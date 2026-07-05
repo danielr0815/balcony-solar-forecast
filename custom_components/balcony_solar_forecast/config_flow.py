@@ -106,16 +106,19 @@ def _user_schema(
         )
     fields.update(
         {
+            # step="any": HA's NumberSelector schema rejects numeric steps
+            # below 1e-3 (vol.Range(min=1e-3)); coordinates need ~1e-6
+            # precision, so free-form input is the only valid choice here.
             vol.Required(CONF_LATITUDE, default=latitude): selector.NumberSelector(
                 selector.NumberSelectorConfig(
-                    min=-90, max=90, step=1e-6, mode=selector.NumberSelectorMode.BOX
+                    min=-90, max=90, step="any", mode=selector.NumberSelectorMode.BOX
                 )
             ),
             vol.Required(
                 CONF_LONGITUDE, default=longitude
             ): selector.NumberSelector(
                 selector.NumberSelectorConfig(
-                    min=-180, max=180, step=1e-6, mode=selector.NumberSelectorMode.BOX
+                    min=-180, max=180, step="any", mode=selector.NumberSelectorMode.BOX
                 )
             ),
             vol.Required(
