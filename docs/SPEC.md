@@ -1,6 +1,7 @@
 # Spezifikation: Balcony Solar Forecast — Mehrebenen-PV-Prognose mit Selbstlernen
 
-> Status: **Entwurf — wartet auf Betreiber-Feedback** (2026-07-05)
+> Status: **Betreiber-Antworten eingearbeitet, Phase 0 ausgeführt —
+> bereit zur Implementierung v0.1.0** (2026-07-05)
 > Gründungsdokument des Projekts `balcony_solar_forecast` (eigenständige
 > HA-Custom-Integration, danielr0815/balcony-solar-forecast). Synthese aus
 > drei unabhängigen Designentwürfen (Compose / Physik-Motor / ML-first) +
@@ -45,14 +46,26 @@ API-Grenzen, siehe Anhang A).
 | P5 | ~25° | 80° | M5 | 430 | oben, links (N) |
 | P6 | ~205° | 80° | M8 | 430 | oben, rechts (S) |
 
-Summe **3260 Wp** an **4× Hoymiles HMS-800W/1000W-2T** (je 2 Module,
-**1 MPPT pro Port** → Module elektrisch unabhängig). HA liefert pro Port
-`sensor.inverter_port_{1,2}_dc_power/_dc_daily_energy/_dc_total_energy`
-(Entity-Suffixe `_2…_4` für WR 2–4)
-(`state_class` vorhanden → **Langzeitstatistik läuft bereits**, wird nie
-gelöscht = Trainingsdaten ab Installation). AC-Clipping: nur wenn beide
-Ports zusammen das WR-AC-Limit reißen — bei diesen Neigungen praktisch nie;
-trotzdem als 1-Zeilen-Clamp modelliert (echte Limits: Frage B1).
+Summe **3260 Wp** an **4× Hoymiles HMS-800W-2T** (bestätigt B1:
+**AC-Limit 800 VA je WR**; je 2 Module, **1 MPPT pro Port** → Module
+elektrisch unabhängig). Port→Modul-Zuordnung (aus dem
+Energie-Dashboard des Betreibers, B2 — systematisch: Port 1 = ungerades
+Modul, Entity-Suffixe `_2…_4` = WR 2–4):
+
+| WR | Port 1 | Port 2 |
+|---|---|---|
+| WR1 | M1 (`sensor.inverter_port_1_dc_*`) | M2 (`sensor.inverter_port_2_dc_*`) |
+| WR2 | M3 (`…_dc_*_2`) | M4 (`…_dc_*_2`) |
+| WR3 | M5 (`…_dc_*_3`) | M6 (`…_dc_*_3`) |
+| WR4 | M7 (`…_dc_*_4`) | M8 (`…_dc_*_4`) |
+
+`state_class` vorhanden → **Langzeitstatistik läuft seit 2024-07** (B11:
+>365 Tage; real ~24 Monate), wird nie gelöscht = warme Trainingsdaten ab
+Tag 1. AC-Clipping: nur wenn beide Ports zusammen 800 VA reißen — bei
+diesen Neigungen praktisch nie; trotzdem als 1-Zeilen-Clamp modelliert.
+Seiten-Azimute exakt 90° zur Front (B3: 25°/205° exakt); Neigungs-
+Konvention bestätigt (B4); Balkon-über-Balkon-Verschattung vernachlässigbar
+(B5, Betreiber-Entscheid).
 
 Verschattung: (a) Hang O/SO 200–300 m (Morgen; Winter fast ganztags),
 (b) 2 Bäume ~10 m S (Frühjahr/Herbst, saisonale Transparenz),
@@ -128,9 +141,10 @@ Pipeline (reine Funktionen über 15-min-Slots × N Ebenen, <50 ms/Lauf):
    Semantik empirisch verifizieren (klarer Morgen als Unit-Test).
 5. **horizon.py** — je Ebene Tabelle `(Azimut, Elevation, Transmittanz)`
    in 10°-Schritten, linear interpoliert: Fernfeld aus PVGIS + Betreiber-
-   Profil; Nahfeld je Ebene differenziert (Gebäudekante hart, Baumsektor
-   ~170–230° auf P3/P6 mit **saisonaler Transmittanz** ~0,7 laublos /
-   ~0,2 belaubt, Kosinus-Rampe April/November). Unter Horizontlinie:
+   Profil; Nahfeld je Ebene differenziert (Gebäudekante hart bei
+   az ≈ 212° für S-Ebenen, Baumsektor az ~135–175° auf P3/P6 mit
+   **saisonaler Transmittanz** ≈ 0,8 kahl / ≈ 0,45 belaubt, Kosinus-Rampe
+   April/November — **alle Startwerte messdatenbasiert, §13**). Unter Horizontlinie:
    Beam+zirkumsolar × Transmittanz; Iso-Diffus statisch × ebenen-eigenem
    SVF (behebt E4). Tabellen liegen **versioniert im Repo/Config-Export**,
    nicht nur in `.storage`.
@@ -240,8 +254,8 @@ Fossibot-Verhalten).
 
 | Phase | Version | Inhalt | Gate/Abbruchkriterium |
 |---|---|---|---|
-| **0** | — (nur Konfig, **sofort**, unabhängig vom Projekt) | Bestehenden rany2-Entry auf **6 Arrays** umkonfigurieren (Komma-Listen; Azimut in 0=S-Konvention: −65,−155,+25,−65,−155,+25; Neigung 70,70,70,80,80,80; kWp 0.74,0.37,0.43,0.86,0.43,0.43), Horizont je Array aktivieren, partial_shading an. Konsumenten profitieren sofort; Entry wird zur eingefrorenen **Baseline**. Sonnentag-Checkliste (Anhang A) gegen Vorzeichenfehler | Plausibilität an 1 klaren Tag |
-| **1** | v0.1.0 | Projekt-Gerüst (Config Flow: Standort, N Ebenen, Horizonttabellen-Import, WR-Gruppen, Mess-Entitäten; HACS-Struktur) + Motor `core/` (Schritte 1–5, 7 — reine Physik, ohne Lernen) + Sensoren/Service/Energy-Hook + **Forecast-as-issued-Logger + Ist-Logger ab Tag 1** + Golden-Tests gegen offline erzeugte **pvlib-Referenzvektoren** (alle 6 Ebenen, Tiefstand 2–10°, Konventionsgrenzen) als Merge-Blocker; 2 Wochen Parallellauf | **Kill-Gate:** 14-Tage-Parallellauf, Taglicht-Stunden-MAE ≥ 10 % unter der 6-Array-Baseline (Schwelle vor Codierungsbeginn fixiert, Gewichtung nach B9-Antwort) — sonst Stopp, Baseline behalten |
+| **0** | — (nur Konfig) | **✅ AUSGEFÜHRT 2026-07-05** (Variante „Einzelplatten" per B12): **8 separate rany2-Entries** „PV Modul 1…8" (je 1 Modul; Azimut in der HA-UI in **0=N**: 25/115/205 — der Koordinator rechnet intern −180, siehe Anhang A!; Neigung 70/80; Wp 370/430; η 0,96; inverter_power = Wp; ohne Horizont — Dateizugriff auf HAOS nicht verfügbar, Horizont kommt im Motor) + **4 Summen-Template-Sensoren** `sensor.pv_prognose_{heute,morgen,uebermorgen,leistung_jetzt}_alle_module`. Erste Werte plausibel (heute 6,79 kWh vs. 3,50 alt). Alt-Entry „Home-LA" (1600 Wp) läuft unverändert weiter und speist vorerst battery_manager. Das 8-Entry-Ensemble = **Baseline** | Plausibilität an 1 klaren Tag (Anhang-A-Checkliste), dann Konsumenten umhängen |
+| **1** | v0.1.0 | Projekt-Gerüst (Config Flow: Standort, N Ebenen, Horizonttabellen-Import, WR-Gruppen, Mess-Entitäten; HACS-Struktur) + Motor `core/` (Schritte 1–5, 7 — reine Physik, ohne Lernen) + Sensoren/Service/Energy-Hook + **Forecast-as-issued-Logger + Ist-Logger ab Tag 1** + Golden-Tests gegen offline erzeugte **pvlib-Referenzvektoren** (alle 6 Ebenen, Tiefstand 2–10°, Konventionsgrenzen) als Merge-Blocker; 2 Wochen Parallellauf | **Kill-Gate** (B9-gewichtet): 14-Tage-Parallellauf, **Tages-kWh-MAE ≥ 10 % unter dem 8-Entry-Baseline-Ensemble** (Primärmetrik); Taglicht-Stunden-MAE als Zweitmetrik berichtet — sonst Stopp, Baseline behalten |
 | **2** | v0.2.0 | Schneller Lerner + Degradationsleiter + Drift-Monitor + Previous-Runs-Backfill | 14 Tage: nächste-6-h-MAE ≥ 5 % unter Phase 1, stratifiziert berichtet (klar/bewölkt/Nebel) |
 | **3** | v0.3.0 | Langsamer Lerner (Shademap) — **explizit bedingt** auf stratifizierte Phase-1/2-Auswertung („nicht aus Momentum bauen") | 14 klare Tage: Klartag-Stunden-MAE ≥ 10 % unter Phase 2; Polarkarte ≙ bekannten Hindernissen |
 | **4** | v0.4.0 (opt.) | P10/P50/P90 im Service/Attributen | 80-%-Band: 70–90 % gemessene Abdeckung |
@@ -288,40 +302,62 @@ dort hilft v. a. Intraday + breite Quantile).
   konfigurierbar; das Betreiber-Setup ist Referenzbeispiel, kein
   Hardcoding.
 
-## 12. Offene Betreiber-Fragen (bitte beantworten)
+## 12. Betreiber-Antworten (2026-07-05 — alle 12 beantwortet)
 
-1. **B1 — WR-Varianten:** HMS-**800**W-2T oder HMS-**1000**W-2T (je
-   Gerät)? → AC-Clamp-Wert. (Typenschild/S/N; Device-Info ist ambivalent.)
-2. **B2 — Port→Modul-Zuordnung:** Die 4 WR erscheinen in HA als
-   `sensor.inverter_port_{1,2}_dc_*` mit Entity-Suffixen `_2…_4` für das
-   2.–4. Gerät. Welche (Gerät, Port)-Kombination gehört zu welchem Modul
-   M1–M8 (WR-Seriennummern helfen)? Vorschlag: an einem klaren Morgen je
-   Modul kurz abdecken und Zuordnung notieren (15 min) — ohne korrekte
-   Zuordnung lernt Ebene A die Schatten von Ebene B.
-3. **B3 — Seiten-Azimute:** Sind die Seitenmodule exakt 90° zur Front
-   (25°/205°) montiert oder angestellt/abweichend (±10° egal, ±30° nicht)?
-4. **B4 — Neigungs-Konvention:** 70°/80° = Winkel gegen die Horizontale
-   (90° = senkrecht)? Bitte bestätigen.
-5. **B5 — Balkon-über-Balkon:** Verschattet der obere Balkonboden bei
-   hoher Sommersonne die oberen Kanten der unteren Module (P1)? Falls ja:
-   eigener Horizont-Eintrag „oben" für P1–P3 (Elevations-Obergrenze).
-6. **B6 — Gebäudekante:** Ab wann (Uhrzeit an einem Sommertag genügt)
-   verschwindet die Sonne für die Front-Module hinter der Hauswand?
-   → initiale Azimut-Grenze je Ebene.
-7. **B7 — Bäume:** grober Azimut-Sektor und Höhenwinkel der 2 Bäume von
-   jedem Balkon aus (Handy-Kompass + Daumenpeilung reicht); Laubbäume?
-8. **B8 — Schnee:** Bleibt auf den fast senkrechten Modulen je Schnee
-   haften (Erfahrung)? → Kollaps-Detektor-Priorität.
-9. **B9 — Zielmetrik:** Was schmerzt mehr — Tages-kWh (Ladeplanung) oder
-   Stundenform morgens/abends (Load-Timing)? → Gewichtung der
-   Phase-1-Gate-Schwelle.
-10. **B10 — Baseline behalten:** rany2-Entry dauerhaft als Watchdog ok
-    (≈23 Sensoren bleiben)?
-11. **B11 — Historie:** Seit wann laufen die Hoymiles-Port-Sensoren?
-    (LTS-Tiefe bestimmt, wie warm die Lerner starten können.)
-12. **B12 — Phase 0 sofort?** Die 6-Array-Umkonfiguration ist risikolos
-    (Optionsdialog seit 2026-07-05 wieder bedienbar) und verbessert die
-    Tageswerte ohne Code — freigeben?
+- **B1 WR:** HMS-**800**W-2T, AC-Limit **800 VA je WR**.
+- **B2 Zuordnung:** aus dem Energie-Dashboard ausgelesen → Tabelle §2.
+- **B3 Seiten-Azimute:** exakt 90° zur Front → 25°/205° exakt.
+- **B4 Neigung:** bestätigt (gegen Horizontale, 90° = senkrecht).
+- **B5 Balkon-über-Balkon:** nur ganz leicht/selten → **ignorieren**.
+- **B6 Gebäudekante:** aus Messdaten analysiert → §13 (Beam-Kollaps der
+  S-Module bei Sonnenazimut ~205–218°).
+- **B7 Bäume:** Laubbäume; aus Messdaten analysiert → §13
+  (Symmetrietest: M4 −15–17 % Sep vs. März, M8 −4 %; Sektor ~135–175°).
+- **B8 Schnee:** bleibt gelegentlich haften → Kollaps-Detektor (§5)
+  bestätigt prioritär.
+- **B9 Zielmetrik:** **Tages-kWh-Prognose** → Phase-1-Gate wird auf
+  Tages-kWh-MAE gewichtet (Stunden-MAE als Zweitmetrik berichtet).
+- **B10 Baseline:** ja, dauerhaft behalten.
+- **B11 Historie:** >365 Tage (real: LTS seit 2024-07, ~24 Monate).
+- **B12 Phase 0:** ja, als **Einzelplatten** (8 Entries) + zusätzliche
+  **Summen-Sensoren** über alle Module → ausgeführt, siehe §9 Phase 0.
+
+## 13. Messdaten-Befunde (24 Monate LTS, analysiert 2026-07-05)
+
+Methode: stündliche Langzeitstatistik aller 8 Port-Sensoren (137 632
+Zeilen, 2024-07 … 2026-07) → **P90 je (Monat × Stunde)** ≈ Klartag-Profil
+(Mediane sind wetterverschmiert); Sonnenstände per NOAA-Formel
+(Selbsttest gegen PVGIS: Juni-Mittag 64,9°, Dez. 18,0° — exakt).
+
+1. **Hang/Ost-Horizont:** M1 (N, unten) springt im Juni von 63 W (6 h,
+   Sonne az 67°, el 10,8°) auf 210 W (7 h, el 20,2°) → effektiver
+   Horizont **~12–15° im Sektor 60–100°** (etwas über PVGIS-Terrain 8,8°
+   → Nahfeld-Zuschlag). Dezember: P90-Peak der Front-Module nur ~59 W →
+   bestätigt „Terrain 18,3° > Wintersonne 18,0°" (praktisch kein
+   Direktstrahl im Hochwinter).
+2. **Gebäudekante:** Die S-Module kollabieren im Juni zwischen
+   Sonnenazimut **~205° und ~218°** (M4: 269 W @13 h → 85 W @14 h; M8:
+   194 → 109 W), obwohl ihre Ebene Beam bis ~295° sähe → **Hauswand-
+   Kante bei az ≈ 210–218°**, unterer Balkon etwas früher als oberer.
+   Front-Module: natürliches Beam-Ende az ~205° (= Geometrie-Limit
+   115°+90°) — Gebäude für sie nicht zusätzlich sichtbar. N-Module:
+   Beam-Ende az ~115° (Geometrie-Limit) ✓.
+3. **Bäume (Sonnenbahn-Symmetrietest** — gleiche Sonnengeometrie,
+   anderer Laubzustand): Tagesenergie Sep/März front-normalisiert:
+   **M4 (S unten) 0,85** (≈ −15–17 %), **M8 (S oben) 0,99** (≈ −4 %);
+   stärkste Stunden 10–12 h (Sonne az ~140–170°, el ~30–45°), M4-
+   Transmittanz dort belaubt ≈ 0,3–0,6. → Baumsektor **az ~135–175°**,
+   Baumkronen-Elevation von unten ~35–45°, von oben ~25–35°.
+4. **Initiale Horizonttabellen je Ebene** (Startwerte für §4 Schritt 5;
+   Transmittanz τ, saisonal wo markiert):
+   - Alle Ebenen, Fernfeld: az 60–100° el 13° τ0 · az 100–150° el 16° τ0
+     (Hang, PVGIS+Messung) · sonst PVGIS-Profil.
+   - P3/P6 (S): zusätzlich az 135–175° el 40°(unten)/30°(oben)
+     **τ 0,45 belaubt / 0,8 kahl** (Bäume, lernfähig) · az >212° el 90°
+     τ0 (Hauswand).
+   - P1/P4 (Front): az >205° irrelevant (Geometrie-Limit); keine
+     Zusatzeinträge nötig.
+   - P2/P5 (N): az >115° irrelevant; Fernfeld Ost besonders wichtig.
 
 ## Anhang A: Konventionen & Kommissionierungs-Checkliste
 
@@ -330,8 +366,9 @@ nur an Grenzen, je mit Unit-Test:
 
 | Kontext | Konvention | P1/P4 Front | P2/P5 links | P3/P6 rechts |
 |---|---|---|---|---|
-| Standort/Spec/intern | 0=N, 90=O | 115° | ~25° | ~205° |
-| Open-Meteo GTI & rany2-Config | 0=S, −90=O | **−65** | **−155** | **+25** |
+| Standort/Spec/intern | 0=N, 90=O | 115° | 25° | 205° |
+| Open-Meteo API direkt (GTI-Param, eigener Motor) | 0=S, −90=O | **−65** | **−155** | **+25** |
+| **rany2-HA-UI (Config Flow)** | **0=N direkt eingeben** — der Koordinator rechnet intern `−180` (Quellcode verifiziert 2026-07-05) | 115 | 25 | 205 |
 | PVGIS printhorizon | 0=S, −90=O | (Terrain: S≙0) | | |
 
 Checkliste klarer Tag (Phase 0 und Phase 1, Pflicht): (1) Peak-Zeit je
