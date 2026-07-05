@@ -1,0 +1,115 @@
+{
+  "entity": {
+    "sensor": {
+      "energy_production_today": {"name": "Energy production today"},
+      "energy_production_tomorrow": {"name": "Energy production tomorrow"},
+      "energy_production_d2": {"name": "Energy production day after tomorrow"},
+      "power_production_now": {"name": "Power production now"},
+      "last_fetch_age_min": {"name": "Last fetch age"},
+      "source_status": {
+        "name": "Source status",
+        "state": {
+          "fresh": "Fresh",
+          "cached": "Cached",
+          "physics_fallback": "Physics fallback",
+          "unavailable": "Unavailable"
+        }
+      }
+    },
+    "binary_sensor": {
+      "degraded": {"name": "Degraded"}
+    }
+  },
+  "services": {
+    "get_forecast": {
+      "name": "Get forecast",
+      "description": "Return the current 15-minute and hourly forecast curves for one or all configured sites.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "Restrict the response to a single config entry. Omit to return every configured site."
+        }
+      }
+    }
+  },
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Balcony Solar Forecast",
+        "description": "Set the name, location and update intervals. The \"Site configuration\" field is pre-filled with the full operator setup (8 modules, horizon tables, inverter groups) — just confirm it for the reference site, or edit it freely. Azimuth: 0° = North, clockwise (90° = East, 180° = South). Tilt: degrees from horizontal (90° = vertical).",
+        "data": {
+          "name": "Name",
+          "latitude": "Latitude",
+          "longitude": "Longitude",
+          "fetch_interval_seconds": "Weather fetch interval (seconds)",
+          "recompute_interval_seconds": "Recompute interval (seconds)",
+          "site": "Site configuration (planes, horizon, inverter groups)"
+        },
+        "data_description": {
+          "name": "Unique name for this installation — one instance per name.",
+          "fetch_interval_seconds": "How often Open-Meteo is polled (default 1800 = 30 min).",
+          "recompute_interval_seconds": "How often the forecast is recomputed (default 900 = 15 min)."
+        }
+      }
+    },
+    "error": {
+      "name_required": "Please provide a name.",
+      "site_not_object": "The site configuration must be an object.",
+      "site_malformed": "The site configuration is invalid or incomplete.",
+      "no_planes": "At least one plane must be defined.",
+      "plane_no_name": "Every plane needs a name.",
+      "plane_dup_name": "Plane names must be unique.",
+      "bad_azimuth": "Azimuth must be between 0 and 360 degrees (0 = North).",
+      "bad_tilt": "Tilt must be between 0 and 90 degrees.",
+      "bad_wp": "Module power (Wp) must be greater than 0.",
+      "bad_efficiency": "Efficiency must be between 0 and 1.",
+      "bad_horizon_azimuth": "Horizon azimuth must be between 0 and 360 degrees.",
+      "bad_horizon_elevation": "Horizon elevation must be between 0 and 90 degrees.",
+      "bad_tau": "Transmittance (tau) must be between 0 and 1.",
+      "seasonal_missing_tau": "Seasonal horizon rows need tau_leafed and tau_bare.",
+      "group_no_name": "Every inverter group needs a name.",
+      "group_dup_name": "Group names must be unique.",
+      "group_no_planes": "Every group must contain at least one plane.",
+      "group_unknown_plane": "A group references an unknown plane.",
+      "bad_ac_limit": "The AC limit must be greater than 0."
+    },
+    "abort": {
+      "already_configured": "An installation with this name already exists."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Edit Balcony Solar Forecast",
+        "description": "Adjust the location, intervals and the full site configuration. The name is immutable after setup.",
+        "data": {
+          "latitude": "Latitude",
+          "longitude": "Longitude",
+          "fetch_interval_seconds": "Weather fetch interval (seconds)",
+          "recompute_interval_seconds": "Recompute interval (seconds)",
+          "site": "Site configuration (planes, horizon, inverter groups)"
+        }
+      }
+    },
+    "error": {
+      "site_not_object": "The site configuration must be an object.",
+      "site_malformed": "The site configuration is invalid or incomplete.",
+      "no_planes": "At least one plane must be defined.",
+      "plane_no_name": "Every plane needs a name.",
+      "plane_dup_name": "Plane names must be unique.",
+      "bad_azimuth": "Azimuth must be between 0 and 360 degrees (0 = North).",
+      "bad_tilt": "Tilt must be between 0 and 90 degrees.",
+      "bad_wp": "Module power (Wp) must be greater than 0.",
+      "bad_efficiency": "Efficiency must be between 0 and 1.",
+      "bad_horizon_azimuth": "Horizon azimuth must be between 0 and 360 degrees.",
+      "bad_horizon_elevation": "Horizon elevation must be between 0 and 90 degrees.",
+      "bad_tau": "Transmittance (tau) must be between 0 and 1.",
+      "seasonal_missing_tau": "Seasonal horizon rows need tau_leafed and tau_bare.",
+      "group_no_name": "Every inverter group needs a name.",
+      "group_dup_name": "Group names must be unique.",
+      "group_no_planes": "Every group must contain at least one plane.",
+      "group_unknown_plane": "A group references an unknown plane.",
+      "bad_ac_limit": "The AC limit must be greater than 0."
+    }
+  }
+}

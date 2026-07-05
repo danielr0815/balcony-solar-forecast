@@ -5,8 +5,10 @@ Balkonkraftwerke mit mehreren Modulausrichtungen, starker
 Standortverschattung (Gelände, Bäume, Gebäude) und Mikrowechselrichtern
 mit Port-genauen Messwerten.
 
-**Status: Planungsphase.** Die vollständige Spezifikation mit
-Architektur, Phasenplan und offenen Fragen steht in
+**Status: v0.1.0 implementiert** (Phase 1 — reiner Physik-Motor, 1085
+Tests grün, pvlib-Golden-Vektoren, adversarial reviewed) — als Nächstes:
+Deploy + 14-Tage-Parallellauf gegen die 8-Entry-Baseline (Kill-Gate,
+SPEC §9). Die vollständige Spezifikation steht in
 [docs/SPEC.md](docs/SPEC.md).
 
 ## Kernidee

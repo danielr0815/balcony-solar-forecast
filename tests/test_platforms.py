@@ -1,0 +1,272 @@
+"""Tests for the platform layer (sensor / binary_sensor / energy / recorder /
+diagnostics).
+
+These modules import Home Assistant; where HA (and its test harness) is not
+installed the whole module is skipped. The genuinely pure logic — slot-curve
+iteration, per-day attribute slicing, degradation-status mapping and the
+service response shape — is exercised against the coordinator's flat
+``self.data`` contract (documented on ``BalconySolarCoordinator._build_data``).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+pytest.importorskip("homeassistant")
+pytest.importorskip("voluptuous")
+
+from custom_components.balcony_solar_forecast import sensor as sensor_mod  # noqa: E402
+from custom_components.balcony_solar_forecast.binary_sensor import (  # noqa: E402
+    DegradedSensor,
+)
+from custom_components.balcony_solar_forecast.energy import (  # noqa: E402
+    async_get_solar_forecast,
+)
+from custom_components.balcony_solar_forecast.recorder import (  # noqa: E402
+    exclude_attributes,
+)
+from custom_components.balcony_solar_forecast.sensor import (  # noqa: E402
+    EnergyProductionSensor,
+    LastFetchAgeSensor,
+    PowerNowSensor,
+    SourceStatusSensor,
+    _build_forecast_response,
+)
+
+UTC = timezone.utc
+DOMAIN = "balcony_solar_forecast"
+
+
+def _curve_data(start: datetime, watts: list[float], *, status: str = "fresh"):
+    """Build a coordinator-shaped flat data dict for a run of 15-min slots."""
+    starts = [start + timedelta(minutes=15 * i) for i in range(len(watts))]
+    iso = [s.isoformat() for s in starts]
+    day = start.date().isoformat()
+    total_wh = sum(watts) * 0.25
+    return {
+        "status": status,
+        "degraded": status != "fresh",
+        "weather_age_seconds": 120,
+        "last_error": None,
+        "power_now_w": watts[0],
+        "energy_today_kwh": total_wh / 1000.0,
+        "energy_tomorrow_kwh": None,
+        "energy_d2_kwh": None,
+        "watts": {k: v for k, v in zip(iso, watts)},
+        "wh_period": {k: round(v * 0.25, 2) for k, v in zip(iso, watts)},
+        "hourly_wh": {start.isoformat(): total_wh},
+        "daily_kwh": {day: total_wh / 1000.0},
+        "slot_starts": iso,
+        "plane_watts": {"M1": list(watts)},
+        "computed_at": start.isoformat(),
+    }
+
+
+class _FakeEntry:
+    entry_id = "abc123"
+
+
+class _FakeCoordinator:
+    def __init__(self, data, *, last_update_success=True):
+        self.data = data
+        self.entry = _FakeEntry()
+        self.last_update_success = last_update_success
+
+
+def _bare(cls, coordinator, **attrs):
+    """Instantiate an entity bypassing HA's CoordinatorEntity.__init__."""
+    obj = cls.__new__(cls)
+    obj.coordinator = coordinator
+    for k, v in attrs.items():
+        setattr(obj, k, v)
+    return obj
+
+
+# --------------------------------------------------------------------------
+# Energy sensors: state from the day roll-up, attribute curve sliced per day.
+# --------------------------------------------------------------------------
+
+
+def test_energy_sensor_state_and_curve(monkeypatch):
+    fixed = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(sensor_mod.dt_util, "now", lambda: fixed)
+    monkeypatch.setattr(sensor_mod.dt_util, "as_local", lambda d: d)
+
+    start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    coord = _FakeCoordinator(_curve_data(start, [400.0, 400.0, 400.0, 400.0]))
+
+    today = _bare(
+        EnergyProductionSensor, coord, _day_offset=0, _energy_key="energy_today_kwh"
+    )
+    assert today.native_value == pytest.approx(0.4)
+    attrs = today.extra_state_attributes
+    assert set(attrs) == {"watts", "wh_period"}
+    assert len(attrs["watts"]) == 4
+    assert attrs["wh_period"][start.isoformat()] == pytest.approx(100.0)
+
+    # Tomorrow: coordinator roll-up is None and no slots fall on that date.
+    tomorrow = _bare(
+        EnergyProductionSensor,
+        coord,
+        _day_offset=1,
+        _energy_key="energy_tomorrow_kwh",
+    )
+    assert tomorrow.native_value is None
+    assert tomorrow.extra_state_attributes == {"watts": {}, "wh_period": {}}
+
+
+def test_energy_sensor_no_data():
+    coord = _FakeCoordinator(None, last_update_success=False)
+    sensor = _bare(
+        EnergyProductionSensor, coord, _day_offset=0, _energy_key="energy_today_kwh"
+    )
+    assert sensor.native_value is None
+    assert sensor.extra_state_attributes == {"watts": {}, "wh_period": {}}
+
+
+# --------------------------------------------------------------------------
+# Power-now, age and status diagnostics.
+# --------------------------------------------------------------------------
+
+
+def test_power_now_reads_coordinator_value():
+    start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    coord = _FakeCoordinator(_curve_data(start, [123.45, 200.0]))
+    sensor = _bare(PowerNowSensor, coord)
+    assert sensor.native_value == pytest.approx(123.5)
+
+
+def test_last_fetch_age_converts_seconds_to_minutes():
+    coord = _FakeCoordinator({"weather_age_seconds": 150})
+    sensor = _bare(LastFetchAgeSensor, coord)
+    assert sensor.native_value == pytest.approx(2.5)
+    # Always available even on a failed update (diagnostics must not vanish).
+    assert sensor.available is True
+
+
+def test_source_status_maps_status_and_failure():
+    start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    ok = _FakeCoordinator(_curve_data(start, [1.0], status="cached"))
+    assert _bare(SourceStatusSensor, ok).native_value == "cached"
+
+    failed = _FakeCoordinator(_curve_data(start, [1.0]), last_update_success=False)
+    assert _bare(SourceStatusSensor, failed).native_value == "unavailable"
+
+
+# --------------------------------------------------------------------------
+# Degraded binary sensor.
+# --------------------------------------------------------------------------
+
+
+def test_degraded_sensor_off_when_fresh():
+    start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    coord = _FakeCoordinator(_curve_data(start, [1.0], status="fresh"))
+    sensor = _bare(DegradedSensor, coord)
+    assert sensor.is_on is False
+    assert sensor.available is True
+    assert sensor.extra_state_attributes["source_status"] == "fresh"
+
+
+def test_degraded_sensor_on_when_cached():
+    start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    coord = _FakeCoordinator(_curve_data(start, [1.0], status="cached"))
+    sensor = _bare(DegradedSensor, coord)
+    assert sensor.is_on is True
+    assert sensor.extra_state_attributes["source_status"] == "cached"
+
+
+def test_degraded_sensor_on_when_update_failed():
+    coord = _FakeCoordinator(None, last_update_success=False)
+    sensor = _bare(DegradedSensor, coord)
+    assert sensor.is_on is True
+    assert sensor.available is True
+    assert sensor.extra_state_attributes["source_status"] == "unavailable"
+
+
+# --------------------------------------------------------------------------
+# Service response shape.
+# --------------------------------------------------------------------------
+
+
+def test_build_forecast_response_shape():
+    start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    coord = _FakeCoordinator(_curve_data(start, [100.0, 200.0]))
+
+    class _Hass:
+        data = {DOMAIN: {"abc123": coord}}
+
+    resp = _build_forecast_response(_Hass(), None)
+    assert set(resp) == {"entries"}
+    entry = resp["entries"]["abc123"]
+    assert entry["total_15min"] == [100.0, 200.0]
+    assert entry["planes"]["M1"] == [100.0, 200.0]
+    assert entry["issued_at"] == start.isoformat()
+    assert entry["slot_starts"][0] == start.isoformat()
+    assert entry["total_hourly"]
+
+
+def test_build_forecast_response_no_data():
+    coord = _FakeCoordinator(None)
+
+    class _Hass:
+        data = {DOMAIN: {"abc123": coord}}
+
+    resp = _build_forecast_response(_Hass(), None)
+    assert resp["entries"]["abc123"] == {
+        "planes": {},
+        "slot_starts": [],
+        "total_15min": [],
+        "total_hourly": {},
+        "issued_at": None,
+    }
+
+
+def test_build_forecast_response_entry_filter():
+    start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    coordA = _FakeCoordinator(_curve_data(start, [50.0]))
+    coordB = _FakeCoordinator(_curve_data(start, [50.0]))
+
+    class _Hass:
+        data = {DOMAIN: {"A": coordA, "B": coordB}}
+
+    resp = _build_forecast_response(_Hass(), "B")
+    assert list(resp["entries"]) == ["B"]
+
+
+# --------------------------------------------------------------------------
+# Recorder + energy hook.
+# --------------------------------------------------------------------------
+
+
+def test_recorder_excludes_curve_attributes():
+    assert exclude_attributes(object()) == {"watts", "wh_period"}
+
+
+async def test_energy_hook_returns_wh_hours():
+    start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    coord = _FakeCoordinator(_curve_data(start, [400.0, 400.0, 400.0, 400.0]))
+
+    class _Hass:
+        data = {DOMAIN: {"eid": coord}}
+
+    out = await async_get_solar_forecast(_Hass(), "eid")
+    assert set(out) == {"wh_hours"}
+    assert out["wh_hours"][start.isoformat()] == pytest.approx(400.0)
+
+
+async def test_energy_hook_unknown_entry_returns_none():
+    class _Hass:
+        data = {DOMAIN: {}}
+
+    assert await async_get_solar_forecast(_Hass(), "nope") is None
+
+
+async def test_energy_hook_no_forecast_returns_none():
+    coord = _FakeCoordinator({"hourly_wh": {}})
+
+    class _Hass:
+        data = {DOMAIN: {"eid": coord}}
+
+    assert await async_get_solar_forecast(_Hass(), "eid") is None

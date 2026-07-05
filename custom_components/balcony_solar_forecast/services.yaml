@@ -1,0 +1,15 @@
+get_forecast:
+  name: Get forecast
+  description: >-
+    Return the current 15-minute and hourly forecast curves for one or all
+    configured sites.
+  fields:
+    entry_id:
+      name: Config entry
+      description: >-
+        Restrict the response to a single config entry. Omit to return every
+        configured site.
+      example: "1234567890abcdef"
+      required: false
+      selector:
+        text:
