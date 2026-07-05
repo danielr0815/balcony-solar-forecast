@@ -22,7 +22,12 @@ INTEGRATION_VERSION = "0.1.0"
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
 RECOMPUTE_INTERVAL_SECONDS = 900  # engine re-run cadence (15-min slots)
 SLOT_MINUTES = 15  # forecast resolution
-FORECAST_DAYS = 3  # today / tomorrow / day-after (d2)
+# today / tomorrow / day-after (d2) — plus ONE buffer day: the fetch runs
+# with timezone=UTC, so forecast_days counts UTC days from the current UTC
+# date. In the local evening (UTC+2) the LOCAL day-after-tomorrow lies
+# partly or fully beyond a 3-UTC-day window (observed live: d2 = 0.0 kWh
+# at 01:00 local). One extra day always covers the local 3-day horizon.
+FORECAST_DAYS = 4
 
 # --- Data validity / degradation ladder (SPEC §7) ---
 MAX_PAYLOAD_AGE_HOURS = 24  # last-good weather still trusted for fresh curve
