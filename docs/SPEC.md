@@ -47,7 +47,8 @@ API-Grenzen, siehe Anhang A).
 
 Summe **3260 Wp** an **4× Hoymiles HMS-800W/1000W-2T** (je 2 Module,
 **1 MPPT pro Port** → Module elektrisch unabhängig). HA liefert pro Port
-`sensor.inverter_port_N_dc_power/_dc_daily_energy/_dc_total_energy`
+`sensor.inverter_port_{1,2}_dc_power/_dc_daily_energy/_dc_total_energy`
+(Entity-Suffixe `_2…_4` für WR 2–4)
 (`state_class` vorhanden → **Langzeitstatistik läuft bereits**, wird nie
 gelöscht = Trainingsdaten ab Installation). AC-Clipping: nur wenn beide
 Ports zusammen das WR-AC-Limit reißen — bei diesen Neigungen praktisch nie;
@@ -140,23 +141,35 @@ Pipeline (reine Funktionen über 15-min-Slots × N Ebenen, <50 ms/Lauf):
 
 HA-Glue: `DataUpdateCoordinator` (Fetch 30 min, Rechnen 15 min,
 Training nächtlich ~01:30 im Executor). Ein `Store` (versioniert,
-`async_delay_save`, ≤3 Writes/Tag — eMMC-Schonung): Horizonttabellen-
-Cache, Lernzustände, 90-Tage-Fehlerringpuffer, Forecast-as-issued-Log.
+`async_delay_save`, ≤3 gebündelte Writes/Tag — eMMC-Schonung):
+Horizonttabellen-Cache, Lernzustände, 90-Tage-Fehlerringpuffer,
+Forecast-as-issued-Log. Schreibsemantik explizit: gebündelt per
+`async_delay_save` + Flush bei HA-Stop; nach einem **harten Crash**
+dürfen Last-Good-Cache und As-issued-Log bis zu einige Stunden
+verlieren — akzeptiert, die Degradationsleiter (§7) greift.
 
 ## 5. Lernschichten (beide numpy-frei, beide abschaltbar)
 
 **Langsamer Lerner — geometrisches Transmissionsfeld** (SunPower-Muster,
 arXiv 2209.09456): je **Messkanal** (hier: WR-Port), je Bin (Sonnenazimut
-5° × Elevation 2,5°) EMA (α 0,15) des Verhältnisses gemessen/modelliert,
-**nur quasi-klare Samples** (k_c-Gate **elevationsabhängig** — Haurwitz
-ist bei Tiefstand grob; plus Nachbarslot-Stabilität; plus modellierte
-Leistung > 5 % Wp). Cold-Start: Bins erben den **statischen
-Horizont-Prior** (nicht 1,0!), Übergang per **Shrinkage** w = n/(n+20)
-statt hartem Min-Sample-Schalter. Clamp [0,2 … 1,2]; wirkt nur auf
-Beam+zirkumsolar. Lernt Hang, Bäume (inkl. Laub-Saison), Gebäudekante,
-Geländer — und korrigiert das handgemachte Horizontprofil über eine
-Saison. Diagnose: Service, der die Karte als **Polartabelle** ausgibt
-(visuell gegen bekannte Hindernisse prüfbar).
+5° × Elevation 2,5° × **Halbjahr** vor/nach Sommersonnenwende — sonst
+aliasen April (laublos) und August (belaubt) im selben Sonnenstands-Bin)
+eine EMA (α 0,15) der **beam-referenzierten Transmittanz**
+`T = (P_gemessen − P_diffus_modelliert) / P_beam_modelliert` —
+bewusst NICHT das Gesamtverhältnis gemessen/modelliert: im Schatten
+enthält die Messung weiter den Diffus-Sockel; ein Gesamt-Ratio auf den
+Beam angewandt würde verschattete Bins systematisch überschätzen und
+diffus-unabhängige Verluste (Soiling, η-Fehler) dem Beam zuschreiben.
+Nur **quasi-klare Samples** (k_c-Gate **elevationsabhängig** — Haurwitz
+ist bei Tiefstand grob; plus Nachbarslot-Stabilität; plus modellierter
+Beam-Anteil > 5 % Wp). Die gelernte Karte **ersetzt** die statische
+Horizont-Transmittanz des Bins; Clamp [0,0 … 1,1] — **volle Okklusion
+muss darstellbar sein** (Hauswand!). Cold-Start: Bins erben den
+**statischen Horizont-Prior**, Übergang per **Shrinkage** w = n/(n+20)
+statt hartem Min-Sample-Schalter. Lernt Hang, Bäume je Halbjahr,
+Gebäudekante, Geländer — und korrigiert das handgemachte Horizontprofil
+über eine Saison. Diagnose: Service, der die Karte als **Polartabelle**
+ausgibt (visuell gegen bekannte Hindernisse prüfbar).
 
 **Schneller Lerner — Wetterfehler intraday:** exponentiell abklingendes
 Verhältnis (τ ≈ 90 min) gemessen/prognostiziert der letzten 2–4 h,
@@ -189,11 +202,11 @@ Tagesabschnitt); Nebelklasse = Sicht < 1000 m ∨ (cloud_cover_low > 85 %
 konforme Nachführung für 80-%-Abdeckung. Nutzung durch Konsumenten:
 P50 = Planung; P10 für konservative Reserven; P90 fürs Load-Timing
 (Überschusslasten so spät wie möglich, ohne Export).
-**Pflicht-Graft:** Open-Meteo **Previous-Runs-API**-Backfill (Forecasts
-as-issued ab 01/2024) gegen LTS-Ist-Werte — als einmaliger Offline-Job
-auf dem Dev-Rechner — füllt Bias-/Quantilspeicher **vor** dem ersten
-Live-Winter (opportunistisch: System muss ohne diese API voll
-funktionieren).
+Der **Previous-Runs-API-Backfill** (geliefert in **Phase 2**, §9):
+Forecasts as-issued ab 01/2024 gegen LTS-Ist-Werte — einmaliger
+Offline-Job auf dem Dev-Rechner — füllt Bias-/Quantilspeicher vor dem
+ersten Live-Winter. Verbindlichkeit: **Pflicht zu versuchen, kein
+Blocker** — das System muss ohne diese API voll funktionieren.
 
 ## 7. Degradationsleiter (nie still!)
 
@@ -228,9 +241,9 @@ Fossibot-Verhalten).
 | Phase | Version | Inhalt | Gate/Abbruchkriterium |
 |---|---|---|---|
 | **0** | — (nur Konfig, **sofort**, unabhängig vom Projekt) | Bestehenden rany2-Entry auf **6 Arrays** umkonfigurieren (Komma-Listen; Azimut in 0=S-Konvention: −65,−155,+25,−65,−155,+25; Neigung 70,70,70,80,80,80; kWp 0.74,0.37,0.43,0.86,0.43,0.43), Horizont je Array aktivieren, partial_shading an. Konsumenten profitieren sofort; Entry wird zur eingefrorenen **Baseline**. Sonnentag-Checkliste (Anhang A) gegen Vorzeichenfehler | Plausibilität an 1 klaren Tag |
-| **1** | v0.1.0 | Projekt-Gerüst (Config Flow: Standort, N Ebenen, Horizonttabellen-Import, WR-Gruppen, Mess-Entitäten; HACS-Struktur) + Motor `core/` (Schritte 1–5, 7 — reine Physik, ohne Lernen) + Sensoren/Service/Energy-Hook + **Forecast-as-issued-Logger + Ist-Logger ab Tag 1** + Golden-Tests gegen offline erzeugte **pvlib-Referenzvektoren** (alle 6 Ebenen, Tiefstand 2–10°, Konventionsgrenzen) als Merge-Blocker; 2 Wochen Parallellauf | **Kill-Gate:** Motor schlägt 6-Array-Baseline bei Taglicht-Stunden-MAE (numerische Schwelle vorab fixieren) — sonst Stopp, Baseline behalten |
-| **2** | v0.2.0 | Schneller Lerner + Degradationsleiter + Drift-Monitor + Previous-Runs-Backfill | nächste-6-h-MAE < Phase 1 |
-| **3** | v0.3.0 | Langsamer Lerner (Shademap) — **explizit bedingt** auf stratifizierte Phase-1/2-Auswertung („nicht aus Momentum bauen") | Klartag-MAE sinkt; Polarkarte ≙ bekannten Hindernissen |
+| **1** | v0.1.0 | Projekt-Gerüst (Config Flow: Standort, N Ebenen, Horizonttabellen-Import, WR-Gruppen, Mess-Entitäten; HACS-Struktur) + Motor `core/` (Schritte 1–5, 7 — reine Physik, ohne Lernen) + Sensoren/Service/Energy-Hook + **Forecast-as-issued-Logger + Ist-Logger ab Tag 1** + Golden-Tests gegen offline erzeugte **pvlib-Referenzvektoren** (alle 6 Ebenen, Tiefstand 2–10°, Konventionsgrenzen) als Merge-Blocker; 2 Wochen Parallellauf | **Kill-Gate:** 14-Tage-Parallellauf, Taglicht-Stunden-MAE ≥ 10 % unter der 6-Array-Baseline (Schwelle vor Codierungsbeginn fixiert, Gewichtung nach B9-Antwort) — sonst Stopp, Baseline behalten |
+| **2** | v0.2.0 | Schneller Lerner + Degradationsleiter + Drift-Monitor + Previous-Runs-Backfill | 14 Tage: nächste-6-h-MAE ≥ 5 % unter Phase 1, stratifiziert berichtet (klar/bewölkt/Nebel) |
+| **3** | v0.3.0 | Langsamer Lerner (Shademap) — **explizit bedingt** auf stratifizierte Phase-1/2-Auswertung („nicht aus Momentum bauen") | 14 klare Tage: Klartag-Stunden-MAE ≥ 10 % unter Phase 2; Polarkarte ≙ bekannten Hindernissen |
 | **4** | v0.4.0 (opt.) | P10/P50/P90 im Service/Attributen | 80-%-Band: 70–90 % gemessene Abdeckung |
 
 Aufwandsschätzung (Jury-korrigiert, ×2 auf Entwurfsschätzung): Phase 0
@@ -245,7 +258,8 @@ Taglicht-Stunden-MAE/nRMSE (normiert auf Anlagen-kWp) + Tages-kWh-Fehler,
 Sensorik: Motor vs. eingefrorene Baseline vs. gemessene Summe (~30
 Zeilen). Realistische Erwartung laut Literatur/Recherche: **30–50 %
 weniger Stunden-MAE** gegenüber heute (E1+E2 zusammen), Intraday-Tuning
-zusätzlich 10–20 %; Day-ahead-Ziel nRMSE ≤ ~10 % der Kapazität, Tages-kWh-
+zusätzlich 10–20 %; Day-ahead-Ziel nRMSE ≤ ~10 % der installierten
+Leistung (kWp), Tages-kWh-
 MAE ≤ ~15 % an Mischtagen. Nebel bleibt die härteste Klasse (ehrlich:
 dort hilft v. a. Intraday + breite Quantile).
 
@@ -278,8 +292,10 @@ dort hilft v. a. Intraday + breite Quantile).
 
 1. **B1 — WR-Varianten:** HMS-**800**W-2T oder HMS-**1000**W-2T (je
    Gerät)? → AC-Clamp-Wert. (Typenschild/S/N; Device-Info ist ambivalent.)
-2. **B2 — Port→Modul-Zuordnung:** Welcher `inverter_port_N_*_M`-Sensor
-   gehört zu welchem Modul M1–M8? Vorschlag: an einem klaren Morgen je
+2. **B2 — Port→Modul-Zuordnung:** Die 4 WR erscheinen in HA als
+   `sensor.inverter_port_{1,2}_dc_*` mit Entity-Suffixen `_2…_4` für das
+   2.–4. Gerät. Welche (Gerät, Port)-Kombination gehört zu welchem Modul
+   M1–M8 (WR-Seriennummern helfen)? Vorschlag: an einem klaren Morgen je
    Modul kurz abdecken und Zuordnung notieren (15 min) — ohne korrekte
    Zuordnung lernt Ebene A die Schatten von Ebene B.
 3. **B3 — Seiten-Azimute:** Sind die Seitenmodule exakt 90° zur Front
