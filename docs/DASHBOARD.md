@@ -33,10 +33,10 @@ Forecast**), e.g.:
 
 | Purpose | Entity id |
 |---|---|
-| Engine today kWh | `sensor.balcony_solar_forecast_energy_production_today` |
-| Engine daily-kWh MAE | `sensor.balcony_solar_forecast_engine_daily_kwh_mae` |
-| Engine hourly MAE | `sensor.balcony_solar_forecast_engine_hourly_mae` |
-| Engine vs best baseline (%) | `sensor.balcony_solar_forecast_engine_vs_best_baseline_pct` |
+| Forecast today kWh | `sensor.balcony_solar_forecast_energy_production_today` |
+| Forecast daily-kWh MAE | `sensor.balcony_solar_forecast_daily_kwh_mae` |
+| Forecast hourly MAE | `sensor.balcony_solar_forecast_hourly_mae` |
+| Forecast vs best baseline (%) | `sensor.balcony_solar_forecast_vs_best_baseline_pct` |
 | Kill-gate | `binary_sensor.balcony_solar_forecast_kill_gate_passed` |
 | Today P10 / P90 | `sensor.balcony_solar_forecast_energy_production_today_p10` / `_p90` |
 | Per-comparison MAE | `sensor.balcony_solar_forecast_comparison_daily_kwh_mae_<slug>` |

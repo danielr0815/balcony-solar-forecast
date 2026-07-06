@@ -44,9 +44,9 @@
           "frozen": "Frozen"
         }
       },
-      "engine_daily_kwh_mae": {"name": "Engine daily kWh MAE"},
-      "engine_hourly_mae": {"name": "Engine hourly MAE"},
-      "engine_vs_best_baseline_pct": {"name": "Engine vs best baseline pct"},
+      "daily_kwh_mae": {"name": "Daily kWh MAE"},
+      "hourly_mae": {"name": "Hourly MAE"},
+      "vs_best_baseline_pct": {"name": "Vs best baseline pct"},
       "energy_production_today_p10": {"name": "Energy production today P10"},
       "energy_production_today_p90": {"name": "Energy production today P90"}
     },

@@ -84,9 +84,9 @@ from .const import (
     SENSOR_ENERGY_TODAY_P10,
     SENSOR_ENERGY_TODAY_P90,
     SENSOR_ENERGY_TOMORROW,
-    SENSOR_ENGINE_DAILY_KWH_MAE,
-    SENSOR_ENGINE_HOURLY_MAE,
-    SENSOR_ENGINE_VS_BEST_BASELINE_PCT,
+    SENSOR_FORECAST_DAILY_KWH_MAE,
+    SENSOR_FORECAST_HOURLY_MAE,
+    SENSOR_FORECAST_VS_BEST_BASELINE_PCT,
     SENSOR_INTRADAY_SCALAR,
     SENSOR_POWER_NOW,
     SERVICE_GET_FORECAST,
@@ -711,7 +711,7 @@ class EngineDailyKwhMaeSensor(_ScoreboardSensor):
     _attr_icon = "mdi:chart-line"
 
     def __init__(self, coordinator: Any) -> None:
-        super().__init__(coordinator, SENSOR_ENGINE_DAILY_KWH_MAE)
+        super().__init__(coordinator, SENSOR_FORECAST_DAILY_KWH_MAE)
 
     @property
     def native_value(self) -> float | None:
@@ -739,7 +739,7 @@ class EngineHourlyMaeSensor(_ScoreboardSensor):
     _attr_icon = "mdi:chart-bell-curve"
 
     def __init__(self, coordinator: Any) -> None:
-        super().__init__(coordinator, SENSOR_ENGINE_HOURLY_MAE)
+        super().__init__(coordinator, SENSOR_FORECAST_HOURLY_MAE)
 
     @property
     def native_value(self) -> float | None:
@@ -760,7 +760,7 @@ class EngineVsBestBaselinePctSensor(_ScoreboardSensor):
     _attr_icon = "mdi:trophy-outline"
 
     def __init__(self, coordinator: Any) -> None:
-        super().__init__(coordinator, SENSOR_ENGINE_VS_BEST_BASELINE_PCT)
+        super().__init__(coordinator, SENSOR_FORECAST_VS_BEST_BASELINE_PCT)
 
     @property
     def native_value(self) -> float | None:

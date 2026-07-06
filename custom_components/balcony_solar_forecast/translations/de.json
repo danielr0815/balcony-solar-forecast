@@ -44,9 +44,9 @@
           "frozen": "Eingefroren"
         }
       },
-      "engine_daily_kwh_mae": {"name": "Motor-Tages-kWh-MAE"},
-      "engine_hourly_mae": {"name": "Motor-Stunden-MAE"},
-      "engine_vs_best_baseline_pct": {"name": "Motor vs. beste Baseline"},
+      "daily_kwh_mae": {"name": "Prognose Tages-kWh-Fehler"},
+      "hourly_mae": {"name": "Prognose Stunden-Fehler"},
+      "vs_best_baseline_pct": {"name": "Prognose vs. beste Baseline"},
       "energy_production_today_p10": {"name": "Energieertrag heute (P10)"},
       "energy_production_today_p90": {"name": "Energieertrag heute (P90)"}
     },

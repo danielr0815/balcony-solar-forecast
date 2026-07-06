@@ -12,8 +12,8 @@
 # (device "Balcony Solar Forecast"); adjust the object_id suffixes if your
 # entities differ.
 #
-# The integration's OWN scoreboard sensors (engine_daily_kwh_mae,
-# engine_vs_best_baseline_pct, kill_gate_passed) are REGISTERED as soon as v0.4
+# The integration's OWN scoreboard sensors (daily_kwh_mae,
+# vs_best_baseline_pct, kill_gate_passed) are REGISTERED as soon as v0.4
 # is installed; before the first nightly run they read "unknown", which the
 # cards render gracefully. TWO groups of ids are the exception and will show
 # "Entity not found" until you act:
@@ -38,30 +38,30 @@ views:
           {% set passed =
           states('binary_sensor.balcony_solar_forecast_kill_gate_passed') %}
           {% set pct =
-          states('sensor.balcony_solar_forecast_engine_vs_best_baseline_pct')
+          states('sensor.balcony_solar_forecast_vs_best_baseline_pct')
           %} {% if passed == 'on' %} ## ✅ Kill-gate PASSED
 
-          The engine is beating the best configured baseline on daily-kWh MAE
+          The forecast is beating the best configured baseline on daily-kWh MAE
           by the required margin over a full rolling window. It is safe to
-          consider re-pointing consumers (e.g. battery_manager) to the engine
+          consider re-pointing consumers (e.g. battery_manager) to the forecast
           sensors. {% elif passed == 'off' %} ## ❌ Kill-gate NOT passed
 
-          Over the current full window the engine is **not** yet the required
+          Over the current full window the forecast is **not** yet the required
           margin better than the best baseline. Keep the frozen baseline in
           place (SPEC §9). {% else %} ## ⏳ Kill-gate: window not full yet
 
           Not enough scored days in the rolling window to assert the gate
           (`unknown` until a full window of nightly scores exists). {% endif %}
 
-          {% if pct not in ('unknown', 'unavailable') %} Engine vs best
-          baseline: **{{ pct }} %** (positive = engine better). {% endif %}
+          {% if pct not in ('unknown', 'unavailable') %} Forecast vs best
+          baseline: **{{ pct }} %** (positive = forecast better). {% endif %}
 
       # ----------------------------------------------------------------
-      # Engine-vs-best-baseline gauge (SPEC §9). Positive = engine better.
+      # Forecast-vs-best-baseline gauge (SPEC §9). Positive = forecast better.
       # ----------------------------------------------------------------
       - type: gauge
-        name: Engine vs best baseline
-        entity: sensor.balcony_solar_forecast_engine_vs_best_baseline_pct
+        name: Forecast vs best baseline
+        entity: sensor.balcony_solar_forecast_vs_best_baseline_pct
         unit: "%"
         min: -50
         max: 50
@@ -77,7 +77,7 @@ views:
             color: "#2ecc71"
 
       # ----------------------------------------------------------------
-      # Scoreboard entities: engine + per-comparison daily-kWh MAE, gate.
+      # Scoreboard entities: forecast + per-comparison daily-kWh MAE, gate.
       # (SPEC §9/§10). Per-comparison sensors carry a slug of the
       # comparison name; the two shown are the operator's documented pair.
       # ----------------------------------------------------------------
@@ -87,12 +87,12 @@ views:
         entities:
           - entity: binary_sensor.balcony_solar_forecast_kill_gate_passed
             name: Kill-gate passed
-          - entity: sensor.balcony_solar_forecast_engine_daily_kwh_mae
-            name: Engine daily-kWh MAE
-          - entity: sensor.balcony_solar_forecast_engine_hourly_mae
-            name: Engine hourly MAE
-          - entity: sensor.balcony_solar_forecast_engine_vs_best_baseline_pct
-            name: Engine vs best baseline
+          - entity: sensor.balcony_solar_forecast_daily_kwh_mae
+            name: Forecast daily-kWh MAE
+          - entity: sensor.balcony_solar_forecast_hourly_mae
+            name: Forecast hourly MAE
+          - entity: sensor.balcony_solar_forecast_vs_best_baseline_pct
+            name: Forecast vs best baseline
           - type: section
             label: Comparison baselines (daily-kWh MAE)
           - entity: sensor.balcony_solar_forecast_comparison_daily_kwh_mae_8_entry_baseline
@@ -101,7 +101,7 @@ views:
             name: Alt 1600W
 
       # ----------------------------------------------------------------
-      # Engine total forecast vs measured total site energy (SPEC §14.3).
+      # Forecast total forecast vs measured total site energy (SPEC §14.3).
       # The forecast today-kWh sensor and the sum of the per-module actual
       # DC power sensors, over the recorder history. history-graph is a
       # built-in card.
@@ -111,11 +111,11 @@ views:
         hours_to_show: 72
         entities:
           - entity: sensor.balcony_solar_forecast_energy_production_today
-            name: Engine — today
+            name: Forecast — today
           - entity: sensor.balcony_solar_forecast_energy_production_tomorrow
-            name: Engine — tomorrow
+            name: Forecast — tomorrow
           - entity: sensor.balcony_solar_forecast_power_production_now
-            name: Engine — power now
+            name: Forecast — power now
 
       # >>> EDIT ME <<< OPERATOR-SPECIFIC entity ids below (this + the next
       # statistics-graph card, and the comparison rows above). The
@@ -127,7 +127,7 @@ views:
       #
       # Measured site power = the 8 per-module DC power sensors. A built-in
       # history-graph overlays them so the measured envelope is visible next
-      # to the engine's forecast power. Per SPEC §2 the modules group into
+      # to the forecast's forecast power. Per SPEC §2 the modules group into
       # planes; grouping is documented in the card names.
       - type: history-graph
         title: Measured DC power per module (ground truth)
@@ -152,7 +152,7 @@ views:
 
       # ----------------------------------------------------------------
       # Per-plane forecast-vs-actual (best-effort with built-in cards).
-      # The engine's per-plane curve is only in the get_forecast service
+      # The forecast's per-plane curve is only in the get_forecast service
       # response; on the dashboard we compare the total energy forecast
       # against the measured per-module power grouped by plane (SPEC §2:
       # front 115°, north 25°, south 205°). A statistics-graph gives daily

@@ -155,7 +155,7 @@ def test_gauge_binds_engine_vs_best_baseline(dashboard):
     assert gauges, "expected a gauge card"
     assert any(
         g.get("entity")
-        == "sensor.balcony_solar_forecast_engine_vs_best_baseline_pct"
+        == "sensor.balcony_solar_forecast_vs_best_baseline_pct"
         for g in gauges
     ), "the gauge must bind to engine_vs_best_baseline_pct"
 
@@ -165,8 +165,8 @@ def test_required_scoreboard_and_learner_entities_referenced(dashboard):
     required = {
         # scoreboard / kill-gate (SPEC §9/§10/§14.1)
         "binary_sensor.balcony_solar_forecast_kill_gate_passed",
-        "sensor.balcony_solar_forecast_engine_daily_kwh_mae",
-        "sensor.balcony_solar_forecast_engine_vs_best_baseline_pct",
+        "sensor.balcony_solar_forecast_daily_kwh_mae",
+        "sensor.balcony_solar_forecast_vs_best_baseline_pct",
         # the two documented operator comparisons (SPEC §14.1)
         "sensor.balcony_solar_forecast_comparison_daily_kwh_mae_8_entry_baseline",
         "sensor.balcony_solar_forecast_comparison_daily_kwh_mae_alt_1600w",
@@ -214,9 +214,9 @@ def test_derived_object_ids_match_dashboard(dashboard):
     """
     referenced = set(_iter_entity_ids(dashboard))
     for platform, key in (
-        ("sensor", "engine_vs_best_baseline_pct"),
-        ("sensor", "engine_daily_kwh_mae"),
-        ("sensor", "engine_hourly_mae"),
+        ("sensor", "vs_best_baseline_pct"),
+        ("sensor", "daily_kwh_mae"),
+        ("sensor", "hourly_mae"),
         ("sensor", "energy_production_today_p10"),
         ("sensor", "energy_production_today_p90"),
         ("binary_sensor", "kill_gate_passed"),

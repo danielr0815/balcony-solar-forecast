@@ -645,13 +645,18 @@ STORE_KEY_SCOREBOARD_STATE = "scoreboard_state"  # ScoreboardState: rolling wind
 STORE_KEY_COMPARISON_RING = "comparison_ring"  # {iso_date: {comparison_name: daily_kwh}} read-from-recorder cache
 
 # --- New diagnostic sensors / binary sensors (SPEC §8/§10) -----------------
-SENSOR_ENGINE_DAILY_KWH_MAE = "engine_daily_kwh_mae"
-SENSOR_ENGINE_HOURLY_MAE = "engine_hourly_mae"
+# Entity object_ids are unprefixed: the device slug already carries
+# "balcony_solar_forecast", so these ARE the forecast's own metrics (baselines
+# are the comparison_* sensors). Avoids the balcony_solar_forecast_forecast_*
+# stutter.
+SENSOR_FORECAST_DAILY_KWH_MAE = "daily_kwh_mae"
+SENSOR_FORECAST_HOURLY_MAE = "hourly_mae"
 # Per-comparison daily-kWh MAE sensor: object_id is suffixed with a slug of the
 # comparison name (built by sensor.py from CONF_COMPARISON_NAME).
 SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX = "comparison_daily_kwh_mae"
-# Positive percent = engine better than the best baseline on daily-kWh MAE.
-SENSOR_ENGINE_VS_BEST_BASELINE_PCT = "engine_vs_best_baseline_pct"
+# Positive percent = the integration's own forecast is better than the best
+# baseline on daily-kWh MAE.
+SENSOR_FORECAST_VS_BEST_BASELINE_PCT = "vs_best_baseline_pct"
 # Optional daily P10 / P90 energy sensors (today's band), SPEC §6/§10.
 SENSOR_ENERGY_TODAY_P10 = "energy_production_today_p10"
 SENSOR_ENERGY_TODAY_P90 = "energy_production_today_p90"
