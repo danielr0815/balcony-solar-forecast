@@ -314,6 +314,21 @@ dort hilft v. a. Intraday + breite Quantile).
   Neustart-Catch-up darf denselben Tag nicht doppelt trainieren —
   Verify-Befund 2026-07-06). Prozess: Fable plant/reviewt/verifiziert,
   Opus implementiert; Kritisch-Fixes nach Fable-Spezifikation.
+- **D-P11** (Betreiber, 2026-07-06): v0.4 = **Skill-Scoreboard +
+  P10/P50/P90-Quantile + Observability-Dashboard** bauen; den
+  **battery_manager-Cutover DEFERRED**, bis das Scoreboard das Kill-Gate
+  bestätigt. Das Scoreboard ist das Gate, an dem der ganze Plan hängt (§9/§10):
+  es misst nächtlich pro Vortag den Tages-kWh-Fehler des Motors **as issued**
+  (aus dem Issued-Ring, nie mit heutigem Lernstand nachgerechnet) gegen jede
+  konfigurierte externe Vergleichsprognose **wie sie am Vortag stand**
+  (Recorder-Historie, nie der heutige Wert) gegen die gemessene Ist-Summe,
+  stratifiziert nach Wetterklasse. Vergleichs-Sensoren sind **generisch +
+  konfigurierbar** (leer ausgeliefert); die zwei Vergleiche des Betreibers sind
+  in `docs/DASHBOARD.md` dokumentiert, nicht im Runtime-Default hardcodiert
+  (D-P9). Quantile: nichtparametrische historische Simulation aus dem
+  90-Tage-Fehlerring (§6), Band kollabiert auf P50 bei zu wenig Samples (keine
+  Fake-Spreizung). Store-Schema v2→v3 **additiv**, Lernzustand des Live-Installs
+  bleibt byte-treu erhalten (§14). battery_manager wird **nicht** angefasst.
 
 ## 12. Betreiber-Antworten (2026-07-05 — alle 12 beantwortet)
 
@@ -406,3 +421,79 @@ HMS-2T-Datenblatt (1 Eingang/MPPT) · HA-Dev-Docs (Store/async_delay_save,
 recorder statistics_during_period, exclude_attributes,
 async_get_solar_forecast, Service-with-Response) · DWD CDC Phänologie
 (Laub-Termine, optional).
+
+## 14. v0.4 — Scoreboard + Quantile + Dashboard (D-P11)
+
+Phase 4 (v0.4.0), Betreiber-Entscheid 2026-07-06 (D-P11): drei Deliverables;
+der **battery_manager-Cutover ist DEFERRED**, bis das Scoreboard das Kill-Gate
+bestätigt. battery_manager und seine Entity-Verweise werden nicht angefasst.
+Laufzeit bleibt **stdlib-only** (aiohttp erlaubt), `requirements` bleibt leer.
+
+### 14.1 Skill-Scoreboard (das Kill-Gate, §9/§10)
+
+Nächtlich, pro Vortag, berechnet der Koordinator den **Tages-kWh-Fehler** von
+(a) der Motor-Prognose **as issued** für den Vortag, (b) jeder konfigurierten
+externen **Vergleichsprognose**, jeweils gegen die **gemessene** Ist-Summe des
+Standorts, plus die **Stunden-MAE** des Motors — **stratifiziert** nach der
+dominanten Wetterklasse des Vortags (clear/mixed/overcast/fog; der Koordinator
+klassifiziert diese bereits, wird wiederverwendet). Rollierendes Fenster
+(Default **14 Tage**, konfigurierbar).
+
+**Fairness / kein Leakage (kritisch):**
+- die **Motor**-Zahl kommt aus der **as issued**-Prognose des Vortags (im
+  Issued-Ring gespeichert, am Vortag geloggt) — **nie** mit heutigem Lernstand
+  nachgerechnet;
+- die **Vergleichs**-Zahl ist der Wert **wie er am Vortag stand** (aus der
+  Recorder-Historie des Vergleichs-Sensors für den Vortag gelesen) — **nie** der
+  heutige Wert;
+- die **Ist**-Zahl ist die Summe der 8 Modul-Ist-Werte aus dem Actuals-Ring.
+
+**Sensorik:** `engine_daily_kwh_mae`, je Vergleich `…daily_kwh_mae`,
+`engine_vs_best_baseline_pct` (positiv = Motor besser als bester Baseline),
+`binary_sensor.kill_gate_passed` (Motor ≥ `SCOREBOARD_GATE_MARGIN`, Default
+**0,10**, besser auf Tages-kWh über ein **volles** Fenster; `None`, solange das
+Fenster nicht voll ist), plus eine **Diagnose-Aufschlüsselung je Wetterstratum**.
+
+**Vergleichs-Sensoren generisch + konfigurierbar** (`CONF_COMPARISON_SENSORS`:
+Liste von `{name, daily_entity}`), **leer** ausgeliefert (D-P9). Die zwei
+Vergleiche des Betreibers sind in `docs/DASHBOARD.md` + einem Config-Beispiel
+dokumentiert, **nicht** im Runtime-Default hardcodiert: name „8-Entry Baseline"
+→ `sensor.pv_prognose_heute_alle_module`; name „Alt 1600W" →
+`sensor.energy_production_today_4` (der alte rany2-„Home-LA"-Heute-Sensor).
+
+### 14.2 Quantile P10/P50/P90 (§6/§10)
+
+Historische Simulation: ein **90-Tage-Ring** stündlicher **relativer** Fehler
+(gemessen / korrigierte-Prognose), gekeyt nach (Wetterklasse × Tagesabschnitt) —
+dieselbe Bin-Taxonomie wie der Day-ahead-Bias. Zur Prognosezeit werden die
+empirischen P10/P50/P90-**Multiplikatoren** je Stunde auf die korrigierte Kurve
+angewandt. **Cold Start:** zu wenige Samples in einem Bin → Band kollabiert auf
+P50 (keine Fake-Spreizung). Ausgabe über die `get_forecast`-Service-Response
+(plane-agnostische Gesamt-P10/P50/P90 in 15 min + stündlich), optionale
+Tages-P10/P90-Sensoren, `wh_period`-P10/P90-Attribute. Enable-Flag Default
+**AN**, Kill-Switch im Options-Flow. Nächtlich trainiert aus
+issued(korrigiert) vs. Ist — die bestehenden Ringe werden wiederverwendet.
+
+### 14.3 Observability-Dashboard
+
+Ein Lovelace-View-YAML unter `dashboards/balcony_solar_forecast.yaml`, **nur mit
+Bordmitteln** (funktioniert ohne Custom-Cards): History-Graph Motor-Gesamt vs.
+gemessen (und je Ebene wo praktikabel), Entities-Card für Lernstatus/Drift-MAE/
+Quellenstatus/Kill-Gate, ein Gauge für `engine_vs_best_baseline_pct`, ein
+Markdown mit dem Kill-Gate-Verdikt. Die Shademap-Polarsicht als bestmögliche
+Bordmittel-Darstellung (kompakte Transmittanz-Tabelle je Kanal via Template/
+Markdown) **plus** die rohen Polardaten über den bestehenden
+`dump_shademap`-Service (dokumentiert, dass daraus ein reicherer Polarplot
+gerendert werden kann). Installationsschritte in `docs/DASHBOARD.md`.
+
+### 14.4 Store-Schema v3 (additiv über v2)
+
+Inneres Schema **v2 → v3 ADDITIV**; die äußere HA-`Store`-Hülle
+(`STORAGE_VERSION`) bleibt auf 1 gepinnt. **KRITISCH:** der Live-Install
+(Entry `01KWT809F7MHH97F8XCKEJTZ0M`) hat **jetzt** einen befüllten v2-Store auf
+Platte (Shademap 7 Kanäle / 851 Bins, Day-ahead 12 Zellen, Drift + Rollback +
+`trained_days`). Eine Migration, die irgendeinen Lernzustand **verwirft oder
+zurücksetzt, ist ein KRITISCHER Fehler**. Die Migration ist rein
+inner-schema: jeder v2-Schlüssel wird **byte-treu** durchgereicht, die drei
+neuen v3-Sektionen (`quantile_state`, `scoreboard_state`, `comparison_ring`)
+werden leer default-injiziert.

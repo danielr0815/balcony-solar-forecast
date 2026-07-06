@@ -43,12 +43,18 @@
           "disabled_by_drift": "Wegen Drift deaktiviert",
           "frozen": "Eingefroren"
         }
-      }
+      },
+      "engine_daily_kwh_mae": {"name": "Motor-Tages-kWh-MAE"},
+      "engine_hourly_mae": {"name": "Motor-Stunden-MAE"},
+      "engine_vs_best_baseline_pct": {"name": "Motor vs. beste Baseline"},
+      "energy_production_today_p10": {"name": "Energieertrag heute (P10)"},
+      "energy_production_today_p90": {"name": "Energieertrag heute (P90)"}
     },
     "binary_sensor": {
       "degraded": {"name": "Eingeschränkt"},
       "fast_learner_active": {"name": "Schneller Lerner aktiv"},
-      "slow_learner_active": {"name": "Shademap-Lerner aktiv"}
+      "slow_learner_active": {"name": "Shademap-Lerner aktiv"},
+      "kill_gate_passed": {"name": "Kill-Gate bestanden"}
     }
   },
   "issues": {
@@ -64,7 +70,7 @@
   "services": {
     "get_forecast": {
       "name": "Prognose abrufen",
-      "description": "Liefert die aktuellen 15-Minuten- und Stundenkurven der Prognose für eine oder alle konfigurierten Anlagen.",
+      "description": "Liefert die aktuellen 15-Minuten- und Stundenkurven der Prognose für eine oder alle konfigurierten Anlagen. Sind die Quantilbänder aktiviert und trainiert, enthält die Antwort zusätzlich Gesamt-P10/P50/P90-Kurven (15 min und stündlich).",
       "fields": {
         "entry_id": {
           "name": "Konfigurationseintrag",
@@ -173,12 +179,16 @@
           "site": "Standort-Konfiguration (Ebenen, Horizont, WR-Gruppen)",
           "fast_learner_enabled": "Schneller Lerner (Intraday-Korrektur)",
           "slow_learner_enabled": "Shademap-Lerner (kanalweise Verschattungskarte)",
-          "day_ahead_bias_enabled": "Day-ahead-Bias-Korrektur"
+          "day_ahead_bias_enabled": "Day-ahead-Bias-Korrektur",
+          "quantiles_enabled": "Quantilbänder (P10/P50/P90)",
+          "comparison_sensors": "Vergleichs-Prognosesensoren"
         },
         "data_description": {
           "fast_learner_enabled": "Wendet eine kurzlebige Intraday-Korrektur im Clear-Sky-Index-Raum auf die nächsten Stunden an (rettet Nebelmorgen).",
           "slow_learner_enabled": "Lernt über eine Saison die kanalweise Beam-Transmittanz je Sonnenstand (Verschattung, Bäume, Gebäudekante).",
-          "day_ahead_bias_enabled": "Wendet einen nächtlich trainierten multiplikativen Bias je Wolkenklasse und Tagesabschnitt an."
+          "day_ahead_bias_enabled": "Wendet einen nächtlich trainierten multiplikativen Bias je Wolkenklasse und Tagesabschnitt an.",
+          "quantiles_enabled": "Gibt empirische P10/P50/P90-Unsicherheitsbänder aus dem 90-Tage-Fehlerring aus (kollabiert auf P50, bis ein Bin genügend Samples hat).",
+          "comparison_sensors": "Liste externer Tages-kWh-Prognosesensoren, gegen die das Scoreboard den Motor bewertet. Jede Zeile ist {name, daily_entity}. Wird leer ausgeliefert; z. B. name \"8-Entry Baseline\" -> sensor.pv_prognose_heute_alle_module."
         }
       }
     },

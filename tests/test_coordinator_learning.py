@@ -112,20 +112,20 @@ class _FakeStore:
     def get_bias_state(self) -> BiasState:
         return BiasState.from_dict(self.bias)
 
-    def set_bias_state(self, d) -> None:
-        self.bias = d
+    def set_bias_state(self, state) -> None:
+        self.bias = state.to_dict()
 
     def get_shademap_state(self) -> ShademapState:
         return ShademapState.from_dict(self.shademap)
 
-    def set_shademap_state(self, d) -> None:
-        self.shademap = d
+    def set_shademap_state(self, state) -> None:
+        self.shademap = state.to_dict()
 
     def get_drift_state(self) -> DriftState:
         return DriftState.from_dict(self.drift)
 
-    def set_drift_state(self, d) -> None:
-        self.drift = d
+    def set_drift_state(self, state) -> None:
+        self.drift = state.to_dict()
 
     # rollback ring (real ForecastStore API)
     def get_snapshots(self):
@@ -216,6 +216,24 @@ def _make_coordinator(store: _FakeStore | None = None) -> BalconySolarCoordinato
     c._correction_source = CORRECTION_SOURCE_NONE
     c._last_result = None
     c._last_error = None
+    # v0.4 scoreboard attributes (_build_data now assembles the scoreboard
+    # summary): neutral empty ring, defaults, no comparisons.
+    from custom_components.balcony_solar_forecast.const import (
+        DEFAULT_SCOREBOARD_GATE_MARGIN,
+        DEFAULT_SCOREBOARD_WINDOW_DAYS,
+    )
+    from custom_components.balcony_solar_forecast.core.types import ScoreboardState
+
+    c._scoreboard_enabled = True
+    c._scoreboard_window_days = DEFAULT_SCOREBOARD_WINDOW_DAYS
+    c._scoreboard_gate_margin = DEFAULT_SCOREBOARD_GATE_MARGIN
+    c._comparisons = ()
+    c._scoreboard_state = ScoreboardState()
+    # v0.4 quantile lane: enabled by default, empty ring (cold start -> neutral).
+    from custom_components.balcony_solar_forecast.core.types import QuantileState
+
+    c._quantiles_enabled = True
+    c._quantile_state = QuantileState()
     return c
 
 

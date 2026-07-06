@@ -17,12 +17,48 @@ Owner: store. One HA ``Store`` per config entry holds (SPEC §4, §5, §6, §9):
     the ``DriftState`` (rolling MAE + loss streaks + auto-disable flags) and a
     small ring of ``LearnerSnapshot`` rollback points.
 
-**Migration.** The inner schema bumps v1 -> v2 (``STORAGE_DATA_VERSION_V2``);
-the outer HA ``Store`` envelope (``STORAGE_VERSION``) stays 1. A live v1
-install MUST survive an upgrade losslessly: the three v1 rings are carried
-through untouched and the four learner sections are injected at their neutral
-defaults (empty bias / shademap / drift, no snapshots). This is additive —
-nothing is dropped.
+**Migration.** The inner schema bumps v1 -> v2 -> v3; the outer HA ``Store``
+envelope (``STORAGE_VERSION``) stays 1. A live v1 install MUST survive an upgrade
+losslessly: the three v1 rings are carried through untouched and the four learner
+sections are injected at their neutral defaults (empty bias / shademap / drift,
+no snapshots). This is additive — nothing is dropped.
+
+v2 -> v3 is ADDITIVE (SPEC §14, v0.4). Every v2 key is carried through
+BYTE-FAITHFUL and three new v3 sections are default-injected empty:
+  * STORE_KEY_QUANTILE_STATE   -> QuantileState().to_dict()  (empty relerr ring)
+  * STORE_KEY_SCOREBOARD_STATE -> ScoreboardState().to_dict() (empty day ring)
+  * STORE_KEY_COMPARISON_RING  -> {}  ({iso_date: {comparison_name: daily_kwh}})
+
+CRITICAL INVARIANT (SPEC §14): the LIVE install (entry
+01KWT809F7MHH97F8XCKEJTZ0M) has a POPULATED v2 store on disk RIGHT NOW —
+shademap 7 channels / 851 bins, day-ahead 12 cells, drift + rollback +
+trained_days. A v2 -> v3 migration that drops or RESETS any of that learner
+state is a CRITICAL failure. The migration is inner-schema only (the
+STORAGE_VERSION envelope stays pinned at 1); it MUST default-inject the three new
+sections and keep EVERYTHING else byte-faithful.
+
+The EXACT v3 inner-schema layout (superset of v2 — every key below is required
+in a well-formed v3 state; the first block is v1, the second v2, the third the
+v0.4 additions):
+
+    {
+      "schema_version": 3,                       # _SCHEMA_KEY == STORAGE_DATA_VERSION_V3
+      # --- v1 rings (carried through EVERY migration untouched) ---
+      "last_payload":        {"fetched_at": iso, "payload": {...}} | None,
+      "forecast_issued_log": {iso_date: snapshot(v1|v2 dict)},      # 90-day ring
+      "daily_actuals_log":   {iso_date: {module: wh}},              # 90-day ring
+      # --- v2 learner sections (carried through v2->v3 BYTE-FAITHFUL) ---
+      "hourly_actuals_log":  {iso_date: {channel: {iso_hour: wh}}}, # short ring
+      "bias_state":          BiasState.to_dict(),                   # day-ahead RLS
+      "shademap_state":      ShademapState.to_dict(),               # 7 ch / 851 bins live
+      "drift_state":         DriftState.to_dict(),                  # MAE + streaks + flags
+      "learner_snapshots":   [LearnerSnapshot.to_dict(), ...],      # rollback ring
+      "trained_days":        [iso_date, ...],                       # idempotence markers
+      # --- v3 additions (default-injected empty on v2->v3 migration) ---
+      "quantile_state":      QuantileState.to_dict(),               # {bin_key: [relerr,...]}
+      "scoreboard_state":    ScoreboardState.to_dict(),             # {iso_date: DayScore}
+      "comparison_ring":     {iso_date: {comparison_name: daily_kwh}},
+    }
 
 **Load is validate-and-clamp** (SPEC §5 "Store validate-and-clamp beim
 Laden"): a corrupt / wrong-shaped / unknown-version blob NEVER crashes setup.
@@ -63,15 +99,19 @@ from .const import (
     PAYLOAD_MIN_SAVE_INTERVAL_SECONDS,
     STORAGE_DATA_VERSION,
     STORAGE_DATA_VERSION_V2,
+    STORAGE_DATA_VERSION_V3,
     STORAGE_SAVE_DELAY_SECONDS,
     STORAGE_VERSION,
     STORE_KEY_ACTUALS_LOG,
     STORE_KEY_BIAS_STATE,
+    STORE_KEY_COMPARISON_RING,
     STORE_KEY_DRIFT_STATE,
     STORE_KEY_HOURLY_ACTUALS,
     STORE_KEY_ISSUED_LOG,
     STORE_KEY_LAST_PAYLOAD,
     STORE_KEY_LEARNER_SNAPSHOTS,
+    STORE_KEY_QUANTILE_STATE,
+    STORE_KEY_SCOREBOARD_STATE,
     STORE_KEY_TRAINED_DAYS,
     TRAINED_DAYS_RING,
     STORE_KEY_SHADEMAP_STATE,
@@ -80,6 +120,8 @@ from .core.types import (
     BiasState,
     DriftState,
     LearnerSnapshot,
+    QuantileState,
+    ScoreboardState,
     ShademapState,
 )
 
@@ -91,10 +133,11 @@ _ACTUALS_RING_DAYS = 90
 
 _SCHEMA_KEY = "schema_version"
 
-# The current inner schema this build writes. The const contract pins v2 as
-# the learner-bearing schema; the legacy v1 value is retained only for the
-# migration branch below.
-_CURRENT_SCHEMA = STORAGE_DATA_VERSION_V2
+# The current inner schema this build writes. The const contract pins v3 as the
+# scoreboard/quantile-bearing schema; v2 (learner-bearing) and the legacy v1
+# value are retained only for the migration branches below.
+_CURRENT_SCHEMA = STORAGE_DATA_VERSION_V3
+_SCHEMA_V2 = STORAGE_DATA_VERSION_V2  # == 2 (learner sections)
 _LEGACY_SCHEMA = STORAGE_DATA_VERSION  # == 1
 
 
@@ -104,9 +147,10 @@ _LEGACY_SCHEMA = STORAGE_DATA_VERSION  # == 1
 
 
 def _empty_state() -> dict[str, Any]:
-    """A well-formed, empty inner state at the CURRENT (v2) schema.
+    """A well-formed, empty inner state at the CURRENT (v3) schema.
 
-    v1 rings + v2 learner sections, all at neutral defaults.
+    v1 rings + v2 learner sections + v3 scoreboard/quantile sections, all at
+    neutral defaults.
     """
     return {
         _SCHEMA_KEY: _CURRENT_SCHEMA,
@@ -121,6 +165,10 @@ def _empty_state() -> dict[str, Any]:
         STORE_KEY_DRIFT_STATE: DriftState().to_dict(),
         STORE_KEY_LEARNER_SNAPSHOTS: [],  # list[LearnerSnapshot dict], newest last
         STORE_KEY_TRAINED_DAYS: [],  # sorted list[iso_date] (training idempotence)
+        # --- v3 scoreboard + quantile sections (neutral / empty) ---
+        STORE_KEY_QUANTILE_STATE: QuantileState().to_dict(),  # {bin_key: [relerr,...]}
+        STORE_KEY_SCOREBOARD_STATE: ScoreboardState().to_dict(),  # {iso_date: DayScore}
+        STORE_KEY_COMPARISON_RING: {},  # {iso_date: {comparison_name: daily_kwh}}
     }
 
 
@@ -214,18 +262,22 @@ def _coerce_snapshots(raw: Any) -> list[dict[str, Any]]:
 
 
 def validate_state(raw: Any) -> dict[str, Any]:
-    """Coerce a loaded blob into a well-formed CURRENT-schema state.
+    """Coerce a loaded blob into a well-formed CURRENT-schema (v3) state.
 
     Never raises (SPEC §5). Handles:
-      * non-dict / missing-schema blobs        -> empty neutral state;
-      * a v1 blob                              -> migrated to v2 (rings kept,
-                                                  learner sections injected);
-      * a v2 blob                              -> validated + clamped in place;
-      * an unknown (future) schema             -> discarded to empty (warned).
+      * non-dict / missing-schema blobs -> empty neutral state;
+      * a v1 blob -> migrated v1->v2->v3 (rings kept, learner + scoreboard/
+        quantile sections injected at neutral defaults);
+      * a v2 blob -> migrated v2->v3 ADDITIVELY: EVERY v2 key (rings + all four
+        learner sections + hourly actuals + trained_days) carried through
+        byte-faithful, the three v3 sections default-injected empty (SPEC §14
+        CRITICAL: never drop/reset live learner state);
+      * a v3 blob -> validated + clamped in place;
+      * an unknown (future) schema -> discarded to empty (warned).
 
-    Every learner section is passed through its dataclass ``from_dict`` so a
-    corrupt learner blob yields neutral factors (1.0 / empty bins) — never a
-    setup crash.
+    Every learner / scoreboard / quantile section is passed through its dataclass
+    ``from_dict`` so a corrupt section yields neutral factors (1.0 / empty bins /
+    empty ring) — never a setup crash.
     """
     if not isinstance(raw, dict):
         return _empty_state()
@@ -233,18 +285,23 @@ def validate_state(raw: Any) -> dict[str, Any]:
     version = raw.get(_SCHEMA_KEY)
 
     if version == _LEGACY_SCHEMA:
-        return _migrate_v1_to_v2(raw)
+        # v1 -> v2 (learner sections) -> v3 (scoreboard/quantile sections).
+        return _migrate_v2_to_v3(_migrate_v1_to_v2(raw))
+
+    if version == _SCHEMA_V2:
+        return _migrate_v2_to_v3(raw)
 
     if version == _CURRENT_SCHEMA:
-        return _validate_v2(raw)
+        return _validate_v3(raw)
 
     # Unknown / missing / future schema: discard but never crash setup.
     if version is not None:
         _LOGGER.warning(
-            "Discarding forecast store: schema %s not in {%s, %s}; "
+            "Discarding forecast store: schema %s not in {%s, %s, %s}; "
             "starting from an empty, well-formed state",
             version,
             _LEGACY_SCHEMA,
+            _SCHEMA_V2,
             _CURRENT_SCHEMA,
         )
     return _empty_state()
@@ -262,7 +319,7 @@ def _migrate_v1_to_v2(raw: dict[str, Any]) -> dict[str, Any]:
         "Migrating forecast store schema %s -> %s (additive; learner state "
         "injected at neutral defaults)",
         _LEGACY_SCHEMA,
-        _CURRENT_SCHEMA,
+        _SCHEMA_V2,
     )
     state = _empty_state()
     state[STORE_KEY_LAST_PAYLOAD] = _coerce_last_payload(
@@ -274,14 +331,25 @@ def _migrate_v1_to_v2(raw: dict[str, Any]) -> dict[str, Any]:
     )
     # v1 had no hourly-actuals ring; a freshly-migrated install starts empty.
     state[STORE_KEY_HOURLY_ACTUALS] = {}
-    # Learner sections stay at the neutral defaults already set by
-    # _empty_state(): a freshly-migrated install has learned nothing yet.
+    # Learner + v3 sections stay at the neutral defaults already set by
+    # _empty_state(): a freshly-migrated v1 install has learned nothing yet.
+    # (The schema key is re-stamped to _CURRENT_SCHEMA by the following
+    # _migrate_v2_to_v3 pass in validate_state.)
     return state
 
 
-def _validate_v2(raw: dict[str, Any]) -> dict[str, Any]:
-    """Validate + clamp a v2 blob into a well-formed state (never raises)."""
-    state = _empty_state()
+def _validate_learner_sections(
+    raw: dict[str, Any], state: dict[str, Any]
+) -> None:
+    """Copy the v1 rings + v2 learner sections from ``raw`` into ``state``.
+
+    Shared by the v2->v3 migration and the v3 in-place validation: every section
+    round-trips through its clamping dataclass so a corrupt section collapses to
+    a neutral state instead of crashing (SPEC §5), and a WELL-FORMED section is
+    preserved byte-faithful (the round-trip is the identity on clean data —
+    exactly what the CRITICAL v2->v3 invariant requires for the live 851-bin
+    shademap / 12-cell bias / drift / rollback / trained_days).
+    """
     state[STORE_KEY_LAST_PAYLOAD] = _coerce_last_payload(
         raw.get(STORE_KEY_LAST_PAYLOAD)
     )
@@ -292,8 +360,6 @@ def _validate_v2(raw: dict[str, Any]) -> dict[str, Any]:
     state[STORE_KEY_HOURLY_ACTUALS] = _coerce_hourly_actuals(
         raw.get(STORE_KEY_HOURLY_ACTUALS)
     )
-    # Learner sections: round-trip through their (clamping) dataclasses so any
-    # corruption collapses to neutral factors instead of crashing (SPEC §5).
     state[STORE_KEY_BIAS_STATE] = BiasState.from_dict(
         raw.get(STORE_KEY_BIAS_STATE, {})
     ).to_dict()
@@ -310,6 +376,66 @@ def _validate_v2(raw: dict[str, Any]) -> dict[str, Any]:
     state[STORE_KEY_TRAINED_DAYS] = sorted(
         {d for d in trained if isinstance(d, str)}
     )[-TRAINED_DAYS_RING:] if isinstance(trained, list) else []
+
+
+def _coerce_comparison_ring(raw: Any) -> dict[str, Any]:
+    """Validate the comparison ring: {iso_date: {comparison_name: daily_kwh}}.
+
+    Keeps string-date-keyed entries whose value is a dict of
+    {str name: finite number}; trimmed to the issued/actuals ring window so it
+    stays bounded alongside the daily rings. Never raises.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for day, cmps in raw.items():
+        if not isinstance(day, str) or not isinstance(cmps, dict):
+            continue
+        row = {
+            name: float(v)
+            for name, v in cmps.items()
+            if isinstance(name, str) and isinstance(v, (int, float))
+        }
+        out[day] = row
+    return _trim_ring(out, _ACTUALS_RING_DAYS)
+
+
+def _migrate_v2_to_v3(raw: dict[str, Any]) -> dict[str, Any]:
+    """ADDITIVE v2 -> v3 migration (SPEC §14 CRITICAL — never reset learners).
+
+    EVERY v2 key (the three v1 rings + hourly actuals + all four learner
+    sections + trained_days) is carried through BYTE-FAITHFUL via
+    :func:`_validate_learner_sections` (the clamping round-trip is the identity
+    on clean data — the live 851-bin shademap / 12-cell bias / drift / rollback /
+    trained_days survive intact). The three v3 sections are default-injected
+    empty. Re-stamps the schema key to v3. Never raises.
+    """
+    _LOGGER.info(
+        "Migrating forecast store schema %s -> %s (additive; scoreboard + "
+        "quantile sections injected empty; all learner state preserved)",
+        _SCHEMA_V2,
+        _CURRENT_SCHEMA,
+    )
+    state = _empty_state()  # already carries empty v3 sections
+    _validate_learner_sections(raw, state)
+    # v3 sections stay at the empty defaults from _empty_state() (a v2 install
+    # has no scoreboard / quantile history yet).
+    return state
+
+
+def _validate_v3(raw: dict[str, Any]) -> dict[str, Any]:
+    """Validate + clamp a v3 blob into a well-formed state (never raises)."""
+    state = _empty_state()
+    _validate_learner_sections(raw, state)
+    state[STORE_KEY_QUANTILE_STATE] = QuantileState.from_dict(
+        raw.get(STORE_KEY_QUANTILE_STATE, {})
+    ).to_dict()
+    state[STORE_KEY_SCOREBOARD_STATE] = ScoreboardState.from_dict(
+        raw.get(STORE_KEY_SCOREBOARD_STATE, {})
+    ).to_dict()
+    state[STORE_KEY_COMPARISON_RING] = _coerce_comparison_ring(
+        raw.get(STORE_KEY_COMPARISON_RING)
+    )
     return state
 
 
@@ -704,3 +830,54 @@ class ForecastStore:
         self._data[STORE_KEY_BIAS_STATE] = bias.to_dict()
         self._data[STORE_KEY_SHADEMAP_STATE] = shademap.to_dict()
         self._schedule_save()
+
+    # ------------------------------------------------------------------
+    # v3: quantile state (SPEC §6) — owner: quantiles/store
+    # ------------------------------------------------------------------
+
+    def get_quantile_state(self) -> QuantileState:
+        """Return the persisted quantile ring (empty if absent/corrupt)."""
+        return QuantileState.from_dict(self._data.get(STORE_KEY_QUANTILE_STATE, {}))
+
+    def set_quantile_state(self, state: QuantileState) -> None:
+        """Persist the quantile ring (schedules a bundled write)."""
+        self._data[STORE_KEY_QUANTILE_STATE] = state.to_dict()
+        self._schedule_save()
+
+    # ------------------------------------------------------------------
+    # v3: scoreboard state (SPEC §9/§10) — owner: scoreboard/store
+    # ------------------------------------------------------------------
+
+    def get_scoreboard_state(self) -> ScoreboardState:
+        """Return the persisted scoreboard day-ring (empty if absent/corrupt)."""
+        return ScoreboardState.from_dict(
+            self._data.get(STORE_KEY_SCOREBOARD_STATE, {})
+        )
+
+    def set_scoreboard_state(self, state: ScoreboardState) -> None:
+        """Persist the scoreboard day-ring (schedules a bundled write)."""
+        self._data[STORE_KEY_SCOREBOARD_STATE] = state.to_dict()
+        self._schedule_save()
+
+    # ------------------------------------------------------------------
+    # v3: comparison ring (recorder-read cache) — owner: scoreboard/store
+    # ------------------------------------------------------------------
+
+    def record_comparison(
+        self, iso_date: str, per_comparison_kwh: dict[str, float]
+    ) -> None:
+        """Cache the per-comparison daily-kWh read from recorder for ``iso_date``.
+
+        ``per_comparison_kwh`` maps ``{comparison_name: daily_kwh}`` — each value
+        the comparison entity's own value AS IT STOOD during ``iso_date`` (read
+        from recorder history, no leakage). Idempotent per day; trimmed to the
+        actuals-ring window.
+        """
+        ring = self._data.setdefault(STORE_KEY_COMPARISON_RING, {})
+        ring[iso_date] = dict(per_comparison_kwh)
+        _trim_ring(ring, _ACTUALS_RING_DAYS)
+        self._schedule_save()
+
+    def get_comparison(self, iso_date: str) -> dict[str, float] | None:
+        """Per-comparison daily-kWh cached for a day, or None if absent."""
+        return self._data.get(STORE_KEY_COMPARISON_RING, {}).get(iso_date)

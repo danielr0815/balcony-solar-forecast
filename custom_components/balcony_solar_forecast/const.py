@@ -16,7 +16,7 @@ from __future__ import annotations
 DOMAIN = "balcony_solar_forecast"
 
 INTEGRATION_NAME = "Balcony Solar Forecast"
-INTEGRATION_VERSION = "0.3.0"
+INTEGRATION_VERSION = "0.4.0"
 
 # --- Update behaviour (SPEC §4: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
@@ -399,6 +399,14 @@ LABEL_MONOTONIC_TOLERANCE_WH = 1.0      # energy must be non-decreasing within t
 LABEL_FROZEN_MIN_REPEATS = 4
 # Channel dropout: if a channel is missing/frozen for the day, discard WHOLE
 # day for BOTH learners (SPEC §5).
+# Day-completeness gate: a recorder/LTS gap (HA restart or recorder outage
+# mid-day) yields a partial-hour sum that must NOT be recorded as the day's
+# ground truth (it would score every forecast against a phantom-low measured
+# energy and feed the drift/collapse detectors a fake loss). A day is accepted
+# only when the best-covered module has hourly-mean rows for at least this
+# fraction of the day's DAYLIGHT hours (sun elevation > 0); below it the whole
+# day is discarded (empty), so a later catch-up can fill it once LTS is complete.
+DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE = 0.75
 
 # Drift monitor: rolling daylight MAE corrected vs pure physics.
 DRIFT_WINDOW_DAYS = 7
@@ -512,3 +520,159 @@ LEARNER_STATUS_VALUES = (
 # --- Repair issue ids (SPEC §5/§7) -----------------------------------------
 ISSUE_FAST_LEARNER_DISABLED = "fast_learner_auto_disabled"
 ISSUE_SLOW_LEARNER_DISABLED = "slow_learner_auto_disabled"
+
+
+# ===========================================================================
+# v0.4 CONTRACT: SKILL SCOREBOARD + QUANTILES P10/P50/P90 (SPEC §6, §9, §10, §14)
+# ---------------------------------------------------------------------------
+# D-P11 (operator 2026-07-06): build the skill scoreboard, the P10/P50/P90
+# quantile bands and the observability dashboard; DEFER the battery_manager
+# cutover until the scoreboard confirms the kill-gate. Everything below is NEW;
+# no existing key above is touched. Owners import their tunables from here
+# (single source of truth); no magic numbers in the scoreboard / quantile
+# modules. Runtime stays stdlib-only; the store schema bumps v2 -> v3 ADDITIVELY
+# (STORAGE_VERSION envelope pinned at 1, inner schema only).
+# ===========================================================================
+
+# --- SKILL SCOREBOARD (SPEC §9/§10 — the kill-gate) ------------------------
+# Nightly, per yesterday: compute the daily-kWh error of (a) the ENGINE forecast
+# AS ISSUED for yesterday (from the issued ring — NEVER recomputed with today's
+# learned state), (b) each configured external COMPARISON forecast AS IT STOOD
+# during yesterday (read from that entity's recorder history for yesterday —
+# NEVER today's value), all against (c) the MEASURED site energy for yesterday
+# (sum of the per-module actuals in the actuals ring). Also the engine's hourly
+# MAE. STRATIFIED by yesterday's dominant weather class (the coordinator already
+# classifies clear/mixed/overcast/fog — reuse, do not reinvent). A rolling
+# window (default SCOREBOARD_WINDOW_DAYS) feeds the kill-gate verdict.
+CONF_SCOREBOARD_ENABLED = "scoreboard_enabled"
+DEFAULT_SCOREBOARD_ENABLED = True
+CONF_SCOREBOARD_WINDOW_DAYS = "scoreboard_window_days"
+DEFAULT_SCOREBOARD_WINDOW_DAYS = 14  # rolling window length (SPEC §9 kill-gate)
+# The kill-gate passes when the engine is at least this fraction better than the
+# best baseline on daily-kWh MAE over a FULL window (SPEC §9: >=10% under the
+# 8-entry baseline is the primary Phase-1 gate, B9-weighted).
+CONF_SCOREBOARD_GATE_MARGIN = "scoreboard_gate_margin"
+DEFAULT_SCOREBOARD_GATE_MARGIN = 0.10
+# Minimum scored days before the gate can pass at all (a partial window can
+# never assert the kill-gate; SPEC §9 "over a full window").
+SCOREBOARD_MIN_WINDOW_DAYS = 1
+# Minimum number of PAIRED days (days on which BOTH the engine and the
+# candidate comparison were scored) before that comparison is eligible to set
+# the best-baseline bar for the gate. A comparison scored on a single lucky day
+# must not decide the whole verdict; the gate is a matched-pair comparison over
+# the days both sides cover (fixes non-paired evaluation, SPEC §9).
+SCOREBOARD_MIN_PAIRED_DAYS = 1
+# Staleness bound (local days): the newest scored day must be within this many
+# days of "today" for the gate to assert at all, else the verdict is suspended
+# (None) — a ring whose scoring stopped weeks ago must not keep publishing a
+# live-looking pass/fail. The coordinator passes the current local date in.
+SCOREBOARD_MAX_STALENESS_DAYS = 3
+
+# --- Comparison forecast sensors (GENERIC + CONFIGURABLE; ship EMPTY) -------
+# CONF_COMPARISON_SENSORS is an editable list of objects, each:
+#   {CONF_COMPARISON_NAME: str, CONF_COMPARISON_DAILY_ENTITY: entity_id}
+# ``daily_entity`` is an HA sensor whose STATE is that comparison's daily-kWh
+# forecast for today (same pattern as our own energy_production_today). The
+# scoreboard reads its RECORDER HISTORY for yesterday (the value AS IT STOOD
+# during yesterday — no leakage). Ships EMPTY by default: the operator's two
+# comparisons are DOCUMENTED (docs/DASHBOARD.md + config example), never
+# hardcoded in the runtime defaults (D-P9 generic-not-hardcoded).
+#
+#   Documented example (operator's live site — see docs/DASHBOARD.md):
+#     - name "8-Entry Baseline" -> sensor.pv_prognose_heute_alle_module
+#     - name "Alt 1600W"        -> sensor.energy_production_today_4
+CONF_COMPARISON_SENSORS = "comparison_sensors"
+CONF_COMPARISON_NAME = "name"
+CONF_COMPARISON_DAILY_ENTITY = "daily_entity"
+DEFAULT_COMPARISON_SENSORS: list[dict] = []  # EMPTY by default (D-P9)
+# The comparison entity's daily-kWh value for yesterday is read from recorder
+# history. We take the LAST recorded state on yesterday's LOCAL calendar day
+# (the settled end-of-day forecast the consumer saw). Unit assumed kWh (the
+# operator's two comparisons and our own sensor are all kWh). A non-numeric /
+# unavailable last state -> that comparison is unscored for the day (not zero).
+SCOREBOARD_COMPARISON_UNIT_KWH = True
+
+# --- QUANTILES P10/P50/P90 (SPEC §6/§10) -----------------------------------
+# Historical-simulation bands: a 90-day ring of hourly RELATIVE errors
+# (measured / corrected-forecast) keyed by (weather class x day part). At
+# forecast time the empirical P10/P50/P90 multipliers of the matching bin are
+# applied per hour to the corrected curve. Trained nightly from issued(corrected)
+# vs actuals — REUSING the existing issued + hourly-actuals rings. Enable flag
+# default ON, kill switch in the options flow.
+CONF_QUANTILES_ENABLED = "quantiles_enabled"
+DEFAULT_QUANTILES_ENABLED = True
+# 90-day ring of hourly relative-error samples (SPEC §6).
+QUANTILE_RING_DAYS = 90
+# A single (class x day part) bin can receive up to a day-part's worth of hourly
+# samples per day (~8 daylight hours in summer), so the per-bin FIFO cap is
+# QUANTILE_RING_DAYS x this, not QUANTILE_RING_DAYS itself — otherwise a
+# frequently-hit summer bin (~6 samples/day) would hold only ~2-3 weeks of
+# history and the bands would snap shut after any calm stretch (SPEC §6 90-day
+# climatology). NOTE: samples are un-timestamped, so this caps by COUNT, not age;
+# a true date-windowed ring is a follow-up (see the deferred note in the review).
+QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN = 8
+# The three band percentiles (SPEC §6: P10/P50/P90 -> 80% central band).
+QUANTILE_P_LOW = 10.0
+QUANTILE_P_MID = 50.0
+QUANTILE_P_HIGH = 90.0
+# Cold start (SPEC §6/§10 "no fake spread"): a bin with fewer than this many
+# samples collapses its band to P50 (low == mid == high multiplier), so a thin
+# bin never fabricates an interval. A bin at/above the floor emits the empirical
+# spread. P50 itself, when the bin is empty, defaults to the neutral 1.0.
+QUANTILE_MIN_SAMPLES = 20
+QUANTILE_NEUTRAL_MULT = 1.0
+# The per-hour relative error = measured_wh / corrected_forecast_wh, clamped to a
+# sane band so a divide-by-near-zero dawn/dusk hour cannot inject a 100x
+# multiplier into the ring (SPEC §5 clamp ethos). Only hours whose corrected
+# forecast Wh exceeds QUANTILE_MIN_FORECAST_WH are sampled.
+QUANTILE_MIN_FORECAST_WH = 5.0
+QUANTILE_REL_ERR_MIN = 0.0
+QUANTILE_REL_ERR_MAX = 5.0
+
+# --- Storage schema v3 (ADDITIVE over v2; SPEC §14) ------------------------
+# Bump the INNER schema v2 -> v3; the outer HA Store envelope (STORAGE_VERSION)
+# stays 1. store.py migrates v2 -> v3 ADDITIVELY: every v2 key (the three v1
+# rings + the four learner sections + hourly actuals + trained_days) is carried
+# through BYTE-FAITHFUL, and the three new v3 sections are default-injected at
+# their neutral empty defaults. A migration that drops or resets any learner
+# state is a CRITICAL failure (the live install has a populated v2 store on
+# disk RIGHT NOW: shademap 7 channels / 851 bins, day-ahead 12 cells, drift +
+# rollback + trained_days).
+STORAGE_DATA_VERSION_V3 = 3
+# New store keys (v3). All EXISTING v2 keys are unchanged and carried through.
+STORE_KEY_QUANTILE_STATE = "quantile_state"    # QuantileState: {bin_key: relerr ring}
+STORE_KEY_SCOREBOARD_STATE = "scoreboard_state"  # ScoreboardState: rolling window of DayScore
+STORE_KEY_COMPARISON_RING = "comparison_ring"  # {iso_date: {comparison_name: daily_kwh}} read-from-recorder cache
+
+# --- New diagnostic sensors / binary sensors (SPEC §8/§10) -----------------
+SENSOR_ENGINE_DAILY_KWH_MAE = "engine_daily_kwh_mae"
+SENSOR_ENGINE_HOURLY_MAE = "engine_hourly_mae"
+# Per-comparison daily-kWh MAE sensor: object_id is suffixed with a slug of the
+# comparison name (built by sensor.py from CONF_COMPARISON_NAME).
+SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX = "comparison_daily_kwh_mae"
+# Positive percent = engine better than the best baseline on daily-kWh MAE.
+SENSOR_ENGINE_VS_BEST_BASELINE_PCT = "engine_vs_best_baseline_pct"
+# Optional daily P10 / P90 energy sensors (today's band), SPEC §6/§10.
+SENSOR_ENERGY_TODAY_P10 = "energy_production_today_p10"
+SENSOR_ENERGY_TODAY_P90 = "energy_production_today_p90"
+BINARY_SENSOR_KILL_GATE_PASSED = "kill_gate_passed"
+
+# --- Quantile curve attributes on the energy sensors (SPEC §6/§8) ----------
+# Additive to the existing ATTR_WATTS / ATTR_WH_PERIOD. Each is a {iso_utc: Wh}
+# 15-min band curve, excluded from the recorder like the existing curve attrs.
+ATTR_WH_PERIOD_P10 = "wh_period_p10"
+ATTR_WH_PERIOD_P50 = "wh_period_p50"
+ATTR_WH_PERIOD_P90 = "wh_period_p90"
+
+# --- Coordinator <-> platform contract additions (self.data keys, v0.4) -----
+DATA_KEY_QUANTILE_CURVES = "quantile_curves"      # {"p10": {iso: Wh}, "p50": ..., "p90": ...} 15-min
+DATA_KEY_SCOREBOARD = "scoreboard"                # dict: engine_mae / per-comparison mae / vs_best_pct / gate / strata
+DATA_KEY_KILL_GATE_PASSED = "kill_gate_passed"    # bool | None (None == not enough window yet)
+
+# --- get_forecast service response additions (SPEC §6/§8) ------------------
+# The extended get_forecast response carries plane-agnostic TOTAL p10/p50/p90
+# 15-min and hourly curves alongside the existing p50 curve. These keys name the
+# blocks in the ServiceResponse dict (see _services.py / services.yaml).
+FORECAST_RESP_KEY_P10 = "p10"
+FORECAST_RESP_KEY_P50 = "p50"
+FORECAST_RESP_KEY_P90 = "p90"

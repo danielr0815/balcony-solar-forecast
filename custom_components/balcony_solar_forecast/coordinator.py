@@ -29,6 +29,7 @@ degradation is never silent (SPEC §5 Schutzmechanismen).
 from __future__ import annotations
 
 import logging
+import math
 from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -45,20 +46,33 @@ from .const import (
     CLOUD_CLASS_CLEAR,
     COLLAPSE_FORECAST_MIN_WH,
     COLLAPSE_MEASURED_MAX_FRAC,
+    CONF_COMPARISON_SENSORS,
     CONF_FETCH_INTERVAL,
+    CONF_QUANTILES_ENABLED,
     CONF_RECOMPUTE_INTERVAL,
+    CONF_SCOREBOARD_ENABLED,
+    CONF_SCOREBOARD_GATE_MARGIN,
+    CONF_SCOREBOARD_WINDOW_DAYS,
     CONF_SITE,
     CORRECTION_SOURCE_BOTH,
     CORRECTION_SOURCE_INTRADAY,
     CORRECTION_SOURCE_NONE,
     CORRECTION_SOURCE_SHADEMAP,
+    DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE,
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_CORRECTION_SOURCE,
     DATA_KEY_DRIFT_MAE,
     DATA_KEY_INTRADAY_SCALAR,
+    DATA_KEY_KILL_GATE_PASSED,
     DATA_KEY_LEARNER_STATUS,
+    DATA_KEY_QUANTILE_CURVES,
     DATA_KEY_RAW_HOURLY_WH,
+    DATA_KEY_SCOREBOARD,
     DAY_AHEAD_BIAS_NEUTRAL,
+    DEFAULT_QUANTILES_ENABLED,
+    FORECAST_RESP_KEY_P10,
+    FORECAST_RESP_KEY_P50,
+    FORECAST_RESP_KEY_P90,
     DAY_PART_MIDDAY,
     DOMAIN,
     DRIFT_LOSS_MARGIN,
@@ -85,6 +99,10 @@ from .const import (
     MAX_PHYSICS_FALLBACK_AGE_HOURS,
     NIGHTLY_CATCHUP_MAX_DAYS,
     RECOMPUTE_INTERVAL_SECONDS,
+    DEFAULT_SCOREBOARD_ENABLED,
+    DEFAULT_SCOREBOARD_GATE_MARGIN,
+    DEFAULT_SCOREBOARD_WINDOW_DAYS,
+    SCOREBOARD_COMPARISON_UNIT_KWH,
     SHADEMAP_MEASURED_CLEAR_MIN_FRAC,
     SHADEMAP_NEIGHBOUR_STABILITY,
     STATUS_CACHED,
@@ -94,6 +112,8 @@ from .const import (
 )
 from .core import (
     BiasState,
+    ComparisonConfig,
+    DayScore,
     DriftState,
     ForecastResult,
     IssuedSnapshot,
@@ -101,12 +121,21 @@ from .core import (
     LearnerHooks,
     LearnerSnapshot,
     PlaneHourlyModeled,
+    QuantileBands,
+    QuantileState,
+    ScoreboardState,
     ShademapState,
     SiteConfig,
     compute_forecast,
 )
 from .core import bias as bias_mod
-from .core import clearsky, shademap as shademap_mod, solpos
+from .core import (
+    clearsky,
+    quantiles as quantiles_mod,
+    scoreboard as scoreboard_mod,
+    shademap as shademap_mod,
+    solpos,
+)
 from .fetcher import (
     FetchError,
     OpenMeteoFetcher,
@@ -120,6 +149,26 @@ _LOGGER = logging.getLogger(__name__)
 # Nightly training/snapshot job local wall-clock (SPEC §4: ~01:30 local).
 _NIGHTLY_HOUR = 1
 _NIGHTLY_MINUTE = 30
+# Comparison read horizon: the engine snapshot is issued at the nightly hour, so
+# each comparison is read at the SAME day-ahead horizon (the first usable state
+# at/after the issue time), never the settled end-of-day value — a live-updating
+# "today" forecast sensor that blends actuals intraday must not be judged on a
+# value that has converged toward the measured truth (biases the gate).
+_COMPARISON_ISSUE_HOUR = _NIGHTLY_HOUR
+_COMPARISON_ISSUE_MINUTE = _NIGHTLY_MINUTE
+# How long after the issue time to look for the first usable comparison state
+# (a comparison that does not refresh right at 01:30 is still captured).
+_COMPARISON_ISSUE_WINDOW_HOURS = 8
+# A comparison daily-kWh value this many times the site's physical daily ceiling
+# (installed Wp x 24 h, expressed in kWh) is discarded as a unit artifact /
+# garbage rather than scored (e.g. a Wh-reporting sensor read as kWh).
+_COMPARISON_MAX_PHYSICAL_FACTOR = 1.0
+# Scoreboard leakage guard: a day is only scored when its issued snapshot was
+# logged BEFORE this local-hour cutoff of the scored day. A snapshot issued
+# later (e.g. a mid-day startup catch-up recomputed from a fresh Open-Meteo
+# fetch that has assimilated the scored day's observed weather) is a
+# hindcast/nowcast, not a day-ahead forecast, and must not flatter the engine.
+_SCOREBOARD_ISSUE_CUTOFF_HOUR = 6
 
 # Live-actual state guards: states we never treat as a measurement.
 _UNUSABLE_STATES = ("unknown", "unavailable", "none", "")
@@ -186,6 +235,31 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Resolved kill switches (options-flow). Rebuilt on every reload.
         self._learner_config = LearnerConfig.from_dict(cfg)
 
+        # --- Skill scoreboard config (v0.4, SPEC §9/§10) --------------------
+        # Enable flag + rolling-window length + kill-gate margin, all from the
+        # options flow (defaults from const). The comparison sensors are a
+        # GENERIC, CONFIGURABLE list (ships EMPTY, D-P9); a malformed/half-filled
+        # row is dropped by ComparisonConfig.list_from_options.
+        self._scoreboard_enabled = bool(
+            cfg.get(CONF_SCOREBOARD_ENABLED, DEFAULT_SCOREBOARD_ENABLED)
+        )
+        self._scoreboard_window_days = int(
+            cfg.get(CONF_SCOREBOARD_WINDOW_DAYS, DEFAULT_SCOREBOARD_WINDOW_DAYS)
+        )
+        self._scoreboard_gate_margin = float(
+            cfg.get(CONF_SCOREBOARD_GATE_MARGIN, DEFAULT_SCOREBOARD_GATE_MARGIN)
+        )
+        self._comparisons: tuple[ComparisonConfig, ...] = (
+            ComparisonConfig.list_from_options(cfg.get(CONF_COMPARISON_SENSORS))
+        )
+
+        # --- Quantile bands (v0.4, SPEC §6/§10) -----------------------------
+        # Historical-simulation P10/P50/P90 bands, enable flag from the options
+        # flow (default ON; kill switch is BooleanSelector).
+        self._quantiles_enabled = bool(
+            cfg.get(CONF_QUANTILES_ENABLED, DEFAULT_QUANTILES_ENABLED)
+        )
+
         # Cached weather image + provenance for the degradation ladder.
         self._last_fetched_at: datetime | None = None
         self._last_fetch_ok: bool = False
@@ -209,6 +283,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._bias_state: BiasState = BiasState()
         self._shademap_state: ShademapState = ShademapState()
         self._drift_state: DriftState = DriftState()
+        # Skill-scoreboard rolling window (validate-and-clamp on load).
+        self._scoreboard_state: ScoreboardState = ScoreboardState()
+        # Quantile relative-error ring (validate-and-clamp on load).
+        self._quantile_state: QuantileState = QuantileState()
         self._learner_states_loaded = False
 
         # Collapse detector: the frozen local date is persisted in DriftState
@@ -278,6 +356,24 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             _LOGGER.debug("Store has no learner-state getters; using neutral state")
         except Exception:  # pragma: no cover - defensive, never crash setup
             _LOGGER.warning("Could not load learner state; using neutral", exc_info=True)
+        # v3 scoreboard ring (independently guarded: a v2 store has no getter).
+        try:
+            self._scoreboard_state = self._store.get_scoreboard_state()
+        except AttributeError:
+            _LOGGER.debug("Store has no scoreboard getter; using empty state")
+        except Exception:  # pragma: no cover - defensive, never crash setup
+            _LOGGER.warning(
+                "Could not load scoreboard state; using empty", exc_info=True
+            )
+        # v3 quantile ring (independently guarded: a v2 store has no getter).
+        try:
+            self._quantile_state = self._store.get_quantile_state()
+        except AttributeError:
+            _LOGGER.debug("Store has no quantile getter; using empty state")
+        except Exception:  # pragma: no cover - defensive, never crash setup
+            _LOGGER.warning(
+                "Could not load quantile state; using empty", exc_info=True
+            )
         self._learner_states_loaded = True
 
     def rebuild_learner_config(self) -> None:
@@ -511,6 +607,32 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 if f != DAY_AHEAD_BIAS_NEUTRAL:
                     day_factor[slot.start] = f
 
+        # Per-slot quantile bands (SPEC §6/§10): keyed by the identical
+        # slot.start datetimes the engine iterates. Each slot's band is the
+        # empirical P10/P50/P90 of its (forecast cloud class x local day part)
+        # bin; a starved / cold-start bin collapses to the neutral band (no fake
+        # spread). Gated on the quantiles kill switch; a slot with a neutral
+        # band is omitted so the engine passes those slots through unchanged.
+        band_by_slot: dict[datetime, QuantileBands] | None = None
+        if self._quantiles_enabled and self._quantile_state.bins:
+            bands: dict[datetime, QuantileBands] = {}
+            for slot in weather.slots:
+                local = dt_util.as_local(slot.start)
+                cc = bias_mod.classify_cloud(
+                    cloud_low=slot.cloud_low, cloud_mid=slot.cloud_mid,
+                    cloud_high=slot.cloud_high,
+                    visibility_m=slot.visibility_m, month=local.month,
+                )
+                dp = bias_mod.day_part_for_hour(local.hour)
+                b = quantiles_mod.bands_for_bin(
+                    self._quantile_state, cloud_class=cc, day_part=dp
+                )
+                # Omit a neutral (identity) band so the engine's `if band:` path
+                # short-circuits an all-1.0 multiply.
+                if not (b.p10 == 1.0 and b.p50 == 1.0 and b.p90 == 1.0):
+                    bands[slot.start] = b
+            band_by_slot = bands or None
+
         slot_factor = None
         scalar = self._intraday_scalar
         if fast_active or day_factor:
@@ -533,7 +655,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         else:
             source = CORRECTION_SOURCE_NONE
         return LearnerHooks(beam_tau=beam_tau, slot_factor=slot_factor,
-                            correction_source=source)
+                            correction_source=source, band_by_slot=band_by_slot)
 
     def _due_for_fetch(self, now: datetime) -> bool:
         if self._last_fetched_at is None or not self._last_fetch_ok:
@@ -802,7 +924,49 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         data[DATA_KEY_CORRECTION_SOURCE] = self._correction_source
         data[DATA_KEY_LEARNER_STATUS] = self._learner_status()
         data[DATA_KEY_DRIFT_MAE] = self._latest_drift_mae()
+        # --- v0.4 additive scoreboard keys (SPEC §9/§10) ---
+        # The rolling-window aggregate view + the kill-gate verdict, derived from
+        # the persisted DayScore ring. Cheap pure assembly; never raises.
+        summary = self._scoreboard_summary()
+        data[DATA_KEY_SCOREBOARD] = summary
+        data[DATA_KEY_KILL_GATE_PASSED] = summary.get("kill_gate_passed")
+        # --- v0.4 additive quantile band curves (SPEC §6/§10) ---
+        # {p10: {iso_slot: Wh}, p50: ..., p90: ...} 15-min band Wh curves, from
+        # the engine's per-slot band watts (only present when quantile bands were
+        # applied this cycle; absent/cold-start => omitted so the P10/P90 sensors
+        # and the get_forecast blocks degrade gracefully to unknown).
+        quantile_curves = self._quantile_curves(result)
+        if quantile_curves:
+            data[DATA_KEY_QUANTILE_CURVES] = quantile_curves
         return data
+
+    def _quantile_curves(self, result: ForecastResult) -> dict[str, dict[str, float]]:
+        """Build ``{p10/p50/p90: {iso_slot: Wh}}`` 15-min band curves from result.
+
+        The engine populates ``p10_watts`` / ``p50_watts`` / ``p90_watts`` only
+        when band_by_slot was applied (non-empty); each is aligned to
+        ``result.slot_starts``. Convert instantaneous watts to per-slot Wh
+        (w * 0.25). Returns an empty dict when no bands were issued (quantiles
+        off / cold start), so the caller omits DATA_KEY_QUANTILE_CURVES.
+        """
+        p10w = result.p10_watts
+        p50w = result.p50_watts
+        p90w = result.p90_watts
+        if not p10w and not p50w and not p90w:
+            return {}
+        starts = result.slot_starts
+
+        def _curve(watts) -> dict[str, float]:
+            return {
+                _iso(start): round(w * 0.25, 2)
+                for start, w in zip(starts, watts)
+            }
+
+        return {
+            FORECAST_RESP_KEY_P10: _curve(p10w),
+            FORECAST_RESP_KEY_P50: _curve(p50w),
+            FORECAST_RESP_KEY_P90: _curve(p90w),
+        }
 
     def _learner_status(self) -> dict[str, Any]:
         """Per-layer learner status for the diagnostic entities (SPEC §5).
@@ -921,6 +1085,17 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             except Exception:  # pragma: no cover - never crash the scheduler
                 _LOGGER.warning(
                     "Nightly training/guard failed for %s", day, exc_info=True
+                )
+            # Skill scoreboard (SPEC §9/§10): score this closed day's engine
+            # forecast-as-issued + each comparison AS IT STOOD that day against
+            # the measured site energy, and persist it into the rolling window.
+            # Independently guarded so a scoreboard failure never aborts the
+            # training sweep (and vice-versa).
+            try:
+                await self._score_scoreboard_day(day)
+            except Exception:  # pragma: no cover - never crash the scheduler
+                _LOGGER.warning(
+                    "Nightly scoreboard scoring failed for %s", day, exc_info=True
                 )
 
     def _catchup_days(self, latest: date) -> list[date]:
@@ -1100,6 +1275,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._train_day_ahead(iso, issued, actuals)
             self._train_shademap(iso, issued, actuals)
 
+        # --- 5b) Quantile bands (SPEC §6/§10) -----------------------------
+        # Sample the day's hourly relative errors (measured vs issued-CORRECTED)
+        # into the 90-day ring. Runs on every day (incl. collapse days: a
+        # dropout hour's relerr is legitimately near 0), inside the same
+        # date-keyed idempotence guard as the learners below.
+        self._train_quantiles_day(day)
+
         # --- 6) Drift monitor --------------------------------------------
         self._update_drift(iso, issued, actuals)
 
@@ -1117,6 +1299,452 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._drift_state, collapse_frozen_date=iso
         )
         self._persist_drift_state()
+
+    # ------------------------------------------------------------------
+    # Skill scoreboard (the kill-gate) — SPEC §9/§10
+    # ------------------------------------------------------------------
+
+    async def _score_scoreboard_day(self, day: date) -> None:
+        """Score one closed local ``day`` into the rolling scoreboard window.
+
+        NO-LEAKAGE (SPEC §9, the whole point of the gate):
+          * the ENGINE number is the forecast AS ISSUED for ``day`` — read from
+            the issued ring's snapshot logged during that day (the CORRECTED
+            served curve, sliced to the local day), NEVER recomputed with today's
+            learned state;
+          * each COMPARISON number is that comparison entity's own value AS IT
+            STOOD during ``day`` — read from its recorder history for that local
+            calendar day (the settled end-of-day forecast the consumer saw),
+            NEVER today's live state;
+          * the MEASURED number is the sum of the per-module actuals in the
+            actuals ring for ``day``.
+        Idempotent + date-keyed: a day already present in the ring is re-scored
+        (engine + measured are deterministic from the rings, so a re-run is a
+        no-op unless a late comparison read now succeeds). A missing comparison
+        is SKIPPED for the day (that source is unscored), never the whole day.
+        """
+        if not self._scoreboard_enabled:
+            return
+        iso = day.isoformat()
+        issued = self._store.get_issued(iso)
+        actuals = self._store.get_actuals(iso)
+        # Need both the issued snapshot and the measured actuals to score a day;
+        # a day missing either is retried by a later catch-up (like training).
+        if not issued or not actuals:
+            return
+
+        snap = IssuedSnapshot.from_dict(issued)
+        # LEAKAGE GUARD (SPEC §9): only score a day whose snapshot was issued
+        # before the early-morning cutoff of that local day. A snapshot issued
+        # later (a mid-day startup catch-up recomputed from a fresh weather fetch
+        # that has assimilated the scored day's observed weather) is a
+        # hindcast/nowcast, not a day-ahead forecast; leave the day UNSCORED so
+        # it never flatters the engine on the kill-gate.
+        if self._issued_after_cutoff(snap, day):
+            _LOGGER.debug(
+                "Skipping scoreboard for %s: snapshot issued after the "
+                "day-ahead cutoff (issued_at=%s)", iso, snap.issued_at,
+            )
+            return
+
+        # Engine AS ISSUED: the CORRECTED served hourly curve, sliced to the day.
+        corrected_hourly = _filter_hourly_to_local_day(
+            snap.corrected_hourly_wh or snap.raw_hourly_wh, iso
+        )
+        engine_kwh = sum(corrected_hourly.values()) / 1000.0
+        # Measured site energy for the day = sum of the per-module actuals.
+        measured_kwh = (
+            sum(
+                float(v)
+                for v in actuals.values()
+                if isinstance(v, (int, float))
+            )
+            / 1000.0
+        )
+        weather_class = self._dominant_weather_class(snap, iso)
+
+        # Engine hourly MAE: issued corrected hourly (Wh) vs measured hourly (Wh).
+        engine_hourly_mae = None
+        hourly_actuals = self._store_hourly_actuals(iso)
+        measured_hourly = self._site_measured_hourly(iso, hourly_actuals)
+        if measured_hourly:
+            engine_hourly_mae = scoreboard_mod.hourly_mae(
+                corrected_hourly, measured_hourly
+            )
+
+        # Comparisons AS THEY STOOD during the day (recorder history), cached in
+        # the comparison ring so a re-run does not re-hit the recorder. A
+        # TRANSIENT recorder failure here (DB locked by a nightly purge/backup)
+        # must NOT lose the whole day for the engine: engine + measured need no
+        # recorder, so we score them anyway and best-effort-merge the comparisons
+        # (a later re-run fills them in).
+        try:
+            comparison_kwh = await self._comparison_kwh_for_day(day)
+        except Exception:  # pragma: no cover - recorder is best-effort
+            _LOGGER.warning(
+                "Comparison read failed for %s; scoring engine/measured only",
+                iso, exc_info=True,
+            )
+            comparison_kwh = {}
+
+        day_score = scoreboard_mod.score_day(
+            iso_date=iso,
+            weather_class=weather_class,
+            measured_kwh=measured_kwh,
+            engine_kwh=engine_kwh,
+            comparison_kwh=comparison_kwh,
+            engine_hourly_mae=engine_hourly_mae,
+        )
+        # eMMC-wear guard (minor): a deterministic re-score with an identical
+        # DayScore (restart-heavy day, same rings) is a no-op — skip the write.
+        if self._scoreboard_state.days.get(iso) == day_score:
+            return
+        days = dict(self._scoreboard_state.days)
+        days[iso] = day_score
+        state = ScoreboardState(days=days, version=self._scoreboard_state.version)
+        # Trim to the configured window so the ring never grows unbounded.
+        state = scoreboard_mod.trim_window(
+            state, window_days=self._scoreboard_window_days
+        )
+        self._scoreboard_state = state
+        self._persist_scoreboard_state()
+
+    def _issued_after_cutoff(self, snap: IssuedSnapshot, day: date) -> bool:
+        """True when the snapshot was issued after the day-ahead cutoff of ``day``.
+
+        The cutoff is ``_SCOREBOARD_ISSUE_CUTOFF_HOUR`` local time of ``day``.
+        A snapshot with an unparseable / empty ``issued_at`` is treated as valid
+        (not after cutoff) — a legacy/v0.1 snapshot pre-dates the catch-up
+        recompute path this guard defends against.
+        """
+        issued_at = dt_util.parse_datetime(snap.issued_at or "")
+        if issued_at is None:
+            return False
+        cutoff = dt_util.start_of_local_day(
+            datetime(day.year, day.month, day.day)
+        ) + timedelta(hours=_SCOREBOARD_ISSUE_CUTOFF_HOUR)
+        return dt_util.as_utc(issued_at) > dt_util.as_utc(cutoff)
+
+    def _dominant_weather_class(self, snap: IssuedSnapshot, iso: str) -> str:
+        """Yesterday's DOMINANT cloud class from the issued snapshot (SPEC §9).
+
+        The issued snapshot stores the forecast cloud class per ISO-UTC hour
+        (``cloud_class_by_hour``); the dominant class is the one carrying the most
+        forecast ENERGY over the local day (weighted by the issued Wh per hour),
+        so nocturnal / near-zero-Wh hours cannot outvote the handful of daylight
+        hours where the PV error actually lives — a radiation-fog morning is filed
+        under 'fog', not 'clear'. Ties broken by the const CLOUD_CLASSES order.
+        Falls back to CLEAR when the snapshot carries no per-hour classes (v0.1
+        issued / empty), so a day is never left unstratified.
+        """
+        weight_by_hour = snap.corrected_hourly_wh or snap.raw_hourly_wh or {}
+        weights: dict[str, float] = {}
+        for hkey, cc in snap.cloud_class_by_hour.items():
+            dt = dt_util.parse_datetime(hkey)
+            if dt is None:
+                continue
+            if dt_util.as_local(dt_util.as_utc(dt)).date().isoformat() != iso:
+                continue
+            # Weight by issued Wh (daylight energy); a near-zero-Wh night hour
+            # contributes essentially nothing. Fall back to an equal +1 vote when
+            # no Wh curve exists so an all-zero-weight day still stratifies.
+            w = weight_by_hour.get(hkey, 0.0)
+            weights[cc] = weights.get(cc, 0.0) + (float(w) if w > 0.0 else 0.0)
+        if not any(v > 0.0 for v in weights.values()):
+            # No daylight-energy signal: fall back to an unweighted hour count so
+            # a Wh-less (legacy) snapshot still gets a class.
+            weights = {}
+            for hkey, cc in snap.cloud_class_by_hour.items():
+                dt = dt_util.parse_datetime(hkey)
+                if dt is None:
+                    continue
+                if dt_util.as_local(dt_util.as_utc(dt)).date().isoformat() != iso:
+                    continue
+                weights[cc] = weights.get(cc, 0.0) + 1.0
+        if not weights:
+            return CLOUD_CLASS_CLEAR
+        best_n = max(weights.values())
+        from .const import CLOUD_CLASSES
+
+        for cls in CLOUD_CLASSES:
+            if abs(weights.get(cls, 0.0) - best_n) < 1e-9:
+                return cls
+        # A class outside the canonical tuple (defensive): return any max.
+        return max(weights, key=lambda c: weights[c])
+
+    async def _comparison_kwh_for_day(self, day: date) -> dict[str, float]:
+        """Per-comparison daily-kWh AS IT STOOD during ``day`` (no leakage).
+
+        Uses the cached comparison ring when present (idempotent re-runs, and a
+        successful earlier read is authoritative); otherwise reads each
+        configured comparison entity's recorder history for the day's LOCAL
+        calendar and caches the result. A comparison with no usable recorded
+        state that day is ABSENT from the returned map (that source is unscored
+        for the day, SPEC §9), never a fabricated zero.
+        """
+        if not self._comparisons:
+            return {}
+        iso = day.isoformat()
+        cached = None
+        try:
+            cached = self._store.get_comparison(iso)
+        except Exception:  # pragma: no cover - defensive
+            cached = None
+        # Read only the comparisons not already cached (a renamed/added
+        # comparison mid-window is filled on its first close).
+        cached = dict(cached) if isinstance(cached, dict) else {}
+        missing = [c for c in self._comparisons if c.name not in cached]
+        if missing:
+            read = await self._async_read_comparison_history(day, missing)
+            if read:
+                cached.update(read)
+                try:
+                    self._store.record_comparison(iso, cached)
+                except Exception:  # pragma: no cover - defensive
+                    _LOGGER.debug(
+                        "Could not cache comparison ring for %s", iso, exc_info=True
+                    )
+        return cached
+
+    async def _async_read_comparison_history(
+        self, day: date, comparisons: list[ComparisonConfig]
+    ) -> dict[str, float]:
+        """Read each comparison's daily-kWh AT THE ENGINE'S HORIZON for ``day``.
+
+        FAIRNESS (SPEC §9, matched horizon): the engine is scored on its ~01:30
+        issued snapshot, so each comparison is read at the SAME day-ahead horizon
+        — the FIRST usable (numeric, finite, non-unavailable) recorded state
+        at/after the local issue time (01:30), NOT the settled end-of-day value.
+        A live-updating "today" forecast sensor that blends actuals intraday would
+        otherwise converge toward the measured truth by 23:00, giving it an error
+        the 01:30 engine snapshot can never match.
+
+        Robustness guards (each -> comparison OMITTED for the day, never zeroed):
+          * FRESHNESS: the accepted state must have ``last_updated`` inside the
+            scored local day (drops a pure start-of-day carry-in from a
+            comparison that produced no in-day update — a frozen / hung sensor
+            holding its last numeric value);
+          * NON-FINITE: a 'nan' / 'inf' state is rejected (never clamped to 0);
+          * UNIT: the entity's live unit is read; a Wh unit is normalised to kWh;
+          * PHYSICAL SANITY: a value orders of magnitude above the site's daily
+            ceiling (installed Wp x 24 h) is discarded as a unit artifact.
+        Runs the recorder read in the recorder executor (SPEC).
+        """
+        if not comparisons:
+            return {}
+        day_start = dt_util.start_of_local_day(
+            datetime(day.year, day.month, day.day)
+        )
+        day_end = dt_util.start_of_local_day(
+            datetime(day.year, day.month, day.day) + timedelta(days=1)
+        )
+        issue_at = day_start + timedelta(
+            hours=_COMPARISON_ISSUE_HOUR, minutes=_COMPARISON_ISSUE_MINUTE
+        )
+        read_end = min(
+            issue_at + timedelta(hours=_COMPARISON_ISSUE_WINDOW_HOURS), day_end
+        )
+        entity_ids = [c.daily_entity for c in comparisons]
+
+        from homeassistant.components.recorder import get_instance
+
+        def _read() -> dict[str, tuple[str, bool] | None]:
+            """Return {entity: (raw_state, in_day)} for the first usable state."""
+            from homeassistant.components.recorder.history import (
+                state_changes_during_period,
+            )
+
+            out: dict[str, tuple[str, bool] | None] = {}
+            for entity_id in entity_ids:
+                history = state_changes_during_period(
+                    self.hass,
+                    issue_at,
+                    read_end,
+                    entity_id,
+                    include_start_time_state=True,
+                    no_attributes=True,
+                )
+                states = history.get(entity_id) or []
+                chosen: tuple[str, bool] | None = None
+                for st in states:
+                    raw = getattr(st, "state", None)
+                    if raw is None:
+                        continue
+                    if str(raw).strip().lower() in _UNUSABLE_STATES:
+                        continue
+                    last_updated = getattr(st, "last_updated", None)
+                    in_day = bool(
+                        last_updated is not None
+                        and dt_util.as_utc(last_updated) >= day_start
+                    )
+                    chosen = (raw, in_day)
+                    break  # FIRST usable state at/after the issue time
+                out[entity_id] = chosen
+            return out
+
+        raw_by_entity = await get_instance(self.hass).async_add_executor_job(_read)
+        result: dict[str, float] = {}
+        for cfg in comparisons:
+            picked = raw_by_entity.get(cfg.daily_entity)
+            if picked is None:
+                continue  # no usable state at the horizon -> comparison skipped
+            raw, in_day = picked
+            if not in_day:
+                # Only a start-of-day carry-in (no in-day update): a frozen /
+                # hung sensor holding a stale value. Skip (unscored), not zero.
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(value) or value < 0.0:
+                continue  # 'nan'/'inf'/negative -> unscored, never a fake zero
+            value = self._normalise_comparison_kwh(cfg.daily_entity, value)
+            if value is None:
+                continue  # unusable unit / physically impossible -> skipped
+            result[cfg.name] = value
+        return result
+
+    def _normalise_comparison_kwh(
+        self, entity_id: str, value: float
+    ) -> float | None:
+        """Normalise a raw comparison state to daily kWh, or None if unusable.
+
+        Reads the entity's live ``unit_of_measurement``: 'Wh' is scaled to kWh;
+        'kWh' (or an absent/unknown unit — assumed kWh per the documented
+        contract) passes through; any other energy-incompatible unit ('W', '%',
+        etc.) is rejected with a warning. A value above the site's physical daily
+        ceiling (installed Wp x 24 h) is discarded as a unit artifact.
+        """
+        unit = None
+        try:
+            state = self.hass.states.get(entity_id)
+        except AttributeError:  # a hass stub without a state machine (tests)
+            state = None
+        if state is not None:
+            unit = state.attributes.get("unit_of_measurement")
+        u = str(unit).strip().lower() if unit is not None else ""
+        if u in ("wh", "watt-hour", "watt-hours"):
+            value = value / 1000.0
+        elif u in ("kwh", "", "none"):
+            pass  # kWh (or unit-less -> assumed kWh per the documented contract)
+        elif not SCOREBOARD_COMPARISON_UNIT_KWH:  # pragma: no cover - config-only
+            value = value / 1000.0
+        else:
+            _LOGGER.warning(
+                "Comparison %s reports unit %r, not an energy unit; skipping",
+                entity_id, unit,
+            )
+            return None
+        ceiling = self._site_daily_kwh_ceiling()
+        if ceiling is not None and value > ceiling * _COMPARISON_MAX_PHYSICAL_FACTOR:
+            _LOGGER.warning(
+                "Comparison %s daily value %.1f kWh exceeds the site ceiling "
+                "%.1f kWh; discarding as a unit artifact",
+                entity_id, value, ceiling,
+            )
+            return None
+        return value
+
+    def _site_daily_kwh_ceiling(self) -> float | None:
+        """The site's physical daily-energy ceiling: installed Wp x 24 h (kWh)."""
+        total_wp = sum(p.wp for p in self._site.planes)
+        if total_wp <= 0.0:
+            return None
+        return total_wp * 24.0 / 1000.0
+
+    def _persist_scoreboard_state(self) -> None:
+        self._call_store_setter(
+            "set_scoreboard_state", self._scoreboard_state
+        )
+
+    def _persist_quantile_state(self) -> None:
+        self._call_store_setter("set_quantile_state", self._quantile_state)
+
+    def _train_quantiles_day(self, day: date) -> None:
+        """Sample one closed ``day`` into the quantile relative-error ring.
+
+        NO-LEAKAGE + consistent frame (SPEC §6): the relative error is
+        ``measured_hourly / issued-CORRECTED-hourly`` — the SAME issued corrected
+        curve the scoreboard scores and the bands are later applied to. Each
+        daylight hour whose corrected Wh exceeds QUANTILE_MIN_FORECAST_WH becomes
+        one sample, classed by the issued snapshot's forecast cloud class for that
+        hour (``cloud_class_by_hour``) x the local day part — the identical
+        (class x part) taxonomy the day-ahead bias and the applier use. Gated on
+        the quantiles kill switch; needs both the issued snapshot and hourly
+        actuals for the day, else it is a no-op (retried by a later catch-up).
+        Idempotence is provided by the same ``is_day_trained`` marker as the
+        learners (see :meth:`_train_and_guard`).
+        """
+        if not self._quantiles_enabled:
+            return
+        iso = day.isoformat()
+        issued = self._store.get_issued(iso)
+        if not issued:
+            return
+        snap = IssuedSnapshot.from_dict(issued)
+        corrected_hourly = _filter_hourly_to_local_day(
+            snap.corrected_hourly_wh or snap.raw_hourly_wh, iso
+        )
+        if not corrected_hourly:
+            return
+        hourly_actuals = self._store_hourly_actuals(iso)
+        measured_hourly = self._site_measured_hourly(iso, hourly_actuals)
+        if not measured_hourly:
+            return
+
+        samples: list[quantiles_mod.QuantileSample] = []
+        for hkey, corrected_wh in corrected_hourly.items():
+            if hkey not in measured_hourly:
+                continue
+            part = self._day_part_for_hourkey(hkey)
+            if part is None:
+                continue
+            cc = snap.cloud_class_by_hour.get(hkey, CLOUD_CLASS_CLEAR)
+            samples.append(
+                quantiles_mod.QuantileSample(
+                    cloud_class=cc,
+                    day_part=part,
+                    measured_wh=float(measured_hourly[hkey]),
+                    corrected_wh=float(corrected_wh),
+                )
+            )
+        if not samples:
+            return
+        self._quantile_state = quantiles_mod.train_quantiles(
+            self._quantile_state, samples
+        )
+        self._persist_quantile_state()
+
+    def _scoreboard_summary(self) -> dict[str, Any]:
+        """The current scoreboard aggregate view for ``self.data`` / platforms."""
+        today = dt_util.as_local(dt_util.utcnow()).date().isoformat()
+        return scoreboard_mod.scoreboard_summary(
+            self._scoreboard_state,
+            window_days=self._scoreboard_window_days,
+            gate_margin=self._scoreboard_gate_margin,
+            today=today,
+        )
+
+    def quantile_state_summary(self) -> dict[str, Any]:
+        """Per-bin quantile sample counts for diagnostics (SPEC §6/§10).
+
+        Reports the enable flag plus, per (class x part) bin, the sample count
+        and whether the bin is trained (n >= QUANTILE_MIN_SAMPLES, i.e. emits a
+        real spread rather than a collapsed-to-P50 band). Bins only — never the
+        raw relative-error values or the operator's location.
+        """
+        from .const import QUANTILE_MIN_SAMPLES
+
+        bins: dict[str, dict[str, Any]] = {}
+        for key, ring in self._quantile_state.bins.items():
+            n = len(ring)
+            bins[key] = {"n": n, "trained": n >= QUANTILE_MIN_SAMPLES}
+        return {
+            "available": True,
+            "enabled": self._quantiles_enabled,
+            "bins": bins,
+        }
 
     # ------------------------------------------------------------------
     # Training
@@ -1706,13 +2334,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     # ------------------------------------------------------------------
 
     def _persist_bias_state(self) -> None:
-        self._call_store_setter("set_bias_state", self._bias_state.to_dict())
+        self._call_store_setter("set_bias_state", self._bias_state)
 
     def _persist_shademap_state(self) -> None:
-        self._call_store_setter("set_shademap_state", self._shademap_state.to_dict())
+        self._call_store_setter("set_shademap_state", self._shademap_state)
 
     def _persist_drift_state(self) -> None:
-        self._call_store_setter("set_drift_state", self._drift_state.to_dict())
+        self._call_store_setter("set_drift_state", self._drift_state)
 
     def _call_store_setter(self, name: str, payload: Any) -> None:
         setter = getattr(self._store, name, None)
@@ -1720,8 +2348,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return
         try:
             setter(payload)
-        except Exception:  # pragma: no cover - defensive
-            _LOGGER.debug("Store setter %s failed", name, exc_info=True)
+        except Exception:
+            _LOGGER.warning(
+                "Store setter %s failed; learner state NOT persisted "
+                "(will be lost on restart)", name, exc_info=True
+            )
 
     # ------------------------------------------------------------------
     # Recorder actuals (per-module daily energy) — SPEC §4
@@ -1791,6 +2422,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             daily: dict[str, float] = {}
             hourly: dict[str, dict[str, float]] = {}
             dropped = False
+            best_covered_hours = 0
             for module, entity_id in entity_by_module.items():
                 rows = stats.get(entity_id)
                 if not rows:
@@ -1824,8 +2456,26 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     wh += m
                 daily[module] = round(wh, 1)
                 hourly[module] = per_hour
+                best_covered_hours = max(best_covered_hours, len(set(hkeys)))
             if dropped:
                 return {}, {}
+            # Day-completeness gate: a mid-day recorder/LTS gap yields a
+            # partial-hour sum that must NOT become the day's ground truth. Drop
+            # the whole day when even the best-covered module misses too many of
+            # the day's daylight hours (a later catch-up refills it once LTS is
+            # complete). Skipped when the daylight span is unknown (0).
+            expected = _daylight_hours_in_local_day(self._site, start, end)
+            if expected > 0:
+                need = int(math.ceil(expected * DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE))
+                if best_covered_hours < need:
+                    _LOGGER.warning(
+                        "Actuals for %s cover only %d of ~%d daylight hours "
+                        "(< %.0f%%); discarding the day as incomplete (recorder "
+                        "gap). A later catch-up will refill it.",
+                        day, best_covered_hours, expected,
+                        DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE * 100.0,
+                    )
+                    return {}, {}
             return daily, hourly
 
         return await get_instance(self.hass).async_add_executor_job(_read)
@@ -1834,6 +2484,38 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
+
+
+def _daylight_hours_in_local_day(
+    site: SiteConfig, start: datetime, end: datetime
+) -> int:
+    """Count whole hours in ``[start, end)`` whose mid-point sun elevation > 0.
+
+    Used by the day-completeness gate to know how many hourly LTS rows a full
+    day SHOULD carry. Pure geometry (solpos); never raises — a bad site/time
+    returns 0 (gate skipped). ``start``/``end`` are tz-aware local-day bounds.
+    """
+    try:
+        start_utc = dt_util.as_utc(start)
+        end_utc = dt_util.as_utc(end)
+    except Exception:  # pragma: no cover - defensive
+        return 0
+    count = 0
+    cur = start_utc
+    step = timedelta(hours=1)
+    # Guard against a runaway loop (DST safety): a local day is <= 25 hours.
+    for _ in range(26):
+        if cur >= end_utc:
+            break
+        mid = cur + timedelta(minutes=30)
+        try:
+            _az, el = solpos.sun_position(mid, site.latitude, site.longitude)
+        except Exception:  # pragma: no cover - defensive
+            el = 0.0
+        if el > 0.0:
+            count += 1
+        cur += step
+    return count
 
 
 def _is_frozen_channel(means: list[float]) -> bool:

@@ -102,9 +102,13 @@ def test_energy_sensor_state_and_curve(monkeypatch):
     )
     assert today.native_value == pytest.approx(0.4)
     attrs = today.extra_state_attributes
-    assert set(attrs) == {"watts", "wh_period"}
+    # v0.4: the served curve plus the additive p10/p90 band curves (empty here,
+    # since this fixture has no DATA_KEY_QUANTILE_CURVES).
+    assert set(attrs) == {"watts", "wh_period", "wh_period_p10", "wh_period_p90"}
     assert len(attrs["watts"]) == 4
     assert attrs["wh_period"][start.isoformat()] == pytest.approx(100.0)
+    assert attrs["wh_period_p10"] == {}
+    assert attrs["wh_period_p90"] == {}
 
     # Tomorrow: coordinator roll-up is None and no slots fall on that date.
     tomorrow = _bare(
@@ -114,7 +118,12 @@ def test_energy_sensor_state_and_curve(monkeypatch):
         _energy_key="energy_tomorrow_kwh",
     )
     assert tomorrow.native_value is None
-    assert tomorrow.extra_state_attributes == {"watts": {}, "wh_period": {}}
+    assert tomorrow.extra_state_attributes == {
+        "watts": {},
+        "wh_period": {},
+        "wh_period_p10": {},
+        "wh_period_p90": {},
+    }
 
 
 def test_energy_sensor_no_data():
@@ -123,7 +132,12 @@ def test_energy_sensor_no_data():
         EnergyProductionSensor, coord, _day_offset=0, _energy_key="energy_today_kwh"
     )
     assert sensor.native_value is None
-    assert sensor.extra_state_attributes == {"watts": {}, "wh_period": {}}
+    assert sensor.extra_state_attributes == {
+        "watts": {},
+        "wh_period": {},
+        "wh_period_p10": {},
+        "wh_period_p90": {},
+    }
 
 
 # --------------------------------------------------------------------------

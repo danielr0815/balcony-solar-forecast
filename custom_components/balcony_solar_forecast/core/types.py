@@ -71,6 +71,12 @@ __all__ = [
     "LearnerSnapshot",
     "IssuedSnapshot",
     "PlaneHourlyModeled",
+    # v0.4 contract: scoreboard + quantiles
+    "ComparisonConfig",
+    "DayScore",
+    "ScoreboardState",
+    "QuantileBands",
+    "QuantileState",
 ]
 
 
@@ -345,6 +351,23 @@ class ForecastResult:
     # Which learner layer(s) shaped ``total_watts`` this cycle
     # (const.CORRECTION_SOURCE_*). Empty string == not yet set by the engine.
     correction_source: str = ""
+    # --- Quantile bands (v0.4, SPEC §6/§10) ---
+    # Plane-agnostic TOTAL site power band curves, aligned to ``slot_starts``,
+    # in the SAME 15-min instantaneous-watts frame as ``total_watts``. The
+    # engine fills these only when a QuantileState is injected via hooks;
+    # otherwise they stay empty and every consumer treats "no band" as
+    # band == corrected (P50 == corrected, no fabricated spread). ``p50_watts``
+    # is the empirical-median-multiplied curve, which need NOT equal
+    # ``total_watts`` (a bin's P50 multiplier can differ from 1.0); consumers
+    # that want the raw served curve keep using ``total_watts``.
+    p10_watts: tuple[float, ...] = ()
+    p50_watts: tuple[float, ...] = ()
+    p90_watts: tuple[float, ...] = ()
+    # Hourly Wh roll-ups of the three band curves (keyed by ISO-8601 UTC hour),
+    # mirroring ``hourly_wh`` for the corrected curve. Empty when no bands.
+    p10_hourly_wh: dict[str, float] = field(default_factory=dict)
+    p50_hourly_wh: dict[str, float] = field(default_factory=dict)
+    p90_hourly_wh: dict[str, float] = field(default_factory=dict)
 
     def with_total(self, total_watts: tuple[float, ...]) -> ForecastResult:
         """Return a copy with a replaced total (e.g. after a learner clamp)."""
@@ -894,4 +917,286 @@ class IssuedSnapshot:
             "corrected_daily_kwh": dict(self.corrected_daily_kwh),
             "per_plane": {k: v.to_dict() for k, v in self.per_plane.items()},
             "cloud_class_by_hour": dict(self.cloud_class_by_hour),
+        }
+
+
+# ===========================================================================
+# v0.4 CONTRACT dataclasses — SKILL SCOREBOARD + QUANTILES (SPEC §6, §9, §10)
+# ---------------------------------------------------------------------------
+# All frozen, plain-JSON (de)serialisable, HA-free. Owners (quantiles /
+# scoreboard / store / coordinator / sensor / diagnostics) share ONLY these
+# types + the const tunables. Every load path is validate-and-clamp: a corrupt
+# blob yields a neutral state (empty rings / neutral 1.0 bands), NEVER a raised
+# exception (SPEC §5 validate-and-clamp-on-load, extended to v0.4 sections).
+# ===========================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class ComparisonConfig:
+    """One configured external comparison forecast (SPEC §9/§10 scoreboard).
+
+    GENERIC + CONFIGURABLE (D-P9): ``name`` is the operator-chosen label and
+    ``daily_entity`` is the HA sensor whose STATE is that comparison's daily-kWh
+    forecast for today. The scoreboard reads its RECORDER HISTORY for yesterday
+    (the value AS IT STOOD during yesterday — no leakage), never its live state.
+    Built by the coordinator from ``CONF_COMPARISON_SENSORS`` (ships EMPTY; the
+    operator's two comparisons are documented, not hardcoded).
+
+    ``slug`` is a stable, filesystem/entity-safe derivation of ``name`` used to
+    suffix the per-comparison MAE sensor object_id and to key the comparison
+    ring; it is derived deterministically so a rename produces a new sensor
+    rather than silently rewriting an old one's history.
+    """
+
+    name: str
+    daily_entity: str
+
+    @property
+    def slug(self) -> str:
+        """Lowercase ascii-alnum slug of ``name`` (stable sensor/ring key)."""
+        out = []
+        for ch in self.name.strip().lower():
+            if ch.isalnum():
+                out.append(ch)
+            elif out and out[-1] != "_":
+                out.append("_")
+        slug = "".join(out).strip("_")
+        return slug or "comparison"
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ComparisonConfig:
+        from ..const import CONF_COMPARISON_DAILY_ENTITY, CONF_COMPARISON_NAME
+
+        if not isinstance(d, dict):
+            return cls(name="", daily_entity="")
+        return cls(
+            name=str(d.get(CONF_COMPARISON_NAME, "")),
+            daily_entity=str(d.get(CONF_COMPARISON_DAILY_ENTITY, "")),
+        )
+
+    def to_dict(self) -> dict:
+        from ..const import CONF_COMPARISON_DAILY_ENTITY, CONF_COMPARISON_NAME
+
+        return {
+            CONF_COMPARISON_NAME: self.name,
+            CONF_COMPARISON_DAILY_ENTITY: self.daily_entity,
+        }
+
+    @staticmethod
+    def list_from_options(raw: object) -> tuple["ComparisonConfig", ...]:
+        """Parse the CONF_COMPARISON_SENSORS options list into configs.
+
+        Skips malformed rows and rows missing a name or a daily_entity so a
+        half-filled options row never yields a scoreboard column that can never
+        be scored. Never raises (validate-and-clamp).
+        """
+        if not isinstance(raw, list):
+            return ()
+        out: list[ComparisonConfig] = []
+        for row in raw:
+            cfg = ComparisonConfig.from_dict(row) if isinstance(row, dict) else None
+            if cfg is not None and cfg.name and cfg.daily_entity:
+                out.append(cfg)
+        return tuple(out)
+
+
+@dataclass(frozen=True, slots=True)
+class DayScore:
+    """One scored day in the rolling scoreboard window (SPEC §9/§10).
+
+    All errors are ABSOLUTE daily-kWh deviations from the measured site energy
+    for ``iso_date`` (the operator's primary metric, B9). NO-LEAKAGE contract:
+      * ``engine_kwh`` is the engine forecast AS ISSUED for this date (read from
+        the issued ring's snapshot logged during that day) — NEVER recomputed
+        with today's learned state;
+      * each value in ``comparison_kwh`` is that comparison entity's own value
+        AS IT STOOD during this date (read from its recorder history) — NEVER
+        today's live state;
+      * ``measured_kwh`` is the sum of the per-module actuals in the actuals
+        ring for this date.
+
+    ``engine_daily_abs_err`` = |engine_kwh - measured_kwh|;
+    ``comparison_daily_abs_err`` maps ``{comparison_name: |cmp_kwh - measured|}``
+    (only names that had a usable recorded value that day — a missing comparison
+    is absent, not zero). ``engine_hourly_mae`` is the engine's mean absolute
+    per-daylight-hour Wh error for the day (issued corrected hourly vs measured
+    hourly), or None when hourly actuals were unavailable. ``weather_class`` is
+    the day's DOMINANT class (const CLOUD_CLASS_*), used for stratification.
+    """
+
+    iso_date: str
+    weather_class: str
+    measured_kwh: float
+    engine_kwh: float
+    engine_daily_abs_err: float
+    comparison_kwh: dict[str, float] = field(default_factory=dict)
+    comparison_daily_abs_err: dict[str, float] = field(default_factory=dict)
+    engine_hourly_mae: float | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict) -> DayScore:
+        if not isinstance(d, dict):
+            return cls(
+                iso_date="", weather_class="", measured_kwh=0.0,
+                engine_kwh=0.0, engine_daily_abs_err=0.0,
+            )
+
+        def _fmap(key: str) -> dict[str, float]:
+            v = d.get(key, {})
+            if not isinstance(v, dict):
+                return {}
+            return {
+                k: _safe_float(x)
+                for k, x in v.items()
+                if isinstance(k, str) and isinstance(x, (int, float))
+            }
+
+        hmae = d.get("engine_hourly_mae")
+        return cls(
+            iso_date=str(d.get("iso_date", "")),
+            weather_class=str(d.get("weather_class", "")),
+            measured_kwh=_safe_float(d.get("measured_kwh", 0.0), minimum=0.0),
+            engine_kwh=_safe_float(d.get("engine_kwh", 0.0), minimum=0.0),
+            engine_daily_abs_err=_safe_float(
+                d.get("engine_daily_abs_err", 0.0), minimum=0.0
+            ),
+            comparison_kwh=_fmap("comparison_kwh"),
+            comparison_daily_abs_err=_fmap("comparison_daily_abs_err"),
+            engine_hourly_mae=(
+                None if hmae is None else _safe_float(hmae, minimum=0.0)
+            ),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "iso_date": self.iso_date,
+            "weather_class": self.weather_class,
+            "measured_kwh": self.measured_kwh,
+            "engine_kwh": self.engine_kwh,
+            "engine_daily_abs_err": self.engine_daily_abs_err,
+            "comparison_kwh": dict(self.comparison_kwh),
+            "comparison_daily_abs_err": dict(self.comparison_daily_abs_err),
+            "engine_hourly_mae": self.engine_hourly_mae,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreboardState:
+    """Rolling window of scored days + the kill-gate verdict (SPEC §9/§10).
+
+    ``days`` maps ``{iso_date: DayScore}``; the store/scoreboard trims it to the
+    configured window (SCOREBOARD_WINDOW_DAYS). Aggregates (engine daily-kWh MAE,
+    per-comparison daily-kWh MAE, engine hourly MAE, engine_vs_best_baseline_pct
+    and the per-weather-stratum breakdown) are DERIVED by ``core/scoreboard.py``
+    from ``days`` — they are NOT stored here (single source of truth is the day
+    ring), so a window-length change re-aggregates cleanly. ``version`` guards
+    forward-compat; unknown versions on load discard to an empty state.
+    """
+
+    days: dict[str, DayScore] = field(default_factory=dict)
+    version: int = 1
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ScoreboardState:
+        if not isinstance(d, dict):
+            return cls()
+        days_raw = d.get("days", {})
+        days: dict[str, DayScore] = {}
+        if isinstance(days_raw, dict):
+            for k, v in days_raw.items():
+                if isinstance(k, str):
+                    days[k] = DayScore.from_dict(v)
+        return cls(days=days, version=_safe_int(d.get("version", 1), 1))
+
+    def to_dict(self) -> dict:
+        return {
+            "version": self.version,
+            "days": {k: v.to_dict() for k, v in self.days.items()},
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class QuantileBands:
+    """Empirical P10/P50/P90 multipliers for one (weather class x day part) bin.
+
+    Multiplicative factors applied to the corrected forecast Wh of an hour in
+    this bin: ``p50`` is the empirical median relative error, ``p10`` / ``p90``
+    the 10th / 90th percentiles (SPEC §6). ``n`` is the sample count backing the
+    bin. COLD START (SPEC §6/§10 "no fake spread"): a bin with n <
+    QUANTILE_MIN_SAMPLES collapses to P50 (p10 == p50 == p90), and an empty bin
+    is the neutral identity (1.0/1.0/1.0). Always p10 <= p50 <= p90 by
+    construction (the producer sorts them). This is a DERIVED view emitted by
+    ``core/quantiles.py`` from the persisted QuantileState ring; it is not itself
+    persisted.
+    """
+
+    p10: float = 1.0
+    p50: float = 1.0
+    p90: float = 1.0
+    n: int = 0
+
+    @property
+    def collapsed(self) -> bool:
+        """True when the band carries no spread (cold start / empty bin)."""
+        return self.p10 == self.p50 == self.p90
+
+    @classmethod
+    def neutral(cls) -> QuantileBands:
+        """The identity band (P50 == 1.0, no spread)."""
+        from ..const import QUANTILE_NEUTRAL_MULT as m
+
+        return cls(p10=m, p50=m, p90=m, n=0)
+
+
+@dataclass(frozen=True, slots=True)
+class QuantileState:
+    """90-day ring of hourly relative errors keyed by (weather class x day part).
+
+    ``bins`` maps ``{bin_key: [relerr, ...]}`` where ``bin_key`` is exactly
+    ``f"{cloud_class}|{day_part}"`` (the SAME cell key as BiasState — const
+    CLOUD_CLASS_* / DAY_PART_* — so the scoreboard, day-ahead bias and quantiles
+    all share one bin taxonomy) and each ``relerr`` = measured_wh /
+    corrected_forecast_wh for one sampled daylight hour, clamped to
+    [QUANTILE_REL_ERR_MIN, QUANTILE_REL_ERR_MAX]. The list is a bounded ring
+    trimmed to QUANTILE_RING_DAYS worth of samples (owner: quantiles /
+    store). ``bands(bin_key)`` computes the empirical QuantileBands with the
+    cold-start collapse rule (SPEC §6).
+
+    Persisted in the store (STORE_KEY_QUANTILE_STATE). Validate-and-clamp on
+    load: a corrupt blob yields empty bins (no bands -> band collapses to P50).
+    """
+
+    bins: dict[str, list[float]] = field(default_factory=dict)
+    version: int = 1
+
+    @staticmethod
+    def bin_key(cloud_class: str, day_part: str) -> str:
+        """Canonical (weather class x day part) key — matches BiasState."""
+        return f"{cloud_class}|{day_part}"
+
+    @classmethod
+    def from_dict(cls, d: dict) -> QuantileState:
+        from ..const import QUANTILE_REL_ERR_MAX, QUANTILE_REL_ERR_MIN
+
+        if not isinstance(d, dict):
+            return cls()
+        bins_raw = d.get("bins", {})
+        bins: dict[str, list[float]] = {}
+        if isinstance(bins_raw, dict):
+            for k, v in bins_raw.items():
+                if not isinstance(k, str) or not isinstance(v, list):
+                    continue
+                vals = [
+                    _clamp(x, QUANTILE_REL_ERR_MIN, QUANTILE_REL_ERR_MAX)
+                    for x in v
+                    if isinstance(x, (int, float))
+                ]
+                if vals:
+                    bins[k] = vals
+        return cls(bins=bins, version=_safe_int(d.get("version", 1), 1))
+
+    def to_dict(self) -> dict:
+        return {
+            "version": self.version,
+            "bins": {k: list(v) for k, v in self.bins.items()},
         }

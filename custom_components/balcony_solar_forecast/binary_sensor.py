@@ -30,8 +30,11 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import (
     BINARY_SENSOR_DEGRADED,
     BINARY_SENSOR_FAST_LEARNER,
+    BINARY_SENSOR_KILL_GATE_PASSED,
     BINARY_SENSOR_SLOW_LEARNER,
+    DATA_KEY_KILL_GATE_PASSED,
     DATA_KEY_LEARNER_STATUS,
+    DATA_KEY_SCOREBOARD,
     DOMAIN,
     STATUS_FRESH,
     STATUS_UNAVAILABLE,
@@ -60,6 +63,7 @@ async def async_setup_entry(
             LearnerActiveSensor(
                 coordinator, BINARY_SENSOR_SLOW_LEARNER, LEARNER_LAYER_SLOW
             ),
+            KillGatePassedSensor(coordinator),
         ]
     )
 
@@ -156,3 +160,55 @@ class LearnerActiveSensor(BalconyForecastEntity, BinarySensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {"status": self._status()}
+
+
+class KillGatePassedSensor(BalconyForecastEntity, BinarySensorEntity):
+    """'On' when the engine passes the kill-gate over a FULL window (SPEC §9/§10).
+
+    The gate the whole v0.4 plan hinges on: on == the engine is at least
+    ``SCOREBOARD_GATE_MARGIN`` better than the best baseline on daily-kWh MAE
+    across a full rolling window. Reads the coordinator's
+    ``DATA_KEY_KILL_GATE_PASSED`` (bool | None). ``None`` — the honest
+    "insufficient data" state while the window is not yet full — is surfaced as
+    an unknown (``is_on`` None), never a premature pass/fail. The headline
+    scoreboard numbers ride along as attributes so the operator can read the
+    verdict's basis at a glance. Diagnostic + always available (the verdict must
+    survive the forecast going unavailable).
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:gate"
+
+    def __init__(self, coordinator: Any) -> None:
+        super().__init__(coordinator, BINARY_SENSOR_KILL_GATE_PASSED)
+
+    @property
+    def available(self) -> bool:
+        # Diagnostic: the kill-gate verdict must remain readable even when the
+        # forecast itself is unavailable (SPEC §7 -- never silent).
+        return True
+
+    def _gate(self) -> bool | None:
+        data = self.coordinator.data or {}
+        value = data.get(DATA_KEY_KILL_GATE_PASSED)
+        return value if isinstance(value, bool) else None
+
+    @property
+    def is_on(self) -> bool | None:
+        # bool -> pass/fail; None (window not full, or scoreboard absent) ->
+        # unknown, so the UI shows honest "insufficient data".
+        return self._gate()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data or {}
+        sb = data.get(DATA_KEY_SCOREBOARD)
+        sb = sb if isinstance(sb, dict) else {}
+        return {
+            "window_days": sb.get("window_days"),
+            "scored_days": sb.get("scored_days"),
+            "engine_daily_kwh_mae": sb.get("engine_daily_kwh_mae"),
+            "engine_vs_best_baseline_pct": sb.get(
+                "engine_vs_best_baseline_pct"
+            ),
+        }

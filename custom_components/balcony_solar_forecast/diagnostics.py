@@ -28,7 +28,9 @@ from .const import (
     DATA_KEY_CORRECTION_SOURCE,
     DATA_KEY_DRIFT_MAE,
     DATA_KEY_INTRADAY_SCALAR,
+    DATA_KEY_KILL_GATE_PASSED,
     DATA_KEY_LEARNER_STATUS,
+    DATA_KEY_SCOREBOARD,
     DOMAIN,
 )
 
@@ -79,6 +81,15 @@ async def async_get_config_entry_diagnostics(
     diagnostics["learners"] = async_redact_data(
         _learner_summary(coordinator, data), TO_REDACT
     )
+    # v0.4 skill scoreboard (per-weather-stratum breakdown + gate verdict) and
+    # quantile bin counts — coordinate-free by construction, still routed
+    # through the redactor as defence in depth (SPEC §9/§10, §6).
+    diagnostics["scoreboard"] = async_redact_data(
+        _scoreboard_summary(coordinator, data), TO_REDACT
+    )
+    diagnostics["quantiles"] = async_redact_data(
+        _quantile_summary(coordinator), TO_REDACT
+    )
     return diagnostics
 
 
@@ -127,6 +138,57 @@ def _learner_summary(coordinator: Any, data: dict[str, Any]) -> dict[str, Any]:
     else:
         summary["state"] = {"available": False}
     return summary
+
+
+def _scoreboard_summary(coordinator: Any, data: dict[str, Any]) -> dict[str, Any]:
+    """Compact skill-scoreboard summary + per-stratum breakdown (SPEC §9/§10).
+
+    Reads the coordinator's ``DATA_KEY_SCOREBOARD`` summary (the shape
+    ``core.scoreboard.scoreboard_summary`` emits): the engine daily-kWh / hourly
+    MAE, per-comparison MAE, engine-vs-best-baseline percent, the kill-gate
+    verdict and the per-weather-stratum breakdown. Everything is read
+    defensively — the scoreboard is optional / disable-able and the coordinator
+    may not have populated it yet, so a missing summary yields
+    ``{"available": False}`` rather than raising.
+    """
+    sb = data.get(DATA_KEY_SCOREBOARD)
+    if not isinstance(sb, dict) or not sb:
+        return {"available": False}
+    out: dict[str, Any] = {
+        "engine_daily_kwh_mae": sb.get("engine_daily_kwh_mae"),
+        "engine_hourly_mae": sb.get("engine_hourly_mae"),
+        "comparison_daily_kwh_mae": sb.get("comparison_daily_kwh_mae"),
+        "engine_vs_best_baseline_pct": sb.get("engine_vs_best_baseline_pct"),
+        "kill_gate_passed": sb.get("kill_gate_passed"),
+        "window_days": sb.get("window_days"),
+        "scored_days": sb.get("scored_days"),
+        # The per-weather-stratum breakdown (clear / mixed / overcast / fog).
+        "strata": sb.get("strata"),
+    }
+    # The flat kill-gate flag (bool | None) also lives on its own data key; carry
+    # it too so a diagnostics reader never has to cross-reference.
+    if DATA_KEY_KILL_GATE_PASSED in data:
+        out["kill_gate_passed_flag"] = data.get(DATA_KEY_KILL_GATE_PASSED)
+    return out
+
+
+def _quantile_summary(coordinator: Any) -> dict[str, Any]:
+    """Per-bin quantile sample counts (SPEC §6/§10).
+
+    The quantile ring's per-bin sample counts come from an optional
+    ``quantile_state_summary()`` accessor the coordinator/store exposes (mirrors
+    ``learner_state_summary`` / ``store_stats``). We never crash diagnostics if
+    it is absent or raises (contract still stabilising); the counts are
+    geometry/weather bins, not the operator's location.
+    """
+    getter = getattr(coordinator, "quantile_state_summary", None)
+    if not callable(getter):
+        return {"available": False}
+    try:
+        state = getter()
+    except Exception as err:  # noqa: BLE001 -- diagnostics must not raise
+        return {"error": repr(err)}
+    return state if isinstance(state, dict) else {"available": False}
 
 
 def _store_stats(coordinator: Any) -> dict[str, Any]:

@@ -28,6 +28,7 @@ HA-free.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -53,10 +54,19 @@ from homeassistant.util import dt as dt_util
 from .const import (
     ATTR_WATTS,
     ATTR_WH_PERIOD,
+    ATTR_WH_PERIOD_P10,
+    ATTR_WH_PERIOD_P50,
+    ATTR_WH_PERIOD_P90,
+    CONF_COMPARISON_SENSORS,
     DATA_KEY_DRIFT_MAE,
     DATA_KEY_INTRADAY_SCALAR,
     DATA_KEY_LEARNER_STATUS,
+    DATA_KEY_QUANTILE_CURVES,
+    DATA_KEY_SCOREBOARD,
     DOMAIN,
+    FORECAST_RESP_KEY_P10,
+    FORECAST_RESP_KEY_P50,
+    FORECAST_RESP_KEY_P90,
     INTEGRATION_NAME,
     INTEGRATION_VERSION,
     LEARNER_LAYER_DAY_AHEAD,
@@ -67,10 +77,16 @@ from .const import (
     LEARNER_STATUS_FROZEN,
     LEARNER_STATUS_OFF,
     LEARNER_STATUS_VALUES,
+    SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX,
     SENSOR_DRIFT_MAE_CORRECTED,
     SENSOR_ENERGY_D2,
     SENSOR_ENERGY_TODAY,
+    SENSOR_ENERGY_TODAY_P10,
+    SENSOR_ENERGY_TODAY_P90,
     SENSOR_ENERGY_TOMORROW,
+    SENSOR_ENGINE_DAILY_KWH_MAE,
+    SENSOR_ENGINE_HOURLY_MAE,
+    SENSOR_ENGINE_VS_BEST_BASELINE_PCT,
     SENSOR_INTRADAY_SCALAR,
     SENSOR_POWER_NOW,
     SERVICE_GET_FORECAST,
@@ -79,6 +95,7 @@ from .const import (
     STATUS_PHYSICS_FALLBACK,
     STATUS_UNAVAILABLE,
 )
+from .core.types import ComparisonConfig
 
 # Diagnostic sensor keys (owned here; not part of the consumer contract).
 SENSOR_LAST_FETCH_AGE = "last_fetch_age_min"
@@ -110,11 +127,27 @@ _KEY_POWER_NOW_W = "power_now_w"
 _KEY_WATTS = "watts"
 _KEY_WH_PERIOD = "wh_period"
 _KEY_HOURLY_WH = "hourly_wh"
+_LOGGER = logging.getLogger(__name__)
+
 _KEY_SLOT_STARTS = "slot_starts"
 _KEY_PLANE_WATTS = "plane_watts"
 _KEY_COMPUTED_AT = "computed_at"
 # The three daily-energy keys, indexed by day offset (today=0).
 _ENERGY_KEYS = ("energy_today_kwh", "energy_tomorrow_kwh", "energy_d2_kwh")
+
+# Sub-keys inside the coordinator's DATA_KEY_SCOREBOARD summary dict (the shape
+# core.scoreboard.scoreboard_summary emits; see that module's docstring). Read
+# defensively — the scoreboard is optional/disable-able and the coordinator may
+# not have populated it yet (validate-and-clamp: a missing field -> None).
+_SB_ENGINE_DAILY_MAE = "engine_daily_kwh_mae"
+_SB_ENGINE_HOURLY_MAE = "engine_hourly_mae"
+_SB_COMPARISON_DAILY_MAE = "comparison_daily_kwh_mae"
+_SB_ENGINE_VS_BEST_PCT = "engine_vs_best_baseline_pct"
+# Sub-keys inside the DATA_KEY_QUANTILE_CURVES dict (15-min band Wh curves keyed
+# by ISO-UTC slot start), matching the get_forecast response block names.
+_Q_P10 = FORECAST_RESP_KEY_P10
+_Q_P50 = FORECAST_RESP_KEY_P50
+_Q_P90 = FORECAST_RESP_KEY_P90
 
 # Optional service field: restrict the returned curve to one config entry.
 SERVICE_GET_FORECAST_SCHEMA = vol.Schema({vol.Optional("entry_id"): str})
@@ -149,7 +182,29 @@ async def async_setup_entry(
             SENSOR_LEARNER_STATUS_DAY_AHEAD,
             LEARNER_LAYER_DAY_AHEAD,
         ),
+        # --- v0.4 skill scoreboard (SPEC §9/§10) ---
+        EngineDailyKwhMaeSensor(coordinator),
+        EngineHourlyMaeSensor(coordinator),
+        EngineVsBestBaselinePctSensor(coordinator),
+        # --- v0.4 quantile bands (SPEC §6/§10): today's P10/P90 ---
+        EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P10, _Q_P10),
+        EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P90, _Q_P90),
     ]
+
+    # One MAE sensor per configured comparison forecast (SPEC §9/§10). The list
+    # is read from the merged entry config (data + options); it ships EMPTY, so
+    # a stock install adds zero comparison sensors. A rename produces a new
+    # sensor (slug-keyed unique_id) rather than silently rewriting history.
+    comparisons = _configured_comparisons(coordinator)
+    for cmp in comparisons:
+        entities.append(ComparisonDailyKwhMaeSensor(coordinator, cmp))
+
+    # Prune ghost per-comparison sensors left behind by a rename/removal via the
+    # options flow: any registry entry whose unique_id is a comparison-MAE slug
+    # not in the CURRENT configured set would otherwise linger permanently
+    # "unavailable" (a restored entity) on every rename. Remove those stale ids.
+    _prune_stale_comparison_sensors(hass, entry, comparisons)
+
     async_add_entities(entities)
 
     # Register the response service exactly once for the whole integration.
@@ -165,6 +220,54 @@ async def async_setup_entry(
             schema=SERVICE_GET_FORECAST_SCHEMA,
             supports_response=SupportsResponse.ONLY,
         )
+
+
+def _prune_stale_comparison_sensors(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    comparisons: tuple[ComparisonConfig, ...],
+) -> None:
+    """Remove registry entries for comparison sensors no longer configured.
+
+    A comparison MAE sensor's unique_id is
+    ``{entry_id}_{PREFIX}_{slug}``; after a rename/removal via the options flow
+    the old slug's registry entry lingers "unavailable" forever unless pruned.
+    We keep only the unique_ids of the CURRENTLY configured comparisons and drop
+    the rest. Best-effort: never raises (a registry hiccup must not block setup).
+    """
+    try:
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        prefix = f"{entry.entry_id}_{SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX}_"
+        keep = {
+            f"{entry.entry_id}_{SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX}_{c.slug}"
+            for c in comparisons
+        }
+        for reg_entry in er.async_entries_for_config_entry(
+            registry, entry.entry_id
+        ):
+            uid = reg_entry.unique_id
+            if uid.startswith(prefix) and uid not in keep:
+                registry.async_remove(reg_entry.entity_id)
+    except Exception:  # pragma: no cover - registry cleanup is best-effort
+        _LOGGER.debug("Comparison-sensor prune skipped", exc_info=True)
+
+
+def _configured_comparisons(coordinator: Any) -> tuple[ComparisonConfig, ...]:
+    """Resolve the configured comparison forecasts for a coordinator's entry.
+
+    Reads CONF_COMPARISON_SENSORS from the merged ``{**entry.data,
+    **entry.options}`` (options win) and parses it leniently via
+    ``ComparisonConfig.list_from_options`` (malformed / half-filled rows are
+    dropped). Ships EMPTY (D-P9), so a stock install returns no comparisons.
+    Never raises: an entry without options or a missing key yields ().
+    """
+    entry = getattr(coordinator, "entry", None)
+    if entry is None:
+        return ()
+    merged = {**getattr(entry, "data", {}), **getattr(entry, "options", {})}
+    return ComparisonConfig.list_from_options(merged.get(CONF_COMPARISON_SENSORS))
 
 
 def _build_forecast_response(
@@ -187,7 +290,7 @@ def _build_forecast_response(
         if not data:
             entries[eid] = _empty_forecast_entry()
             continue
-        entries[eid] = {
+        entry_resp = {
             "slot_starts": list(data.get(_KEY_SLOT_STARTS, [])),
             "planes": {
                 name: list(watts)
@@ -199,7 +302,57 @@ def _build_forecast_response(
             "total_hourly": dict(data.get(_KEY_HOURLY_WH) or {}),
             "issued_at": data.get(_KEY_COMPUTED_AT),
         }
+        # v0.4 quantile bands (SPEC §6/§8): plane-agnostic TOTAL p10/p50/p90
+        # 15-min + hourly Wh curves alongside the served (corrected) curve. Only
+        # present when the engine issued bands this cycle; absent otherwise so a
+        # quantiles-off / cold-start install simply omits the blocks rather than
+        # fabricating a spread.
+        bands = _band_blocks(data)
+        if bands:
+            entry_resp.update(bands)
+        entries[eid] = entry_resp
     return {"entries": entries}
+
+
+def _band_blocks(data: dict[str, Any]) -> dict[str, Any]:
+    """Assemble the p10/p50/p90 15-min + hourly forecast-response blocks.
+
+    Reads the coordinator's ``DATA_KEY_QUANTILE_CURVES`` (15-min band Wh curves
+    keyed by ISO-UTC slot start) and rolls each up to hourly Wh. Returns a dict
+    ``{p10: {"wh_period": {...}, "hourly": {...}}, p50: ..., p90: ...}`` — or an
+    empty dict when no bands were issued (quantiles off / cold start), so the
+    caller omits the blocks entirely. Pure; never raises on a malformed curve.
+    """
+    curves = data.get(DATA_KEY_QUANTILE_CURVES)
+    if not isinstance(curves, dict) or not curves:
+        return {}
+    out: dict[str, Any] = {}
+    for key in (_Q_P10, _Q_P50, _Q_P90):
+        curve = curves.get(key)
+        if not isinstance(curve, dict) or not curve:
+            continue
+        out[key] = {
+            ATTR_WH_PERIOD: dict(curve),
+            "hourly": _hourly_from_slots(curve),
+        }
+    return out
+
+
+def _hourly_from_slots(slot_wh: dict[str, float]) -> dict[str, float]:
+    """Roll a 15-min ``{iso_slot: Wh}`` curve up to ``{iso_hour: Wh}``.
+
+    Buckets each slot's Wh into its containing UTC hour (truncating the slot
+    start to the hour). Malformed keys/values are skipped so a diagnostic curve
+    can never crash the response.
+    """
+    hourly: dict[str, float] = {}
+    for iso, wh in slot_wh.items():
+        parsed = dt_util.parse_datetime(iso) if isinstance(iso, str) else None
+        if parsed is None or not isinstance(wh, (int, float)):
+            continue
+        hour_key = parsed.replace(minute=0, second=0, microsecond=0).isoformat()
+        hourly[hour_key] = round(hourly.get(hour_key, 0.0) + float(wh), 2)
+    return hourly
 
 
 def _empty_forecast_entry() -> dict[str, Any]:
@@ -272,7 +425,17 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_icon = "mdi:solar-power"
-    _unrecorded_attributes = frozenset({ATTR_WATTS, ATTR_WH_PERIOD})
+    # The bulky curve dicts (served + the three quantile bands) are all excluded
+    # from the recorder (SPEC §8) via _unrecorded_attributes + recorder.py.
+    _unrecorded_attributes = frozenset(
+        {
+            ATTR_WATTS,
+            ATTR_WH_PERIOD,
+            ATTR_WH_PERIOD_P10,
+            ATTR_WH_PERIOD_P50,
+            ATTR_WH_PERIOD_P90,
+        }
+    )
 
     def __init__(self, coordinator: Any, key: str, day_offset: int) -> None:
         super().__init__(coordinator, key)
@@ -294,9 +457,19 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
         data = self.coordinator.data or {}
         watts_all = data.get(_KEY_WATTS) or {}
         wh_all = data.get(_KEY_WH_PERIOD) or {}
+        # v0.4 band curves (SPEC §6/§8): 15-min P10/P90 Wh, sliced to this day
+        # like the served curve. Empty when quantiles are off / cold-started, so
+        # the attrs are simply empty dicts (no fabricated spread).
+        curves = data.get(DATA_KEY_QUANTILE_CURVES)
+        p10_all = curves.get(_Q_P10) if isinstance(curves, dict) else None
+        p90_all = curves.get(_Q_P90) if isinstance(curves, dict) else None
+        p10_all = p10_all if isinstance(p10_all, dict) else {}
+        p90_all = p90_all if isinstance(p90_all, dict) else {}
         target = self._target_date()
         watts: dict[str, float] = {}
         wh_period: dict[str, float] = {}
+        wh_p10: dict[str, float] = {}
+        wh_p90: dict[str, float] = {}
         for iso in data.get(_KEY_SLOT_STARTS, []):
             local = _local_date_of(iso)
             if local != target:
@@ -305,7 +478,16 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
                 watts[iso] = watts_all[iso]
             if iso in wh_all:
                 wh_period[iso] = wh_all[iso]
-        return {ATTR_WATTS: watts, ATTR_WH_PERIOD: wh_period}
+            if iso in p10_all:
+                wh_p10[iso] = p10_all[iso]
+            if iso in p90_all:
+                wh_p90[iso] = p90_all[iso]
+        return {
+            ATTR_WATTS: watts,
+            ATTR_WH_PERIOD: wh_period,
+            ATTR_WH_PERIOD_P10: wh_p10,
+            ATTR_WH_PERIOD_P90: wh_p90,
+        }
 
 
 class PowerNowSensor(BalconyForecastEntity, SensorEntity):
@@ -492,6 +674,194 @@ class LearnerStatusSensor(_DiagnosticSensor):
         if value in LEARNER_STATUS_VALUES:
             return value
         return None
+
+
+# ---------------------------------------------------------------------------
+# v0.4 skill-scoreboard diagnostics (SPEC §9/§10 — the kill-gate metrics)
+# ---------------------------------------------------------------------------
+
+
+class _ScoreboardSensor(_DiagnosticSensor):
+    """Base for the always-available scoreboard metric sensors.
+
+    Reads the coordinator's ``DATA_KEY_SCOREBOARD`` summary dict (the shape
+    ``core.scoreboard.scoreboard_summary`` emits). All fields are read
+    defensively: the scoreboard is optional and disable-able, and the
+    coordinator may not have populated it yet, so a missing summary or field
+    yields ``None`` (never a fabricated zero — SPEC §9).
+    """
+
+    def _summary(self) -> dict[str, Any]:
+        data = self.coordinator.data or {}
+        sb = data.get(DATA_KEY_SCOREBOARD)
+        return sb if isinstance(sb, dict) else {}
+
+
+class EngineDailyKwhMaeSensor(_ScoreboardSensor):
+    """Engine daily-kWh MAE over the rolling window (SPEC §10 primary metric).
+
+    The engine forecast AS ISSUED for each scored day, mean absolute daily-kWh
+    error vs. the measured site energy. kWh unit; no device_class (an MAE is not
+    a cumulative energy quantity). ``None`` until the window has a scored day.
+    The window length + scored-day count ride along as attributes.
+    """
+
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:chart-line"
+
+    def __init__(self, coordinator: Any) -> None:
+        super().__init__(coordinator, SENSOR_ENGINE_DAILY_KWH_MAE)
+
+    @property
+    def native_value(self) -> float | None:
+        value = self._summary().get(_SB_ENGINE_DAILY_MAE)
+        return None if value is None else round(float(value), 3)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        sb = self._summary()
+        return {
+            "window_days": sb.get("window_days"),
+            "scored_days": sb.get("scored_days"),
+        }
+
+
+class EngineHourlyMaeSensor(_ScoreboardSensor):
+    """Engine hourly MAE over the window (SPEC §10 second metric).
+
+    Mean per-daylight-hour Wh error of the issued corrected curve vs. measured.
+    Wh unit; ``None`` until at least one day in the window has an hourly MAE.
+    """
+
+    _attr_native_unit_of_measurement = UnitOfEnergy.WATT_HOUR
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:chart-bell-curve"
+
+    def __init__(self, coordinator: Any) -> None:
+        super().__init__(coordinator, SENSOR_ENGINE_HOURLY_MAE)
+
+    @property
+    def native_value(self) -> float | None:
+        value = self._summary().get(_SB_ENGINE_HOURLY_MAE)
+        return None if value is None else round(float(value), 1)
+
+
+class EngineVsBestBaselinePctSensor(_ScoreboardSensor):
+    """Percent the engine beats the BEST baseline on daily-kWh MAE (SPEC §10).
+
+    Positive == engine better (smaller error) than the best configured
+    comparison. ``None`` when there is no scored engine day, no comparison with a
+    scored day, or an undefined ratio. Backs the dashboard gauge.
+    """
+
+    _attr_native_unit_of_measurement = "%"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:trophy-outline"
+
+    def __init__(self, coordinator: Any) -> None:
+        super().__init__(coordinator, SENSOR_ENGINE_VS_BEST_BASELINE_PCT)
+
+    @property
+    def native_value(self) -> float | None:
+        value = self._summary().get(_SB_ENGINE_VS_BEST_PCT)
+        return None if value is None else round(float(value), 1)
+
+
+class ComparisonDailyKwhMaeSensor(_ScoreboardSensor):
+    """Daily-kWh MAE of one configured external comparison forecast (SPEC §10).
+
+    One instance per ``CONF_COMPARISON_SENSORS`` entry. The object_id is suffixed
+    with the comparison's stable slug so a rename mints a new sensor rather than
+    rewriting history; the friendly name carries the operator's label as an
+    attribute (the entity ``name`` translation is generic). Reads its own MAE
+    out of the scoreboard summary's ``comparison_daily_kwh_mae`` map by the
+    comparison NAME (the key core.scoreboard uses). ``None`` until that
+    comparison has a scored day in the window (a comparison added mid-window is
+    absent, not zero).
+    """
+
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:chart-line-variant"
+
+    def __init__(self, coordinator: Any, comparison: ComparisonConfig) -> None:
+        super().__init__(
+            coordinator,
+            f"{SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX}_{comparison.slug}",
+        )
+        self._comparison = comparison
+        # A per-comparison entity name so the dynamic sensors are distinguishable
+        # in the UI (the shared translation_key would otherwise name them all
+        # identically). has_entity_name stays True: this becomes the object name.
+        # The name is chosen so the derived object_id is DETERMINISTIC and matches
+        # the documented dashboard id
+        # `…_comparison_daily_kwh_mae_<slug>` (HA slugifies the name; for these
+        # labels the name-slug equals ComparisonConfig.slug). A `suggested_object_id`
+        # pins it even if HA's slugify differs, so the dashboard ids never drift.
+        self._attr_translation_key = None
+        self._attr_name = f"Comparison daily kWh MAE {comparison.name}"
+        self._attr_suggested_object_id = (
+            f"{DOMAIN}_{SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX}_{comparison.slug}"
+        )
+
+    def _comparison_mae_map(self) -> dict[str, Any]:
+        cmp_map = self._summary().get(_SB_COMPARISON_DAILY_MAE)
+        return cmp_map if isinstance(cmp_map, dict) else {}
+
+    @property
+    def native_value(self) -> float | None:
+        value = self._comparison_mae_map().get(self._comparison.name)
+        return None if value is None else round(float(value), 3)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "comparison_name": self._comparison.name,
+            "daily_entity": self._comparison.daily_entity,
+        }
+
+
+# ---------------------------------------------------------------------------
+# v0.4 quantile daily band sensors (SPEC §6/§10 — today's P10 / P90 energy)
+# ---------------------------------------------------------------------------
+
+
+class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
+    """Today's forecast energy at one quantile band (P10 or P90), kWh.
+
+    Sums the 15-min band Wh curve (``DATA_KEY_QUANTILE_CURVES[band]``) over the
+    slots that fall on the local *today*, mirroring the served energy sensor.
+    A *forecast*, so no ``state_class`` (never feeds long-term statistics, like
+    the served energy sensors). ``None`` when no band was issued (quantiles off
+    / cold start) — the band honestly collapses rather than fabricating a
+    spread. Follows the coordinator's availability (not a diagnostic).
+    """
+
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_icon = "mdi:solar-power"
+
+    def __init__(self, coordinator: Any, key: str, band: str) -> None:
+        super().__init__(coordinator, key)
+        self._band = band
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data or {}
+        curves = data.get(DATA_KEY_QUANTILE_CURVES)
+        curve = curves.get(self._band) if isinstance(curves, dict) else None
+        if not isinstance(curve, dict) or not curve:
+            return None
+        target = dt_util.now().date()
+        total_wh = 0.0
+        seen = False
+        for iso, wh in curve.items():
+            if _local_date_of(iso) != target or not isinstance(wh, (int, float)):
+                continue
+            total_wh += float(wh)
+            seen = True
+        return round(total_wh / 1000.0, 3) if seen else None
 
 
 # ---------------------------------------------------------------------------

@@ -44,23 +44,28 @@ from homeassistant.helpers import selector
 
 from ._site_validation import SiteValidationError, validate_site
 from .const import (
+    CONF_COMPARISON_SENSORS,
     CONF_DAY_AHEAD_BIAS_ENABLED,
     CONF_FAST_LEARNER_ENABLED,
     CONF_FETCH_INTERVAL,
     CONF_LATITUDE,
     CONF_LONGITUDE,
     CONF_NAME,
+    CONF_QUANTILES_ENABLED,
     CONF_RECOMPUTE_INTERVAL,
     CONF_SITE,
     CONF_SLOW_LEARNER_ENABLED,
+    DEFAULT_COMPARISON_SENSORS,
     DEFAULT_DAY_AHEAD_BIAS_ENABLED,
     DEFAULT_FAST_LEARNER_ENABLED,
+    DEFAULT_QUANTILES_ENABLED,
     DEFAULT_SITE,
     DEFAULT_SLOW_LEARNER_ENABLED,
     DOMAIN,
     FETCH_INTERVAL_SECONDS,
     RECOMPUTE_INTERVAL_SECONDS,
 )
+from .core.types import ComparisonConfig
 
 # Re-export so consumers/tests can import the validation surface from here too.
 __all__ = [
@@ -96,8 +101,21 @@ def _site_selector() -> selector.Selector:
 
 
 def _bool_selector() -> selector.Selector:
-    """A plain on/off toggle for a learner kill switch."""
+    """A plain on/off toggle for a learner / feature kill switch."""
     return selector.BooleanSelector()
+
+
+def _comparison_sensors_selector() -> selector.Selector:
+    """Editable list of comparison-forecast entries (SPEC §9/§10, D-P9).
+
+    Each row is an object ``{name, daily_entity}`` naming an external daily-kWh
+    forecast sensor the scoreboard compares the engine against. Ships EMPTY;
+    the operator's two comparisons are documented (docs/DASHBOARD.md), never
+    hardcoded in the runtime defaults. ObjectSelector with ``multiple`` yields a
+    plain list-of-dicts, parsed leniently by ``ComparisonConfig.list_from_options``
+    (malformed / half-filled rows are dropped rather than raising).
+    """
+    return selector.ObjectSelector(selector.ObjectSelectorConfig(multiple=True))
 
 
 def _user_schema(
@@ -113,14 +131,17 @@ def _user_schema(
     fast_learner_enabled: bool = DEFAULT_FAST_LEARNER_ENABLED,
     slow_learner_enabled: bool = DEFAULT_SLOW_LEARNER_ENABLED,
     day_ahead_bias_enabled: bool = DEFAULT_DAY_AHEAD_BIAS_ENABLED,
+    quantiles_enabled: bool = DEFAULT_QUANTILES_ENABLED,
+    comparison_sensors: list[dict] | None = None,
 ) -> vol.Schema:
     """Schema for the user step / options step, pre-filled with defaults.
 
     ``include_name`` is False for the options step, where the name (and its
     unique-id) is immutable after setup. ``include_learner_switches`` is True
-    for the options step only: the three per-layer learner kill switches
-    (SPEC §5) are runtime tunables, not first-setup fields, so the wizard stays
-    lean and the switches appear where the operator manages a live install.
+    for the options step only: the per-layer learner kill switches (SPEC §5),
+    the v0.4 quantile kill switch (SPEC §6) and the editable comparison-sensors
+    list (SPEC §9/§10) are runtime tunables, not first-setup fields, so the
+    wizard stays lean and they appear where the operator manages a live install.
     Every switch is a plain boolean toggle (no NumberSelector, so the HA-2026
     ``step >= 1e-3`` selector rule cannot bite here) and defaults ON.
     """
@@ -167,6 +188,17 @@ def _user_schema(
                 vol.Required(
                     CONF_DAY_AHEAD_BIAS_ENABLED, default=day_ahead_bias_enabled
                 ): _bool_selector(),
+                # v0.4 quantile bands kill switch (SPEC §6, default ON).
+                vol.Required(
+                    CONF_QUANTILES_ENABLED, default=quantiles_enabled
+                ): _bool_selector(),
+                # v0.4 comparison-forecast list (SPEC §9/§10). Optional so an
+                # empty list means "no external comparisons" without forcing a
+                # required-field error; the default is the current value.
+                vol.Optional(
+                    CONF_COMPARISON_SENSORS,
+                    default=list(comparison_sensors or []),
+                ): _comparison_sensors_selector(),
             }
         )
     return vol.Schema(fields)
@@ -294,6 +326,22 @@ class BalconySolarForecastOptionsFlow(OptionsFlow):
                             DEFAULT_DAY_AHEAD_BIAS_ENABLED,
                         )
                     ),
+                    # v0.4 quantile kill switch (SPEC §6, default ON).
+                    CONF_QUANTILES_ENABLED: bool(
+                        user_input.get(
+                            CONF_QUANTILES_ENABLED, DEFAULT_QUANTILES_ENABLED
+                        )
+                    ),
+                    # v0.4 comparison-forecast list (SPEC §9/§10): normalise
+                    # through ComparisonConfig so half-filled / malformed rows
+                    # are dropped and only clean {name, daily_entity} objects are
+                    # persisted. Stored as a list of plain dicts.
+                    CONF_COMPARISON_SENSORS: [
+                        c.to_dict()
+                        for c in ComparisonConfig.list_from_options(
+                            user_input.get(CONF_COMPARISON_SENSORS)
+                        )
+                    ],
                 }
                 return self.async_create_entry(title="", data=data)
 
@@ -352,6 +400,20 @@ def _current_values(
             return bool(existing[key])
         return fallback
 
+    def _comparison_default() -> list[dict]:
+        # Same precedence as the bool switches. The value is a list of
+        # {name, daily_entity} objects; a just-submitted raw list (possibly with
+        # half-filled rows from the object editor) is passed through verbatim so
+        # an error re-render keeps the operator's in-progress edits, while a
+        # value pulled from the persisted entry is already normalised.
+        if CONF_COMPARISON_SENSORS in src:
+            raw = src[CONF_COMPARISON_SENSORS]
+            return list(raw) if isinstance(raw, list) else []
+        if existing is not None and CONF_COMPARISON_SENSORS in existing:
+            raw = existing[CONF_COMPARISON_SENSORS]
+            return list(raw) if isinstance(raw, list) else []
+        return list(DEFAULT_COMPARISON_SENSORS)
+
     return {
         "name": src.get(CONF_NAME, existing.get(CONF_NAME, "") if existing else ""),
         "latitude": src.get(CONF_LATITUDE, default_lat),
@@ -378,4 +440,8 @@ def _current_values(
         "day_ahead_bias_enabled": _bool_default(
             CONF_DAY_AHEAD_BIAS_ENABLED, DEFAULT_DAY_AHEAD_BIAS_ENABLED
         ),
+        "quantiles_enabled": _bool_default(
+            CONF_QUANTILES_ENABLED, DEFAULT_QUANTILES_ENABLED
+        ),
+        "comparison_sensors": _comparison_default(),
     }

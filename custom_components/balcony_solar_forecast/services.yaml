@@ -2,7 +2,9 @@ get_forecast:
   name: Get forecast
   description: >-
     Return the current 15-minute and hourly forecast curves for one or all
-    configured sites.
+    configured sites. When quantile bands are enabled and trained, the response
+    additionally carries plane-agnostic total p10/p50/p90 15-minute and hourly
+    Wh curves alongside the served (p50-corrected) curve.
   fields:
     entry_id:
       name: Config entry

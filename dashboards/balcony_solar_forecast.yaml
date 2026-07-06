@@ -1,0 +1,285 @@
+# Balcony Solar Forecast — Observability dashboard (SPEC §9/§10/§14.3)
+#
+# A single Lovelace VIEW that uses ONLY built-in Home Assistant cards
+# (markdown, entities, history-graph, statistics-graph, gauge, grid). It works
+# on a stock install with ZERO custom cards / HACS frontend resources.
+#
+# Install: Settings -> Dashboards -> add a new (empty) dashboard, open its
+# three-dot menu -> "Edit dashboard" -> three-dot menu -> "Raw configuration
+# editor", then paste this file's contents. See docs/DASHBOARD.md for the
+# full copy-paste walkthrough and the operator's CONF_COMPARISON_SENSORS
+# example. The entity_ids below assume the single reference install
+# (device "Balcony Solar Forecast"); adjust the object_id suffixes if your
+# entities differ.
+#
+# The integration's OWN scoreboard sensors (engine_daily_kwh_mae,
+# engine_vs_best_baseline_pct, kill_gate_passed) are REGISTERED as soon as v0.4
+# is installed; before the first nightly run they read "unknown", which the
+# cards render gracefully. TWO groups of ids are the exception and will show
+# "Entity not found" until you act:
+#   * the per-comparison MAE rows (…_comparison_daily_kwh_mae_<slug>) — those
+#     sensors are only CREATED once you configure CONF_COMPARISON_SENSORS
+#     (ships EMPTY, D-P9); add your comparisons in the options flow first;
+#   * the `sensor.inverter_port_*` rows — OPERATOR-SPECIFIC (see the ">>> EDIT
+#     ME <<<" marker further down); replace or delete them on a stock install.
+
+title: Balcony Solar Forecast
+views:
+  - title: Forecast
+    path: forecast
+    icon: mdi:solar-power
+    cards:
+      # ----------------------------------------------------------------
+      # Kill-gate verdict (SPEC §9/§10) — the headline the whole plan hangs on.
+      # ----------------------------------------------------------------
+      - type: markdown
+        title: Kill-gate verdict
+        content: >
+          {% set passed =
+          states('binary_sensor.balcony_solar_forecast_kill_gate_passed') %}
+          {% set pct =
+          states('sensor.balcony_solar_forecast_engine_vs_best_baseline_pct')
+          %} {% if passed == 'on' %} ## ✅ Kill-gate PASSED
+
+          The engine is beating the best configured baseline on daily-kWh MAE
+          by the required margin over a full rolling window. It is safe to
+          consider re-pointing consumers (e.g. battery_manager) to the engine
+          sensors. {% elif passed == 'off' %} ## ❌ Kill-gate NOT passed
+
+          Over the current full window the engine is **not** yet the required
+          margin better than the best baseline. Keep the frozen baseline in
+          place (SPEC §9). {% else %} ## ⏳ Kill-gate: window not full yet
+
+          Not enough scored days in the rolling window to assert the gate
+          (`unknown` until a full window of nightly scores exists). {% endif %}
+
+          {% if pct not in ('unknown', 'unavailable') %} Engine vs best
+          baseline: **{{ pct }} %** (positive = engine better). {% endif %}
+
+      # ----------------------------------------------------------------
+      # Engine-vs-best-baseline gauge (SPEC §9). Positive = engine better.
+      # ----------------------------------------------------------------
+      - type: gauge
+        name: Engine vs best baseline
+        entity: sensor.balcony_solar_forecast_engine_vs_best_baseline_pct
+        unit: "%"
+        min: -50
+        max: 50
+        needle: true
+        segments:
+          - from: -50
+            color: "#c0392b"
+          - from: -10
+            color: "#e67e22"
+          - from: 0
+            color: "#f1c40f"
+          - from: 10
+            color: "#2ecc71"
+
+      # ----------------------------------------------------------------
+      # Scoreboard entities: engine + per-comparison daily-kWh MAE, gate.
+      # (SPEC §9/§10). Per-comparison sensors carry a slug of the
+      # comparison name; the two shown are the operator's documented pair.
+      # ----------------------------------------------------------------
+      - type: entities
+        title: Skill scoreboard
+        show_header_toggle: false
+        entities:
+          - entity: binary_sensor.balcony_solar_forecast_kill_gate_passed
+            name: Kill-gate passed
+          - entity: sensor.balcony_solar_forecast_engine_daily_kwh_mae
+            name: Engine daily-kWh MAE
+          - entity: sensor.balcony_solar_forecast_engine_hourly_mae
+            name: Engine hourly MAE
+          - entity: sensor.balcony_solar_forecast_engine_vs_best_baseline_pct
+            name: Engine vs best baseline
+          - type: section
+            label: Comparison baselines (daily-kWh MAE)
+          - entity: sensor.balcony_solar_forecast_comparison_daily_kwh_mae_8_entry_baseline
+            name: 8-Entry Baseline
+          - entity: sensor.balcony_solar_forecast_comparison_daily_kwh_mae_alt_1600w
+            name: Alt 1600W
+
+      # ----------------------------------------------------------------
+      # Engine total forecast vs measured total site energy (SPEC §14.3).
+      # The forecast today-kWh sensor and the sum of the per-module actual
+      # DC power sensors, over the recorder history. history-graph is a
+      # built-in card.
+      # ----------------------------------------------------------------
+      - type: history-graph
+        title: Forecast (today kWh) vs recent horizon
+        hours_to_show: 72
+        entities:
+          - entity: sensor.balcony_solar_forecast_energy_production_today
+            name: Engine — today
+          - entity: sensor.balcony_solar_forecast_energy_production_tomorrow
+            name: Engine — tomorrow
+          - entity: sensor.balcony_solar_forecast_power_production_now
+            name: Engine — power now
+
+      # >>> EDIT ME <<< OPERATOR-SPECIFIC entity ids below (this + the next
+      # statistics-graph card, and the comparison rows above). The
+      # `sensor.inverter_port_*` ids are the REFERENCE install's per-module DC
+      # power sensors; on a stock install they do not exist and will read
+      # "Entity not found" until you replace them with your own module sensors
+      # (or delete these two cards). Everything ABOVE this marker uses the
+      # integration's OWN entities and works out of the box.
+      #
+      # Measured site power = the 8 per-module DC power sensors. A built-in
+      # history-graph overlays them so the measured envelope is visible next
+      # to the engine's forecast power. Per SPEC §2 the modules group into
+      # planes; grouping is documented in the card names.
+      - type: history-graph
+        title: Measured DC power per module (ground truth)
+        hours_to_show: 48
+        entities:
+          - entity: sensor.inverter_port_1_dc_power
+            name: M1 (N, lower)
+          - entity: sensor.inverter_port_2_dc_power
+            name: M2 (front, lower)
+          - entity: sensor.inverter_port_1_dc_power_2
+            name: M3 (front, lower)
+          - entity: sensor.inverter_port_2_dc_power_2
+            name: M4 (S, lower)
+          - entity: sensor.inverter_port_1_dc_power_3
+            name: M5 (N, upper)
+          - entity: sensor.inverter_port_2_dc_power_3
+            name: M6 (front, upper)
+          - entity: sensor.inverter_port_1_dc_power_4
+            name: M7 (front, upper)
+          - entity: sensor.inverter_port_2_dc_power_4
+            name: M8 (S, upper)
+
+      # ----------------------------------------------------------------
+      # Per-plane forecast-vs-actual (best-effort with built-in cards).
+      # The engine's per-plane curve is only in the get_forecast service
+      # response; on the dashboard we compare the total energy forecast
+      # against the measured per-module power grouped by plane (SPEC §2:
+      # front 115°, north 25°, south 205°). A statistics-graph gives daily
+      # measured energy per module from long-term statistics.
+      # ----------------------------------------------------------------
+      - type: statistics-graph
+        title: Measured daily energy per module (LTS)
+        period: day
+        stat_types:
+          - sum
+        chart_type: bar
+        days_to_show: 14
+        entities:
+          - sensor.inverter_port_1_dc_power
+          - sensor.inverter_port_2_dc_power
+          - sensor.inverter_port_2_dc_power_2
+          - sensor.inverter_port_2_dc_power_4
+
+      # ----------------------------------------------------------------
+      # Uncertainty band: today's P10 / P50 (state) / P90 (SPEC §6/§14.2).
+      # ----------------------------------------------------------------
+      - type: entities
+        title: Today's forecast band (P10 / P50 / P90)
+        show_header_toggle: false
+        entities:
+          - entity: sensor.balcony_solar_forecast_energy_production_today_p10
+            name: P10 (conservative)
+          - entity: sensor.balcony_solar_forecast_energy_production_today
+            name: P50 (planning)
+          - entity: sensor.balcony_solar_forecast_energy_production_today_p90
+            name: P90 (optimistic)
+
+      # ----------------------------------------------------------------
+      # Learner status + drift MAE + source status (SPEC §5/§7).
+      # ----------------------------------------------------------------
+      - type: entities
+        title: Learners, drift & degradation
+        show_header_toggle: false
+        entities:
+          - entity: sensor.balcony_solar_forecast_source_status
+            name: Source status (degradation ladder)
+          - entity: binary_sensor.balcony_solar_forecast_degraded
+            name: Degraded
+          - entity: sensor.balcony_solar_forecast_last_fetch_age
+            name: Weather image age
+          - type: section
+            label: Learners
+          - entity: sensor.balcony_solar_forecast_fast_learner_status
+            name: Fast (intraday) learner
+          - entity: sensor.balcony_solar_forecast_shademap_learner_status
+            name: Shademap (slow) learner
+          - entity: sensor.balcony_solar_forecast_day_ahead_bias_status
+            name: Day-ahead bias
+          - entity: sensor.balcony_solar_forecast_intraday_correction_scalar
+            name: Intraday scalar (applied)
+          - entity: sensor.balcony_solar_forecast_drift_mae_corrected
+            name: Drift MAE (corrected vs physics)
+
+      # ----------------------------------------------------------------
+      # Drift MAE over time — corrected curve error trend (SPEC §5).
+      # ----------------------------------------------------------------
+      - type: history-graph
+        title: Drift MAE (corrected) trend
+        hours_to_show: 168
+        entities:
+          - entity: sensor.balcony_solar_forecast_drift_mae_corrected
+            name: Corrected MAE (Wh)
+
+      # ----------------------------------------------------------------
+      # Shademap (SPEC §5/§14.3): best-effort built-in representation.
+      # The learned per-channel transmittance polar map is NOT a sensor
+      # attribute — it lives in the dump_shademap service response. This
+      # markdown card documents how to pull it and reminds the operator of
+      # the known obstruction sectors (SPEC §13) to eyeball it against; the
+      # learner-status entities above show whether the shademap is active
+      # and how many bins it holds.
+      # ----------------------------------------------------------------
+      - type: markdown
+        title: Shademap (learned shade transmittance)
+        content: >
+          The slow learner holds a per-channel polar map of beam
+          transmittance τ over (sun-azimuth × elevation × half-year). It is
+          **not** a sensor attribute — pull the full polar table with the
+          built-in service:
+
+
+          **Developer Tools → Actions →** `balcony_solar_forecast.dump_shademap`
+          (enable *"Return response"*). Each channel returns bins of
+          `{az_deg, el_deg, tau, n}`; a richer polar plot can be rendered
+          offline from that JSON.
+
+
+          Eyeball the learned τ against the known obstructions (SPEC §13):
+
+          - **East hill** — reduced τ at low elevation, sun-azimuth ~60–100°
+            (morning), all channels.
+
+          - **Building wall** — τ → 0 above the edge for the **south** modules
+            M4/M8 at sun-azimuth ~205–218° (early afternoon beam collapse).
+
+          - **Trees** (seasonal) — reduced τ on M4 (strong) / M8 (weak) at
+            sun-azimuth ~135–175°, elevation ~30–45°; lower in leaf.
+
+
+          Shademap status and bin count are in the *Learners, drift &
+          degradation* card above.
+
+      # ----------------------------------------------------------------
+      # Comparison-sensor configuration reminder (D-P9: shipped EMPTY).
+      # ----------------------------------------------------------------
+      - type: markdown
+        title: Scoreboard comparison sensors
+        content: >
+          The scoreboard ships with **no** comparison baselines configured
+          (generic, not hardcoded — D-P9). Add them in **Settings →
+          Devices & Services → Balcony Solar Forecast → Configure →
+          Comparison sensors**. The operator's live site uses:
+
+
+          | Name | Daily-kWh entity |
+
+          |---|---|
+
+          | `8-Entry Baseline` | `sensor.pv_prognose_heute_alle_module` |
+
+          | `Alt 1600W` | `sensor.energy_production_today_4` |
+
+
+          Each added comparison creates a
+          `…_comparison_daily_kwh_mae_<slug>` sensor. See docs/DASHBOARD.md.

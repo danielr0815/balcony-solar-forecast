@@ -78,11 +78,12 @@ from ..const import (
     SLOT_MINUTES,
     SNOW_DEPTH_THRESHOLD_M,
 )
-from . import clearsky, electrical, horizon, solpos, transpose
+from . import clearsky, electrical, horizon, quantiles, solpos, transpose
 from .types import (
     ForecastResult,
     PlaneConfig,
     PlaneResult,
+    QuantileBands,
     SiteConfig,
     WeatherSeries,
     WeatherSlot,
@@ -128,11 +129,24 @@ class LearnerHooks:
     ``beam_tau`` and composes ``bias.apply_intraday_scalar`` +
     ``bias.apply_day_ahead_bias`` into ``slot_factor``, then hands this object
     to :func:`compute_forecast`.
+
+    ``band_by_slot`` (v0.4, SPEC §6/§10) is the quantile hook: a mapping from
+    each slot-start datetime the engine iterates to that slot's empirical
+    ``QuantileBands`` (P10/P50/P90 multipliers for its weather-class x day-part
+    bin). When it is None or empty the engine emits NO band curves (the
+    ForecastResult band fields stay empty and every consumer reads "no band" as
+    band == corrected, no fabricated spread — bit-exact with the pre-quantile
+    path). When populated, the engine multiplies the CORRECTED per-slot site
+    power by each band factor to produce the p10/p50/p90 15-min watts curves and
+    their hourly Wh roll-ups, in the SAME instantaneous frame as ``total_watts``.
+    The coordinator builds it (per-slot cloud-class classification -> bin ->
+    ``quantiles.bands_for_bin``); the engine treats the bands as opaque scalars.
     """
 
     beam_tau: BeamTauHook | None = None
     slot_factor: SlotFactorHook | None = None
     correction_source: str = CORRECTION_SOURCE_NONE
+    band_by_slot: dict[datetime, QuantileBands] | None = None
 
 
 # Module-level identity hooks so the raw pass and a learner-free corrected pass
@@ -554,6 +568,41 @@ def compute_forecast(
         for plane in planes
     )
 
+    # --- Quantile bands (v0.4, SPEC §6/§10) ---------------------------------
+    # When a per-slot band map is injected, emit the P10/P50/P90 site-power
+    # curves by multiplying the CORRECTED per-slot total by each band factor,
+    # then roll them up to hourly Wh using the SAME UTC hour key as ``hourly_wh``
+    # so the corrected and band hourly curves stay index-aligned. When no band
+    # map is present the fields stay empty and every consumer treats "no band"
+    # as band == corrected (bit-exact with the pre-quantile path).
+    p10_watts: tuple[float, ...] = ()
+    p50_watts: tuple[float, ...] = ()
+    p90_watts: tuple[float, ...] = ()
+    p10_hourly_wh: dict[str, float] = {}
+    p50_hourly_wh: dict[str, float] = {}
+    p90_hourly_wh: dict[str, float] = {}
+    band_by_slot = hk.band_by_slot
+    if band_by_slot:
+        p10_watts, p50_watts, p90_watts = quantiles.band_curve_from_corrected(
+            total_watts, slot_starts, band_by_slot,
+        )
+        for i, start in enumerate(slot_starts):
+            hkey = (
+                start.astimezone(timezone.utc)
+                .replace(minute=0, second=0, microsecond=0)
+                .isoformat()
+            )
+            # Keep the band hourly key set IDENTICAL to the corrected
+            # ``hourly_wh``: slots that short-circuited to zero-production (fully
+            # dark twilight / missing weather) never created a corrected hour
+            # bucket, and their band watts are zero anyway, so they must not
+            # introduce spurious empty band hours either.
+            if hkey not in hourly_wh:
+                continue
+            p10_hourly_wh[hkey] = p10_hourly_wh.get(hkey, 0.0) + p10_watts[i] * _SLOT_HOURS
+            p50_hourly_wh[hkey] = p50_hourly_wh.get(hkey, 0.0) + p50_watts[i] * _SLOT_HOURS
+            p90_hourly_wh[hkey] = p90_hourly_wh.get(hkey, 0.0) + p90_watts[i] * _SLOT_HOURS
+
     return ForecastResult(
         slot_starts=tuple(slot_starts),
         total_watts=tuple(total_watts),
@@ -564,4 +613,10 @@ def compute_forecast(
         raw_hourly_wh=raw_hourly_wh,
         raw_daily_kwh=raw_daily_kwh,
         correction_source=hk.correction_source,
+        p10_watts=p10_watts,
+        p50_watts=p50_watts,
+        p90_watts=p90_watts,
+        p10_hourly_wh=p10_hourly_wh,
+        p50_hourly_wh=p50_hourly_wh,
+        p90_hourly_wh=p90_hourly_wh,
     )

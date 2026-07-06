@@ -17,6 +17,8 @@ from .transpose import hay_davies_poa
 from .types import (
     BiasCell,
     BiasState,
+    ComparisonConfig,
+    DayScore,
     DriftState,
     ForecastResult,
     HorizonRow,
@@ -28,6 +30,9 @@ from .types import (
     PlaneHourlyModeled,
     PlaneResult,
     PlaneSlotBreakdown,
+    QuantileBands,
+    QuantileState,
+    ScoreboardState,
     ShademapBin,
     ShademapState,
     SiteConfig,
@@ -56,6 +61,12 @@ __all__ = [
     "LearnerSnapshot",
     "IssuedSnapshot",
     "PlaneHourlyModeled",
+    # v0.4 contract types: scoreboard + quantiles
+    "ComparisonConfig",
+    "DayScore",
+    "ScoreboardState",
+    "QuantileBands",
+    "QuantileState",
     # solar position
     "sun_position",
     # clear sky

@@ -40,6 +40,7 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     SHADEMAP_TAU_MIN,
     STORAGE_DATA_VERSION,
     STORAGE_DATA_VERSION_V2,
+    STORAGE_DATA_VERSION_V3,
     STORE_KEY_ACTUALS_LOG,
     STORE_KEY_BIAS_STATE,
     STORE_KEY_DRIFT_STATE,
@@ -146,8 +147,8 @@ def test_v1_migrates_losslessly():
     v1 = _v1_payload()
     state = validate_state(v1)
 
-    # Schema advanced to v2.
-    assert state[_SCHEMA_KEY] == STORAGE_DATA_VERSION_V2
+    # Schema advanced to the current inner schema (v1 -> v2 -> v3, additive).
+    assert state[_SCHEMA_KEY] == STORAGE_DATA_VERSION_V3
 
     # The three v1 rings are preserved exactly.
     assert state[STORE_KEY_LAST_PAYLOAD] == v1[STORE_KEY_LAST_PAYLOAD]
@@ -170,7 +171,7 @@ async def test_load_migrates_and_schedules_writeback():
     assert fake.delay_saves == 1  # migration written back
     # The pending snapshot is at the current schema and keeps the rings.
     pending = fake.pending_snapshot()
-    assert pending[_SCHEMA_KEY] == STORAGE_DATA_VERSION_V2
+    assert pending[_SCHEMA_KEY] == STORAGE_DATA_VERSION_V3
     assert store.get_actuals("2026-07-05") == {"M1": 300.0, "M4": 250.0}
     assert store.get_issued("2026-07-05") is not None
 
@@ -201,7 +202,7 @@ async def test_first_ever_empty_load_is_lazy():
 @pytest.mark.parametrize("junk", [None, 42, "nope", [], {"no_schema": 1}])
 def test_non_dict_or_schemaless_blob_yields_empty(junk):
     state = validate_state(junk)
-    assert state[_SCHEMA_KEY] == STORAGE_DATA_VERSION_V2
+    assert state[_SCHEMA_KEY] == STORAGE_DATA_VERSION_V3
     assert state[STORE_KEY_BIAS_STATE] == BiasState().to_dict()
 
 
@@ -209,7 +210,7 @@ def test_unknown_future_schema_discarded():
     state = validate_state({_SCHEMA_KEY: 999, STORE_KEY_ACTUALS_LOG: {"x": {"M1": 1}}})
     # Discarded to empty (do NOT trust an unknown future shape).
     assert state[STORE_KEY_ACTUALS_LOG] == {}
-    assert state[_SCHEMA_KEY] == STORAGE_DATA_VERSION_V2
+    assert state[_SCHEMA_KEY] == STORAGE_DATA_VERSION_V3
 
 
 def test_corrupt_learner_blob_loads_neutral():
