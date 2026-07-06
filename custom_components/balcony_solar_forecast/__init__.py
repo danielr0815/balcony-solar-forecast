@@ -12,7 +12,7 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from ._services import async_register_services, async_remove_services
@@ -60,13 +60,24 @@ async def async_setup_entry(
     coordinator.async_start_nightly_job()
 
     # Catch up any nightly job missed while HA was down (idempotent/date-keyed).
-    hass.async_create_task(coordinator.async_startup_catchup())
+    # Background task tied to the entry: tracked and auto-cancelled on unload.
+    entry.async_create_background_task(
+        hass,
+        coordinator.async_startup_catchup(),
+        name=f"{DOMAIN}_startup_catchup",
+    )
 
     # Flush the Store on HA stop so a hard shutdown keeps the last-good cache.
+    # Must AWAIT the flush directly: EVENT_HOMEASSISTANT_STOP is a blocking
+    # event that HA awaits, whereas scheduling hass.async_create_task during
+    # shutdown creates an orphaned task whose exception is never retrieved
+    # ("calls async_create_task from a thread other than the event loop").
+    async def _async_flush_on_stop(_event: Event) -> None:
+        await store.async_flush()
+
     entry.async_on_unload(
         hass.bus.async_listen_once(
-            EVENT_HOMEASSISTANT_STOP,
-            lambda _event: hass.async_create_task(store.async_flush()),
+            EVENT_HOMEASSISTANT_STOP, _async_flush_on_stop
         )
     )
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
