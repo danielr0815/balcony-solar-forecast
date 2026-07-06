@@ -627,6 +627,25 @@ def test_stat_row_hour_variants():
     assert bf._stat_row_hour("not-a-date") is None
 
 
+def test_lts_windows_chunk_a_multi_year_range():
+    # A 2-year hourly pull for all modules overflows HA's 4 MiB WS frame; the
+    # LTS query must be chunked. Windows must tile [start, end) with no gap
+    # or overlap and the last one clipped to end.
+    start = datetime(2024, 7, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    wins = bf._lts_windows(start, end, bf._LTS_WINDOW_DAYS)
+    assert wins[0][0] == start
+    assert wins[-1][1] == end
+    for (_a0, a1), (b0, _b1) in zip(wins, wins[1:]):
+        assert a1 == b0  # contiguous, no gap/overlap
+    # Every window is at most the window size.
+    from datetime import timedelta as _td
+    assert all(b - a <= _td(days=bf._LTS_WINDOW_DAYS) for a, b in wins)
+    # A range shorter than one window yields exactly one clipped window.
+    short = bf._lts_windows(start, start + _td(days=3), bf._LTS_WINDOW_DAYS)
+    assert short == [(start, start + _td(days=3))]
+
+
 # ---------------------------------------------------------------------------
 # Day grouping / filtering
 # ---------------------------------------------------------------------------

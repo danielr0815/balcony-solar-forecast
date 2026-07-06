@@ -985,6 +985,27 @@ async def _get_json(session, url: str, params: dict) -> dict:
         return await resp.json()
 
 
+# A single hourly statistics response for all modules over a multi-year range
+# exceeds HA's 4 MiB WebSocket frame limit (MESSAGE_TOO_BIG). Query in windows
+# small enough that each response stays well under the cap: 90 days x 24 h x
+# ~8 sensors ~= 17k rows ~= 1 MiB.
+_LTS_WINDOW_DAYS = 90
+
+
+def _lts_windows(
+    start_dt: datetime, end_dt: datetime, window_days: int
+) -> list[tuple[datetime, datetime]]:
+    """Split [start_dt, end_dt) into consecutive [win_start, win_end) chunks."""
+    windows: list[tuple[datetime, datetime]] = []
+    step = timedelta(days=window_days)
+    cur = start_dt
+    while cur < end_dt:
+        nxt = min(cur + step, end_dt)
+        windows.append((cur, nxt))
+        cur = nxt
+    return windows
+
+
 async def fetch_lts_hourly(
     session,
     *,
@@ -997,10 +1018,11 @@ async def fetch_lts_hourly(
     """Pull hourly per-statistic mean power from HA LTS via the WebSocket API.
 
     Connects to ``{ha_url}/api/websocket``, authenticates with the long-lived
-    token, and issues one ``recorder/statistics_during_period`` command over
-    the whole range at hourly period. Returns
-    ``{statistic_id: {iso_hour: mean_wh}}`` where mean_wh = mean power (W) over
-    the hour == Wh (matches coordinator._async_read_daily_actuals).
+    token, and issues ``recorder/statistics_during_period`` commands at hourly
+    period — chunked into ``_LTS_WINDOW_DAYS`` windows so no single response
+    trips HA's 4 MiB WS frame limit. Returns ``{statistic_id: {iso_hour:
+    mean_wh}}`` where mean_wh = mean power (W) over the hour == Wh (matches
+    coordinator._async_read_daily_actuals).
 
     Raises on connection/auth failure — the caller aborts (no measured energy
     means nothing to train against).
@@ -1017,7 +1039,11 @@ async def fetch_lts_hourly(
 
     out: dict[str, dict[str, float]] = {sid: {} for sid in statistic_ids}
     timeout = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_SECONDS)
-    async with session.ws_connect(ws_url, timeout=timeout) as ws:
+    # max_msg_size=0 lifts the client-side frame cap; chunking keeps each
+    # response small regardless (belt and suspenders against the server cap).
+    async with session.ws_connect(
+        ws_url, timeout=timeout, max_msg_size=0
+    ) as ws:
         # 1) auth_required -> auth -> auth_ok
         await ws.receive_json()  # auth_required
         await ws.send_json({"type": "auth", "access_token": token})
@@ -1025,22 +1051,26 @@ async def fetch_lts_hourly(
         if auth.get("type") != "auth_ok":
             raise RuntimeError(f"HA WebSocket auth failed: {auth}")
 
-        # 2) statistics_during_period
-        msg_id = 1
-        await ws.send_json(
-            {
-                "id": msg_id,
-                "type": "recorder/statistics_during_period",
-                "start_time": start_dt.isoformat(),
-                "end_time": end_dt.isoformat(),
-                "statistic_ids": statistic_ids,
-                "period": "hour",
-                "types": ["mean"],
-            }
-        )
-        result = await _await_ws_result(ws, msg_id)
+        # 2) statistics_during_period, one command per time window
+        msg_id = 0
+        for win_start, win_end in _lts_windows(
+            start_dt, end_dt, _LTS_WINDOW_DAYS
+        ):
+            msg_id += 1
+            await ws.send_json(
+                {
+                    "id": msg_id,
+                    "type": "recorder/statistics_during_period",
+                    "start_time": win_start.isoformat(),
+                    "end_time": win_end.isoformat(),
+                    "statistic_ids": statistic_ids,
+                    "period": "hour",
+                    "types": ["mean"],
+                }
+            )
+            result = await _await_ws_result(ws, msg_id)
+            _parse_lts_result(result, out)
 
-    _parse_lts_result(result, out)
     return out
 
 
