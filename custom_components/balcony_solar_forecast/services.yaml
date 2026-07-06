@@ -13,3 +13,87 @@ get_forecast:
       required: false
       selector:
         text:
+
+import_bootstrap:
+  name: Import learner bootstrap
+  description: >-
+    Ingest a bootstrap JSON produced offline by scripts/backfill.py to pre-seed
+    the day-ahead bias and shademap learner states before the first live
+    season. The payload is validated and clamped; an unknown schema version is
+    rejected and backfilled shademap bins are capped so live data overrides
+    them quickly.
+  fields:
+    entry_id:
+      name: Config entry
+      description: >-
+        Target config entry. Omit only if a single site is configured (the
+        service then applies to that one).
+      example: "1234567890abcdef"
+      required: false
+      selector:
+        text:
+    payload:
+      name: Bootstrap JSON
+      description: >-
+        The bootstrap object inline, either as a JSON object or a JSON string.
+        Provide this OR "path", not both.
+      required: false
+      example: '{"schema_version": 1, "bias_state": {}, "shademap_state": {}}'
+      selector:
+        object:
+    path:
+      name: Bootstrap file path
+      description: >-
+        Absolute path to a bootstrap JSON file readable by Home Assistant (must
+        be inside an allowed directory, e.g. /config). Provide this OR
+        "payload", not both.
+      required: false
+      example: "/config/balcony_bootstrap.json"
+      selector:
+        text:
+
+rollback_learners:
+  name: Roll back learner state
+  description: >-
+    Restore the day-ahead bias and shademap learner states from the nightly
+    rollback ring (SPEC §5). Restores state only — the per-layer enable
+    switches and any drift auto-disable stay untouched; re-enable a layer in
+    the integration options afterwards if needed.
+  fields:
+    entry_id:
+      name: Config entry
+      description: >-
+        Target config entry. Omit only if a single site is configured.
+      example: "1234567890abcdef"
+      required: false
+      selector:
+        text:
+    snapshots_back:
+      name: Snapshots back
+      description: >-
+        How many nightly snapshots to go back. 1 restores the newest snapshot
+        (last night's pre-training state), higher values go further back.
+      required: false
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 10
+          mode: box
+
+dump_shademap:
+  name: Dump shademap
+  description: >-
+    Return the learned shademap as a polar table (sun azimuth x elevation) per
+    measurement channel, for visual comparison against known obstructions
+    (SPEC §5). Read-only diagnostic; returns a response.
+  fields:
+    entry_id:
+      name: Config entry
+      description: >-
+        Restrict the dump to a single config entry. Omit to return every
+        configured site.
+      example: "1234567890abcdef"
+      required: false
+      selector:
+        text:

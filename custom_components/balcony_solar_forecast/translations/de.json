@@ -14,10 +14,51 @@
           "physics_fallback": "Physik-Rückfall",
           "unavailable": "Nicht verfügbar"
         }
+      },
+      "intraday_scalar": {"name": "Intraday-Korrekturfaktor"},
+      "drift_mae_corrected": {"name": "Drift-MAE (korrigiert)"},
+      "learner_status_fast": {
+        "name": "Status schneller Lerner",
+        "state": {
+          "active": "Aktiv",
+          "off": "Aus",
+          "disabled_by_drift": "Wegen Drift deaktiviert",
+          "frozen": "Eingefroren"
+        }
+      },
+      "learner_status_slow": {
+        "name": "Status Shademap-Lerner",
+        "state": {
+          "active": "Aktiv",
+          "off": "Aus",
+          "disabled_by_drift": "Wegen Drift deaktiviert",
+          "frozen": "Eingefroren"
+        }
+      },
+      "learner_status_day_ahead": {
+        "name": "Status Day-ahead-Bias",
+        "state": {
+          "active": "Aktiv",
+          "off": "Aus",
+          "disabled_by_drift": "Wegen Drift deaktiviert",
+          "frozen": "Eingefroren"
+        }
       }
     },
     "binary_sensor": {
-      "degraded": {"name": "Eingeschränkt"}
+      "degraded": {"name": "Eingeschränkt"},
+      "fast_learner_active": {"name": "Schneller Lerner aktiv"},
+      "slow_learner_active": {"name": "Shademap-Lerner aktiv"}
+    }
+  },
+  "issues": {
+    "fast_learner_auto_disabled": {
+      "title": "Schneller Lerner automatisch deaktiviert",
+      "description": "Der schnelle (Intraday-)Lerner war sieben Tage in Folge schlechter als die reine Physik und wurde zum Schutz der Prognose automatisch deaktiviert. Zum Wiederaktivieren \"Schneller Lerner (Intraday-Korrektur)\" in den Integrationsoptionen einmal aus- und wieder einschalten."
+    },
+    "slow_learner_auto_disabled": {
+      "title": "Shademap-Lerner automatisch deaktiviert",
+      "description": "Der Shademap-Lerner war sieben Tage in Folge schlechter als die reine Physik und wurde zum Schutz der Prognose automatisch deaktiviert. Zum Wiederaktivieren \"Shademap-Lerner (kanalweise Verschattungskarte)\" in den Integrationsoptionen einmal aus- und wieder einschalten."
     }
   },
   "services": {
@@ -28,6 +69,48 @@
         "entry_id": {
           "name": "Konfigurationseintrag",
           "description": "Beschränkt die Antwort auf einen einzelnen Konfigurationseintrag. Leer lassen, um alle Anlagen zurückzugeben."
+        }
+      }
+    },
+    "import_bootstrap": {
+      "name": "Lerner-Bootstrap importieren",
+      "description": "Importiert eine offline vom Backfill-Skript erzeugte Bootstrap-JSON, um die Day-ahead-Bias- und Shademap-Lernzustände vorab zu befüllen. Die Nutzdaten werden validiert und begrenzt; unbekannte Schemaversionen werden abgelehnt.",
+      "fields": {
+        "entry_id": {
+          "name": "Konfigurationseintrag",
+          "description": "Ziel-Konfigurationseintrag. Nur weglassen, wenn genau eine Anlage konfiguriert ist."
+        },
+        "payload": {
+          "name": "Bootstrap-JSON",
+          "description": "Das Bootstrap-Objekt direkt, als JSON-Objekt oder JSON-Zeichenkette. Entweder dieses oder einen Pfad angeben, nicht beides."
+        },
+        "path": {
+          "name": "Pfad zur Bootstrap-Datei",
+          "description": "Absoluter Pfad zu einer Bootstrap-JSON-Datei in einem erlaubten Verzeichnis (z. B. /config). Entweder diesen oder die Nutzdaten angeben, nicht beides."
+        }
+      }
+    },
+    "dump_shademap": {
+      "name": "Shademap ausgeben",
+      "description": "Gibt die gelernte Shademap als Polartabelle (Sonnenazimut x Elevation) je Kanal aus, zum visuellen Abgleich mit bekannten Hindernissen.",
+      "fields": {
+        "entry_id": {
+          "name": "Konfigurationseintrag",
+          "description": "Beschränkt die Ausgabe auf einen einzelnen Konfigurationseintrag. Leer lassen, um alle Anlagen zurückzugeben."
+        }
+      }
+    },
+    "rollback_learners": {
+      "name": "Lernzustand zurückrollen",
+      "description": "Stellt die Zustände von Day-ahead-Bias und Shademap aus dem nächtlichen Rollback-Ring wieder her. Die Aktivierungs-Schalter und Drift-Abschaltungen bleiben unberührt.",
+      "fields": {
+        "entry_id": {
+          "name": "Konfigurationseintrag",
+          "description": "Ziel-Konfigurationseintrag. Nur weglassen, wenn genau eine Anlage konfiguriert ist."
+        },
+        "snapshots_back": {
+          "name": "Snapshots zurück",
+          "description": "Wie viele nächtliche Snapshots zurückgegangen wird. 1 stellt den neuesten Snapshot wieder her (Zustand vor dem letzten Training)."
         }
       }
     }
@@ -81,13 +164,21 @@
     "step": {
       "init": {
         "title": "Balkon-Solar-Prognose bearbeiten",
-        "description": "Standort, Intervalle und die vollständige Standort-Konfiguration anpassen. Der Name bleibt nach der Einrichtung unveränderlich.",
+        "description": "Standort, Intervalle, die vollständige Standort-Konfiguration und die Lernschichten anpassen. Der Name bleibt nach der Einrichtung unveränderlich.",
         "data": {
           "latitude": "Breitengrad",
           "longitude": "Längengrad",
           "fetch_interval_seconds": "Abrufintervall Wetterdaten (Sekunden)",
           "recompute_interval_seconds": "Neuberechnungsintervall (Sekunden)",
-          "site": "Standort-Konfiguration (Ebenen, Horizont, WR-Gruppen)"
+          "site": "Standort-Konfiguration (Ebenen, Horizont, WR-Gruppen)",
+          "fast_learner_enabled": "Schneller Lerner (Intraday-Korrektur)",
+          "slow_learner_enabled": "Shademap-Lerner (kanalweise Verschattungskarte)",
+          "day_ahead_bias_enabled": "Day-ahead-Bias-Korrektur"
+        },
+        "data_description": {
+          "fast_learner_enabled": "Wendet eine kurzlebige Intraday-Korrektur im Clear-Sky-Index-Raum auf die nächsten Stunden an (rettet Nebelmorgen).",
+          "slow_learner_enabled": "Lernt über eine Saison die kanalweise Beam-Transmittanz je Sonnenstand (Verschattung, Bäume, Gebäudekante).",
+          "day_ahead_bias_enabled": "Wendet einen nächtlich trainierten multiplikativen Bias je Wolkenklasse und Tagesabschnitt an."
         }
       }
     },

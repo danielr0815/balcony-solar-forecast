@@ -5,10 +5,14 @@ Balkonkraftwerke mit mehreren Modulausrichtungen, starker
 Standortverschattung (Gelände, Bäume, Gebäude) und Mikrowechselrichtern
 mit Port-genauen Messwerten.
 
-**Status: v0.1.0 implementiert** (Phase 1 — reiner Physik-Motor, 1085
-Tests grün, pvlib-Golden-Vektoren, adversarial reviewed) — als Nächstes:
-Deploy + 14-Tage-Parallellauf gegen die 8-Entry-Baseline (Kill-Gate,
-SPEC §9). Die vollständige Spezifikation steht in
+**Status: v0.3.0** (v0.1.0 live deployed — Phase 1, reiner Physik-Motor im
+14-Tage-Parallellauf gegen die 8-Entry-Baseline; **v0.2.0 + v0.3.0 fertig
+implementiert** — Phase 2/3 mit beiden Lernschichten: schneller Intraday-/
+Day-ahead-Bias-Lerner und langsamer Shademap-Lerner, voll in den Motor
+verdrahtet, plus Drift-Monitor mit Auto-Abschaltung, Kollaps-Detektor,
+Rollback-Ring, nächtliche Stunden-Ist-Werte, Catch-up nach Ausfall und
+Previous-Runs-Backfill; alles geclamped, gegated und abschaltbar,
+SPEC §5–§9). Die vollständige Spezifikation steht in
 [docs/SPEC.md](docs/SPEC.md).
 
 ## Kernidee

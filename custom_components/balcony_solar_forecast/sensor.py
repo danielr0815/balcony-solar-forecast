@@ -53,12 +53,25 @@ from homeassistant.util import dt as dt_util
 from .const import (
     ATTR_WATTS,
     ATTR_WH_PERIOD,
+    DATA_KEY_DRIFT_MAE,
+    DATA_KEY_INTRADAY_SCALAR,
+    DATA_KEY_LEARNER_STATUS,
     DOMAIN,
     INTEGRATION_NAME,
     INTEGRATION_VERSION,
+    LEARNER_LAYER_DAY_AHEAD,
+    LEARNER_LAYER_FAST,
+    LEARNER_LAYER_SLOW,
+    LEARNER_STATUS_ACTIVE,
+    LEARNER_STATUS_DISABLED_BY_DRIFT,
+    LEARNER_STATUS_FROZEN,
+    LEARNER_STATUS_OFF,
+    LEARNER_STATUS_VALUES,
+    SENSOR_DRIFT_MAE_CORRECTED,
     SENSOR_ENERGY_D2,
     SENSOR_ENERGY_TODAY,
     SENSOR_ENERGY_TOMORROW,
+    SENSOR_INTRADAY_SCALAR,
     SENSOR_POWER_NOW,
     SERVICE_GET_FORECAST,
     STATUS_CACHED,
@@ -70,6 +83,25 @@ from .const import (
 # Diagnostic sensor keys (owned here; not part of the consumer contract).
 SENSOR_LAST_FETCH_AGE = "last_fetch_age_min"
 SENSOR_SOURCE_STATUS = "source_status"
+
+# Per-layer learner status values + layer names (SPEC §5) live in const now
+# (shared with the coordinator, which writes exactly these strings). Re-exported
+# here so the display code and its tests keep importing them from this module.
+__all__ = [
+    "LEARNER_STATUS_ACTIVE",
+    "LEARNER_STATUS_OFF",
+    "LEARNER_STATUS_DISABLED_BY_DRIFT",
+    "LEARNER_STATUS_FROZEN",
+    "LEARNER_STATUS_VALUES",
+    "LEARNER_LAYER_FAST",
+    "LEARNER_LAYER_SLOW",
+    "LEARNER_LAYER_DAY_AHEAD",
+]
+
+# Diagnostic sensor keys for the per-layer learner status enums.
+SENSOR_LEARNER_STATUS_FAST = "learner_status_fast"
+SENSOR_LEARNER_STATUS_SLOW = "learner_status_slow"
+SENSOR_LEARNER_STATUS_DAY_AHEAD = "learner_status_day_ahead"
 
 # Data-dict keys from the coordinator (see module docstring / _build_data).
 _KEY_STATUS = "status"
@@ -103,6 +135,20 @@ async def async_setup_entry(
         PowerNowSensor(coordinator),
         LastFetchAgeSensor(coordinator),
         SourceStatusSensor(coordinator),
+        # --- learning-layer diagnostics (v0.2.0 + v0.3.0, SPEC §5) ---
+        IntradayScalarSensor(coordinator),
+        DriftMaeCorrectedSensor(coordinator),
+        LearnerStatusSensor(
+            coordinator, SENSOR_LEARNER_STATUS_FAST, LEARNER_LAYER_FAST
+        ),
+        LearnerStatusSensor(
+            coordinator, SENSOR_LEARNER_STATUS_SLOW, LEARNER_LAYER_SLOW
+        ),
+        LearnerStatusSensor(
+            coordinator,
+            SENSOR_LEARNER_STATUS_DAY_AHEAD,
+            LEARNER_LAYER_DAY_AHEAD,
+        ),
     ]
     async_add_entities(entities)
 
@@ -338,6 +384,114 @@ class SourceStatusSensor(_DiagnosticSensor):
             # No fresh/cached/physics curve was issued this cycle.
             return STATUS_UNAVAILABLE
         return data.get(_KEY_STATUS)
+
+
+# ---------------------------------------------------------------------------
+# Learning-layer diagnostics (v0.2.0 + v0.3.0, SPEC §5, §9)
+# ---------------------------------------------------------------------------
+
+
+class IntradayScalarSensor(_DiagnosticSensor):
+    """The FAST learner's currently applied intraday clear-sky-index scalar.
+
+    Unitless multiplier in [INTRADAY_SCALAR_MIN, MAX]; 1.0 == no correction.
+    Transient (re-inits to 1.0 on restart, never persisted — SPEC §5), so it is
+    read straight from the coordinator's live ``self.data`` snapshot. Stays
+    available even during a degraded forecast so the operator can see the
+    learner is neutralised.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:tune-variant"
+
+    def __init__(self, coordinator: Any) -> None:
+        super().__init__(coordinator, SENSOR_INTRADAY_SCALAR)
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data or {}
+        value = data.get(DATA_KEY_INTRADAY_SCALAR)
+        return None if value is None else round(float(value), 3)
+
+
+class DriftMaeCorrectedSensor(_DiagnosticSensor):
+    """Rolling 7-day daylight MAE of the CORRECTED (served) curve (SPEC §5).
+
+    The drift monitor's headline number: mean absolute error of the learner-
+    corrected forecast against measured production over the trailing
+    DRIFT_WINDOW_DAYS. Wh unit. The paired raw-physics and baseline MAE ride
+    along as attributes so the operator can see at a glance whether the
+    learners are winning (corrected < raw) or losing (which auto-disables the
+    layer after DRIFT_LOSS_STREAK_DAYS).
+    """
+
+    # No device_class: an MAE is not an energy quantity, and ENERGY +
+    # MEASUREMENT is an invalid combination HA rejects at entity-add time
+    # (energy needs total/total_increasing). Keep the Wh unit + measurement
+    # state class like the other error-metric sensors (sensor:427).
+    _attr_native_unit_of_measurement = UnitOfEnergy.WATT_HOUR
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:chart-bell-curve-cumulative"
+
+    def __init__(self, coordinator: Any) -> None:
+        super().__init__(coordinator, SENSOR_DRIFT_MAE_CORRECTED)
+
+    def _mae(self) -> dict[str, Any]:
+        data = self.coordinator.data or {}
+        mae = data.get(DATA_KEY_DRIFT_MAE)
+        return mae if isinstance(mae, dict) else {}
+
+    @property
+    def native_value(self) -> float | None:
+        value = self._mae().get("corrected")
+        return None if value is None else round(float(value), 1)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        mae = self._mae()
+
+        def _r(key: str) -> float | None:
+            v = mae.get(key)
+            return None if v is None else round(float(v), 1)
+
+        return {
+            "raw_mae": _r("raw"),
+            "corrected_mae": _r("corrected"),
+            "baseline_mae": _r("baseline"),
+        }
+
+
+class LearnerStatusSensor(_DiagnosticSensor):
+    """Per-layer learner status ENUM (active / off / disabled_by_drift / frozen).
+
+    One instance per learner layer (fast intraday, slow shademap, day-ahead
+    bias). Reads ``self.data[DATA_KEY_LEARNER_STATUS][<layer>]`` — a string the
+    coordinator sets from the resolved kill switch + drift-disable flag +
+    collapse freeze (SPEC §5). Unknown/missing values report ``None`` (unknown)
+    rather than inventing a status. Always available so the operator can always
+    see why a layer is or is not correcting.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_icon = "mdi:brain"
+    _attr_options = list(LEARNER_STATUS_VALUES)
+
+    def __init__(self, coordinator: Any, key: str, layer: str) -> None:
+        super().__init__(coordinator, key)
+        self._layer = layer
+
+    @property
+    def native_value(self) -> str | None:
+        data = self.coordinator.data or {}
+        status_map = data.get(DATA_KEY_LEARNER_STATUS)
+        if not isinstance(status_map, dict):
+            return None
+        value = status_map.get(self._layer)
+        # Only advertise values we declared as ENUM options; anything else is
+        # treated as unknown so HA does not log an invalid-enum-state warning.
+        if value in LEARNER_STATUS_VALUES:
+            return value
+        return None
 
 
 # ---------------------------------------------------------------------------

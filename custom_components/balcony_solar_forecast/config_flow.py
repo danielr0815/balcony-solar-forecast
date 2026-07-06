@@ -15,7 +15,12 @@ sees it inline.
 
 The options flow edits the very same object (modern HA 2026 pattern: the
 framework supplies ``self.config_entry`` as a read-only property — we never
-assign it).
+assign it) and additionally exposes the three learner kill switches (fast
+learner / shademap learning / day-ahead bias — SPEC §5 "Kill-Switches je
+Lernschicht im Options-Flow"; all default ON per the 2026-07-06 operator
+decision to build v0.3 early). Turning a switch off writes ``False`` into the
+entry options; the coordinator resolves them via ``LearnerConfig`` from
+``{**entry.data, **entry.options}`` on the next reload.
 
 Azimuth here is the INTERNAL convention (0 = North, clockwise). The rany2 UI
 uses the same 0=N numbers; conversions to Open-Meteo / PVGIS conventions live
@@ -39,13 +44,19 @@ from homeassistant.helpers import selector
 
 from ._site_validation import SiteValidationError, validate_site
 from .const import (
+    CONF_DAY_AHEAD_BIAS_ENABLED,
+    CONF_FAST_LEARNER_ENABLED,
     CONF_FETCH_INTERVAL,
     CONF_LATITUDE,
     CONF_LONGITUDE,
     CONF_NAME,
     CONF_RECOMPUTE_INTERVAL,
     CONF_SITE,
+    CONF_SLOW_LEARNER_ENABLED,
+    DEFAULT_DAY_AHEAD_BIAS_ENABLED,
+    DEFAULT_FAST_LEARNER_ENABLED,
     DEFAULT_SITE,
+    DEFAULT_SLOW_LEARNER_ENABLED,
     DOMAIN,
     FETCH_INTERVAL_SECONDS,
     RECOMPUTE_INTERVAL_SECONDS,
@@ -84,6 +95,11 @@ def _site_selector() -> selector.Selector:
     return selector.ObjectSelector(selector.ObjectSelectorConfig())
 
 
+def _bool_selector() -> selector.Selector:
+    """A plain on/off toggle for a learner kill switch."""
+    return selector.BooleanSelector()
+
+
 def _user_schema(
     *,
     name: str,
@@ -93,11 +109,20 @@ def _user_schema(
     recompute_interval: int,
     site: dict[str, Any],
     include_name: bool = True,
+    include_learner_switches: bool = False,
+    fast_learner_enabled: bool = DEFAULT_FAST_LEARNER_ENABLED,
+    slow_learner_enabled: bool = DEFAULT_SLOW_LEARNER_ENABLED,
+    day_ahead_bias_enabled: bool = DEFAULT_DAY_AHEAD_BIAS_ENABLED,
 ) -> vol.Schema:
     """Schema for the user step / options step, pre-filled with defaults.
 
     ``include_name`` is False for the options step, where the name (and its
-    unique-id) is immutable after setup.
+    unique-id) is immutable after setup. ``include_learner_switches`` is True
+    for the options step only: the three per-layer learner kill switches
+    (SPEC §5) are runtime tunables, not first-setup fields, so the wizard stays
+    lean and the switches appear where the operator manages a live install.
+    Every switch is a plain boolean toggle (no NumberSelector, so the HA-2026
+    ``step >= 1e-3`` selector rule cannot bite here) and defaults ON.
     """
     fields: dict[Any, Any] = {}
     if include_name:
@@ -130,6 +155,20 @@ def _user_schema(
             vol.Required(CONF_SITE, default=site): _site_selector(),
         }
     )
+    if include_learner_switches:
+        fields.update(
+            {
+                vol.Required(
+                    CONF_FAST_LEARNER_ENABLED, default=fast_learner_enabled
+                ): _bool_selector(),
+                vol.Required(
+                    CONF_SLOW_LEARNER_ENABLED, default=slow_learner_enabled
+                ): _bool_selector(),
+                vol.Required(
+                    CONF_DAY_AHEAD_BIAS_ENABLED, default=day_ahead_bias_enabled
+                ): _bool_selector(),
+            }
+        )
     return vol.Schema(fields)
 
 
@@ -228,6 +267,9 @@ class BalconySolarForecastOptionsFlow(OptionsFlow):
                 site_dict[CONF_LONGITUDE] = lon
                 # Name/unique-id are fixed after setup; only editable fields
                 # are written to options (merged over entry.data downstream).
+                # The three learner kill switches (SPEC §5) round-trip as plain
+                # booleans; missing keys fall back to the shipped ON defaults so
+                # an older entry that predates them keeps both learners active.
                 data = {
                     CONF_LATITUDE: lat,
                     CONF_LONGITUDE: lon,
@@ -236,15 +278,36 @@ class BalconySolarForecastOptionsFlow(OptionsFlow):
                         user_input[CONF_RECOMPUTE_INTERVAL]
                     ),
                     CONF_SITE: site_dict,
+                    CONF_FAST_LEARNER_ENABLED: bool(
+                        user_input.get(
+                            CONF_FAST_LEARNER_ENABLED, DEFAULT_FAST_LEARNER_ENABLED
+                        )
+                    ),
+                    CONF_SLOW_LEARNER_ENABLED: bool(
+                        user_input.get(
+                            CONF_SLOW_LEARNER_ENABLED, DEFAULT_SLOW_LEARNER_ENABLED
+                        )
+                    ),
+                    CONF_DAY_AHEAD_BIAS_ENABLED: bool(
+                        user_input.get(
+                            CONF_DAY_AHEAD_BIAS_ENABLED,
+                            DEFAULT_DAY_AHEAD_BIAS_ENABLED,
+                        )
+                    ),
                 }
                 return self.async_create_entry(title="", data=data)
 
         merged = {**self.config_entry.data, **self.config_entry.options}
         defaults = _current_values(user_input, existing=merged)
-        # Name is immutable in options; omit it from the schema.
+        # Name is immutable in options; omit it from the schema. The learner
+        # kill switches only appear here (not in first setup).
         return self.async_show_form(
             step_id="init",
-            data_schema=_user_schema(**defaults, include_name=False),
+            data_schema=_user_schema(
+                **defaults,
+                include_name=False,
+                include_learner_switches=True,
+            ),
             errors=errors,
         )
 
@@ -280,6 +343,15 @@ def _current_values(
         else copy.deepcopy(DEFAULT_SITE)
     )
 
+    def _bool_default(key: str, fallback: bool) -> bool:
+        # Precedence mirrors the other fields: just-submitted edit > existing
+        # option > shipped default. ``existing`` already merges data+options.
+        if key in src:
+            return bool(src[key])
+        if existing is not None and key in existing:
+            return bool(existing[key])
+        return fallback
+
     return {
         "name": src.get(CONF_NAME, existing.get(CONF_NAME, "") if existing else ""),
         "latitude": src.get(CONF_LATITUDE, default_lat),
@@ -297,4 +369,13 @@ def _current_values(
             else RECOMPUTE_INTERVAL_SECONDS,
         ),
         "site": src.get(CONF_SITE, default_site),
+        "fast_learner_enabled": _bool_default(
+            CONF_FAST_LEARNER_ENABLED, DEFAULT_FAST_LEARNER_ENABLED
+        ),
+        "slow_learner_enabled": _bool_default(
+            CONF_SLOW_LEARNER_ENABLED, DEFAULT_SLOW_LEARNER_ENABLED
+        ),
+        "day_ahead_bias_enabled": _bool_default(
+            CONF_DAY_AHEAD_BIAS_ENABLED, DEFAULT_DAY_AHEAD_BIAS_ENABLED
+        ),
     }

@@ -16,7 +16,7 @@ from __future__ import annotations
 DOMAIN = "balcony_solar_forecast"
 
 INTEGRATION_NAME = "Balcony Solar Forecast"
-INTEGRATION_VERSION = "0.1.0"
+INTEGRATION_VERSION = "0.3.0"
 
 # --- Update behaviour (SPEC §4: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
@@ -275,3 +275,240 @@ DEFAULT_SITE = {
          CONF_GROUP_AC_LIMIT: 800.0},
     ],
 }
+
+
+# ===========================================================================
+# LEARNING CONTRACT (v0.2.0 + v0.3.0 — SPEC §5, §6, §7, §9, §13)
+# ---------------------------------------------------------------------------
+# Two learning layers, both numpy-free, both clamped/gated/disable-able and
+# never silently degrading (SPEC §5 Schutzmechanismen). The FAST learner
+# (core/bias.py) has an intraday clear-sky-index scalar + a nightly day-ahead
+# RLS bias per (cloud class x day part). The SLOW learner (core/shademap.py)
+# is a per-channel, per-(sun-az x sun-el x half-year) EMA of beam-referenced
+# transmittance that REPLACES the static horizon tau of the bin.
+#
+# Every key below is NEW. No existing key above is touched. All owners import
+# their tunables from here (single source of truth); no magic numbers in the
+# learner modules.
+# ===========================================================================
+
+# --- Kill switches / options-flow keys (SPEC §5: per-layer disable) --------
+# Both learners default ON (operator decision 2026-07-06: build v0.3 early).
+CONF_FAST_LEARNER_ENABLED = "fast_learner_enabled"
+CONF_SLOW_LEARNER_ENABLED = "slow_learner_enabled"
+CONF_DAY_AHEAD_BIAS_ENABLED = "day_ahead_bias_enabled"
+DEFAULT_FAST_LEARNER_ENABLED = True
+DEFAULT_SLOW_LEARNER_ENABLED = True
+DEFAULT_DAY_AHEAD_BIAS_ENABLED = True
+
+# --- FAST learner: intraday clear-sky-index scalar (SPEC §5) ---------------
+# s = exponentially decayed (tau ~ 90 min) ratio measured/forecast site energy
+# over a trailing window, computed in CLEAR-SKY-INDEX space, applied to the
+# next ~6 h with linear decay toward 1.0, clamped. Re-init to 1.0 on restart;
+# NEVER persisted.
+INTRADAY_TAU_MINUTES = 90.0            # EMA decay time constant
+INTRADAY_TRAILING_WINDOW_MINUTES = 240.0   # 2-4 h look-back for the ratio
+INTRADAY_MIN_TRAILING_MINUTES = 120.0      # need >=2 h of samples before acting
+INTRADAY_APPLY_HORIZON_MINUTES = 360.0     # forward-apply window (~6 h)
+INTRADAY_DECAY_TO_ONE = True               # linear decay toward 1.0 over horizon
+INTRADAY_SCALAR_MIN = 0.25
+INTRADAY_SCALAR_MAX = 2.5
+INTRADAY_NEUTRAL = 1.0
+# Only accumulate the intraday ratio where the modeled site energy is
+# non-trivial (avoid divide-by-near-zero at dawn/dusk / deep shade).
+INTRADAY_MIN_MODELED_WH = 5.0
+
+# --- FAST learner: day-ahead RLS bias per (cloud class x day part) ----------
+# One scalar recursive-least-squares state per cell; trained nightly from the
+# issued-vs-actuals rings; clamped.
+DAY_AHEAD_BIAS_MIN = 0.5
+DAY_AHEAD_BIAS_MAX = 1.5
+DAY_AHEAD_BIAS_NEUTRAL = 1.0
+RLS_FORGETTING_FACTOR = 0.98    # lambda: <1 discounts old days
+RLS_INIT_COVARIANCE = 1000.0    # P0: large => fast initial adaptation
+RLS_MIN_SAMPLES = 3             # cells with fewer trained days stay neutral
+
+# Cloud classes (SPEC §5/§6). "fog" = forecast visibility < FOG_VISIBILITY_M
+# OR (cloud_cover_low > FOG_CLOUD_LOW_PCT AND month in FOG_MONTHS).
+CLOUD_CLASS_CLEAR = "clear"
+CLOUD_CLASS_MIXED = "mixed"
+CLOUD_CLASS_OVERCAST = "overcast"
+CLOUD_CLASS_FOG = "fog"
+CLOUD_CLASSES = (
+    CLOUD_CLASS_CLEAR,
+    CLOUD_CLASS_MIXED,
+    CLOUD_CLASS_OVERCAST,
+    CLOUD_CLASS_FOG,
+)
+# Total-cloud-cover thresholds (%) separating clear / mixed / overcast when
+# the fog test does not fire. Mean of the three cloud layers.
+CLOUD_CLEAR_MAX_PCT = 25.0
+CLOUD_OVERCAST_MIN_PCT = 75.0
+# Fog-class parameters.
+FOG_VISIBILITY_M = 1000.0
+FOG_CLOUD_LOW_PCT = 85.0
+FOG_MONTHS = (10, 11, 12, 1, 2)   # Oct-Feb
+
+# Day parts (SPEC §5). Boundaries in local solar/clock hours (coordinator maps
+# a slot's local hour to a part). Midday brackets solar noon.
+DAY_PART_MORNING = "morning"
+DAY_PART_MIDDAY = "midday"
+DAY_PART_AFTERNOON = "afternoon"
+DAY_PARTS = (DAY_PART_MORNING, DAY_PART_MIDDAY, DAY_PART_AFTERNOON)
+DAY_PART_MORNING_END_HOUR = 10     # [dawn, 10:00) local
+DAY_PART_AFTERNOON_START_HOUR = 14  # [14:00, dusk) local; [10,14) = midday
+
+# --- SLOW learner: shademap (SPEC §5, §13) ---------------------------------
+# Per measurement channel (module/plane name), per bin
+# (sun azimuth SHADEMAP_AZ_BIN_DEG x elevation SHADEMAP_EL_BIN_DEG x half-year
+# before/after summer solstice), an EMA of beam-referenced transmittance
+# T = (P_measured - P_diffuse_modeled) / P_beam_modeled. Learned map REPLACES
+# the static horizon tau of the bin. Applied to beam+circumsolar only.
+SHADEMAP_EMA_ALPHA = 0.15
+SHADEMAP_AZ_BIN_DEG = 5.0          # sun-azimuth bin width (0=N internal)
+SHADEMAP_EL_BIN_DEG = 2.5          # sun-elevation bin width
+SHADEMAP_TAU_MIN = 0.0             # full occlusion representable (building wall)
+SHADEMAP_TAU_MAX = 1.1
+# Cold-start shrinkage toward the static horizon prior: w = n / (n + K).
+SHADEMAP_SHRINKAGE_K = 20.0
+# Half-year key: True == "after summer solstice" (solstice .. next solstice).
+# Northern-hemisphere summer solstice ~ Jun 21 (doy 172). A sample's half is
+# derived from its day-of-year relative to this anchor (SPEC §5: April laublos
+# vs. August belaubt must not alias).
+SUMMER_SOLSTICE_DOY = 172
+
+# Quasi-clear sample gate (SPEC §5): elevation-dependent k_c band, neighbour
+# slot stability, and a minimum modeled beam share of the plane's Wp.
+# k_c must fall inside [lo, hi]; the band tightens with elevation because
+# Haurwitz is crude at low sun (relax the LOW bound at low elevation).
+SHADEMAP_KC_LO_HIGH_SUN = 0.85     # k_c lower bound at/above the pivot elevation
+SHADEMAP_KC_LO_LOW_SUN = 0.65      # relaxed lower bound at very low sun
+SHADEMAP_KC_HI = 1.35              # upper bound (thin-cloud enhancement guard)
+SHADEMAP_KC_PIVOT_ELEV_DEG = 20.0  # elevation where the lo bound reaches HIGH_SUN
+SHADEMAP_NEIGHBOUR_STABILITY = 0.15  # max relative k_c change vs. adjacent slot
+SHADEMAP_MIN_BEAM_SHARE = 0.05     # modeled beam POA power must exceed 5% Wp
+
+# --- GUARDS (SPEC §5 all mandatory) ----------------------------------------
+# Label gates (trainer): frozen sensor detection.
+LABEL_FROZEN_STALE_SECONDS = 3 * 3600   # unchanged value + last_updated older => missing
+LABEL_MONOTONIC_TOLERANCE_WH = 1.0      # energy must be non-decreasing within tol
+# Nightly LTS frozen-channel gate: a channel whose hourly means repeat the SAME
+# non-zero value for at least this many consecutive daylight hours is a frozen
+# Hoymiles/DTU sensor holding a value (the operator's known failure mode) — the
+# whole day is discarded for both learners (SPEC §5 channel dropout).
+LABEL_FROZEN_MIN_REPEATS = 4
+# Channel dropout: if a channel is missing/frozen for the day, discard WHOLE
+# day for BOTH learners (SPEC §5).
+
+# Drift monitor: rolling daylight MAE corrected vs pure physics.
+DRIFT_WINDOW_DAYS = 7
+DRIFT_LOSS_STREAK_DAYS = 7        # consecutive losing days => auto-disable layer
+DRIFT_ROLLBACK_SNAPSHOTS = 3     # legacy alias; the live ring depth is LEARNER_SNAPSHOT_RING (must exceed the loss streak)
+# A "losing" day = corrected daylight MAE strictly worse than physics MAE by
+# more than this relative margin (avoids flapping on ties/noise).
+DRIFT_LOSS_MARGIN = 0.02
+
+# Collapse detector (SPEC §5): all channels ~0 while forecast high => snow /
+# total dropout => freeze BOTH learners for the day; only the clamped intraday
+# scalar reacts.
+COLLAPSE_MEASURED_MAX_FRAC = 0.05   # measured site energy < 5% of forecast
+COLLAPSE_FORECAST_MIN_WH = 500.0    # ...only when the forecast day is non-trivial
+
+# --- Storage schema v2 (SPEC §5/§9 attribution; §6 backfill) ----------------
+# Bump the INNER schema; the outer HA Store envelope (STORAGE_VERSION) stays 1.
+# store.py migrates v1 -> v2 in-place (v1 rings preserved, learner state added).
+STORAGE_DATA_VERSION_V2 = 2
+# New store keys (v2). Existing v1 keys (STORE_KEY_LAST_PAYLOAD /
+# _ISSUED_LOG / _ACTUALS_LOG) are unchanged and carried through migration.
+STORE_KEY_BIAS_STATE = "bias_state"            # BiasState (day-ahead RLS only; intraday NEVER persisted)
+STORE_KEY_SHADEMAP_STATE = "shademap_state"    # ShademapState (per-channel bins)
+STORE_KEY_LEARNER_SNAPSHOTS = "learner_snapshots"  # rollback ring: list[LearnerSnapshot]
+STORE_KEY_DRIFT_STATE = "drift_state"          # DriftState (rolling MAE + streaks + disable flags)
+STORE_KEY_HOURLY_ACTUALS = "hourly_actuals_log"  # {iso_date: {channel: {iso_hour: wh}}}
+# Per-day training idempotence markers (verify finding 2026-07-06): the
+# restart-time catch-up re-sweeps the last processed day, and the RLS /
+# drift-streak updates are NOT internally idempotent — without a persisted
+# marker every HA restart would re-train the same day (double-counted RLS
+# samples, double-incremented loss streaks -> spurious auto-disable).
+STORE_KEY_TRAINED_DAYS = "trained_days"        # sorted list[iso_date]
+TRAINED_DAYS_RING = 120
+# Rollback ring depth. Must exceed DRIFT_LOSS_STREAK_DAYS so at least one
+# pre-streak snapshot survives when auto-disable fires (a ring == the streak
+# length would only ever hold poisoned mid-streak states — the exact failure
+# the rollback ring must avoid).
+LEARNER_SNAPSHOT_RING = 10
+# Per-channel hourly actuals ring is far heavier (per-hour, per-module) than
+# the daily rings; keep a short window so the eMMC-friendly store stays small.
+HOURLY_ACTUALS_RING_DAYS = 14
+# Nightly catch-up: on start (and after the first refresh) run the idempotent
+# nightly job logic for any missed local day, bounded to this many days back.
+NIGHTLY_CATCHUP_MAX_DAYS = 3
+# Measured-side quasi-clear gate: a candidate training day must have measured
+# site energy at least this fraction of the modeled forecast, otherwise the
+# forecast wrongly called the day clear and the sample is pure weather error
+# (would darken the geometric shademap). SPEC §5 label gate.
+SHADEMAP_MEASURED_CLEAR_MIN_FRAC = 0.8
+
+# --- New services (SPEC §5 diagnose, §6 backfill) --------------------------
+SERVICE_IMPORT_BOOTSTRAP = "import_bootstrap"   # ingest scripts/backfill.py JSON
+SERVICE_DUMP_SHADEMAP = "dump_shademap"         # polar-table diagnostic export
+SERVICE_ROLLBACK_LEARNERS = "rollback_learners"  # restore learner state from the ring
+
+# --- Bootstrap JSON schema (SPEC §6; scripts/backfill.py <-> store) ---------
+# The import service validates + clamps and REJECTS unknown schema versions.
+BOOTSTRAP_SCHEMA_VERSION = 1
+BOOTSTRAP_KEY_SCHEMA = "schema_version"
+BOOTSTRAP_KEY_GENERATED_AT = "generated_at"     # iso utc
+BOOTSTRAP_KEY_SITE_SIGNATURE = "site_signature" # lat/lon+plane-name digest sanity check
+BOOTSTRAP_KEY_BIAS = "bias_state"               # day-ahead RLS cells
+BOOTSTRAP_KEY_SHADEMAP = "shademap_state"       # per-channel bins
+# Backfill n-credit cap: hourly-smeared backfilled bins are less trustworthy,
+# so their initial EMA sample count is capped so live 15-min data overrides
+# quickly (SPEC §6).
+BOOTSTRAP_MAX_BIN_N = 5
+
+# --- Attribution / diagnostics (operator decision 2026-07-06, SPEC §9) ------
+# The engine computes BOTH curves each cycle; the nightly issued snapshot v2
+# stores hourly values of both plus per-plane modeled beam/diffuse/ghi/kc so
+# the shademap can be trained from hourly LTS. Diagnostics expose daily MAE of
+# raw vs corrected vs baseline.
+CORRECTION_SOURCE_NONE = "none"          # raw physics served (learner off/frozen)
+CORRECTION_SOURCE_INTRADAY = "intraday"  # intraday scalar applied
+CORRECTION_SOURCE_SHADEMAP = "shademap"  # shademap applied
+CORRECTION_SOURCE_BOTH = "both"
+
+# Coordinator <-> platform contract additions (self.data keys, v0.2/v0.3):
+DATA_KEY_RAW_HOURLY_WH = "raw_hourly_wh"          # {iso_hour: Wh} pure physics
+DATA_KEY_CORRECTED_HOURLY_WH = "corrected_hourly_wh"  # {iso_hour: Wh} served curve
+DATA_KEY_INTRADAY_SCALAR = "intraday_scalar"      # current applied scalar
+DATA_KEY_LEARNER_STATUS = "learner_status"        # dict: enabled/frozen/disabled per layer
+DATA_KEY_DRIFT_MAE = "drift_mae"                  # dict: {raw, corrected, baseline} rolling MAE
+DATA_KEY_CORRECTION_SOURCE = "correction_source"  # one of CORRECTION_SOURCE_*
+
+# --- New diagnostic entities (SPEC §8) -------------------------------------
+SENSOR_INTRADAY_SCALAR = "intraday_scalar"
+SENSOR_DRIFT_MAE_CORRECTED = "drift_mae_corrected"
+BINARY_SENSOR_FAST_LEARNER = "fast_learner_active"
+BINARY_SENSOR_SLOW_LEARNER = "slow_learner_active"
+
+# --- Per-layer learner status strings (SPEC §5) ----------------------------
+# The coordinator writes exactly these into DATA_KEY_LEARNER_STATUS[<layer>]
+# ("fast" / "slow" / "day_ahead"); the LearnerStatusSensor / LearnerActiveSensor
+# read them back. sensor.py re-exports these names for its own display code.
+LEARNER_LAYER_FAST = "fast"
+LEARNER_LAYER_SLOW = "slow"
+LEARNER_LAYER_DAY_AHEAD = "day_ahead"
+LEARNER_STATUS_ACTIVE = "active"                 # enabled and shaping the curve
+LEARNER_STATUS_OFF = "off"                        # user kill switch off
+LEARNER_STATUS_DISABLED_BY_DRIFT = "disabled_by_drift"  # drift monitor auto-off
+LEARNER_STATUS_FROZEN = "frozen"                  # collapse detector froze it today
+LEARNER_STATUS_VALUES = (
+    LEARNER_STATUS_ACTIVE,
+    LEARNER_STATUS_OFF,
+    LEARNER_STATUS_DISABLED_BY_DRIFT,
+    LEARNER_STATUS_FROZEN,
+)
+
+# --- Repair issue ids (SPEC §5/§7) -----------------------------------------
+ISSUE_FAST_LEARNER_DISABLED = "fast_learner_auto_disabled"
+ISSUE_SLOW_LEARNER_DISABLED = "slow_learner_auto_disabled"

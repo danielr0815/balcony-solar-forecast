@@ -10,16 +10,26 @@ from __future__ import annotations
 
 from .clearsky import clear_sky_index, haurwitz_ghi
 from .electrical import clamp_groups, dc_power
-from .engine import compute_forecast
+from .engine import LearnerHooks, compute_forecast
 from .horizon import interp_elevation, sky_view_factor, transmittance_at
 from .solpos import sun_position
 from .transpose import hay_davies_poa
 from .types import (
+    BiasCell,
+    BiasState,
+    DriftState,
     ForecastResult,
     HorizonRow,
     InverterGroup,
+    IssuedSnapshot,
+    LearnerConfig,
+    LearnerSnapshot,
     PlaneConfig,
+    PlaneHourlyModeled,
     PlaneResult,
+    PlaneSlotBreakdown,
+    ShademapBin,
+    ShademapState,
     SiteConfig,
     WeatherSeries,
     WeatherSlot,
@@ -35,6 +45,17 @@ __all__ = [
     "WeatherSeries",
     "PlaneResult",
     "ForecastResult",
+    # learning contract types (v0.2.0 + v0.3.0)
+    "LearnerConfig",
+    "PlaneSlotBreakdown",
+    "BiasCell",
+    "BiasState",
+    "ShademapBin",
+    "ShademapState",
+    "DriftState",
+    "LearnerSnapshot",
+    "IssuedSnapshot",
+    "PlaneHourlyModeled",
     # solar position
     "sun_position",
     # clear sky
@@ -51,4 +72,5 @@ __all__ = [
     "clamp_groups",
     # engine
     "compute_forecast",
+    "LearnerHooks",
 ]

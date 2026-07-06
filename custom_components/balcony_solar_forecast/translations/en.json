@@ -14,10 +14,51 @@
           "physics_fallback": "Physics fallback",
           "unavailable": "Unavailable"
         }
+      },
+      "intraday_scalar": {"name": "Intraday correction scalar"},
+      "drift_mae_corrected": {"name": "Drift MAE (corrected)"},
+      "learner_status_fast": {
+        "name": "Fast learner status",
+        "state": {
+          "active": "Active",
+          "off": "Off",
+          "disabled_by_drift": "Disabled by drift",
+          "frozen": "Frozen"
+        }
+      },
+      "learner_status_slow": {
+        "name": "Shademap learner status",
+        "state": {
+          "active": "Active",
+          "off": "Off",
+          "disabled_by_drift": "Disabled by drift",
+          "frozen": "Frozen"
+        }
+      },
+      "learner_status_day_ahead": {
+        "name": "Day-ahead bias status",
+        "state": {
+          "active": "Active",
+          "off": "Off",
+          "disabled_by_drift": "Disabled by drift",
+          "frozen": "Frozen"
+        }
       }
     },
     "binary_sensor": {
-      "degraded": {"name": "Degraded"}
+      "degraded": {"name": "Degraded"},
+      "fast_learner_active": {"name": "Fast learner active"},
+      "slow_learner_active": {"name": "Shademap learner active"}
+    }
+  },
+  "issues": {
+    "fast_learner_auto_disabled": {
+      "title": "Fast learner auto-disabled",
+      "description": "The fast (intraday) learner lost to pure physics for seven days in a row and was automatically disabled to protect the forecast. To re-enable it, toggle \"Fast learner (intraday correction)\" off and then on again in the integration options."
+    },
+    "slow_learner_auto_disabled": {
+      "title": "Shademap learner auto-disabled",
+      "description": "The shademap (slow) learner lost to pure physics for seven days in a row and was automatically disabled to protect the forecast. To re-enable it, toggle \"Shademap learner (per-channel shade map)\" off and then on again in the integration options."
     }
   },
   "services": {
@@ -28,6 +69,48 @@
         "entry_id": {
           "name": "Config entry",
           "description": "Restrict the response to a single config entry. Omit to return every configured site."
+        }
+      }
+    },
+    "import_bootstrap": {
+      "name": "Import learner bootstrap",
+      "description": "Ingest a bootstrap JSON produced offline by the backfill script to pre-seed the day-ahead bias and shademap learner states. The payload is validated and clamped; an unknown schema version is rejected.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "Target config entry. Omit only if a single site is configured."
+        },
+        "payload": {
+          "name": "Bootstrap JSON",
+          "description": "The bootstrap object inline, as a JSON object or a JSON string. Provide this or a path, not both."
+        },
+        "path": {
+          "name": "Bootstrap file path",
+          "description": "Absolute path to a bootstrap JSON file inside an allowed directory (e.g. /config). Provide this or the payload, not both."
+        }
+      }
+    },
+    "dump_shademap": {
+      "name": "Dump shademap",
+      "description": "Return the learned shademap as a polar table (sun azimuth x elevation) per channel, for visual comparison against known obstructions.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "Restrict the dump to a single config entry. Omit to return every configured site."
+        }
+      }
+    },
+    "rollback_learners": {
+      "name": "Roll back learner state",
+      "description": "Restore the day-ahead bias and shademap learner states from the nightly rollback ring. Enable switches and drift auto-disable flags stay untouched.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "Target config entry. Omit only if a single site is configured."
+        },
+        "snapshots_back": {
+          "name": "Snapshots back",
+          "description": "How many nightly snapshots to go back. 1 restores the newest snapshot (last night's pre-training state)."
         }
       }
     }
@@ -81,13 +164,21 @@
     "step": {
       "init": {
         "title": "Edit Balcony Solar Forecast",
-        "description": "Adjust the location, intervals and the full site configuration. The name is immutable after setup.",
+        "description": "Adjust the location, intervals, the full site configuration and the learning layers. The name is immutable after setup.",
         "data": {
           "latitude": "Latitude",
           "longitude": "Longitude",
           "fetch_interval_seconds": "Weather fetch interval (seconds)",
           "recompute_interval_seconds": "Recompute interval (seconds)",
-          "site": "Site configuration (planes, horizon, inverter groups)"
+          "site": "Site configuration (planes, horizon, inverter groups)",
+          "fast_learner_enabled": "Fast learner (intraday correction)",
+          "slow_learner_enabled": "Shademap learner (per-channel shade map)",
+          "day_ahead_bias_enabled": "Day-ahead bias correction"
+        },
+        "data_description": {
+          "fast_learner_enabled": "Applies a short-lived intraday clear-sky-index correction to the next few hours (recovers from fog mornings).",
+          "slow_learner_enabled": "Learns per-channel beam transmittance by sun position over a season (shade, trees, building edge).",
+          "day_ahead_bias_enabled": "Applies a nightly-trained multiplicative bias per cloud class and day part."
         }
       }
     },

@@ -15,6 +15,7 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from ._services import async_register_services, async_remove_services
 from .const import DOMAIN, SERVICE_GET_FORECAST
 from .coordinator import BalconySolarCoordinator
 from .fetcher import OpenMeteoFetcher
@@ -52,7 +53,14 @@ async def async_setup_entry(
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    # Integration-wide learner services (import_bootstrap / dump_shademap).
+    # Idempotent: registered once, shared across entries (SPEC §5/§6).
+    async_register_services(hass)
+
     coordinator.async_start_nightly_job()
+
+    # Catch up any nightly job missed while HA was down (idempotent/date-keyed).
+    hass.async_create_task(coordinator.async_startup_catchup())
 
     # Flush the Store on HA stop so a hard shutdown keeps the last-good cache.
     entry.async_on_unload(
@@ -84,6 +92,9 @@ async def async_unload_entry(
             # entry unloads so it does not linger returning empty results.
             if hass.services.has_service(DOMAIN, SERVICE_GET_FORECAST):
                 hass.services.async_remove(DOMAIN, SERVICE_GET_FORECAST)
+            # Same lifecycle for the learner services (import_bootstrap /
+            # dump_shademap), registered from async_setup_entry.
+            async_remove_services(hass)
     return unload_ok
 
 

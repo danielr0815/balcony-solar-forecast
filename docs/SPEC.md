@@ -1,7 +1,8 @@
 # Spezifikation: Balcony Solar Forecast — Mehrebenen-PV-Prognose mit Selbstlernen
 
-> Status: **Betreiber-Antworten eingearbeitet, Phase 0 ausgeführt —
-> bereit zur Implementierung v0.1.0** (2026-07-05)
+> Status: **v0.1.0 live (2026-07-06, Parallellauf läuft); v0.2.0 + v0.3.0
+> implementiert & adversarial verifiziert (2026-07-06, Deploy ausstehend)**
+> — Lernschichten auf Betreiber-Entscheid vorgezogen, siehe D-P10.
 > Gründungsdokument des Projekts `balcony_solar_forecast` (eigenständige
 > HA-Custom-Integration, danielr0815/balcony-solar-forecast). Synthese aus
 > drei unabhängigen Designentwürfen (Compose / Physik-Motor / ML-first) +
@@ -256,8 +257,8 @@ Fossibot-Verhalten).
 |---|---|---|---|
 | **0** | — (nur Konfig) | **✅ AUSGEFÜHRT 2026-07-05** (Variante „Einzelplatten" per B12): **8 separate rany2-Entries** „PV Modul 1…8" (je 1 Modul; Azimut in der HA-UI in **0=N**: 25/115/205 — der Koordinator rechnet intern −180, siehe Anhang A!; Neigung 70/80; Wp 370/430; η 0,96; inverter_power = Wp; ohne Horizont — Dateizugriff auf HAOS nicht verfügbar, Horizont kommt im Motor) + **4 Summen-Template-Sensoren** `sensor.pv_prognose_{heute,morgen,uebermorgen,leistung_jetzt}_alle_module`. Erste Werte plausibel (heute 6,79 kWh vs. 3,50 alt). Alt-Entry „Home-LA" (1600 Wp) läuft unverändert weiter und speist vorerst battery_manager. Das 8-Entry-Ensemble = **Baseline** | Plausibilität an 1 klaren Tag (Anhang-A-Checkliste), dann Konsumenten umhängen |
 | **1** | v0.1.0 | Projekt-Gerüst (Config Flow: Standort, N Ebenen, Horizonttabellen-Import, WR-Gruppen, Mess-Entitäten; HACS-Struktur) + Motor `core/` (Schritte 1–5, 7 — reine Physik, ohne Lernen) + Sensoren/Service/Energy-Hook + **Forecast-as-issued-Logger + Ist-Logger ab Tag 1** + Golden-Tests gegen offline erzeugte **pvlib-Referenzvektoren** (alle 6 Ebenen, Tiefstand 2–10°, Konventionsgrenzen) als Merge-Blocker; 2 Wochen Parallellauf | **Kill-Gate** (B9-gewichtet): 14-Tage-Parallellauf, **Tages-kWh-MAE ≥ 10 % unter dem 8-Entry-Baseline-Ensemble** (Primärmetrik); Taglicht-Stunden-MAE als Zweitmetrik berichtet — sonst Stopp, Baseline behalten |
-| **2** | v0.2.0 | Schneller Lerner + Degradationsleiter + Drift-Monitor + Previous-Runs-Backfill | 14 Tage: nächste-6-h-MAE ≥ 5 % unter Phase 1, stratifiziert berichtet (klar/bewölkt/Nebel) |
-| **3** | v0.3.0 | Langsamer Lerner (Shademap) — **explizit bedingt** auf stratifizierte Phase-1/2-Auswertung („nicht aus Momentum bauen") | 14 klare Tage: Klartag-Stunden-MAE ≥ 10 % unter Phase 2; Polarkarte ≙ bekannten Hindernissen |
+| **2** | v0.2.0 | **✅ IMPLEMENTIERT 2026-07-06** (mit Phase 3 zusammen, D-P10): Intraday-Lerner (k_c-Raum, τ≈90 min, Clamp [0,25…2,5], nie persistiert) + Day-ahead-RLS je (Wolkenklasse × Tagesabschnitt) + Drift-Monitor (Auto-Abschaltung + Repair-Issue + **Auto-Restore aus dem Rollback-Ring**) + Kollaps-Detektor + `scripts/backfill.py` (Previous-Runs + LTS via HA-WS) + Services `import_bootstrap`/`dump_shademap`/`rollback_learners` | Gates werden im Parallellauf **nachträglich** ausgewertet: 14 Tage, nächste-6-h-MAE ≥ 5 % unter reiner Physik, stratifiziert (klar/bewölkt/Nebel) |
+| **3** | v0.3.0 | **✅ IMPLEMENTIERT 2026-07-06** (D-P10): Shademap-Lerner — beam-referenzierte Transmittanz je (Kanal × Sonnenaz. 5° × El. 2,5° × Halbjahr), Clear-Sky-Gate elevationsabhängig, Shrinkage w=n/(n+20) mit statischem Horizont-Prior, Clamp [0…1,1], trainiert gegen **ungegatete** Beam-Referenz (sonst Selbstreferenz → √T-Fixpunkt) | dito nachträglich: 14 klare Tage, Klartag-Stunden-MAE ≥ 10 % unter reiner Physik; Polarkarte (`dump_shademap`) ≙ bekannten Hindernissen |
 | **4** | v0.4.0 (opt.) | P10/P50/P90 im Service/Attributen | 80-%-Band: 70–90 % gemessene Abdeckung |
 
 Aufwandsschätzung (Jury-korrigiert, ×2 auf Entwurfsschätzung): Phase 0
@@ -301,6 +302,18 @@ dort hilft v. a. Intraday + breite Quantile).
 - **D-P9** Generik: Ebenen, Horizonte, WR-Gruppen, Mess-Entitäten frei
   konfigurierbar; das Betreiber-Setup ist Referenzbeispiel, kein
   Hardcoding.
+- **D-P10** (Betreiber, 2026-07-06): v0.2 + v0.3 **gemeinsam vorgezogen**
+  gebaut statt sequenziell nach Gate-Auswertung. Die Gate-Logik bleibt
+  erhalten, weil die **Attribution** konstruktiv gesichert ist: der
+  nächtliche Issued-Snapshot speichert **beide** Stundenkurven (rohe
+  Physik UND korrigiert) — der Parallellauf kann Physik- und Lernbeitrag
+  getrennt bewerten. Absicherung: Shrinkage-Cold-Start (Shademap wirkt
+  anfangs ≈ 0), Drift-Monitor mit Auto-Abschaltung + **Auto-Restore des
+  Pre-Streak-Zustands aus dem Rollback-Ring**, Kill-Switch je Schicht,
+  Service `rollback_learners`, **Tages-Idempotenzmarker** im Store (ein
+  Neustart-Catch-up darf denselben Tag nicht doppelt trainieren —
+  Verify-Befund 2026-07-06). Prozess: Fable plant/reviewt/verifiziert,
+  Opus implementiert; Kritisch-Fixes nach Fable-Spezifikation.
 
 ## 12. Betreiber-Antworten (2026-07-05 — alle 12 beantwortet)
 
