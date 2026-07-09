@@ -23,7 +23,12 @@ from .store import ForecastStore
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.SENSOR]
+PLATFORMS: list[Platform] = [
+    Platform.BINARY_SENSOR,
+    Platform.DATE,
+    Platform.SELECT,
+    Platform.SENSOR,
+]
 
 type BalconySolarConfigEntry = ConfigEntry[BalconySolarCoordinator]
 

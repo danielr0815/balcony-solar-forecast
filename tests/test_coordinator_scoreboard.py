@@ -15,13 +15,12 @@ package), so HA must be installed; the whole module is skipped otherwise.
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 import pytest
 
 pytest.importorskip("homeassistant")
 
-from custom_components.balcony_solar_forecast import coordinator as coord_mod  # noqa: E402
 from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     CLOUD_CLASS_CLEAR,
     CLOUD_CLASS_OVERCAST,
@@ -38,9 +37,6 @@ from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     ScoreboardState,
     SiteConfig,
 )
-
-UTC = timezone.utc
-
 
 # ---------------------------------------------------------------------------
 # Fakes

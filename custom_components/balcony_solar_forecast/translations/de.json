@@ -48,13 +48,20 @@
       "hourly_mae": {"name": "Prognose Stunden-Fehler"},
       "vs_best_baseline_pct": {"name": "Prognose vs. beste Baseline"},
       "energy_production_today_p10": {"name": "Energieertrag heute (P10)"},
-      "energy_production_today_p90": {"name": "Energieertrag heute (P90)"}
+      "energy_production_today_p90": {"name": "Energieertrag heute (P90)"},
+      "shade_profile": {"name": "Verschattungsprofil"}
     },
     "binary_sensor": {
       "degraded": {"name": "Eingeschränkt"},
       "fast_learner_active": {"name": "Schneller Lerner aktiv"},
       "slow_learner_active": {"name": "Shademap-Lerner aktiv"},
       "kill_gate_passed": {"name": "Kill-Gate bestanden"}
+    },
+    "select": {
+      "shade_profile_module": {"name": "Verschattungsprofil Modul"}
+    },
+    "date": {
+      "shade_profile_date": {"name": "Verschattungsprofil Datum"}
     }
   },
   "issues": {

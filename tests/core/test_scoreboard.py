@@ -13,7 +13,6 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from balcony_solar_forecast.const import (
     CLOUD_CLASS_CLEAR,
     CLOUD_CLASS_MIXED,
@@ -26,7 +25,6 @@ from balcony_solar_forecast.core.types import (
     DayScore,
     ScoreboardState,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -20,10 +20,9 @@ import pytest
 ha = pytest.importorskip("homeassistant")
 
 import voluptuous_serialize  # noqa: E402  (ships with homeassistant)
-from homeassistant.helpers import config_validation as cv  # noqa: E402
-
 from balcony_solar_forecast.config_flow import _user_schema  # noqa: E402
 from balcony_solar_forecast.const import DEFAULT_SITE  # noqa: E402
+from homeassistant.helpers import config_validation as cv  # noqa: E402
 
 
 def _build_schema(include_name: bool = True):

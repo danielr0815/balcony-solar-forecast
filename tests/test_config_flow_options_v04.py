@@ -20,8 +20,6 @@ pytest.importorskip("homeassistant")
 pytest.importorskip("voluptuous")
 
 import voluptuous_serialize  # noqa: E402
-from homeassistant.helpers import config_validation as cv  # noqa: E402
-
 from balcony_solar_forecast.config_flow import (  # noqa: E402
     BalconySolarForecastOptionsFlow,
     _current_values,
@@ -39,6 +37,7 @@ from balcony_solar_forecast.const import (  # noqa: E402
     FETCH_INTERVAL_SECONDS,
     RECOMPUTE_INTERVAL_SECONDS,
 )
+from homeassistant.helpers import config_validation as cv  # noqa: E402
 
 
 def _schema(*, include_learner_switches: bool, **overrides):

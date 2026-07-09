@@ -48,13 +48,20 @@
       "hourly_mae": {"name": "Hourly MAE"},
       "vs_best_baseline_pct": {"name": "Vs best baseline pct"},
       "energy_production_today_p10": {"name": "Energy production today P10"},
-      "energy_production_today_p90": {"name": "Energy production today P90"}
+      "energy_production_today_p90": {"name": "Energy production today P90"},
+      "shade_profile": {"name": "Shade profile"}
     },
     "binary_sensor": {
       "degraded": {"name": "Degraded"},
       "fast_learner_active": {"name": "Fast learner active"},
       "slow_learner_active": {"name": "Shademap learner active"},
       "kill_gate_passed": {"name": "Kill-gate passed"}
+    },
+    "select": {
+      "shade_profile_module": {"name": "Shade profile module"}
+    },
+    "date": {
+      "shade_profile_date": {"name": "Shade profile date"}
     }
   },
   "issues": {

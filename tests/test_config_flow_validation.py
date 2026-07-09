@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from balcony_solar_forecast._site_validation import (
     SiteValidationError,
     validate_site,

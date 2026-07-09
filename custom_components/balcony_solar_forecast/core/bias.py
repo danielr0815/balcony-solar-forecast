@@ -72,7 +72,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from ..const import (
     CLOUD_CLASS_CLEAR,
@@ -102,7 +102,6 @@ from ..const import (
     INTRADAY_TRAILING_WINDOW_MINUTES,
     RLS_FORGETTING_FACTOR,
     RLS_INIT_COVARIANCE,
-    RLS_MIN_SAMPLES,
 )
 from .types import BiasCell, BiasState
 
@@ -188,7 +187,7 @@ class DayAheadSample:
 
 
 def compute_intraday_scalar(
-    samples: list["IntradaySample"],
+    samples: list[IntradaySample],
     *,
     now: datetime,
 ) -> float:
@@ -375,7 +374,7 @@ def _parse_iso_hour(key: str) -> datetime | None:
     except ValueError:
         return None
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -489,7 +488,7 @@ def _rls_step(cell: BiasCell, modeled_wh: float, measured_wh: float) -> BiasCell
 
 def train_day_ahead_bias(
     state: BiasState,
-    samples: list["DayAheadSample"],
+    samples: list[DayAheadSample],
 ) -> BiasState:
     """Nightly RLS update of the day-ahead bias cells (SPEC §5).
 

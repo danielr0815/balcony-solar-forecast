@@ -16,7 +16,7 @@ from __future__ import annotations
 DOMAIN = "balcony_solar_forecast"
 
 INTEGRATION_NAME = "Balcony Solar Forecast"
-INTEGRATION_VERSION = "0.4.0"
+INTEGRATION_VERSION = "0.5.0"
 
 # --- Update behaviour (SPEC §4: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
@@ -125,6 +125,14 @@ SENSOR_ENERGY_TOMORROW = "energy_production_tomorrow"
 SENSOR_ENERGY_D2 = "energy_production_d2"
 SENSOR_POWER_NOW = "power_production_now"
 BINARY_SENSOR_DEGRADED = "degraded"
+
+# --- Shade-profile visualisation entities (sun path vs learned shade) -------
+# A per-date sun-path + learned-shade diagram (SPEC §5): the sensor exposes the
+# curve arrays as attributes; a `select` picks the module/plane and a `date`
+# picks the day to visualise. See core/shadeprofile.py + docs/DASHBOARD.md.
+SENSOR_SHADE_PROFILE = "shade_profile"
+SELECT_SHADE_PROFILE_MODULE = "shade_profile_module"
+DATE_SHADE_PROFILE_DATE = "shade_profile_date"
 
 # --- Attribute names (curve dicts; excluded from recorder) ---
 ATTR_WATTS = "watts"  # {iso_utc: W} 15-min instantaneous power
@@ -681,3 +689,27 @@ DATA_KEY_KILL_GATE_PASSED = "kill_gate_passed"    # bool | None (None == not eno
 FORECAST_RESP_KEY_P10 = "p10"
 FORECAST_RESP_KEY_P50 = "p50"
 FORECAST_RESP_KEY_P90 = "p90"
+
+# --- Shade-profile visualisation tunables (SPEC §5) ------------------------
+# The sun-path-vs-learned-shade diagram (core/shadeprofile.py). The sun path is
+# sampled over the visualised local day at SHADE_PROFILE_STEP_MINUTES; the two
+# horizon lines (static config horizon + learned shade horizon) are sampled on a
+# fixed azimuth grid at SHADE_PROFILE_AZ_STEP_DEG over the day's daylight azimuth
+# span. The learned shade horizon at an azimuth is the elevation below which the
+# effective (gated + learner-blended) beam transmittance stays under
+# SHADE_PROFILE_TAU_THRESHOLD, located by scanning elevation in
+# SHADE_PROFILE_EL_SCAN_DEG steps. All pure geometry/lookup — no HA, no weather.
+SHADE_PROFILE_STEP_MINUTES = 5     # sun-path sampling cadence over the local day
+SHADE_PROFILE_AZ_STEP_DEG = 1.0    # azimuth grid step for the horizon lines
+SHADE_PROFILE_TAU_THRESHOLD = 0.5  # effective-tau crossover = "shaded" for the horizon
+SHADE_PROFILE_EL_SCAN_DEG = 1.0    # elevation scan step locating the shade horizon
+
+# Shade-profile sensor attribute names (curve arrays; excluded from the recorder
+# via recorder.exclude_attributes + the sensor's _unrecorded_attributes).
+ATTR_SP_AZIMUTH = "azimuth"                 # [deg] sun azimuth per sun-path sample
+ATTR_SP_SUN_ELEVATION = "sun_elevation"     # [deg] sun elevation per sample
+ATTR_SP_TRANSMITTANCE = "transmittance"     # [0..1] effective beam tau per sample
+ATTR_SP_TIME = "time"                       # [local ISO] time per sample
+ATTR_SP_HORIZON_AZIMUTH = "horizon_azimuth"  # [deg] azimuth grid for the horizon lines
+ATTR_SP_SHADE_HORIZON = "shade_horizon"     # [deg] learned shade horizon per grid azimuth
+ATTR_SP_STATIC_HORIZON = "static_horizon"   # [deg] config horizon per grid azimuth

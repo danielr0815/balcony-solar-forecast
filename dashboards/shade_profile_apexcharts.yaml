@@ -1,0 +1,135 @@
+# Shade-profile diagram — sun path vs. learned shading (SPEC §5)
+#
+# OPTIONAL. This ONE card needs the HACS frontend card `apexcharts-card`
+# (https://github.com/RomRider/apexcharts-card). Everything in the main
+# dashboards/balcony_solar_forecast.yaml stays zero-custom-card; only this
+# per-date sun-path/shade diagram cannot be drawn by a built-in Lovelace card,
+# so it lives here as a separate, opt-in snippet.
+#
+# Install: HACS -> Frontend -> install "apexcharts-card", then add this as a
+# Manual card on any dashboard (Edit dashboard -> Add card -> Manual, paste).
+#
+# It reads three integration-owned entities (device "Balcony Solar Forecast"):
+#   * select.balcony_solar_forecast_shade_profile_module  — pick the module
+#   * date.balcony_solar_forecast_shade_profile_date       — pick the date
+#   * sensor.balcony_solar_forecast_shade_profile          — the curve arrays
+# Changing the module or the date recomputes the sensor's attributes and the
+# chart redraws. Adjust the object_ids if your entity ids differ.
+#
+# The x-axis is the sun azimuth (0 = North, 90 = East, 180 = South, 270 = West);
+# the y-axis is elevation in degrees. The sun path (Sonnenstand) is a line whose
+# points are additionally split into three transmittance buckets (free /
+# partial / shaded) so the LEARNED shading shows as colour along the path, and
+# two horizon lines are overlaid: the learned shade horizon (below it the beam
+# is mostly blocked) and the static configured horizon.
+
+type: vertical-stack
+cards:
+  # --- Controls: which module + which date to visualise -------------------
+  - type: entities
+    title: Verschattungsprofil — Auswahl
+    show_header_toggle: false
+    entities:
+      - entity: select.balcony_solar_forecast_shade_profile_module
+        name: Modul
+      - entity: date.balcony_solar_forecast_shade_profile_date
+        name: Datum
+      - entity: sensor.balcony_solar_forecast_shade_profile
+        name: Verschattet (Anteil Tageslicht)
+
+  # --- The diagram (requires apexcharts-card) -----------------------------
+  - type: custom:apexcharts-card
+    header:
+      show: true
+      title: Sonnenbahn & gelernte Verschattung
+      show_states: false
+    # graph_span is required by the schema; the series supply explicit [az, el]
+    # pairs via data_generator, so this value only bounds the (unused) time axis.
+    graph_span: 24h
+    chart_type: line
+    apex_config:
+      chart:
+        height: 360
+      xaxis:
+        type: numeric
+        tickAmount: 12
+        decimalsInFloat: 0
+        title:
+          text: "Sonnen-Azimut (°) — 90 = Ost · 180 = Süd · 270 = West"
+      yaxis:
+        min: 0
+        max: 90
+        tickAmount: 9
+        decimalsInFloat: 0
+        title:
+          text: "Höhenwinkel / Elevation (°)"
+      legend:
+        show: true
+      tooltip:
+        enabled: true
+    series:
+      # Sun path (Sonnenstand): elevation over azimuth for the selected date.
+      - entity: sensor.balcony_solar_forecast_shade_profile
+        name: Sonnenstand
+        type: line
+        stroke_width: 2
+        color: "#f1c40f"
+        data_generator: |
+          const a = entity.attributes;
+          return (a.azimuth || []).map((az, i) => [az, a.sun_elevation[i]]);
+      # τ-Färbung: the same sun path split by learned beam transmittance.
+      - entity: sensor.balcony_solar_forecast_shade_profile
+        name: verschattet (τ<0.5)
+        type: scatter
+        color: "#c0392b"
+        # τ<0.5 == "shaded", the SAME threshold the grey learned-shade horizon and
+        # the sensor's shaded-fraction headline use (SHADE_PROFILE_TAU_THRESHOLD).
+        data_generator: |
+          const a = entity.attributes;
+          const out = [];
+          (a.azimuth || []).forEach((az, i) => {
+            if (a.transmittance[i] < 0.5) out.push([az, a.sun_elevation[i]]);
+          });
+          return out;
+      - entity: sensor.balcony_solar_forecast_shade_profile
+        name: teilverschattet (0.5–0.85)
+        type: scatter
+        color: "#e67e22"
+        data_generator: |
+          const a = entity.attributes;
+          const out = [];
+          (a.azimuth || []).forEach((az, i) => {
+            const t = a.transmittance[i];
+            if (t >= 0.5 && t < 0.85) out.push([az, a.sun_elevation[i]]);
+          });
+          return out;
+      - entity: sensor.balcony_solar_forecast_shade_profile
+        name: frei (τ≥0.85)
+        type: scatter
+        color: "#2ecc71"
+        data_generator: |
+          const a = entity.attributes;
+          const out = [];
+          (a.azimuth || []).forEach((az, i) => {
+            if (a.transmittance[i] >= 0.85) out.push([az, a.sun_elevation[i]]);
+          });
+          return out;
+      # Learned shade horizon: below this elevation the beam is mostly blocked.
+      - entity: sensor.balcony_solar_forecast_shade_profile
+        name: Verschattungshorizont (gelernt)
+        type: area
+        stroke_width: 1
+        opacity: 0.15
+        color: "#7f8c8d"
+        data_generator: |
+          const a = entity.attributes;
+          return (a.horizon_azimuth || []).map((az, i) => [az, a.shade_horizon[i]]);
+      # Static configured horizon (from the site setup), for reference.
+      - entity: sensor.balcony_solar_forecast_shade_profile
+        name: Statischer Horizont (Konfig)
+        type: line
+        stroke_width: 1
+        color: "#95a5a6"
+        data_generator: |
+          const a = entity.attributes;
+          return (a.horizon_azimuth || []).map((az, i) => [az, a.static_horizon[i]]);

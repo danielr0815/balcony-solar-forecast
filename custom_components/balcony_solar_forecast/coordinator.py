@@ -32,7 +32,7 @@ import logging
 import math
 from collections import deque
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -58,7 +58,6 @@ from .const import (
     CORRECTION_SOURCE_INTRADAY,
     CORRECTION_SOURCE_NONE,
     CORRECTION_SOURCE_SHADEMAP,
-    DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE,
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_CORRECTION_SOURCE,
     DATA_KEY_DRIFT_MAE,
@@ -68,18 +67,22 @@ from .const import (
     DATA_KEY_QUANTILE_CURVES,
     DATA_KEY_RAW_HOURLY_WH,
     DATA_KEY_SCOREBOARD,
+    DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE,
     DAY_AHEAD_BIAS_NEUTRAL,
-    DEFAULT_QUANTILES_ENABLED,
-    FORECAST_RESP_KEY_P10,
-    FORECAST_RESP_KEY_P50,
-    FORECAST_RESP_KEY_P90,
     DAY_PART_MIDDAY,
+    DEFAULT_QUANTILES_ENABLED,
+    DEFAULT_SCOREBOARD_ENABLED,
+    DEFAULT_SCOREBOARD_GATE_MARGIN,
+    DEFAULT_SCOREBOARD_WINDOW_DAYS,
     DOMAIN,
     DRIFT_LOSS_MARGIN,
     DRIFT_LOSS_STREAK_DAYS,
     DRIFT_WINDOW_DAYS,
     FETCH_INTERVAL_SECONDS,
     FORECAST_DAYS,
+    FORECAST_RESP_KEY_P10,
+    FORECAST_RESP_KEY_P50,
+    FORECAST_RESP_KEY_P90,
     INTRADAY_MIN_MODELED_WH,
     INTRADAY_NEUTRAL,
     INTRADAY_TRAILING_WINDOW_MINUTES,
@@ -90,7 +93,6 @@ from .const import (
     LEARNER_LAYER_DAY_AHEAD,
     LEARNER_LAYER_FAST,
     LEARNER_LAYER_SLOW,
-    LEARNER_SNAPSHOT_RING,
     LEARNER_STATUS_ACTIVE,
     LEARNER_STATUS_DISABLED_BY_DRIFT,
     LEARNER_STATUS_FROZEN,
@@ -99,9 +101,6 @@ from .const import (
     MAX_PHYSICS_FALLBACK_AGE_HOURS,
     NIGHTLY_CATCHUP_MAX_DAYS,
     RECOMPUTE_INTERVAL_SECONDS,
-    DEFAULT_SCOREBOARD_ENABLED,
-    DEFAULT_SCOREBOARD_GATE_MARGIN,
-    DEFAULT_SCOREBOARD_WINDOW_DAYS,
     SCOREBOARD_COMPARISON_UNIT_KWH,
     SHADEMAP_MEASURED_CLEAR_MIN_FRAC,
     SHADEMAP_NEIGHBOUR_STABILITY,
@@ -113,7 +112,6 @@ from .const import (
 from .core import (
     BiasState,
     ComparisonConfig,
-    DayScore,
     DriftState,
     ForecastResult,
     IssuedSnapshot,
@@ -126,15 +124,22 @@ from .core import (
     ScoreboardState,
     ShademapState,
     SiteConfig,
+    clearsky,
     compute_forecast,
+    solpos,
 )
 from .core import bias as bias_mod
 from .core import (
-    clearsky,
     quantiles as quantiles_mod,
+)
+from .core import (
     scoreboard as scoreboard_mod,
+)
+from .core import (
     shademap as shademap_mod,
-    solpos,
+)
+from .core import (
+    shadeprofile as shadeprofile_mod,
 )
 from .fetcher import (
     FetchError,
@@ -296,6 +301,19 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Last computed ForecastResult (for the nightly per-plane snapshot).
         self._last_result: ForecastResult | None = None
 
+        # --- Shade-profile diagram selection (SPEC §5 visualisation) --------
+        # Which module/plane + local date the shade-profile sensor renders. The
+        # select entity owns the persisted module (RestoreEntity) and pushes it
+        # here; the date entity always defaults to today (not restored). None =>
+        # the front plane / today. Transient here; recomputed on demand by
+        # build_shade_profile (pure geometry, no weather), memoised below.
+        self._shade_profile_module: str | None = None
+        self._shade_profile_date: date | None = None
+        # Memo of the last built profile: (cache_key, result). The profile is a
+        # pure function of (module, date, slow-active, shademap object), so it is
+        # rebuilt only when one of those changes — not on every 15-min tick.
+        self._shade_profile_cache: tuple[tuple, dict[str, Any]] | None = None
+
     # ------------------------------------------------------------------
     # Live provenance (independent of the last update's success)
     # ------------------------------------------------------------------
@@ -452,6 +470,100 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Current in-memory shademap for the dump_shademap polar diagnostic."""
         self._load_learner_states()
         return self._shademap_state
+
+    # ------------------------------------------------------------------
+    # Shade-profile diagram (sun path vs learned shade) — SPEC §5
+    # ------------------------------------------------------------------
+
+    def shade_profile_plane_names(self) -> list[str]:
+        """Module/plane names selectable for the shade-profile diagram."""
+        return [p.name for p in self._site.planes]
+
+    @property
+    def shade_profile_module(self) -> str:
+        """Selected shade-profile module.
+
+        Falls back to the balcony's FRONT plane (the orientation the most planes
+        share — the reference site's 115° modules M2/M3/…), not the first plane,
+        so the diagram opens on a productive front module by default.
+        """
+        if self._shade_profile_module in self.shade_profile_plane_names():
+            return self._shade_profile_module
+        return shadeprofile_mod.default_module(self._site.planes)
+
+    @property
+    def shade_profile_date(self) -> date:
+        """Selected shade-profile date (falls back to today, local calendar)."""
+        return self._shade_profile_date or dt_util.as_local(dt_util.utcnow()).date()
+
+    @callback
+    def set_shade_profile_module(self, module: str) -> None:
+        """Set the visualised module and refresh the diagram entities."""
+        self._shade_profile_module = module
+        self.async_update_listeners()
+
+    @callback
+    def set_shade_profile_date(self, day: date) -> None:
+        """Set the visualised date and refresh the diagram entities."""
+        self._shade_profile_date = day
+        self.async_update_listeners()
+
+    def _slow_active(self) -> bool:
+        """Whether the SLOW learner (shademap) is currently shaping the forecast.
+
+        Mirrors the ``slow_active`` gate in :meth:`_build_learner_hooks`: the
+        shademap only attenuates the served beam when the layer is enabled, not
+        drift-auto-disabled, not collapse-frozen for today, and has learned bins.
+        The shade-profile diagram consults the SAME gate so it never paints
+        learned shading the forecast is not applying (SPEC §5).
+        """
+        return (
+            self._learner_config.slow_enabled
+            and not self._drift_state.slow_disabled
+            and not self._slow_frozen()
+            and bool(self._shademap_state.channels)
+        )
+
+    def build_shade_profile(self) -> dict[str, Any]:
+        """Sun-path + learned-shade profile for the current module/date selection.
+
+        Pure geometry + shademap lookup (core/shadeprofile.py) over the selected
+        plane's config for the selected local date; no weather, never raises.
+        Returns an empty dict when no plane is configured or the selected module
+        has vanished (renamed away).
+
+        The learned shademap is blended in ONLY when the slow learner is active
+        (:meth:`_slow_active`) — matching what the served forecast actually
+        applies (engine ``_plane_poa_split``). When it is off / drift-disabled /
+        collapse-frozen the diagram shows the static config shading alone, exactly
+        as the forecast does. The result is memoised on
+        ``(module, date, slow_active, id(shademap))`` so the O(azimuth×elevation)
+        horizon scan runs once per real change, not on every coordinator tick.
+        """
+        module = self.shade_profile_module
+        plane = self._site.plane_by_name(module)
+        if plane is None:
+            return {}
+        self._load_learner_states()
+        slow_active = self._slow_active()
+        day = self.shade_profile_date
+        key = (module, day.isoformat(), slow_active, id(self._shademap_state))
+        cache = self._shade_profile_cache
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        shademap = self._shademap_state if slow_active else ShademapState()
+        tz = dt_util.get_time_zone(self.hass.config.time_zone) or UTC
+        result = shadeprofile_mod.compute_shade_profile(
+            plane=plane,
+            shademap=shademap,
+            channel=module,
+            latitude=self._site.latitude,
+            longitude=self._site.longitude,
+            day=day,
+            tz=tz,
+        )
+        self._shade_profile_cache = (key, result)
+        return result
 
     def _site_signature(self) -> str:
         """Stable lat/lon + plane-name digest (mirrors backfill.site_signature).
@@ -676,18 +788,21 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             _LOGGER.warning("Open-Meteo fetch failed: %s", err)
             return
         prior = self._store.get_last_payload()
-        if prior is not None and isinstance(prior.get("payload"), dict):
-            if radiation_coverage(payload) < radiation_coverage(prior["payload"]):
-                self._last_fetched_at = now
-                self._last_fetch_ok = True
-                self._last_error = None
-                _LOGGER.warning(
-                    "Keeping richer last-good payload; new fetch has less "
-                    "radiation coverage (%d < %d)",
-                    radiation_coverage(payload),
-                    radiation_coverage(prior["payload"]),
-                )
-                return
+        if (
+            prior is not None
+            and isinstance(prior.get("payload"), dict)
+            and radiation_coverage(payload) < radiation_coverage(prior["payload"])
+        ):
+            self._last_fetched_at = now
+            self._last_fetch_ok = True
+            self._last_error = None
+            _LOGGER.warning(
+                "Keeping richer last-good payload; new fetch has less "
+                "radiation coverage (%d < %d)",
+                radiation_coverage(payload),
+                radiation_coverage(prior["payload"]),
+            )
+            return
         self._last_fetched_at = now
         self._last_fetch_ok = True
         self._last_error = None
@@ -864,6 +979,52 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     # Output assembly (the contract every platform reads)
     # ------------------------------------------------------------------
 
+    def _dayahead_today_kwh(
+        self, result: ForecastResult, now: datetime
+    ) -> float | None:
+        """Today's kWh with the transient intraday scalar divided back out.
+
+        ``energy_today_kwh`` must be a STABLE day-ahead expectation, not a live
+        nowcast. The intraday scalar is applied forward-only and decays to 1.0
+        over ``INTRADAY_APPLY_HORIZON_MINUTES`` (see ``_build_learner_hooks``);
+        folding it into a full-day SUM makes the displayed total balloon in the
+        morning (the whole large day is still forward, so the scalar has maximum
+        leverage) and settle back to the day-ahead floor by early afternoon (the
+        big hours are now in the frozen past) — a spurious intraday hump of the
+        headline even though the underlying forecast has not changed.
+
+        We keep the scalar in the served 15-min ``watts`` / ``wh_period`` curve
+        (battery_manager integrates its FORWARD part as the live nowcast) but
+        strip it from the headline. The shademap ``beam_tau`` and the day-ahead
+        RLS bias stay — those are stable within a day. Each slot's applied
+        intraday factor is reconstructed exactly as the ``slot_factor`` closure
+        applies it, then divided out; the factor is clamped >= INTRADAY_SCALAR_MIN
+        so the divide is always safe. Only the current local day is affected —
+        tomorrow/d2 slots lie beyond the apply horizon and already carry factor
+        1.0, so they equal the plain ``daily_kwh`` roll-up.
+        """
+        scalar = self._intraday_scalar
+        fast_active = (
+            self._learner_config.fast_enabled
+            and not self._drift_state.fast_disabled
+            and scalar != INTRADAY_NEUTRAL
+        )
+        local_today = dt_util.as_local(now).date()
+        total_wh = 0.0
+        seen = False
+        for start, watts in zip(result.slot_starts, result.total_watts, strict=False):
+            start_utc = dt_util.as_utc(start)
+            if dt_util.as_local(start_utc).date() != local_today:
+                continue
+            seen = True
+            factor = 1.0
+            if fast_active:
+                age_min = (start_utc - now).total_seconds() / 60.0
+                if age_min > -15.0:  # matches the slot_factor gate
+                    factor = bias_mod.intraday_factor_at(max(0.0, age_min), scalar)
+            total_wh += (watts / factor) * 0.25
+        return round(total_wh / 1000.0, 3) if seen else None
+
     def _build_data(
         self,
         result: ForecastResult,
@@ -884,11 +1045,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         watts = {
             _iso(start): round(w, 1)
-            for start, w in zip(result.slot_starts, result.total_watts)
+            for start, w in zip(result.slot_starts, result.total_watts, strict=False)
         }
         wh_period = {
             _iso(start): round(w * 0.25, 2)
-            for start, w in zip(result.slot_starts, result.total_watts)
+            for start, w in zip(result.slot_starts, result.total_watts, strict=False)
         }
 
         raw_hourly = result.raw_hourly_wh or result.hourly_wh
@@ -899,7 +1060,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "weather_age_seconds": int(age.total_seconds()),
             "last_error": self._last_error,
             "power_now_w": round(_power_now(result, now), 1),
-            "energy_today_kwh": _round3(daily.get(local_today.isoformat())),
+            # Day-ahead (scalar-free) headline: stable across the day. The live
+            # intraday nowcast stays in the watts/wh_period curve below, so on
+            # the current day energy_today_kwh != sum(today's wh_period) by
+            # design (they still match exactly for tomorrow/d2). See
+            # _dayahead_today_kwh for why.
+            "energy_today_kwh": self._dayahead_today_kwh(result, now),
             "energy_tomorrow_kwh": _round3(
                 daily.get((local_today + timedelta(days=1)).isoformat())
             ),
@@ -959,7 +1125,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         def _curve(watts) -> dict[str, float]:
             return {
                 _iso(start): round(w * 0.25, 2)
-                for start, w in zip(starts, watts)
+                for start, w in zip(starts, watts, strict=False)
             }
 
         return {
@@ -2014,7 +2180,6 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             measured_wh = measured_by_hour.get(hkey)
             if measured_wh is None or beam_wh <= 0.0:
                 continue
-            kc = modeled.kc.get(hkey, 0.0)
             beam_share = beam_wh / (plane.wp) if plane.wp else 0.0
             dt = dt_util.parse_datetime(hkey)
             if dt is None:
@@ -2030,7 +2195,6 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 nb = ratio_by_hour.get(hkeys[idx - 1])
                 if nb is not None:
                     neighbour_kc = nb
-                    kc = this_ratio  # gate the stability leg on the ratio pair
             try:
                 if not shademap_mod.is_quasi_clear(
                     kc=modeled.kc.get(hkey, 0.0),
@@ -2451,7 +2615,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     break
                 per_hour: dict[str, float] = {}
                 wh = 0.0
-                for hkey, m in zip(hkeys, means):
+                for hkey, m in zip(hkeys, means, strict=False):
                     per_hour[hkey] = per_hour.get(hkey, 0.0) + m  # W*1h = Wh
                     wh += m
                 daily[module] = round(wh, 1)
@@ -2546,7 +2710,7 @@ def _stat_row_hour_key(start: object) -> str | None:
     if isinstance(start, datetime):
         dt = dt_util.as_utc(start)
     elif isinstance(start, (int, float)):
-        dt = datetime.fromtimestamp(start / 1000.0, tz=timezone.utc)
+        dt = datetime.fromtimestamp(start / 1000.0, tz=UTC)
     elif isinstance(start, str):
         dt = dt_util.parse_datetime(start)
         if dt is None:
@@ -2597,12 +2761,11 @@ def _iso(dt: datetime) -> str:
 
 def _hour_key(dt: datetime) -> str:
     """ISO-UTC hour-start key for an aligned slot start."""
-    from datetime import timezone
 
     return (
         dt_util.as_utc(dt)
         .replace(minute=0, second=0, microsecond=0)
-        .astimezone(timezone.utc)
+        .astimezone(UTC)
         .isoformat()
     )
 
@@ -2615,7 +2778,7 @@ def _power_at(slot_starts, watts, now: datetime) -> float:
     """Instantaneous power at the 15-min slot containing ``now`` (shared walk)."""
     now_utc = dt_util.as_utc(now)
     slot = timedelta(minutes=15)
-    for start, w in zip(slot_starts, watts):
+    for start, w in zip(slot_starts, watts, strict=False):
         start_utc = dt_util.as_utc(start)
         if start_utc <= now_utc < start_utc + slot:
             return w
@@ -2651,7 +2814,7 @@ def _raw_power_now(result: ForecastResult, now: datetime) -> float:
 def _local_daily_kwh(result: ForecastResult) -> dict[str, float]:
     """Roll the 15-min curve up to LOCAL calendar-day kWh."""
     daily: dict[str, float] = {}
-    for start, watts in zip(result.slot_starts, result.total_watts):
+    for start, watts in zip(result.slot_starts, result.total_watts, strict=False):
         local_day = dt_util.as_local(dt_util.as_utc(start)).date().isoformat()
         daily[local_day] = daily.get(local_day, 0.0) + watts * 0.25 / 1000.0
     return {k: round(v, 3) for k, v in daily.items()}

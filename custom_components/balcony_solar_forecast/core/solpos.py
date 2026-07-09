@@ -16,7 +16,7 @@ public return values are degrees. No external dependencies (stdlib only).
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 __all__ = ["sun_position"]
 
@@ -38,7 +38,7 @@ def _julian_century(dt_utc: datetime) -> float:
     # bug the SPEC's DST test guards against.
     if dt_utc.tzinfo is None:
         raise ValueError("sun_position requires a tz-aware UTC datetime")
-    ts = dt_utc.astimezone(timezone.utc).timestamp()
+    ts = dt_utc.astimezone(UTC).timestamp()
     jd = _JD_UNIX_EPOCH + ts / _SECONDS_PER_DAY
     return (jd - _JD_J2000) / _JULIAN_CENTURY_DAYS
 
@@ -102,7 +102,7 @@ def sun_position(dt_utc: datetime, lat: float, lon: float) -> tuple[float, float
 
     # --- True solar time (minutes) & hour angle (deg) ---
     # Minutes elapsed in the UTC day. lon is degrees East; +4 min per degree.
-    utc = dt_utc.astimezone(timezone.utc)
+    utc = dt_utc.astimezone(UTC)
     minutes_of_day = (
         utc.hour * 60.0
         + utc.minute

@@ -29,7 +29,7 @@ HA-free.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 import voluptuous as vol
@@ -39,11 +39,12 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy, UnitOfPower, UnitOfTime
+from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower, UnitOfTime
 from homeassistant.core import (
     HomeAssistant,
     ServiceResponse,
     SupportsResponse,
+    callback,
 )
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
@@ -52,6 +53,13 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    ATTR_SP_AZIMUTH,
+    ATTR_SP_HORIZON_AZIMUTH,
+    ATTR_SP_SHADE_HORIZON,
+    ATTR_SP_STATIC_HORIZON,
+    ATTR_SP_SUN_ELEVATION,
+    ATTR_SP_TIME,
+    ATTR_SP_TRANSMITTANCE,
     ATTR_WATTS,
     ATTR_WH_PERIOD,
     ATTR_WH_PERIOD_P10,
@@ -89,6 +97,7 @@ from .const import (
     SENSOR_FORECAST_VS_BEST_BASELINE_PCT,
     SENSOR_INTRADAY_SCALAR,
     SENSOR_POWER_NOW,
+    SENSOR_SHADE_PROFILE,
     SERVICE_GET_FORECAST,
     STATUS_CACHED,
     STATUS_FRESH,
@@ -189,6 +198,8 @@ async def async_setup_entry(
         # --- v0.4 quantile bands (SPEC §6/§10): today's P10/P90 ---
         EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P10, _Q_P10),
         EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P90, _Q_P90),
+        # --- Shade-profile diagram data (SPEC §5 visualisation) ---
+        ShadeProfileSensor(coordinator),
     ]
 
     # One MAE sensor per configured comparison forecast (SPEC §9/§10). The list
@@ -862,6 +873,91 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
             total_wh += float(wh)
             seen = True
         return round(total_wh / 1000.0, 3) if seen else None
+
+
+# ---------------------------------------------------------------------------
+# Shade-profile diagram (sun path vs learned shade) — SPEC §5 visualisation
+# ---------------------------------------------------------------------------
+
+
+class ShadeProfileSensor(BalconyForecastEntity, SensorEntity):
+    """Sun-path + learned-shade diagram data for the selected module/date.
+
+    State is the shaded fraction of daylight (%): the share of daylight samples
+    whose *effective* beam transmittance (engine-exact static-horizon gate
+    blended with the learned shademap) is below the shade threshold, for the
+    module chosen by ``select.…_shade_profile_module`` on the date chosen by
+    ``date.…_shade_profile_date``. The full curve arrays — the sun path
+    (azimuth / elevation / transmittance) plus the static config horizon and the
+    learned shade horizon on an azimuth grid — ride along as attributes for an
+    ApexCharts card (docs/DASHBOARD.md), excluded from the recorder like the
+    energy-curve dicts. Diagnostic + always available: the diagram is pure
+    geometry and must render even while the live forecast is unavailable.
+
+    The profile is rebuilt on every coordinator update (nightly shademap
+    changes) and whenever the select/date entities push a new selection (they
+    call ``coordinator.set_shade_profile_*`` -> ``async_update_listeners``).
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_icon = "mdi:sun-angle"
+    # The bulky curve arrays are kept out of the recorder (mirrors the energy
+    # sensors' curve dicts) via _unrecorded_attributes + recorder.py.
+    _unrecorded_attributes = frozenset(
+        {
+            ATTR_SP_TIME,
+            ATTR_SP_AZIMUTH,
+            ATTR_SP_SUN_ELEVATION,
+            ATTR_SP_TRANSMITTANCE,
+            ATTR_SP_HORIZON_AZIMUTH,
+            ATTR_SP_STATIC_HORIZON,
+            ATTR_SP_SHADE_HORIZON,
+        }
+    )
+
+    def __init__(self, coordinator: Any) -> None:
+        super().__init__(coordinator, SENSOR_SHADE_PROFILE)
+        self._data: dict[str, Any] = {}
+
+    @property
+    def available(self) -> bool:
+        # Diagnostic: the diagram is pure geometry, so it stays available even
+        # when the live forecast is unavailable.
+        return True
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._recompute()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        # Recompute once per update (tick or selection change), then write state;
+        # both properties read the cached result so there is a single build.
+        self._recompute()
+        super()._handle_coordinator_update()
+
+    def _recompute(self) -> None:
+        builder = getattr(self.coordinator, "build_shade_profile", None)
+        if not callable(builder):
+            self._data = {}
+            return
+        try:
+            self._data = builder() or {}
+        except Exception:  # pragma: no cover - the diagram must never crash HA
+            _LOGGER.debug("Shade-profile build failed", exc_info=True)
+            self._data = {}
+
+    @property
+    def native_value(self) -> float | None:
+        if not self._data.get("sample_count"):
+            return None
+        frac = self._data.get("shaded_fraction")
+        return None if frac is None else round(float(frac) * 100.0, 1)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return dict(self._data)
 
 
 # ---------------------------------------------------------------------------

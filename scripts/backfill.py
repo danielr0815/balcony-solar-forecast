@@ -52,11 +52,10 @@ import asyncio
 import hashlib
 import json
 import logging
-import math
 import sys
 import types
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -86,15 +85,17 @@ _register_namespace_package("balcony_solar_forecast.core", _PKG_DIR / "core")
 
 # Now safe to import the pure core + const (no HA).
 from balcony_solar_forecast import const  # noqa: E402
+from balcony_solar_forecast.core import bias as bias_mod  # noqa: E402
 from balcony_solar_forecast.core import (  # noqa: E402
     clearsky,
     electrical,
     horizon,
-    shademap as shademap_mod,
     solpos,
     transpose,
 )
-from balcony_solar_forecast.core import bias as bias_mod  # noqa: E402
+from balcony_solar_forecast.core import (  # noqa: E402
+    shademap as shademap_mod,
+)
 from balcony_solar_forecast.core.types import (  # noqa: E402
     BiasCell,
     BiasState,
@@ -218,8 +219,8 @@ def _as_utc_hour(value: str) -> datetime:
     """Parse an Open-Meteo (UTC, no suffix) hourly ISO stamp to aware UTC."""
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def _num(value: object) -> float | None:
@@ -512,7 +513,7 @@ def process_day(
     day_actuals: dict[str, float],
     *,
     svf_by_plane: dict[str, float],
-    tz: "timezone | None" = None,
+    tz: timezone | None = None,
 ) -> bool:
     """Fold one day's weather + measured per-module Wh into the accumulator.
 
@@ -553,7 +554,7 @@ def process_day_hourly(
     hourly_actuals: dict[str, dict[str, float]],
     *,
     svf_by_plane: dict[str, float],
-    tz: "timezone | None" = None,
+    tz: timezone | None = None,
 ) -> bool:
     """Like :func:`process_day` but with TRUE hourly measured module energy.
 
@@ -580,7 +581,7 @@ def _process_day_impl(
     actuals_daily: dict[str, float] | None,
     actuals_hourly: dict[str, dict[str, float]] | None,
     svf_by_plane: dict[str, float],
-    tz: "timezone | None" = None,
+    tz: timezone | None = None,
 ) -> bool:
     if not day_weather:
         return False
@@ -780,7 +781,7 @@ def _site_measured_hourly(
     return site if have_any else {}
 
 
-def _local_hour(dt: datetime, tz: "timezone | None") -> tuple[int, int]:
+def _local_hour(dt: datetime, tz: timezone | None) -> tuple[int, int]:
     """(local_hour, local_month) for a UTC hour start under ``tz`` (UTC if None).
 
     Converting to the site's local time before day-part / fog-month
@@ -792,7 +793,7 @@ def _local_hour(dt: datetime, tz: "timezone | None") -> tuple[int, int]:
     return local.hour, local.month
 
 
-def _classify_cloud(wx: HourlyWeather, tz: "timezone | None" = None) -> str:
+def _classify_cloud(wx: HourlyWeather, tz: timezone | None = None) -> str:
     """Cloud class via the live bias.classify_cloud (SPEC §5).
 
     The fog-month test uses the LOCAL month (``tz``) so a late-evening UTC hour
@@ -808,7 +809,7 @@ def _classify_cloud(wx: HourlyWeather, tz: "timezone | None" = None) -> str:
     )
 
 
-def _day_part_for_hour(utc_hour: int, tz: "timezone | None" = None) -> str:
+def _day_part_for_hour(utc_hour: int, tz: timezone | None = None) -> str:
     """Day part via the live bias.day_part_for_hour (SPEC §5).
 
     ``utc_hour`` is the hour start's UTC hour; the caller passes ``tz`` so it is
@@ -838,7 +839,7 @@ def build_bootstrap_json(
     top-level schema/version/site-signature + ``BiasState.to_dict()`` and
     ``ShademapState.to_dict()`` sub-objects.
     """
-    gen = (generated_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    gen = (generated_at or datetime.now(UTC)).astimezone(UTC)
 
     # Shademap: cap n, clamp tau, into ShademapState for a validated round-trip.
     shade_state = ShademapState(
@@ -1032,8 +1033,8 @@ async def fetch_lts_hourly(
     ws_url = ha_url.rstrip("/").replace("http://", "ws://").replace(
         "https://", "wss://"
     ) + "/api/websocket"
-    start_dt = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
-    end_dt = datetime(end.year, end.month, end.day, tzinfo=timezone.utc) + timedelta(
+    start_dt = datetime(start.year, start.month, start.day, tzinfo=UTC)
+    end_dt = datetime(end.year, end.month, end.day, tzinfo=UTC) + timedelta(
         days=1
     )
 
@@ -1052,11 +1053,9 @@ async def fetch_lts_hourly(
             raise RuntimeError(f"HA WebSocket auth failed: {auth}")
 
         # 2) statistics_during_period, one command per time window
-        msg_id = 0
-        for win_start, win_end in _lts_windows(
-            start_dt, end_dt, _LTS_WINDOW_DAYS
+        for msg_id, (win_start, win_end) in enumerate(
+            _lts_windows(start_dt, end_dt, _LTS_WINDOW_DAYS), start=1
         ):
-            msg_id += 1
             await ws.send_json(
                 {
                     "id": msg_id,
@@ -1118,16 +1117,13 @@ def _stat_row_hour(start: object) -> str | None:
     cores; older/other paths may send an ISO string. Handle both.
     """
     if isinstance(start, (int, float)):
-        dt = datetime.fromtimestamp(start / 1000.0, tz=timezone.utc)
+        dt = datetime.fromtimestamp(start / 1000.0, tz=UTC)
     elif isinstance(start, str):
         try:
             dt = datetime.fromisoformat(start)
         except ValueError:
             return None
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        else:
-            dt = dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
     else:
         return None
     return dt.replace(minute=0, second=0, microsecond=0).isoformat()

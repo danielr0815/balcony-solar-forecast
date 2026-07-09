@@ -12,6 +12,7 @@ from .clearsky import clear_sky_index, haurwitz_ghi
 from .electrical import clamp_groups, dc_power
 from .engine import LearnerHooks, compute_forecast
 from .horizon import interp_elevation, sky_view_factor, transmittance_at
+from .shadeprofile import compute_shade_profile
 from .solpos import sun_position
 from .transpose import hay_davies_poa
 from .types import (
@@ -78,6 +79,8 @@ __all__ = [
     "interp_elevation",
     "transmittance_at",
     "sky_view_factor",
+    # shade profile (visualisation)
+    "compute_shade_profile",
     # electrical
     "dc_power",
     "clamp_groups",

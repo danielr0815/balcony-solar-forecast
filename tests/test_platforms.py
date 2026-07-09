@@ -10,7 +10,7 @@ service response shape — is exercised against the coordinator's flat
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -35,7 +35,6 @@ from custom_components.balcony_solar_forecast.sensor import (  # noqa: E402
     _build_forecast_response,
 )
 
-UTC = timezone.utc
 DOMAIN = "balcony_solar_forecast"
 
 
@@ -54,8 +53,8 @@ def _curve_data(start: datetime, watts: list[float], *, status: str = "fresh"):
         "energy_today_kwh": total_wh / 1000.0,
         "energy_tomorrow_kwh": None,
         "energy_d2_kwh": None,
-        "watts": {k: v for k, v in zip(iso, watts)},
-        "wh_period": {k: round(v * 0.25, 2) for k, v in zip(iso, watts)},
+        "watts": {k: v for k, v in zip(iso, watts, strict=False)},
+        "wh_period": {k: round(v * 0.25, 2) for k, v in zip(iso, watts, strict=False)},
         "hourly_wh": {start.isoformat(): total_wh},
         "daily_kwh": {day: total_wh / 1000.0},
         "slot_starts": iso,
@@ -255,7 +254,18 @@ def test_build_forecast_response_entry_filter():
 
 
 def test_recorder_excludes_curve_attributes():
-    assert exclude_attributes(object()) == {"watts", "wh_period"}
+    assert exclude_attributes(object()) == {
+        "watts",
+        "wh_period",
+        # Shade-profile diagram curve arrays (SPEC §5) — bulky, per-selection.
+        "time",
+        "azimuth",
+        "sun_elevation",
+        "transmittance",
+        "horizon_azimuth",
+        "static_horizon",
+        "shade_horizon",
+    }
 
 
 async def test_energy_hook_returns_wh_hours():

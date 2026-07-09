@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .const import (
     OPEN_METEO_HOURLY,
@@ -190,11 +190,13 @@ def _parse_time(value: object) -> datetime:
     try:
         dt = datetime.fromisoformat(value)
     except ValueError as err:
-        raise FetchError(f"Unparseable time '{value}': {err}", retryable=False)
+        raise FetchError(
+            f"Unparseable time '{value}': {err}", retryable=False
+        ) from err
     # timezone=UTC requested: naive stamps are UTC wall-clock.
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def _to_float(value: object) -> float | None:
@@ -212,7 +214,7 @@ def _hourly_lookup(hourly: dict, var: str) -> dict[datetime, float | None]:
     times = hourly["time"]
     values = hourly[var]
     out: dict[datetime, float | None] = {}
-    for t, v in zip(times, values):
+    for t, v in zip(times, values, strict=False):
         out[_parse_time(t)] = _to_float(v)
     return out
 
@@ -362,10 +364,14 @@ class OpenMeteoFetcher:
                 except (aiohttp.ContentTypeError, ValueError) as err:
                     raise FetchError(
                         f"Open-Meteo returned non-JSON body: {err}", retryable=True
-                    )
+                    ) from err
         except FetchError:
             raise
-        except asyncio.TimeoutError as err:
-            raise FetchError(f"Open-Meteo request timed out: {err}", retryable=True)
+        except TimeoutError as err:
+            raise FetchError(
+                f"Open-Meteo request timed out: {err}", retryable=True
+            ) from err
         except aiohttp.ClientError as err:
-            raise FetchError(f"Open-Meteo request failed: {err}", retryable=True)
+            raise FetchError(
+                f"Open-Meteo request failed: {err}", retryable=True
+            ) from err

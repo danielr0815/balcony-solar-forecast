@@ -19,8 +19,7 @@ Needs Home Assistant; skipped on the plain-core path.
 
 from __future__ import annotations
 
-import copy
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -35,7 +34,6 @@ from balcony_solar_forecast.const import (  # noqa: E402
     ATTR_WH_PERIOD_P10,
     ATTR_WH_PERIOD_P90,
     CONF_COMPARISON_SENSORS,
-    CONF_QUANTILES_ENABLED,
     DATA_KEY_KILL_GATE_PASSED,
     DATA_KEY_QUANTILE_CURVES,
     DATA_KEY_SCOREBOARD,
@@ -61,7 +59,6 @@ from balcony_solar_forecast.sensor import (  # noqa: E402
     _hourly_from_slots,
 )
 
-UTC = timezone.utc
 DOMAIN = "balcony_solar_forecast"
 
 

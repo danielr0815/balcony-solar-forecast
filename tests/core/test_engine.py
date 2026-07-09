@@ -16,10 +16,9 @@ afternoon by its wall horizon row).
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
-
 from balcony_solar_forecast.const import DEFAULT_SITE
 from balcony_solar_forecast.core import engine
 from balcony_solar_forecast.core.types import (
@@ -29,8 +28,6 @@ from balcony_solar_forecast.core.types import (
     WeatherSeries,
     WeatherSlot,
 )
-
-UTC = timezone.utc
 
 # --------------------------------------------------------------------------
 # Analytic stand-ins for the sibling physics modules

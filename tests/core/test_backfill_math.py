@@ -20,7 +20,7 @@ The aiohttp network coroutines are intentionally NOT exercised here.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -41,7 +41,6 @@ from balcony_solar_forecast.core.types import (  # noqa: E402
     SiteConfig,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -59,7 +58,7 @@ def _clear_summer_noon_hours() -> list[bf.HourlyWeather]:
     passes for the front/south planes. Three consecutive hours so the
     neighbour-stability gate has neighbours.
     """
-    base = datetime(2025, 6, 21, 9, 0, tzinfo=timezone.utc)  # ~11:00 local
+    base = datetime(2025, 6, 21, 9, 0, tzinfo=UTC)  # ~11:00 local
     out = []
     for h in range(3):
         start = base.replace(hour=9 + h)
@@ -97,7 +96,7 @@ def test_parse_previous_runs_suffix_reads_suffixed_radiation():
     assert recs[0].ghi == 700.0
     assert recs[1].temp_c == 24.0
     assert recs[0].cloud_low == 5.0
-    assert recs[0].start == datetime(2025, 6, 21, 9, 0, tzinfo=timezone.utc)
+    assert recs[0].start == datetime(2025, 6, 21, 9, 0, tzinfo=UTC)
 
 
 def test_parse_historical_plain_variables():
@@ -226,7 +225,7 @@ def test_reconstruct_night_hour_is_zero(site: SiteConfig):
     plane = site.plane_by_name("M1")
     svf = horizon.sky_view_factor(plane)
     night = bf.HourlyWeather(
-        start=datetime(2025, 6, 21, 0, 0, tzinfo=timezone.utc),
+        start=datetime(2025, 6, 21, 0, 0, tzinfo=UTC),
         ghi=0.0, dni=0.0, dhi=0.0, temp_c=12.0,
     )
     r = bf.reconstruct_plane_hour(
@@ -254,7 +253,7 @@ def test_reconstruct_shaded_plane_keeps_ungated_reference_beam(site: SiteConfig)
     plane = site.plane_by_name("M4")  # south, hard wall from az 212
     svf = horizon.sky_view_factor(plane)
     wx = bf.HourlyWeather(
-        start=datetime(2025, 6, 21, 12, 0, tzinfo=timezone.utc),
+        start=datetime(2025, 6, 21, 12, 0, tzinfo=UTC),
         ghi=780.0, dni=820.0, dhi=120.0, temp_c=24.0,
     )
     r = bf.reconstruct_plane_hour(
@@ -285,7 +284,7 @@ def test_reconstruct_shaded_bin_learns_full_occlusion(site: SiteConfig):
     # Three consecutive occluded hours (neighbour-stability needs neighbours).
     weather = [
         bf.HourlyWeather(
-            start=datetime(2025, 6, 21, 12 + h, 0, tzinfo=timezone.utc),
+            start=datetime(2025, 6, 21, 12 + h, 0, tzinfo=UTC),
             ghi=780.0, dni=820.0, dhi=120.0, temp_c=24.0,
         )
         for h in range(3)
@@ -310,7 +309,7 @@ def test_reconstruct_snow_uses_high_albedo(site: SiteConfig):
     plane = site.plane_by_name("M4")  # south, 70 deg tilt -> ground term matters
     svf = horizon.sky_view_factor(plane)
     common = dict(ghi=300.0, dni=200.0, dhi=150.0, temp_c=-2.0)
-    start = datetime(2025, 1, 15, 11, 0, tzinfo=timezone.utc)
+    start = datetime(2025, 1, 15, 11, 0, tzinfo=UTC)
     dry = bf.HourlyWeather(start=start, snow_depth_m=0.0, **common)
     snow = bf.HourlyWeather(start=start, snow_depth_m=0.10, **common)
     r_dry = bf.reconstruct_plane_hour(
@@ -493,7 +492,7 @@ def test_build_bootstrap_caps_bin_n(site: SiteConfig):
     acc.bias = {BiasState.cell_key(const.CLOUD_CLASS_CLEAR,
                                    const.DAY_PART_MIDDAY): BiasCell(theta=1.1, n=5)}
     js = bf.build_bootstrap_json(acc, site,
-                                 generated_at=datetime(2026, 7, 6, tzinfo=timezone.utc))
+                                 generated_at=datetime(2026, 7, 6, tzinfo=UTC))
     shade = js[const.BOOTSTRAP_KEY_SHADEMAP]
     cap = const.BOOTSTRAP_MAX_BIN_N
     assert shade["channels"]["M4"]["41:16:1"]["n"] == cap
@@ -554,18 +553,18 @@ def test_site_signature_stable_and_site_sensitive(site: SiteConfig):
 def test_classify_cloud_fog_and_covers():
     # Low visibility -> fog regardless of month.
     fog = bf.HourlyWeather(
-        start=datetime(2025, 3, 1, 8, tzinfo=timezone.utc),
+        start=datetime(2025, 3, 1, 8, tzinfo=UTC),
         ghi=50.0, dni=0.0, dhi=50.0, temp_c=2.0, visibility_m=500.0,
     )
     assert bf._classify_cloud(fog) == const.CLOUD_CLASS_FOG
     clear = bf.HourlyWeather(
-        start=datetime(2025, 6, 21, 10, tzinfo=timezone.utc),
+        start=datetime(2025, 6, 21, 10, tzinfo=UTC),
         ghi=800.0, dni=850.0, dhi=100.0, temp_c=25.0,
         cloud_low=5.0, cloud_mid=0.0, cloud_high=0.0, visibility_m=30000.0,
     )
     assert bf._classify_cloud(clear) == const.CLOUD_CLASS_CLEAR
     overcast = bf.HourlyWeather(
-        start=datetime(2025, 6, 21, 10, tzinfo=timezone.utc),
+        start=datetime(2025, 6, 21, 10, tzinfo=UTC),
         ghi=120.0, dni=0.0, dhi=120.0, temp_c=18.0,
         cloud_low=90.0, cloud_mid=90.0, cloud_high=90.0, visibility_m=20000.0,
     )
@@ -589,7 +588,7 @@ def test_day_part_boundaries():
 def test_parse_lts_result_epoch_ms_and_iso():
     out = {"sensor.a": {}, "sensor.b": {}}
     ts_ms = int(
-        datetime(2025, 6, 21, 10, 0, tzinfo=timezone.utc).timestamp() * 1000
+        datetime(2025, 6, 21, 10, 0, tzinfo=UTC).timestamp() * 1000
     )
     result = {
         "sensor.a": [
@@ -603,9 +602,9 @@ def test_parse_lts_result_epoch_ms_and_iso():
         "sensor.unknown": [{"start": ts_ms, "mean": 999.0}],  # not requested
     }
     bf._parse_lts_result(result, out)
-    hkey_a = datetime(2025, 6, 21, 10, 0, tzinfo=timezone.utc).isoformat()
+    hkey_a = datetime(2025, 6, 21, 10, 0, tzinfo=UTC).isoformat()
     assert out["sensor.a"][hkey_a] == pytest.approx(150.0)
-    hkey_b = datetime(2025, 6, 21, 11, 0, tzinfo=timezone.utc).isoformat()
+    hkey_b = datetime(2025, 6, 21, 11, 0, tzinfo=UTC).isoformat()
     assert out["sensor.b"][hkey_b] == pytest.approx(200.0)
     # None mean produced no entry; unknown sid ignored.
     assert len(out["sensor.b"]) == 1
@@ -613,14 +612,14 @@ def test_parse_lts_result_epoch_ms_and_iso():
 
 
 def test_stat_row_hour_variants():
-    ts_ms = int(datetime(2025, 6, 21, 10, 30, tzinfo=timezone.utc).timestamp() * 1000)
+    ts_ms = int(datetime(2025, 6, 21, 10, 30, tzinfo=UTC).timestamp() * 1000)
     # Epoch ms floored to the hour.
     assert bf._stat_row_hour(ts_ms) == datetime(
-        2025, 6, 21, 10, 0, tzinfo=timezone.utc
+        2025, 6, 21, 10, 0, tzinfo=UTC
     ).isoformat()
     # Naive ISO assumed UTC.
     assert bf._stat_row_hour("2025-06-21T10:45:00") == datetime(
-        2025, 6, 21, 10, 0, tzinfo=timezone.utc
+        2025, 6, 21, 10, 0, tzinfo=UTC
     ).isoformat()
     # Junk -> None.
     assert bf._stat_row_hour(object()) is None
@@ -631,12 +630,12 @@ def test_lts_windows_chunk_a_multi_year_range():
     # A 2-year hourly pull for all modules overflows HA's 4 MiB WS frame; the
     # LTS query must be chunked. Windows must tile [start, end) with no gap
     # or overlap and the last one clipped to end.
-    start = datetime(2024, 7, 1, tzinfo=timezone.utc)
-    end = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    start = datetime(2024, 7, 1, tzinfo=UTC)
+    end = datetime(2026, 7, 6, tzinfo=UTC)
     wins = bf._lts_windows(start, end, bf._LTS_WINDOW_DAYS)
     assert wins[0][0] == start
     assert wins[-1][1] == end
-    for (_a0, a1), (b0, _b1) in zip(wins, wins[1:]):
+    for (_a0, a1), (b0, _b1) in zip(wins, wins[1:], strict=False):
         assert a1 == b0  # contiguous, no gap/overlap
     # Every window is at most the window size.
     from datetime import timedelta as _td
@@ -653,9 +652,9 @@ def test_lts_windows_chunk_a_multi_year_range():
 
 def test_group_by_day_and_filter_actuals():
     recs = [
-        bf.HourlyWeather(datetime(2025, 6, 21, 9, tzinfo=timezone.utc),
+        bf.HourlyWeather(datetime(2025, 6, 21, 9, tzinfo=UTC),
                          700, 800, 110, 22),
-        bf.HourlyWeather(datetime(2025, 6, 22, 9, tzinfo=timezone.utc),
+        bf.HourlyWeather(datetime(2025, 6, 22, 9, tzinfo=UTC),
                          700, 800, 110, 22),
     ]
     by_day = bf._group_by_day(recs)

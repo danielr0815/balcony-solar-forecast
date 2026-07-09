@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - platform without tz data
 
 
 def _utc(y, mo, d, h=0, mi=0, s=0):
-    return datetime(y, mo, d, h, mi, s, tzinfo=timezone.utc)
+    return datetime(y, mo, d, h, mi, s, tzinfo=UTC)
 
 
 def _scan_solar_noon(y, mo, d):

@@ -9,10 +9,9 @@ root ``__init__``.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-
 from balcony_solar_forecast.const import (
     OPEN_METEO_HOURLY,
     OPEN_METEO_MINUTELY_15,
@@ -23,7 +22,6 @@ from balcony_solar_forecast.fetcher import (
     parse_weather,
     validate_payload,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -211,21 +209,21 @@ def test_radiation_coverage_counts_non_null(good_payload):
 def test_parse_basic_shape_and_length(good_payload):
     ws = parse_weather(good_payload)
     assert len(ws) == 4
-    assert all(s.start.tzinfo == timezone.utc for s in ws.slots)
+    assert all(s.start.tzinfo == UTC for s in ws.slots)
 
 
 def test_parse_shifts_stamp_to_interval_start(good_payload):
     """Open-Meteo stamps the interval END (backward mean); slot start is −15m."""
     ws = parse_weather(good_payload)
     # First stamp is 00:15 -> slot start 00:00.
-    assert ws.slots[0].start == datetime(2026, 7, 5, 0, 0, tzinfo=timezone.utc)
-    assert ws.slots[1].start == datetime(2026, 7, 5, 0, 15, tzinfo=timezone.utc)
+    assert ws.slots[0].start == datetime(2026, 7, 5, 0, 0, tzinfo=UTC)
+    assert ws.slots[1].start == datetime(2026, 7, 5, 0, 15, tzinfo=UTC)
 
 
 def test_parse_midpoint_is_start_plus_7m30s(good_payload):
     ws = parse_weather(good_payload)
     assert ws.slots[0].midpoint == datetime(
-        2026, 7, 5, 0, 7, 30, tzinfo=timezone.utc
+        2026, 7, 5, 0, 7, 30, tzinfo=UTC
     )
 
 
@@ -300,4 +298,4 @@ def test_parse_utc_suffix_is_normalised():
         "hourly": _hourly_block(1),
     }
     ws = parse_weather(payload)
-    assert ws.slots[0].start == datetime(2026, 7, 5, 0, 0, tzinfo=timezone.utc)
+    assert ws.slots[0].start == datetime(2026, 7, 5, 0, 0, tzinfo=UTC)

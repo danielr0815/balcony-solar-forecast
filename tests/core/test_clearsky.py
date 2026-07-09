@@ -8,12 +8,10 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from balcony_solar_forecast.core.clearsky import (
     clear_sky_index,
     haurwitz_ghi,
 )
-
 
 # --- Haurwitz GHI ---------------------------------------------------------
 
