@@ -195,7 +195,7 @@
           "slow_learner_enabled": "Learns per-channel beam transmittance by sun position over a season (shade, trees, building edge).",
           "day_ahead_bias_enabled": "Applies a nightly-trained multiplicative bias per cloud class and day part.",
           "quantiles_enabled": "Emits empirical P10/P50/P90 uncertainty bands from the 90-day error ring (collapses to P50 until a bin has enough samples).",
-          "comparison_sensors": "List of external daily-kWh forecast sensors the scoreboard scores the engine against. Each row is {name, daily_entity}. Ships empty; e.g. name \"8-Entry Baseline\" -> sensor.pv_prognose_heute_alle_module."
+          "comparison_sensors": "List of external daily-kWh forecast sensors the scoreboard scores the engine against. Each row has a name plus a daily_entity. Ships empty; e.g. name \"8-Entry Baseline\" -> sensor.pv_prognose_heute_alle_module."
         }
       }
     },

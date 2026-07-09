@@ -1,10 +1,10 @@
 {
   "domain": "balcony_solar_forecast",
   "name": "Balcony Solar Forecast",
+  "after_dependencies": ["recorder"],
   "codeowners": ["@danielr0815"],
   "config_flow": true,
   "dependencies": [],
-  "after_dependencies": ["recorder"],
   "documentation": "https://github.com/danielr0815/balcony-solar-forecast",
   "integration_type": "service",
   "iot_class": "cloud_polling",

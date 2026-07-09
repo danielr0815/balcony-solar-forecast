@@ -96,23 +96,19 @@ def _venv_run(args: list[str]) -> None:
 
 
 def test() -> None:
-    """Run the test suite.
+    """Run the full test suite with the PHACC pytest plugin disabled.
 
-    On POSIX (Linux/macOS/WSL) the full suite runs, including the Home Assistant
-    layer. On Windows the HA test helpers cannot load (``homeassistant.runner``
-    imports the POSIX-only ``fcntl``), so — exactly like battery-manager-ha — we
-    run the pure-core suite natively and leave the HA layer to Linux/WSL/CI.
+    The suite is unit-style: every HA-layer test runs against fakes/monkeypatch
+    and needs only ``import homeassistant``, not a real HA instance. The
+    pytest-homeassistant-custom-component plugin's autouse fixtures call
+    ``asyncio.get_event_loop()`` at setup (raises on Python 3.12+ for the sync
+    tests) and its import pulls the POSIX-only ``fcntl`` (unimportable on
+    Windows), so it only ever breaks a suite that never uses its fixtures.
+    Disabling it (``-p no:homeassistant``) runs the whole meaningful suite
+    identically on Linux, macOS, WSL and Windows (pytest-asyncio still drives the
+    async tests). Matches the CI ``tests`` job.
     """
-    if os.name == "nt":
-        print(
-            "Windows detected: the Home Assistant test helpers "
-            "(pytest-homeassistant-custom-component) cannot load here\n"
-            "(homeassistant.runner imports the POSIX-only 'fcntl'). Running the "
-            "pure-core suite;\nrun the full suite on Linux / WSL / CI.\n"
-        )
-        _venv_run(["-m", "pytest", "tests/core", "-p", "no:homeassistant"])
-        return
-    _venv_run(["-m", "pytest"])
+    _venv_run(["-m", "pytest", "tests", "-p", "no:homeassistant"])
 
 
 def test_core() -> None:

@@ -195,7 +195,7 @@
           "slow_learner_enabled": "Lernt über eine Saison die kanalweise Beam-Transmittanz je Sonnenstand (Verschattung, Bäume, Gebäudekante).",
           "day_ahead_bias_enabled": "Wendet einen nächtlich trainierten multiplikativen Bias je Wolkenklasse und Tagesabschnitt an.",
           "quantiles_enabled": "Gibt empirische P10/P50/P90-Unsicherheitsbänder aus dem 90-Tage-Fehlerring aus (kollabiert auf P50, bis ein Bin genügend Samples hat).",
-          "comparison_sensors": "Liste externer Tages-kWh-Prognosesensoren, gegen die das Scoreboard den Motor bewertet. Jede Zeile ist {name, daily_entity}. Wird leer ausgeliefert; z. B. name \"8-Entry Baseline\" -> sensor.pv_prognose_heute_alle_module."
+          "comparison_sensors": "Liste externer Tages-kWh-Prognosesensoren, gegen die das Scoreboard den Motor bewertet. Jede Zeile hat einen Namen und eine daily_entity. Wird leer ausgeliefert; z. B. name \"8-Entry Baseline\" -> sensor.pv_prognose_heute_alle_module."
         }
       }
     },

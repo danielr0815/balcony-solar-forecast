@@ -81,19 +81,22 @@ Installation. Die venv-Python-Version kommt vom Bootstrap-Interpreter
 ### Tests & Linter
 
 ```bash
-make test        # volle Suite (Linux/WSL/CI); auf Windows automatisch nur Core
-make test-core   # nur der reine Kern (ohne Home Assistant) — überall lauffähig
+make test        # volle Suite (plattformunabhängig, PHACC-Plugin deaktiviert)
+make test-core   # nur der reine Kern (ohne Home Assistant)
 make lint        # ruff check
 make format      # ruff check --fix
 make clean       # venv entfernen
 ```
 
-> **Windows-Hinweis:** Die HA-Test-Helfer
-> (`pytest-homeassistant-custom-component`) laden auf Windows nicht — HAs
-> `runner` importiert das POSIX-only `fcntl`. Deshalb läuft die **volle** Suite
-> unter **Linux / WSL / CI**; auf Windows testet man den Kern nativ
-> (`make test-core`). `make test` erkennt Windows und führt dort automatisch nur
-> den Kern aus.
+> **Warum `-p no:homeassistant`?** Die Suite ist Unit-Test-artig: jeder
+> HA-Schicht-Test läuft gegen Fakes/Monkeypatch und braucht nur
+> `import homeassistant`, keine echte HA-Instanz. Die autouse-Fixtures von
+> `pytest-homeassistant-custom-component` rufen beim Setup
+> `asyncio.get_event_loop()` auf (wirft auf Python 3.12+ bei den sync-Tests) und
+> der Import zieht das POSIX-only `fcntl` (auf Windows nicht importierbar) — das
+> Plugin bricht also nur eine Suite, die seine Fixtures nie nutzt. Deaktiviert
+> läuft die **volle** Suite überall gleich (`pytest-asyncio` treibt die
+> async-Tests weiter). Genau das macht `make test` und der CI-`tests`-Job.
 
 ## Lizenz
 

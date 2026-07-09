@@ -92,5 +92,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install homeassistant pytest pytest-homeassistant-custom-component
 
+      # Disable the pytest-homeassistant-custom-component plugin (`-p
+      # no:homeassistant`). The suite is unit-style: every HA-layer test runs
+      # against fakes/monkeypatch and needs only `import homeassistant`, not a
+      # real HA instance. PHACC's autouse fixtures (enable_event_loop_debug /
+      # verify_cleanup) call asyncio.get_event_loop() at setup, which raises on
+      # Python 3.12+ for the sync tests -- so the plugin only breaks a suite that
+      # never uses its fixtures. Disabling it runs the full meaningful suite
+      # (pytest-asyncio, installed via PHACC, still drives the async tests).
       - name: Run test suite
-        run: python -m pytest tests -q
+        run: python -m pytest tests -q -p no:homeassistant
