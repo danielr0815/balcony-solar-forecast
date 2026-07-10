@@ -738,3 +738,9 @@ ATTR_SP_TIME = "time"                       # [local ISO] time per sample
 ATTR_SP_HORIZON_AZIMUTH = "horizon_azimuth"  # [deg] azimuth grid for the horizon lines
 ATTR_SP_SHADE_HORIZON = "shade_horizon"     # [deg] learned shade horizon per grid azimuth
 ATTR_SP_STATIC_HORIZON = "static_horizon"   # [deg] config horizon per grid azimuth
+# Year-stable x-axis bounds (SPEC §15): the widest daylight sun-azimuth span of
+# the whole year at the site (both solstices), so the diagram's x-axis does NOT
+# rescale with the season and curves stay comparable across dates. Constant site
+# geometry (a function of lat/lon/year only) — excluded from the recorder too.
+ATTR_SP_AXIS_AZ_MIN = "axis_azimuth_min"    # [deg] min daylight azimuth over the year
+ATTR_SP_AXIS_AZ_MAX = "axis_azimuth_max"    # [deg] max daylight azimuth over the year

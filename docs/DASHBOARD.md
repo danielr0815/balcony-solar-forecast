@@ -256,6 +256,12 @@ resource, so it appears directly in the card picker:
    configured horizon. The x-axis is the sun azimuth (90° = East, 180° = South,
    270° = West).
 
+The x-axis is now fixed to the site's whole-year daylight azimuth span (both
+solstices), so the sun path stays comparable as you step through dates instead
+of rescaling with the season, and hovering (or touching) the chart snaps a
+crosshair to the nearest sun-path point and shows a readout line with its time,
+azimuth + compass direction, shading % (τ) and elevation.
+
 The card auto-discovers the three shade-profile entities above, so the default
 YAML is simply `type: custom:balcony-shade-profile-card`. It has four optional
 keys — `sensor`, `module_select`, `date_entity`, `title` — set them only to pin

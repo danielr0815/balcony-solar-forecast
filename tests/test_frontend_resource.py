@@ -288,5 +288,8 @@ def test_js_card_file_sanity():
     for color in ("#2ecc71", "#e67e22", "#c0392b"):
         assert color in text, f"missing τ colour {color}"
 
+    # The hover crosshair wires a mousemove handler over the plot overlay.
+    assert "mousemove" in text, "card JS has no hover crosshair (mousemove)"
+
     # No external-URL ES imports (self-contained module).
     assert re.search(r'from\s+["\']https?:', text) is None
