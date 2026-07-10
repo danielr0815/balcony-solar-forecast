@@ -17,6 +17,15 @@ import pytest
 pytest.importorskip("homeassistant")
 pytest.importorskip("voluptuous")
 
+from homeassistant.components.sensor import (  # noqa: E402
+    SensorDeviceClass,
+    SensorStateClass,
+)
+from homeassistant.const import UnitOfPower  # noqa: E402
+from homeassistant.helpers.update_coordinator import (  # noqa: E402
+    CoordinatorEntity,
+)
+
 from custom_components.balcony_solar_forecast import sensor as sensor_mod  # noqa: E402
 from custom_components.balcony_solar_forecast.binary_sensor import (  # noqa: E402
     DegradedSensor,
@@ -30,6 +39,7 @@ from custom_components.balcony_solar_forecast.recorder import (  # noqa: E402
 from custom_components.balcony_solar_forecast.sensor import (  # noqa: E402
     EnergyProductionSensor,
     LastFetchAgeSensor,
+    MeasuredDcTotalSensor,
     PowerNowSensor,
     SourceStatusSensor,
     _build_forecast_response,
@@ -166,6 +176,232 @@ def test_source_status_maps_status_and_failure():
 
     failed = _FakeCoordinator(_curve_data(start, [1.0]), last_update_success=False)
     assert _bare(SourceStatusSensor, failed).native_value == "unavailable"
+
+
+# --------------------------------------------------------------------------
+# Measured site-total DC-power sensor (ground truth; independent of the
+# coordinator's forecast cycle).
+# --------------------------------------------------------------------------
+
+
+class _FakeSourceState:
+    def __init__(self, state):
+        self.state = state
+
+
+class _StatesRegistry:
+    """Minimal ``hass.states`` stand-in: entity_id -> state string map."""
+
+    def __init__(self, mapping):
+        self._mapping = mapping
+
+    def get(self, entity_id):
+        if entity_id not in self._mapping:
+            return None
+        return _FakeSourceState(self._mapping[entity_id])
+
+
+class _StatesHass:
+    def __init__(self, mapping):
+        self.states = _StatesRegistry(mapping)
+
+
+class _MeasuredPlane:
+    def __init__(self, actual_entity):
+        self.actual_entity = actual_entity
+
+
+class _MeasuredSite:
+    def __init__(self, planes):
+        self.planes = tuple(planes)
+
+
+class _MeasuredEntry:
+    def __init__(self):
+        self.entry_id = "abc123"
+        self.data: dict = {}
+        self.options: dict = {}
+
+
+class _MeasuredCoordinator:
+    """Coordinator double exposing the ``_site.planes`` surface + entry that
+    ``async_setup_entry`` reads to build (or omit) the measured-total sensor."""
+
+    def __init__(self, actual_entities):
+        self.entry = _MeasuredEntry()
+        self._site = _MeasuredSite([_MeasuredPlane(a) for a in actual_entities])
+        self.data = None
+        self.last_update_success = True
+
+
+class _MeasuredHass:
+    def __init__(self, coordinator):
+        self.data = {DOMAIN: {"abc123": coordinator}}
+
+
+def test_measured_total_sums_numeric_sources():
+    hass = _StatesHass({"sensor.a": "120.0", "sensor.b": "80.0"})
+    s = _bare(
+        MeasuredDcTotalSensor,
+        _FakeCoordinator(None),
+        hass=hass,
+        _source_ids=["sensor.a", "sensor.b"],
+        _value=None,
+        _reporting=0,
+    )
+    s._recompute()
+    assert s.native_value == pytest.approx(200.0)
+    assert s.available is True
+    attrs = s.extra_state_attributes
+    assert attrs == {
+        "channels_total": 2,
+        "channels_reporting": 2,
+        "sources": ["sensor.a", "sensor.b"],
+    }
+
+
+def test_measured_total_skips_unavailable_and_non_numeric():
+    hass = _StatesHass(
+        {
+            "sensor.a": "100.0",
+            "sensor.b": "unavailable",
+            "sensor.c": "not-a-number",
+            "sensor.d": "50.0",
+            # sensor.e is absent from the state machine entirely -> skipped.
+        }
+    )
+    s = _bare(
+        MeasuredDcTotalSensor,
+        _FakeCoordinator(None),
+        hass=hass,
+        _source_ids=["sensor.a", "sensor.b", "sensor.c", "sensor.d", "sensor.e"],
+        _value=None,
+        _reporting=0,
+    )
+    s._recompute()
+    # Only the two numeric sources contribute; the count reflects it.
+    assert s.native_value == pytest.approx(150.0)
+    attrs = s.extra_state_attributes
+    assert attrs["channels_total"] == 5
+    assert attrs["channels_reporting"] == 2
+    assert s.available is True
+
+
+def test_measured_total_all_dead_is_unavailable():
+    hass = _StatesHass({"sensor.a": "unavailable", "sensor.b": "unknown"})
+    s = _bare(
+        MeasuredDcTotalSensor,
+        _FakeCoordinator(None),
+        hass=hass,
+        _source_ids=["sensor.a", "sensor.b"],
+        _value=None,
+        _reporting=0,
+    )
+    s._recompute()
+    assert s.native_value is None
+    assert s.available is False
+    assert s.extra_state_attributes["channels_reporting"] == 0
+
+
+def test_measured_total_available_independent_of_coordinator():
+    # The forecast coordinator's last update FAILED, but a live source keeps the
+    # measured sensor available (ground truth is decoupled from the forecast).
+    hass = _StatesHass({"sensor.a": "42.0"})
+    coord = _FakeCoordinator(None, last_update_success=False)
+    s = _bare(
+        MeasuredDcTotalSensor,
+        coord,
+        hass=hass,
+        _source_ids=["sensor.a"],
+        _value=None,
+        _reporting=0,
+    )
+    s._recompute()
+    assert coord.last_update_success is False
+    assert s.available is True
+    assert s.native_value == pytest.approx(42.0)
+
+
+async def test_measured_total_state_change_event_recomputes(monkeypatch):
+    """async_added_to_hass registers the state-change tracker with the source
+    ids + recompute callback, seeds once, and firing the callback recomputes."""
+    captured: dict = {}
+
+    def _fake_track(hass, ids, cb):
+        captured["hass"] = hass
+        captured["ids"] = ids
+        captured["cb"] = cb
+        return lambda: captured.__setitem__("unsub_called", True)
+
+    monkeypatch.setattr(sensor_mod, "async_track_state_change_event", _fake_track)
+
+    async def _noop_super(self):
+        return None
+
+    monkeypatch.setattr(CoordinatorEntity, "async_added_to_hass", _noop_super)
+
+    mapping = {"sensor.a": "100.0", "sensor.b": "unavailable"}
+    hass = _StatesHass(mapping)
+    written: list[bool] = []
+    s = _bare(
+        MeasuredDcTotalSensor,
+        _FakeCoordinator(None),
+        hass=hass,
+        _source_ids=["sensor.a", "sensor.b"],
+        _value=None,
+        _reporting=0,
+        async_on_remove=lambda f: None,
+        async_write_ha_state=lambda: written.append(True),
+    )
+    await s.async_added_to_hass()
+    # Tracker wired to our source ids + the recompute callback.
+    assert captured["ids"] == ["sensor.a", "sensor.b"]
+    assert captured["cb"] == s._handle_source_event
+    assert captured["hass"] is hass
+    # Seeded once on add: only sensor.a reports.
+    assert s.native_value == pytest.approx(100.0)
+    assert s.extra_state_attributes["channels_reporting"] == 1
+    assert written == []  # the seed does not write (the platform's add does)
+    # A second source comes alive -> firing the captured callback recomputes
+    # and publishes.
+    mapping["sensor.b"] = "50.0"
+    captured["cb"](object())
+    assert s.native_value == pytest.approx(150.0)
+    assert written == [True]
+
+
+async def test_measured_total_added_only_when_sources_configured():
+    # Planes carry actual_entity ids (deduped, order preserved) -> the sensor is
+    # added, wired to those source ids.
+    coord = _MeasuredCoordinator(
+        ["sensor.a", "sensor.b", "sensor.a", None]
+    )
+    added: list = []
+    await sensor_mod.async_setup_entry(_MeasuredHass(coord), coord.entry, added.extend)
+    measured = [e for e in added if isinstance(e, MeasuredDcTotalSensor)]
+    assert len(measured) == 1
+    assert measured[0]._source_ids == ["sensor.a", "sensor.b"]
+
+
+async def test_measured_total_omitted_when_no_sources():
+    # No plane has an actual_entity -> nothing to sum -> sensor not created.
+    coord = _MeasuredCoordinator([None, None])
+    added: list = []
+    await sensor_mod.async_setup_entry(_MeasuredHass(coord), coord.entry, added.extend)
+    assert not any(isinstance(e, MeasuredDcTotalSensor) for e in added)
+
+
+def test_measured_total_entity_contract_pinned():
+    coord = _FakeCoordinator(None)
+    s = MeasuredDcTotalSensor(coord, ["sensor.a", "sensor.b"])
+    assert s.unique_id == "abc123_measured_dc_power_total"
+    assert s.translation_key == "measured_dc_power_total"
+    assert s.device_class == SensorDeviceClass.POWER
+    assert s.native_unit_of_measurement == UnitOfPower.WATT
+    assert s.state_class == SensorStateClass.MEASUREMENT
+    # NOT excluded from the recorder: the class declares no unrecorded attrs
+    # (its history is the whole point) — unlike the curve-bearing energy sensor.
+    assert "_unrecorded_attributes" not in MeasuredDcTotalSensor.__dict__
 
 
 # --------------------------------------------------------------------------

@@ -5,6 +5,7 @@
       "energy_production_tomorrow": {"name": "Energieertrag morgen"},
       "energy_production_d2": {"name": "Energieertrag übermorgen"},
       "power_production_now": {"name": "Momentanleistung"},
+      "measured_dc_power_total": {"name": "Gemessene DC-Leistung (gesamt)"},
       "last_fetch_age_min": {"name": "Alter des letzten Abrufs"},
       "source_status": {
         "name": "Quellenstatus",

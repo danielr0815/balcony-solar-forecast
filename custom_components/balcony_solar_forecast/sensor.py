@@ -39,11 +39,19 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower, UnitOfTime
+from homeassistant.const import (
+    PERCENTAGE,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+    UnitOfEnergy,
+    UnitOfPower,
+    UnitOfTime,
+)
 from homeassistant.core import HomeAssistant, ServiceResponse, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
@@ -93,6 +101,7 @@ from .const import (
     SENSOR_FORECAST_HOURLY_MAE,
     SENSOR_FORECAST_VS_BEST_BASELINE_PCT,
     SENSOR_INTRADAY_SCALAR,
+    SENSOR_MEASURED_DC_TOTAL,
     SENSOR_POWER_NOW,
     SENSOR_SHADE_PROFILE,
     STATUS_CACHED,
@@ -194,6 +203,14 @@ async def async_setup_entry(
         # --- Shade-profile diagram data (SPEC §15) ---
         ShadeProfileSensor(coordinator),
     ]
+
+    # Measured site-total DC power (ground truth): the live sum of the planes'
+    # actual_entity sensors. Added ONLY when at least one plane has an
+    # actual_entity — with none configured there is nothing to sum, so the
+    # sensor is omitted rather than published permanently unavailable.
+    measured_ids = _measured_source_ids(coordinator)
+    if measured_ids:
+        entities.append(MeasuredDcTotalSensor(coordinator, measured_ids))
 
     # One MAE sensor per configured comparison forecast (SPEC §9/§10). The list
     # is read from the merged entry config (data + options); it ships EMPTY, so
@@ -499,6 +516,99 @@ class PowerNowSensor(BalconyForecastEntity, SensorEntity):
         data = self.coordinator.data or {}
         value = data.get(_KEY_POWER_NOW_W)
         return None if value is None else round(float(value), 1)
+
+
+class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
+    """Measured site-total DC power: the live sum of the per-module measured
+    DC-power sensors (SPEC §14.3 ground truth) — the time-accurate partner of
+    the forecast power sensor.
+
+    Source entities are the configured planes' ``actual_entity`` ids (planes
+    without one skipped, de-duplicated, plane order preserved); the sensor is
+    not created at all when that list is empty (nothing to sum). State is the
+    sum of the sources' current numeric states; a source that is unknown /
+    unavailable / non-numeric is skipped, so a partial DTU dropout reads as the
+    reduced live total rather than going blank.
+
+    Two design points worth calling out:
+      * ``available`` is DECOUPLED from the coordinator — True while AT LEAST ONE
+        source reports a numeric value, unavailable only when every source is
+        dead. Measured production is ground truth and must keep being recorded
+        even while the FORECAST is degraded/unavailable; the base class ties
+        availability to ``coordinator.last_update_success``, so this override is
+        essential.
+      * ``MEASUREMENT`` + ``POWER`` + ``W`` => Home Assistant keeps long-term
+        statistics, and there are no bulky curve attributes, so this sensor is
+        deliberately NOT excluded from the recorder: its history IS the point.
+
+    It never reads ``coordinator.data``: it subscribes to the source entities
+    directly via ``async_track_state_change_event`` (auto-unsubscribed on removal
+    through ``async_on_remove`` — HA best practice, no manual teardown) and
+    recomputes on every change plus once on add, so it is fully independent of
+    the forecast recompute cadence.
+    """
+
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:solar-power"
+
+    def __init__(self, coordinator: Any, source_ids: list[str]) -> None:
+        super().__init__(coordinator, SENSOR_MEASURED_DC_TOTAL)
+        self._source_ids = list(source_ids)
+        self._value: float | None = None
+        self._reporting = 0
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # Track the source sensors directly (ground truth is independent of the
+        # forecast coordinator's tick). async_on_remove auto-unsubscribes when
+        # the entity is removed — no manual unsub bookkeeping needed.
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, self._source_ids, self._handle_source_event
+            )
+        )
+        # Seed the cached state before the first write so it is correct on add.
+        self._recompute()
+
+    @callback
+    def _handle_source_event(self, event: Any) -> None:
+        """Recompute + publish on any source-sensor state change."""
+        self._recompute()
+        self.async_write_ha_state()
+
+    def _recompute(self) -> None:
+        """Cache the summed value + reporting count from the current states."""
+        total = 0.0
+        reporting = 0
+        for entity_id in self._source_ids:
+            value = _numeric_state(self.hass.states.get(entity_id))
+            if value is None:
+                continue
+            total += value
+            reporting += 1
+        self._reporting = reporting
+        self._value = round(total, 1) if reporting else None
+
+    @property
+    def available(self) -> bool:
+        # Ground truth: available while >=1 source reports, decoupled from the
+        # coordinator's last_update_success (panels produce even when the
+        # forecast is unavailable).
+        return self._reporting > 0
+
+    @property
+    def native_value(self) -> float | None:
+        return self._value
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "channels_total": len(self._source_ids),
+            "channels_reporting": self._reporting,
+            "sources": list(self._source_ids),
+        }
 
 
 class _DiagnosticSensor(BalconyForecastEntity, SensorEntity):
@@ -962,3 +1072,41 @@ def _local_date_of(iso: str):
     if parsed is None:
         return None
     return dt_util.as_local(parsed).date()
+
+
+def _numeric_state(state: Any) -> float | None:
+    """Current numeric value of a source state, or None if unusable.
+
+    None for a missing state, an unknown/unavailable state, or a non-numeric
+    value — the caller then skips that channel when summing.
+    """
+    if state is None:
+        return None
+    raw = getattr(state, "state", None)
+    if raw is None or raw in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _measured_source_ids(coordinator: Any) -> list[str]:
+    """Ordered, de-duplicated measured DC-power entity ids from the site planes.
+
+    Each plane's ``actual_entity`` (the HA sensor of that module's measured DC
+    power); planes without one are skipped and duplicates dropped while plane
+    order is preserved. Empty when no plane has an ``actual_entity`` — the
+    platform then omits the summing sensor entirely (nothing to sum).
+    """
+    site = getattr(coordinator, "_site", None)
+    if site is None:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for plane in getattr(site, "planes", ()):
+        entity_id = getattr(plane, "actual_entity", None)
+        if isinstance(entity_id, str) and entity_id and entity_id not in seen:
+            seen.add(entity_id)
+            out.append(entity_id)
+    return out

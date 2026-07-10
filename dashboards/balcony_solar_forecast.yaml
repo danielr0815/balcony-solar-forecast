@@ -101,21 +101,22 @@ views:
             name: Alt 1600W
 
       # ----------------------------------------------------------------
-      # Time-accurate forecast power (SPEC §14.3): today's cumulative kWh and
-      # the instantaneous forecast power, over the recorder history. Pairs
-      # top-to-bottom with the measured per-module DC-power card below.
-      # Tomorrow's kWh is deliberately NOT shown — juxtaposing today's
-      # forecast with tomorrow's says nothing about accuracy. history-graph
-      # is a built-in card.
+      # Forecast vs. measured SITE POWER (SPEC §14.3): a like-for-like W-vs-W
+      # comparison on one y-scale — the instantaneous forecast power overlaid
+      # with the measured site-total DC power (the integration's own
+      # measured_dc_power_total sensor, the live sum of the per-module DC-power
+      # entities). The today-kWh row is gone: mixing kWh and W on one axis is
+      # unreadable (the daily-kWh story is in the band card + scoreboard).
+      # history-graph is a built-in card.
       # ----------------------------------------------------------------
       - type: history-graph
-        title: Forecast power (time-accurate)
+        title: Forecast vs. measured (site power)
         hours_to_show: 72
         entities:
-          - entity: sensor.balcony_solar_forecast_energy_production_today
-            name: Forecast — today
           - entity: sensor.balcony_solar_forecast_power_production_now
-            name: Forecast — power now
+            name: Forecast
+          - entity: sensor.balcony_solar_forecast_measured_dc_power_total
+            name: Measured
 
       # >>> EDIT ME <<< OPERATOR-SPECIFIC entity ids below (this + the next
       # statistics-graph card, and the comparison rows above). The

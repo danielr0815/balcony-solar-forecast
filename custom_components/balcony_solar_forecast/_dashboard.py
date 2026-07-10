@@ -42,6 +42,7 @@ from .const import (
     SENSOR_FORECAST_HOURLY_MAE,
     SENSOR_FORECAST_VS_BEST_BASELINE_PCT,
     SENSOR_INTRADAY_SCALAR,
+    SENSOR_MEASURED_DC_TOTAL,
     SENSOR_POWER_NOW,
     SENSOR_SHADE_PROFILE,
 )
@@ -76,6 +77,7 @@ DASHBOARD_ENTITY_KEYS: tuple[str, ...] = (
     SENSOR_FORECAST_HOURLY_MAE,
     SENSOR_ENERGY_TODAY,
     SENSOR_POWER_NOW,
+    SENSOR_MEASURED_DC_TOTAL,
     SENSOR_ENERGY_TODAY_P10,
     SENSOR_ENERGY_TODAY_P90,
     SENSOR_SOURCE_STATUS,
@@ -295,30 +297,34 @@ def _add_scoreboard(
 def _add_forecast_history(
     cards: list[dict[str, Any]], entity_map: dict[str, str]
 ) -> None:
-    """Forecast today-kWh + power-now history-graph (SPEC §14.3).
+    """Forecast-vs-measured SITE POWER comparison history-graph (SPEC §14.3).
 
-    Time-accurate: today's cumulative kWh and the instantaneous forecast
-    power, paired with the measured per-module DC-power card immediately
-    below. Tomorrow's kWh is deliberately NOT shown here — juxtaposing today's
-    forecast with tomorrow's tells the operator nothing about accuracy.
+    A pure power comparison on ONE y-scale: the instantaneous forecast power
+    (``power_production_now``) against the measured site-total DC power
+    (``measured_dc_power_total``, the live sum of the per-module sensors). The
+    today-kWh row that used to share this card is gone — mixing kWh and W on one
+    axis is unreadable; the daily-kWh story lives in the band card + scoreboard.
+
+    Gated on the forecast-power row: the card is omitted entirely only when
+    ``power_production_now`` is absent. When just the measured-total sensor is
+    missing (no plane has an ``actual_entity``, so the summing sensor was never
+    created) the forecast-only row survives.
     """
-    rows: list[dict[str, Any]] = []
-    for key, name in (
-        (SENSOR_ENERGY_TODAY, "Forecast — today"),
-        (SENSOR_POWER_NOW, "Forecast — power now"),
-    ):
-        row = _row(entity_map, key, name)
-        if row is not None:
-            rows.append(row)
-    if rows:
-        cards.append(
-            {
-                "type": "history-graph",
-                "title": "Forecast power (time-accurate)",
-                "hours_to_show": 72,
-                "entities": rows,
-            }
-        )
+    forecast_row = _row(entity_map, SENSOR_POWER_NOW, "Forecast")
+    if forecast_row is None:
+        return
+    rows = [forecast_row]
+    measured_row = _row(entity_map, SENSOR_MEASURED_DC_TOTAL, "Measured")
+    if measured_row is not None:
+        rows.append(measured_row)
+    cards.append(
+        {
+            "type": "history-graph",
+            "title": "Forecast vs. measured (site power)",
+            "hours_to_show": 72,
+            "entities": rows,
+        }
+    )
 
 
 def _add_measured_power(

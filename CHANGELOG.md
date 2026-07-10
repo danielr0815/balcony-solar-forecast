@@ -7,17 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Measured site-total DC-power sensor.** A new
+  `sensor.…_measured_dc_power_total` sums the configured per-module measured
+  DC-power entities (each plane's `actual_entity`) into one site-total power
+  reading (W, `state_class: measurement`, so Home Assistant keeps long-term
+  statistics). It tracks its source sensors directly and stays available while at
+  least one still reports — independent of the forecast coordinator — so its
+  history is the real measured envelope even when the forecast is degraded. It is
+  created only when at least one plane has an `actual_entity`.
+
 ### Changed
 - **Dashboard UX fixes.** The observability dashboard (both the generated one and
   the shipped copy-paste YAML) is tidied: the forecast graph drops the pointless
-  today-vs-tomorrow juxtaposition and is retitled *Forecast power (time-accurate)*
-  so it pairs top-to-bottom with the measured per-module card; the measured
-  DC-power graph now labels its rows by plane (M1…M8) instead of the inverter
-  ports' ambiguous own names. The generated dashboard additionally drops its
-  redundant *Shade profile (per date & module)* controls card (those controls are
-  embedded in the bundled diagram card) and its shademap note now points at
-  *your* site's obstructions generically instead of hardcoding the reference
-  install's east-hill/wall/tree sectors.
+  today-vs-tomorrow juxtaposition and becomes a like-for-like power comparison —
+  retitled *Forecast vs. measured (site power)* — pairing the forecast power with
+  the new measured-total sensor and dropping its today-kWh row (kWh and W do not
+  share a y-axis); the measured per-module DC-power graph now labels its rows by
+  plane (M1…M8) instead of the inverter ports' ambiguous own names. The generated
+  dashboard additionally drops its redundant *Shade profile (per date & module)*
+  controls card (those controls are embedded in the bundled diagram card) and its
+  shademap note now points at *your* site's obstructions generically instead of
+  hardcoding the reference install's east-hill/wall/tree sectors.
 
 ## [0.9.0] - 2026-07-10
 

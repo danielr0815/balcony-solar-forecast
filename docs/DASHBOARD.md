@@ -80,6 +80,7 @@ Solar Forecast**), e.g.:
 | Kill-gate | `binary_sensor.balcony_solar_forecast_kill_gate_passed` |
 | Today P10 / P90 | `sensor.balcony_solar_forecast_energy_production_today_p10` / `_p90` |
 | Per-comparison MAE | `sensor.balcony_solar_forecast_comparison_daily_kwh_mae_<slug>` |
+| Measured site power (total) | `sensor.balcony_solar_forecast_measured_dc_power_total` |
 | Measured module power | `sensor.inverter_port_{1,2}_dc_power[_2.._4]` |
 
 If your entity ids differ (multiple installs, renamed entities), fix the
@@ -161,12 +162,16 @@ comparison_sensors:
   `engine_vs_best_baseline_pct`; positive = engine better on daily-kWh MAE.
 - **Skill scoreboard** (entities) — engine daily-kWh MAE, engine hourly MAE,
   engine-vs-best percent, plus each configured comparison's daily-kWh MAE.
-- **Forecast power (time-accurate)** + **Measured DC power per module**
-  (history-graphs) — today's cumulative kWh forecast and the instantaneous
-  forecast power, paired top-to-bottom with the 8 per-module measured DC-power
-  sensors (ground truth, labelled by plane M1…M8). Tomorrow's kWh is not shown:
-  juxtaposing today's forecast with tomorrow's says nothing about accuracy (a
-  true total-measured-vs-forecast overlay lands in a later phase).
+- **Forecast vs. measured (site power)** (history-graph) — the instantaneous
+  forecast power overlaid with the measured site-total DC power
+  (`sensor.…_measured_dc_power_total`, the live sum of the per-module sensors),
+  a like-for-like W-vs-W comparison on one y-scale. The today-kWh row is gone:
+  mixing kWh and W on one axis is unreadable (the daily-kWh story lives in the
+  band card + scoreboard). The measured-total sensor exists only when at least
+  one plane has an `actual_entity`; with none configured the graph shows the
+  forecast row alone.
+- **Measured DC power per module** (history-graph) — the 8 per-module measured
+  DC-power sensors (ground truth, labelled by plane M1…M8).
 - **Measured daily energy per module** (statistics-graph) — daily LTS sums per
   representative module (bar), a best-effort per-plane view.
 - **Today's forecast band** (entities) — P10 / P50 / P90 for today (SPEC §6).

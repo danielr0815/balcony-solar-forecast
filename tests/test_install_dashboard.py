@@ -116,7 +116,18 @@ def test_build_full_inventory_matches_shipped_yaml():
     assert not any(
         c.get("title") == "Forecast (today kWh) vs recent horizon" for c in cards
     )
-    assert any(c.get("title") == "Forecast power (time-accurate)" for c in cards)
+    assert not any(
+        c.get("title") == "Forecast power (time-accurate)" for c in cards
+    )
+    # The forecast card is now a pure W-vs-W comparison: Forecast (power_now)
+    # vs Measured (the integration's measured-total sensor), no kWh row.
+    fvm = next(
+        c for c in cards if c.get("title") == "Forecast vs. measured (site power)"
+    )
+    assert [(r["entity"], r["name"]) for r in fvm["entities"]] == [
+        ("sensor.real_power_production_now", "Forecast"),
+        ("sensor.real_measured_dc_power_total", "Measured"),
+    ]
     # The shademap markdown no longer hardcodes the reference site's obstructions.
     shademap = next(
         c
@@ -215,6 +226,44 @@ def test_build_measured_cards_use_measured_entities():
     # The LTS statistics-graph takes bare entity ids (no per-row name support).
     stats = next(c for c in cards if c["type"] == "statistics-graph")
     assert stats["entities"] == ["sensor.a", "sensor.b", "sensor.c"]
+
+
+def test_forecast_card_survives_without_measured_row():
+    """No measured-total sensor (no actual_entity configured) -> the forecast
+    card keeps its single Forecast row rather than being dropped."""
+    entity_map = _full_entity_map()
+    entity_map.pop("measured_dc_power_total")
+    config = d.build_dashboard_config(
+        entity_map=entity_map,
+        comparison_slugs=[],
+        measured_entities=[],
+        version="0.0.0",
+    )
+    card = next(
+        c
+        for c in config["views"][0]["cards"]
+        if c.get("title") == "Forecast vs. measured (site power)"
+    )
+    assert [(r["entity"], r["name"]) for r in card["entities"]] == [
+        ("sensor.real_power_production_now", "Forecast"),
+    ]
+
+
+def test_forecast_card_omitted_without_power_now():
+    """The forecast-vs-measured card is gated on power_production_now: absent
+    that row, the whole card is omitted (even if the measured sensor exists)."""
+    entity_map = _full_entity_map()
+    entity_map.pop("power_production_now")
+    config = d.build_dashboard_config(
+        entity_map=entity_map,
+        comparison_slugs=[],
+        measured_entities=[],
+        version="0.0.0",
+    )
+    assert not any(
+        c.get("title") == "Forecast vs. measured (site power)"
+        for c in config["views"][0]["cards"]
+    )
 
 
 # --------------------------------------------------------------------------

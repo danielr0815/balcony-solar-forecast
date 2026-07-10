@@ -5,6 +5,7 @@
       "energy_production_tomorrow": {"name": "Energy production tomorrow"},
       "energy_production_d2": {"name": "Energy production day after tomorrow"},
       "power_production_now": {"name": "Power production now"},
+      "measured_dc_power_total": {"name": "Measured DC power (total)"},
       "last_fetch_age_min": {"name": "Last fetch age"},
       "source_status": {
         "name": "Source status",
