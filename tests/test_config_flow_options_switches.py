@@ -1,10 +1,15 @@
-"""Tests for the options-flow learner kill switches (SPEC §5).
+"""Tests for the (slim) options-flow learner kill switches (SPEC §5).
 
-The options step must expose the three per-layer learner toggles (fast learner,
-shademap learner, day-ahead bias — all default ON), pre-fill them from the
-existing entry options, survive the exact HTTP-flow serialization, and persist
-the submitted booleans. Boolean selectors sidestep the HA-2026 ``step >= 1e-3``
-NumberSelector rule entirely, but we still assert the schema serializes.
+The options step exposes the three per-layer learner toggles (fast learner,
+shademap learner, day-ahead bias — all default ON), pre-fills them from the
+existing entry options, survives the exact HTTP-flow serialization, and
+persists the submitted booleans. Structural setup (location, intervals, site)
+no longer lives here — it moved to the reconfigure flow — so the options schema
+must NOT carry it, an options submit must NOT include it, and any structural key
+an OLD entry still carries in options must ride through an options save
+untouched (the migration-safety rule). Boolean selectors sidestep the HA-2026
+``step >= 1e-3`` NumberSelector rule entirely, but we still assert the schema
+serializes.
 
 Needs Home Assistant + voluptuous; skipped on the plain-core path.
 """
@@ -22,6 +27,7 @@ import voluptuous_serialize  # noqa: E402  (ships with homeassistant)
 from balcony_solar_forecast.config_flow import (  # noqa: E402
     BalconySolarForecastOptionsFlow,
     _current_values,
+    _options_schema,
     _user_schema,
 )
 from balcony_solar_forecast.const import (  # noqa: E402
@@ -45,21 +51,26 @@ _SWITCH_KEYS = (
     CONF_DAY_AHEAD_BIAS_ENABLED,
 )
 
+# The structural keys that must NOT appear in the slim options schema/submit.
+_STRUCTURAL_KEYS = (
+    CONF_LATITUDE,
+    CONF_LONGITUDE,
+    CONF_FETCH_INTERVAL,
+    CONF_RECOMPUTE_INTERVAL,
+    CONF_SITE,
+)
 
-def _schema(*, include_learner_switches: bool, **overrides):
-    base = {
-        "name": "Test",
-        "latitude": 48.5479,
-        "longitude": 12.1873,
-        "fetch_interval": 1800,
-        "recompute_interval": 900,
-        "site": copy.deepcopy(DEFAULT_SITE),
-    }
-    base.update(overrides)
+
+def _user_structural_schema():
+    """The user/reconfigure schema — structural fields only, no switches."""
     return _user_schema(
-        **base,
+        name="Test",
+        latitude=48.5479,
+        longitude=12.1873,
+        fetch_interval=1800,
+        recompute_interval=900,
+        site=copy.deepcopy(DEFAULT_SITE),
         include_name=False,
-        include_learner_switches=include_learner_switches,
     )
 
 
@@ -71,26 +82,32 @@ def _field_names(schema) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# Schema shape: switches only appear when asked; serialize like the endpoint.
+# Schema shape: switches live in the options schema, never the user schema.
 # --------------------------------------------------------------------------
 
 
-def test_switches_absent_from_user_step() -> None:
-    names = _field_names(_schema(include_learner_switches=False))
+def test_switches_absent_from_user_schema() -> None:
+    names = _field_names(_user_structural_schema())
     for key in _SWITCH_KEYS:
         assert key not in names
+    # The user/reconfigure schema carries ONLY the structural fields.
+    for key in _STRUCTURAL_KEYS:
+        assert key in names
 
 
-def test_switches_present_in_options_step_and_serialize() -> None:
-    names = _field_names(_schema(include_learner_switches=True))
+def test_switches_present_in_options_schema_and_serialize() -> None:
+    names = _field_names(_options_schema())
     for key in _SWITCH_KEYS:
         assert key in names
+    # ...and no structural field leaked into the options schema.
+    for key in _STRUCTURAL_KEYS:
+        assert key not in names
 
 
 def test_switch_defaults_are_on() -> None:
     """The rendered defaults must be True (both learners ON out of the box)."""
     fields = voluptuous_serialize.convert(
-        _schema(include_learner_switches=True),
+        _options_schema(),
         custom_serializer=cv.custom_serializer,
     )
     by_name = {f.get("name"): f for f in fields}
@@ -100,8 +117,7 @@ def test_switch_defaults_are_on() -> None:
 
 def test_switch_defaults_reflect_overrides() -> None:
     fields = voluptuous_serialize.convert(
-        _schema(
-            include_learner_switches=True,
+        _options_schema(
             fast_learner_enabled=False,
             slow_learner_enabled=True,
             day_ahead_bias_enabled=False,
@@ -146,7 +162,8 @@ def test_current_values_submitted_beats_existing() -> None:
 
 
 # --------------------------------------------------------------------------
-# Options flow persists the submitted switches (and fills missing with ON).
+# Options flow persists the submitted switches (and fills missing with ON),
+# writes NO structural keys, and preserves stale structural keys in options.
 # --------------------------------------------------------------------------
 
 
@@ -156,16 +173,17 @@ class _FakeEntry:
         self.options = options or {}
 
 
-async def test_options_flow_persists_switches(monkeypatch) -> None:
-    entry = _FakeEntry(
-        data={
-            CONF_LATITUDE: 48.5,
-            CONF_LONGITUDE: 12.1,
-            CONF_FETCH_INTERVAL: FETCH_INTERVAL_SECONDS,
-            CONF_RECOMPUTE_INTERVAL: RECOMPUTE_INTERVAL_SECONDS,
-            CONF_SITE: copy.deepcopy(DEFAULT_SITE),
-        },
-    )
+def _structural_data() -> dict:
+    return {
+        CONF_LATITUDE: 48.5,
+        CONF_LONGITUDE: 12.1,
+        CONF_FETCH_INTERVAL: FETCH_INTERVAL_SECONDS,
+        CONF_RECOMPUTE_INTERVAL: RECOMPUTE_INTERVAL_SECONDS,
+        CONF_SITE: copy.deepcopy(DEFAULT_SITE),
+    }
+
+
+def _options_flow(monkeypatch, entry):
     flow = BalconySolarForecastOptionsFlow.__new__(BalconySolarForecastOptionsFlow)
     # Patch the read-only config_entry property on the class for this instance.
     monkeypatch.setattr(
@@ -174,7 +192,6 @@ async def test_options_flow_persists_switches(monkeypatch) -> None:
         property(lambda self: entry),
         raising=False,
     )
-
     captured: dict = {}
 
     def _fake_create_entry(*, title, data):
@@ -183,14 +200,15 @@ async def test_options_flow_persists_switches(monkeypatch) -> None:
         return {"type": "create_entry", "data": data}
 
     monkeypatch.setattr(flow, "async_create_entry", _fake_create_entry)
+    return flow, captured
 
-    site = copy.deepcopy(DEFAULT_SITE)
+
+async def test_options_flow_persists_switches(monkeypatch) -> None:
+    entry = _FakeEntry(data=_structural_data())
+    flow, captured = _options_flow(monkeypatch, entry)
+
+    # Slim options submit: switches only, no structural fields.
     user_input = {
-        CONF_LATITUDE: 48.5,
-        CONF_LONGITUDE: 12.1,
-        CONF_FETCH_INTERVAL: FETCH_INTERVAL_SECONDS,
-        CONF_RECOMPUTE_INTERVAL: RECOMPUTE_INTERVAL_SECONDS,
-        CONF_SITE: site,
         CONF_FAST_LEARNER_ENABLED: False,
         CONF_SLOW_LEARNER_ENABLED: True,
         # day-ahead omitted -> defaults ON.
@@ -201,17 +219,51 @@ async def test_options_flow_persists_switches(monkeypatch) -> None:
     assert data[CONF_FAST_LEARNER_ENABLED] is False
     assert data[CONF_SLOW_LEARNER_ENABLED] is True
     assert data[CONF_DAY_AHEAD_BIAS_ENABLED] is True
+    # An options save never writes structural keys (they belong to entry.data).
+    for key in _STRUCTURAL_KEYS:
+        assert key not in data
+
+
+async def test_options_save_preserves_stale_structural_keys_in_options(
+    monkeypatch,
+) -> None:
+    """Migration-safety: an old entry that edited its site via the LEGACY
+    options flow still carries structural keys in ``entry.options``. An options
+    save must ride them through UNTOUCHED — dropping them would silently revert
+    the live site to the stale ``entry.data`` version until the next reconfigure
+    cleans them up.
+    """
+    legacy_site = copy.deepcopy(DEFAULT_SITE)
+    legacy_site["planes"][0]["name"] = "LEGACY_M1"  # a distinguishable marker
+    entry = _FakeEntry(
+        data=_structural_data(),
+        options={
+            CONF_LATITUDE: 51.0,
+            CONF_LONGITUDE: 7.0,
+            CONF_FETCH_INTERVAL: 1200,
+            CONF_RECOMPUTE_INTERVAL: 600,
+            CONF_SITE: legacy_site,
+            CONF_FAST_LEARNER_ENABLED: True,
+        },
+    )
+    flow, captured = _options_flow(monkeypatch, entry)
+
+    await flow.async_step_init({CONF_FAST_LEARNER_ENABLED: False})
+
+    data = captured["data"]
+    # The submitted switch is (re)written on top...
+    assert data[CONF_FAST_LEARNER_ENABLED] is False
+    # ...while every stale structural key survives verbatim.
+    assert data[CONF_LATITUDE] == 51.0
+    assert data[CONF_LONGITUDE] == 7.0
+    assert data[CONF_FETCH_INTERVAL] == 1200
+    assert data[CONF_RECOMPUTE_INTERVAL] == 600
+    assert data[CONF_SITE]["planes"][0]["name"] == "LEGACY_M1"
 
 
 async def test_options_flow_renders_form_with_switches(monkeypatch) -> None:
     entry = _FakeEntry(
-        data={
-            CONF_LATITUDE: 48.5,
-            CONF_LONGITUDE: 12.1,
-            CONF_FETCH_INTERVAL: FETCH_INTERVAL_SECONDS,
-            CONF_RECOMPUTE_INTERVAL: RECOMPUTE_INTERVAL_SECONDS,
-            CONF_SITE: copy.deepcopy(DEFAULT_SITE),
-        },
+        data=_structural_data(),
         options={CONF_FAST_LEARNER_ENABLED: False},
     )
     flow = BalconySolarForecastOptionsFlow.__new__(BalconySolarForecastOptionsFlow)
@@ -224,7 +276,7 @@ async def test_options_flow_renders_form_with_switches(monkeypatch) -> None:
 
     captured: dict = {}
 
-    def _fake_show_form(*, step_id, data_schema, errors):
+    def _fake_show_form(*, step_id, data_schema, errors=None):
         captured["step_id"] = step_id
         captured["schema"] = data_schema
         return {"type": "form"}
@@ -236,6 +288,9 @@ async def test_options_flow_renders_form_with_switches(monkeypatch) -> None:
     names = _field_names(captured["schema"])
     for key in _SWITCH_KEYS:
         assert key in names
+    # No structural fields in the slim options form.
+    for key in _STRUCTURAL_KEYS:
+        assert key not in names
     # The disabled fast learner from options must ride along as the default.
     fields = voluptuous_serialize.convert(
         captured["schema"], custom_serializer=cv.custom_serializer

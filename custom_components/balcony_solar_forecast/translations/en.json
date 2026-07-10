@@ -146,6 +146,21 @@
           "fetch_interval_seconds": "How often Open-Meteo is polled (default 1800 = 30 min).",
           "recompute_interval_seconds": "How often the forecast is recomputed (default 900 = 15 min)."
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Balcony Solar Forecast",
+        "description": "Edit the structural setup: location, update intervals and the full site configuration (planes, horizon tables, inverter groups). The runtime tunables — learner switches, quantile bands and comparison sensors — live in the options dialog (\"Configure\"). The name is immutable after setup. Azimuth: 0° = North, clockwise (90° = East, 180° = South). Tilt: degrees from horizontal (90° = vertical).",
+        "data": {
+          "latitude": "Latitude",
+          "longitude": "Longitude",
+          "fetch_interval_seconds": "Weather fetch interval (seconds)",
+          "recompute_interval_seconds": "Recompute interval (seconds)",
+          "site": "Site configuration (planes, horizon, inverter groups)"
+        },
+        "data_description": {
+          "fetch_interval_seconds": "How often Open-Meteo is polled (default 1800 = 30 min).",
+          "recompute_interval_seconds": "How often the forecast is recomputed (default 900 = 15 min)."
+        }
       }
     },
     "error": {
@@ -176,14 +191,9 @@
   "options": {
     "step": {
       "init": {
-        "title": "Edit Balcony Solar Forecast",
-        "description": "Adjust the location, intervals, the full site configuration and the learning layers. The name is immutable after setup.",
+        "title": "Balcony Solar Forecast options",
+        "description": "Runtime tunables only: the learner layers, quantile bands and comparison sensors. Structural setup (location, intervals, the full site configuration) moved to \"Reconfigure\" in the integration's three-dot menu.",
         "data": {
-          "latitude": "Latitude",
-          "longitude": "Longitude",
-          "fetch_interval_seconds": "Weather fetch interval (seconds)",
-          "recompute_interval_seconds": "Recompute interval (seconds)",
-          "site": "Site configuration (planes, horizon, inverter groups)",
           "fast_learner_enabled": "Fast learner (intraday correction)",
           "slow_learner_enabled": "Shademap learner (per-channel shade map)",
           "day_ahead_bias_enabled": "Day-ahead bias correction",

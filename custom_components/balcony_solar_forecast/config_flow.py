@@ -13,13 +13,23 @@ The submitted ``site`` object is validated by round-tripping it through
 violation is surfaced as a field error on the ``site`` key so the operator
 sees it inline.
 
-The options flow edits the very same object (modern HA 2026 pattern: the
-framework supplies ``self.config_entry`` as a read-only property — we never
-assign it) and additionally exposes the three learner kill switches (fast
-learner / shademap learning / day-ahead bias — SPEC §5 "Kill-Switches je
-Lernschicht im Options-Flow"; all default ON per the 2026-07-06 operator
-decision to build v0.3 early). Turning a switch off writes ``False`` into the
-entry options; the coordinator resolves them via ``LearnerConfig`` from
+Structural setup — location, the fetch/recompute cadences and the full ``site``
+object — lives in ``entry.data`` and is edited AFTER setup through the
+reconfigure flow (``async_step_reconfigure``, the HA quality-scale pattern),
+which writes it straight back into ``entry.data`` via
+``async_update_reload_and_abort``. Editing structural data into
+``entry.options`` (the legacy options behaviour) permanently shadowed
+``entry.data`` through the ``{**entry.data, **entry.options}`` merge every
+reader uses.
+
+The options flow is therefore slimmed to RUNTIME TUNABLES only: the three
+learner kill switches (fast learner / shademap learning / day-ahead bias —
+SPEC §5 "Kill-Switches je Lernschicht im Options-Flow"; all default ON per the
+2026-07-06 operator decision to build v0.3 early), the v0.4 quantile kill
+switch (SPEC §6) and the editable comparison-sensors list (SPEC §9/§10). Modern
+HA 2026 pattern: the framework supplies ``self.config_entry`` as a read-only
+property — we never assign it. Turning a switch off writes ``False`` into the
+entry options; the coordinator resolves every tunable via ``LearnerConfig`` from
 ``{**entry.data, **entry.options}`` on the next reload.
 
 Azimuth here is the INTERNAL convention (0 = North, clockwise). The rany2 UI
@@ -44,6 +54,8 @@ from homeassistant.helpers import selector
 
 from ._site_validation import SiteValidationError, validate_site
 from .const import (
+    CONF_COMPARISON_DAILY_ENTITY,
+    CONF_COMPARISON_NAME,
     CONF_COMPARISON_SENSORS,
     CONF_DAY_AHEAD_BIAS_ENABLED,
     CONF_FAST_LEARNER_ENABLED,
@@ -65,7 +77,7 @@ from .const import (
     FETCH_INTERVAL_SECONDS,
     RECOMPUTE_INTERVAL_SECONDS,
 )
-from .core.types import ComparisonConfig
+from .core.types import ComparisonConfig, SiteConfig
 
 # Re-export so consumers/tests can import the validation surface from here too.
 __all__ = [
@@ -80,6 +92,22 @@ _MIN_FETCH_SECONDS = 300  # 5 min — stay well under Open-Meteo's daily budget
 _MAX_FETCH_SECONDS = 21600  # 6 h
 _MIN_RECOMPUTE_SECONDS = 60  # 1 min
 _MAX_RECOMPUTE_SECONDS = 3600  # 1 h
+
+# The five STRUCTURAL keys that belong in ``entry.data`` (edited via the
+# reconfigure flow), never in ``entry.options``. Stale copies left in options —
+# e.g. by the legacy options flow that used to edit the site there — would
+# silently shadow the just-reconfigured data through the ``{**data, **options}``
+# merge every reader uses, so the reconfigure step strips them out of options in
+# the SAME atomic ``async_update_reload_and_abort`` call.
+_STRUCTURAL_OPTION_KEYS = frozenset(
+    {
+        CONF_LATITUDE,
+        CONF_LONGITUDE,
+        CONF_FETCH_INTERVAL,
+        CONF_RECOMPUTE_INTERVAL,
+        CONF_SITE,
+    }
+)
 
 
 def _interval_selector(minimum: int, maximum: int) -> selector.Selector:
@@ -108,14 +136,36 @@ def _bool_selector() -> selector.Selector:
 def _comparison_sensors_selector() -> selector.Selector:
     """Editable list of comparison-forecast entries (SPEC §9/§10, D-P9).
 
-    Each row is an object ``{name, daily_entity}`` naming an external daily-kWh
-    forecast sensor the scoreboard compares the engine against. Ships EMPTY;
-    the operator's two comparisons are documented (docs/DASHBOARD.md), never
-    hardcoded in the runtime defaults. ObjectSelector with ``multiple`` yields a
-    plain list-of-dicts, parsed leniently by ``ComparisonConfig.list_from_options``
-    (malformed / half-filled rows are dropped rather than raising).
+    Each row is a structured object with a required operator label and a
+    required daily-kWh forecast sensor (domain ``sensor``). The field keys are
+    EXACTLY ``CONF_COMPARISON_NAME`` / ``CONF_COMPARISON_DAILY_ENTITY`` so a
+    persisted row round-trips straight back into the editor. ``label_field``
+    shows the name as each row's header; ``multiple`` yields a list-of-dicts.
+    Ships EMPTY; the operator's two comparisons are documented
+    (docs/DASHBOARD.md), never hardcoded in the runtime defaults.
+    ``ComparisonConfig.list_from_options`` stays the lenient backstop on save —
+    half-filled / malformed rows are dropped rather than persisted.
     """
-    return selector.ObjectSelector(selector.ObjectSelectorConfig(multiple=True))
+    return selector.ObjectSelector(
+        selector.ObjectSelectorConfig(
+            multiple=True,
+            label_field=CONF_COMPARISON_NAME,
+            fields={
+                CONF_COMPARISON_NAME: {
+                    "required": True,
+                    "selector": selector.TextSelector(
+                        selector.TextSelectorConfig()
+                    ),
+                },
+                CONF_COMPARISON_DAILY_ENTITY: {
+                    "required": True,
+                    "selector": selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain="sensor")
+                    ),
+                },
+            },
+        )
+    )
 
 
 def _user_schema(
@@ -127,23 +177,13 @@ def _user_schema(
     recompute_interval: int,
     site: dict[str, Any],
     include_name: bool = True,
-    include_learner_switches: bool = False,
-    fast_learner_enabled: bool = DEFAULT_FAST_LEARNER_ENABLED,
-    slow_learner_enabled: bool = DEFAULT_SLOW_LEARNER_ENABLED,
-    day_ahead_bias_enabled: bool = DEFAULT_DAY_AHEAD_BIAS_ENABLED,
-    quantiles_enabled: bool = DEFAULT_QUANTILES_ENABLED,
-    comparison_sensors: list[dict] | None = None,
 ) -> vol.Schema:
-    """Schema for the user step / options step, pre-filled with defaults.
+    """Schema for the user / reconfigure step: STRUCTURAL setup only.
 
-    ``include_name`` is False for the options step, where the name (and its
-    unique-id) is immutable after setup. ``include_learner_switches`` is True
-    for the options step only: the per-layer learner kill switches (SPEC §5),
-    the v0.4 quantile kill switch (SPEC §6) and the editable comparison-sensors
-    list (SPEC §9/§10) are runtime tunables, not first-setup fields, so the
-    wizard stays lean and they appear where the operator manages a live install.
-    Every switch is a plain boolean toggle (no NumberSelector, so the HA-2026
-    ``step >= 1e-3`` selector rule cannot bite here) and defaults ON.
+    ``include_name`` is False for the reconfigure step, where the name (and its
+    unique-id) is immutable after setup. The runtime tunables (learner kill
+    switches, quantile bands, comparison sensors) are NOT first-setup fields and
+    live in the options flow — see ``_options_schema``.
     """
     fields: dict[Any, Any] = {}
     if include_name:
@@ -176,36 +216,79 @@ def _user_schema(
             vol.Required(CONF_SITE, default=site): _site_selector(),
         }
     )
-    if include_learner_switches:
-        fields.update(
-            {
-                vol.Required(
-                    CONF_FAST_LEARNER_ENABLED, default=fast_learner_enabled
-                ): _bool_selector(),
-                vol.Required(
-                    CONF_SLOW_LEARNER_ENABLED, default=slow_learner_enabled
-                ): _bool_selector(),
-                vol.Required(
-                    CONF_DAY_AHEAD_BIAS_ENABLED, default=day_ahead_bias_enabled
-                ): _bool_selector(),
-                # v0.4 quantile bands kill switch (SPEC §6, default ON).
-                vol.Required(
-                    CONF_QUANTILES_ENABLED, default=quantiles_enabled
-                ): _bool_selector(),
-                # v0.4 comparison-forecast list (SPEC §9/§10). Optional so an
-                # empty list means "no external comparisons" without forcing a
-                # required-field error; the default is the current value.
-                vol.Optional(
-                    CONF_COMPARISON_SENSORS,
-                    default=list(comparison_sensors or []),
-                ): _comparison_sensors_selector(),
-            }
-        )
     return vol.Schema(fields)
 
 
+def _options_schema(
+    *,
+    fast_learner_enabled: bool = DEFAULT_FAST_LEARNER_ENABLED,
+    slow_learner_enabled: bool = DEFAULT_SLOW_LEARNER_ENABLED,
+    day_ahead_bias_enabled: bool = DEFAULT_DAY_AHEAD_BIAS_ENABLED,
+    quantiles_enabled: bool = DEFAULT_QUANTILES_ENABLED,
+    comparison_sensors: list[dict] | None = None,
+) -> vol.Schema:
+    """Schema for the options step: RUNTIME TUNABLES only.
+
+    Structural setup lives in the reconfigure flow (see the module docstring).
+    What remains here are the three per-layer learner kill switches (SPEC §5),
+    the v0.4 quantile kill switch (SPEC §6) and the editable comparison-sensors
+    list (SPEC §9/§10). Every switch is a plain boolean toggle (no
+    NumberSelector, so the HA-2026 ``step >= 1e-3`` selector rule cannot bite
+    here) and defaults ON. The comparison list is Optional so an empty list
+    means "no comparisons" without a required-field error; the default is the
+    current value.
+    """
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_FAST_LEARNER_ENABLED, default=fast_learner_enabled
+            ): _bool_selector(),
+            vol.Required(
+                CONF_SLOW_LEARNER_ENABLED, default=slow_learner_enabled
+            ): _bool_selector(),
+            vol.Required(
+                CONF_DAY_AHEAD_BIAS_ENABLED, default=day_ahead_bias_enabled
+            ): _bool_selector(),
+            vol.Required(
+                CONF_QUANTILES_ENABLED, default=quantiles_enabled
+            ): _bool_selector(),
+            vol.Optional(
+                CONF_COMPARISON_SENSORS,
+                default=list(comparison_sensors or []),
+            ): _comparison_sensors_selector(),
+        }
+    )
+
+
+def _structural_data(site: SiteConfig, user_input: dict[str, Any]) -> dict[str, Any]:
+    """Build the structural (``entry.data``) dict from validated input.
+
+    Shared by the user AND reconfigure steps so the load-bearing lat/lon→site
+    merge can never diverge between the two entry points: the coordinator reads
+    ONLY the site-embedded coordinates (fetch + sun position), so the visible
+    lat/lon fields MUST be merged into the site dict — otherwise they are stored
+    but silently ignored and every off-reference user forecasts for the shipped
+    reference-site default. Returns the five structural keys; the user step
+    layers ``CONF_NAME`` on top.
+    """
+    lat = float(user_input[CONF_LATITUDE])
+    lon = float(user_input[CONF_LONGITUDE])
+    # Store the normalised (round-tripped) site so downstream readers get a
+    # canonical dict regardless of the input shape.
+    site_dict = site.to_dict()
+    site_dict[CONF_LATITUDE] = lat
+    site_dict[CONF_LONGITUDE] = lon
+    return {
+        CONF_LATITUDE: lat,
+        CONF_LONGITUDE: lon,
+        CONF_FETCH_INTERVAL: int(user_input[CONF_FETCH_INTERVAL]),
+        CONF_RECOMPUTE_INTERVAL: int(user_input[CONF_RECOMPUTE_INTERVAL]),
+        CONF_SITE: site_dict,
+    }
+
+
 class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle the initial setup: name, location, cadences and the site object."""
+    """Initial setup and later reconfiguration of the structural site data."""
 
     VERSION = 1
     MINOR_VERSION = 1
@@ -237,28 +320,7 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
                 except SiteValidationError as err:
                     errors[CONF_SITE] = err.code
                 else:
-                    lat = float(user_input[CONF_LATITUDE])
-                    lon = float(user_input[CONF_LONGITUDE])
-                    # The coordinator reads the site-embedded coordinates only
-                    # (fetch + sun position), so the visible lat/lon fields MUST
-                    # be merged into the site dict — otherwise they are stored
-                    # but silently ignored and every off-reference user forecasts
-                    # for the shipped Landshut default.
-                    site_dict = site.to_dict()
-                    site_dict[CONF_LATITUDE] = lat
-                    site_dict[CONF_LONGITUDE] = lon
-                    # Store the normalised (round-tripped) site so downstream
-                    # readers get a canonical dict regardless of input shape.
-                    data = {
-                        CONF_NAME: name,
-                        CONF_LATITUDE: lat,
-                        CONF_LONGITUDE: lon,
-                        CONF_FETCH_INTERVAL: int(user_input[CONF_FETCH_INTERVAL]),
-                        CONF_RECOMPUTE_INTERVAL: int(
-                            user_input[CONF_RECOMPUTE_INTERVAL]
-                        ),
-                        CONF_SITE: site_dict,
-                    }
+                    data = {CONF_NAME: name, **_structural_data(site, user_input)}
                     return self.async_create_entry(title=name, data=data)
 
         # First render (or re-render after an error): default location from
@@ -266,22 +328,30 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
         defaults = _current_values(user_input, hass_config=self.hass.config)
         return self.async_show_form(
             step_id="user",
-            data_schema=_user_schema(**defaults),
+            data_schema=_user_schema(
+                name=defaults["name"],
+                latitude=defaults["latitude"],
+                longitude=defaults["longitude"],
+                fetch_interval=defaults["fetch_interval"],
+                recompute_interval=defaults["recompute_interval"],
+                site=defaults["site"],
+            ),
             errors=errors,
         )
 
-
-class BalconySolarForecastOptionsFlow(OptionsFlow):
-    """Edit the same site object (and cadences/location) after setup.
-
-    Modern HA 2026 pattern: ``self.config_entry`` is provided by the
-    framework as a read-only property — we do NOT assign it in ``__init__``
-    (the setter was removed).
-    """
-
-    async def async_step_init(
+    async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        """Edit the structural setup of an existing entry into ``entry.data``.
+
+        HA quality-scale pattern: structural data (location, cadences, the full
+        site object) belongs in ``entry.data``, not ``entry.options`` — editing
+        it into options permanently shadows ``entry.data`` through the
+        ``{**data, **options}`` merge. Uses the SAME site validation and the SAME
+        lat/lon→site merge as the user step (shared ``_structural_data``); the
+        name is immutable so there is no name field and no learner switches here.
+        """
+        entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -290,73 +360,111 @@ class BalconySolarForecastOptionsFlow(OptionsFlow):
             except SiteValidationError as err:
                 errors[CONF_SITE] = err.code
             else:
-                lat = float(user_input[CONF_LATITUDE])
-                lon = float(user_input[CONF_LONGITUDE])
-                # Merge the visible lat/lon into the site dict too: the
-                # coordinator reads only the site-embedded coordinates.
-                site_dict = site.to_dict()
-                site_dict[CONF_LATITUDE] = lat
-                site_dict[CONF_LONGITUDE] = lon
-                # Name/unique-id are fixed after setup; only editable fields
-                # are written to options (merged over entry.data downstream).
-                # The three learner kill switches (SPEC §5) round-trip as plain
-                # booleans; missing keys fall back to the shipped ON defaults so
-                # an older entry that predates them keeps both learners active.
-                data = {
-                    CONF_LATITUDE: lat,
-                    CONF_LONGITUDE: lon,
-                    CONF_FETCH_INTERVAL: int(user_input[CONF_FETCH_INTERVAL]),
-                    CONF_RECOMPUTE_INTERVAL: int(
-                        user_input[CONF_RECOMPUTE_INTERVAL]
-                    ),
-                    CONF_SITE: site_dict,
-                    CONF_FAST_LEARNER_ENABLED: bool(
-                        user_input.get(
-                            CONF_FAST_LEARNER_ENABLED, DEFAULT_FAST_LEARNER_ENABLED
-                        )
-                    ),
-                    CONF_SLOW_LEARNER_ENABLED: bool(
-                        user_input.get(
-                            CONF_SLOW_LEARNER_ENABLED, DEFAULT_SLOW_LEARNER_ENABLED
-                        )
-                    ),
-                    CONF_DAY_AHEAD_BIAS_ENABLED: bool(
-                        user_input.get(
-                            CONF_DAY_AHEAD_BIAS_ENABLED,
-                            DEFAULT_DAY_AHEAD_BIAS_ENABLED,
-                        )
-                    ),
-                    # v0.4 quantile kill switch (SPEC §6, default ON).
-                    CONF_QUANTILES_ENABLED: bool(
-                        user_input.get(
-                            CONF_QUANTILES_ENABLED, DEFAULT_QUANTILES_ENABLED
-                        )
-                    ),
-                    # v0.4 comparison-forecast list (SPEC §9/§10): normalise
-                    # through ComparisonConfig so half-filled / malformed rows
-                    # are dropped and only clean {name, daily_entity} objects are
-                    # persisted. Stored as a list of plain dicts.
-                    CONF_COMPARISON_SENSORS: [
-                        c.to_dict()
-                        for c in ComparisonConfig.list_from_options(
-                            user_input.get(CONF_COMPARISON_SENSORS)
-                        )
-                    ],
+                # Strip any stale structural keys from options in the SAME
+                # atomic update: left behind, they would shadow the just-
+                # reconfigured data through the {**data, **options} merge and
+                # silently revert the live site to the pre-edit values.
+                stripped_options = {
+                    k: v
+                    for k, v in entry.options.items()
+                    if k not in _STRUCTURAL_OPTION_KEYS
                 }
-                return self.async_create_entry(title="", data=data)
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data_updates=_structural_data(site, user_input),
+                    options=stripped_options,
+                )
+
+        merged = {**entry.data, **entry.options}
+        defaults = _current_values(user_input, existing=merged)
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=_user_schema(
+                name=defaults["name"],
+                latitude=defaults["latitude"],
+                longitude=defaults["longitude"],
+                fetch_interval=defaults["fetch_interval"],
+                recompute_interval=defaults["recompute_interval"],
+                site=defaults["site"],
+                include_name=False,
+            ),
+            errors=errors,
+        )
+
+
+class BalconySolarForecastOptionsFlow(OptionsFlow):
+    """Edit the RUNTIME TUNABLES of a live install (SPEC §5/§6/§9/§10).
+
+    Structural setup (location, cadences, the site object) is edited through the
+    reconfigure flow into ``entry.data``, NOT here — see the module docstring.
+    Modern HA 2026 pattern: ``self.config_entry`` is provided by the framework
+    as a read-only property — we do NOT assign it in ``__init__`` (the setter
+    was removed).
+    """
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            # Spread the EXISTING options FIRST: an old entry that edited its
+            # site via the legacy options flow still carries structural keys in
+            # options, and dropping them here would silently revert the live
+            # site to the stale ``entry.data`` version. They are cleaned up by
+            # the next reconfigure, not by an options save. Only the five runtime
+            # tunables below are (re)written on top.
+            #
+            # The learner kill switches (SPEC §5) round-trip as plain booleans;
+            # a missing key falls back to the shipped ON default so an older
+            # entry that predates a switch keeps that layer active. The
+            # comparison list (SPEC §9/§10) is normalised through
+            # ComparisonConfig so half-filled / malformed rows are dropped and
+            # only clean {name, daily_entity} objects are persisted.
+            data = {
+                **self.config_entry.options,
+                CONF_FAST_LEARNER_ENABLED: bool(
+                    user_input.get(
+                        CONF_FAST_LEARNER_ENABLED, DEFAULT_FAST_LEARNER_ENABLED
+                    )
+                ),
+                CONF_SLOW_LEARNER_ENABLED: bool(
+                    user_input.get(
+                        CONF_SLOW_LEARNER_ENABLED, DEFAULT_SLOW_LEARNER_ENABLED
+                    )
+                ),
+                CONF_DAY_AHEAD_BIAS_ENABLED: bool(
+                    user_input.get(
+                        CONF_DAY_AHEAD_BIAS_ENABLED,
+                        DEFAULT_DAY_AHEAD_BIAS_ENABLED,
+                    )
+                ),
+                # v0.4 quantile kill switch (SPEC §6, default ON).
+                CONF_QUANTILES_ENABLED: bool(
+                    user_input.get(
+                        CONF_QUANTILES_ENABLED, DEFAULT_QUANTILES_ENABLED
+                    )
+                ),
+                CONF_COMPARISON_SENSORS: [
+                    c.to_dict()
+                    for c in ComparisonConfig.list_from_options(
+                        user_input.get(CONF_COMPARISON_SENSORS)
+                    )
+                ],
+            }
+            return self.async_create_entry(title="", data=data)
 
         merged = {**self.config_entry.data, **self.config_entry.options}
         defaults = _current_values(user_input, existing=merged)
-        # Name is immutable in options; omit it from the schema. The learner
-        # kill switches only appear here (not in first setup).
+        # Only runtime tunables here; the name and structural fields belong to
+        # the reconfigure flow.
         return self.async_show_form(
             step_id="init",
-            data_schema=_user_schema(
-                **defaults,
-                include_name=False,
-                include_learner_switches=True,
+            data_schema=_options_schema(
+                fast_learner_enabled=defaults["fast_learner_enabled"],
+                slow_learner_enabled=defaults["slow_learner_enabled"],
+                day_ahead_bias_enabled=defaults["day_ahead_bias_enabled"],
+                quantiles_enabled=defaults["quantiles_enabled"],
+                comparison_sensors=defaults["comparison_sensors"],
             ),
-            errors=errors,
         )
 
 
@@ -371,7 +479,9 @@ def _current_values(
     Precedence: just-submitted ``user_input`` (so an error re-render keeps
     the operator's edits) > ``existing`` entry data/options > hass.config /
     shipped constants. The site default is a deep copy so the shared
-    ``DEFAULT_SITE`` is never mutated by later editing.
+    ``DEFAULT_SITE`` is never mutated by later editing. Returns both the
+    structural values (user/reconfigure steps) and the runtime tunables (options
+    step); each caller reads only the subset its schema renders.
     """
     src = user_input or existing or {}
 
