@@ -189,7 +189,7 @@ async def async_setup_entry(
         # --- v0.4 quantile bands (SPEC §6/§10): today's P10/P90 ---
         EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P10, _Q_P10),
         EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P90, _Q_P90),
-        # --- Shade-profile diagram data (SPEC §5 visualisation) ---
+        # --- Shade-profile diagram data (SPEC §15) ---
         ShadeProfileSensor(coordinator),
     ]
 
@@ -861,7 +861,7 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
 
 
 # ---------------------------------------------------------------------------
-# Shade-profile diagram (sun path vs learned shade) — SPEC §5 visualisation
+# Shade-profile diagram (sun path vs learned shade) — SPEC §15
 # ---------------------------------------------------------------------------
 
 

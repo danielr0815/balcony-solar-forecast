@@ -60,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorder-excluded attributes). The full diagram renders via an optional HACS
   `apexcharts-card` (`dashboards/shade_profile_apexcharts.yaml`); the built-in
   dashboard gains module/date controls + the shaded-fraction headline with no
-  custom card. Pure, HA-free maths in `core/shadeprofile.py` (SPEC §5). The
+  custom card. Pure, HA-free maths in `core/shadeprofile.py` (SPEC §15). The
   learned blend is shown ONLY when the slow learner is active (kill switch on,
   not drift-disabled, not collapse-frozen), matching the served forecast.
 - **Reproducible developer environment + CI.** `make install` (or

@@ -1,4 +1,4 @@
-"""Select platform: pick the module for the shade-profile diagram (SPEC §5).
+"""Select platform: pick the module for the shade-profile diagram (SPEC §15).
 
 A single ``shade_profile_module`` select whose options are the configured
 plane/channel names. Choosing one re-points the ``shade_profile`` sensor (and

@@ -134,7 +134,7 @@ SENSOR_POWER_NOW = "power_production_now"
 BINARY_SENSOR_DEGRADED = "degraded"
 
 # --- Shade-profile visualisation entities (sun path vs learned shade) -------
-# A per-date sun-path + learned-shade diagram (SPEC §5): the sensor exposes the
+# A per-date sun-path + learned-shade diagram (SPEC §15): the sensor exposes the
 # curve arrays as attributes; a `select` picks the module/plane and a `date`
 # picks the day to visualise. See core/shadeprofile.py + docs/DASHBOARD.md.
 SENSOR_SHADE_PROFILE = "shade_profile"
@@ -702,7 +702,7 @@ FORECAST_RESP_KEY_P10 = "p10"
 FORECAST_RESP_KEY_P50 = "p50"
 FORECAST_RESP_KEY_P90 = "p90"
 
-# --- Shade-profile visualisation tunables (SPEC §5) ------------------------
+# --- Shade-profile visualisation tunables (SPEC §15) -----------------------
 # The sun-path-vs-learned-shade diagram (core/shadeprofile.py). The sun path is
 # sampled over the visualised local day at SHADE_PROFILE_STEP_MINUTES; the two
 # horizon lines (static config horizon + learned shade horizon) are sampled on a

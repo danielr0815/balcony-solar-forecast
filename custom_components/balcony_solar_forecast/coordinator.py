@@ -311,7 +311,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Last computed ForecastResult (for the nightly per-plane snapshot).
         self._last_result: ForecastResult | None = None
 
-        # --- Shade-profile diagram selection (SPEC §5 visualisation) --------
+        # --- Shade-profile diagram selection (SPEC §15) ---------------------
         # Which module/plane + local date the shade-profile sensor renders. The
         # select entity owns the persisted module (RestoreEntity) and pushes it
         # here; the date entity always defaults to today (not restored). None =>
@@ -482,7 +482,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return self._shademap_state
 
     # ------------------------------------------------------------------
-    # Shade-profile diagram (sun path vs learned shade) — SPEC §5
+    # Shade-profile diagram (sun path vs learned shade) — SPEC §15
     # ------------------------------------------------------------------
 
     def shade_profile_plane_names(self) -> list[str]:
@@ -525,7 +525,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         shademap only attenuates the served beam when the layer is enabled, not
         drift-auto-disabled, not collapse-frozen for today, and has learned bins.
         The shade-profile diagram consults the SAME gate so it never paints
-        learned shading the forecast is not applying (SPEC §5).
+        learned shading the forecast is not applying (SPEC §15).
         """
         return (
             self._learner_config.slow_enabled

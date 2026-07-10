@@ -140,6 +140,13 @@ Pipeline (reine Funktionen über 15-min-Slots × N Ebenen, <50 ms/Lauf):
    Schneedecke**, gedeckelt). Pflicht-Fixes: R_b-Deckel (≤10) bzw.
    Zirkumsolar = 0 unter 3° Sonnenhöhe; Intervallmittel-vs.-Instant-
    Semantik empirisch verifizieren (klarer Morgen als Unit-Test).
+   **Einfallswinkel-Modifikator (v0.5.x):** ASHRAE-IAM
+   `f = 1 − b₀·(1/cos θ − 1)`, b₀ = 0,05 (`IAM_B0`), auf Beam+Zirkumsolar —
+   angewandt in der **Engine** (pvlib-analog nach der reinen Transposition,
+   damit die pvlib-Golden-Vektoren vergleichbar bleiben) und **vor** der
+   ungegateten Trainer-Referenz, sonst absorbiert die Shademap den
+   Glasreflexionsverlust (5–15 % bei AOI > 60°; auf den 70–80°-Fassaden
+   großer Tagesanteil) als AOI-förmige Phantom-Verschattung.
 5. **horizon.py** — je Ebene Tabelle `(Azimut, Elevation, Transmittanz)`
    in 10°-Schritten, linear interpoliert: Fernfeld aus PVGIS + Betreiber-
    Profil; Nahfeld je Ebene differenziert (Gebäudekante hart bei
@@ -497,3 +504,63 @@ zurücksetzt, ist ein KRITISCHER Fehler**. Die Migration ist rein
 inner-schema: jeder v2-Schlüssel wird **byte-treu** durchgereicht, die drei
 neuen v3-Sektionen (`quantile_state`, `scoreboard_state`, `comparison_ring`)
 werden leer default-injiziert.
+
+## 15. v0.5 — Verschattungsprofil-Diagramm (Sonnenbahn vs. gelernte Verschattung)
+
+**Zweck:** Für ein wählbares Modul und ein wählbares lokales Datum die
+aktuell bekannte Verschattung sichtbar machen: die Sonnenbahn (Elevation über
+Sonnen-Azimut) mit der **effektiven** Beam-Transmittanz τ, die die Prognose an
+jeder Sonnenposition tatsächlich anwendet (statischer Konfig-Horizont, per
+Shrinkage geblendet mit der gelernten Shademap), plus zwei Horizontlinien
+(statisch und gelernt). Interaktives Gegenstück zur `dump_shademap`-Polartabelle.
+
+### 15.1 Entitäten (Gerät „Balcony Solar Forecast")
+
+| Entität | Rolle | Default |
+|---|---|---|
+| `select.…_shade_profile_module` | Modul-/Kanalwahl | **Front-Ebene** (die Ausrichtung, die die meisten Ebenen teilen — Referenzanlage: M2/115°); manuelle Wahl wird via RestoreEntity über Neustarts gehalten |
+| `date.…_shade_profile_date` | Datumswahl (lokaler Kalendertag) | **immer heute** — bewusst NICHT restauriert; jede Neustart/Reload öffnet auf dem aktuellen Tag |
+| `sensor.…_shade_profile` | State = verschatteter Tageslicht-Anteil in % (τ < `SHADE_PROFILE_TAU_THRESHOLD`); Kurven-Arrays als Attribute | — |
+
+Attribute des Sensors (Recorder-ausgeschlossen wie die Energie-Kurven):
+`time`/`azimuth`/`sun_elevation`/`transmittance` (ein Eintrag je
+Tageslicht-Sample der Sonnenbahn) und
+`horizon_azimuth`/`static_horizon`/`shade_horizon` (Horizontlinien auf einem
+Azimut-Raster über die Tageslicht-Spanne). Zusammenfassung:
+`shaded_fraction`, `mean_transmittance`, `has_learned_data`/`learned_bins`
+(NUR Bins des visualisierten **Halbjahrs** — Bins des anderen Halbjahrs können
+die gezeigte Kurve nie beeinflussen), `sunrise`/`sunset`, `max_elevation`.
+
+### 15.2 Semantik (Engine-exakt, nie „schöner als die Prognose")
+
+Die Transmittanz je Sonnenposition repliziert die Engine-Gate-Logik
+(`engine._plane_poa_split`) **exakt**: statischer Prior =
+`horizon.transmittance_at` nur bei Sonne ≤ interpolierte Horizontlinie, sonst
+1,0; darüber blendet `shademap.effective_tau`. **Slow-Active-Kopplung:** die
+gelernte Shademap fließt NUR ein, wenn der Slow-Learner aktiv ist
+(Kill-Switch an, nicht drift-deaktiviert, nicht collapse-eingefroren, Bins
+vorhanden) — exakt das `slow_active`-Gate der Learner-Hooks. Ist er inaktiv,
+zeigt das Diagramm die rein statische Verschattung, genau wie die servierte
+Prognose. Das Ergebnis wird auf `(Modul, Datum, slow_active, Shademap-Objekt)`
+memoisiert (der O(Azimut×Elevation)-Scan läuft je Änderung einmal, nicht je
+15-min-Tick).
+
+### 15.3 Berechnung & Tunables (const, `core/shadeprofile.py` — pur, HA-frei)
+
+Sonnenbahn: lokaler Tag in `SHADE_PROFILE_STEP_MINUTES`-Schritten (5 min),
+nur Samples mit Elevation > 0. Horizontlinien: Azimut-Raster
+`SHADE_PROFILE_AZ_STEP_DEG` (1°) über die Tageslicht-Azimutspanne; die
+gelernte Verschattungshorizont-Linie ist je Azimut die höchste Elevation mit
+effektivem τ < `SHADE_PROFILE_TAU_THRESHOLD` (0,5), gescannt in
+`SHADE_PROFILE_EL_SCAN_DEG`-Schritten (1°). Day-of-Year (Halbjahres-Split +
+Laub-Rampe) stammt vom lokalen Kalenderdatum (dokumentierte Näherung; für
+CET/CEST identisch mit der Engine).
+
+### 15.4 Darstellung
+
+Bordmittel-Karten (Modul-/Datumswahl + Anteil-Headline) im mitgelieferten
+Dashboard; das eigentliche Diagramm ist das EINE bewusst optionale
+HACS-Artefakt (`dashboards/shade_profile_apexcharts.yaml`,
+`custom:apexcharts-card`): x = Sonnen-Azimut, y = Grad, Sonnenbahn nach τ
+eingefärbt (Schwellen an `SHADE_PROFILE_TAU_THRESHOLD` ausgerichtet), beide
+Horizontlinien überlagert. Details in `docs/DASHBOARD.md` §4b.
