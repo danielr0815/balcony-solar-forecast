@@ -145,6 +145,24 @@
           "description": "Replace a dashboard that already has content this integration did not create. A dashboard this action previously wrote is refreshed without it."
         }
       }
+    },
+    "suggest_shade_groups": {
+      "name": "Suggest shade groups",
+      "description": "Compare every module's individually-learned shade map bin-by-bin and suggest which planes share the same shading, so grouping is data-driven instead of eyeballed. Returns a similarity matrix, a grouping proposal and the current grouping for comparison.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "Target config entry. Omit only if a single site is configured."
+        },
+        "max_diff": {
+          "name": "Max mean tau difference",
+          "description": "Two planes count as sharing shade when their n-weighted mean transmittance difference over the bins both learned stays at or below this value. Lower is stricter."
+        },
+        "min_common_bins": {
+          "name": "Minimum common bins",
+          "description": "Minimum number of shared sun-position bins two planes must both have learned before their similarity counts as evidence; below it the pair is insufficient and never grouped."
+        }
+      }
     }
   },
   "config": {

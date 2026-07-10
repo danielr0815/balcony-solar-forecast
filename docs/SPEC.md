@@ -231,6 +231,22 @@ weiterzählt, bis sie von den kanalweisen Live-Daten verdünnt ist. Das
 Umschalter), damit der Betreiber die individuelle Karte jedes Moduls gegen die
 gepoolte vergleichen und über Gruppierungen entscheiden kann.
 
+**Gruppenvorschlag (`suggest_shade_groups`-Service):** Weil jede Ebene ihren
+Kanal einzeln lernt, lässt sich die Gruppierung datengetrieben belegen statt am
+Diagramm abzuschätzen. Der Service vergleicht je Ebenenpaar die beiden Kanäle
+**bin-weise über die gemeinsam besuchten Bins**: die **Ähnlichkeit** ist die
+n-gewichtete mittlere τ-Differenz (`mean_abs_diff = Σ w·|τ_a − τ_b| / Σ w` mit
+`w = min(n_a, n_b)`). Ein Paar gilt als *ähnlich*, wenn es mindestens
+`min_common_bins` gemeinsame Bins hat **und** `mean_abs_diff ≤ max_diff`,
+sonst als *verschieden* bzw. bei zu wenig gemeinsamer Evidenz als *unzureichend*.
+Aus den ähnlichen Paaren wird per **Complete-Linkage-Agglomeration** (aufsteigend
+nach `mean_abs_diff`; zwei Cluster verschmelzen nur, wenn **jedes** Kreuzpaar
+ähnlich ist — kein Verketten A~B~C bei zu großem A↔C) ein Vorschlag gebildet;
+Ebenen ohne Evidenz bleiben als `insufficient_data` Einzelgänger. Beide
+**Schwellen sind pro Service-Feld konfigurierbar** (Defaults
+`SHADE_SIM_MAX_MEAN_DIFF` / `SHADE_SIM_MIN_COMMON_BINS`); die Antwort enthält
+Matrix, Vorschlag und die **aktuelle Gruppierung** zum direkten Abgleich.
+
 **Schneller Lerner — Wetterfehler intraday:** exponentiell abklingendes
 Verhältnis (τ ≈ 90 min) gemessen/prognostiziert der letzten 2–4 h,
 **im k_c-Raum konditioniert** (Geometrie/Saison herausnormiert), auf die

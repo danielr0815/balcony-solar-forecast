@@ -137,3 +137,47 @@ install_dashboard:
       default: false
       selector:
         boolean:
+
+suggest_shade_groups:
+  name: Suggest shade groups
+  description: >-
+    Compare every module's individually-learned shade map bin-by-bin and suggest
+    which planes share the same shading, so grouping is data-driven instead of
+    eyeballed. Returns a similarity matrix, a grouping proposal and the current
+    grouping for comparison (SPEC §5). Read-only diagnostic; returns a response.
+  fields:
+    entry_id:
+      name: Config entry
+      description: >-
+        Target config entry. Omit only if a single site is configured.
+      example: "1234567890abcdef"
+      required: false
+      selector:
+        text:
+    max_diff:
+      name: Max mean tau difference
+      description: >-
+        Two planes are treated as sharing shade when their n-weighted mean
+        transmittance difference over the bins both learned stays at or below
+        this value. Lower is stricter.
+      required: false
+      default: 0.06
+      selector:
+        number:
+          min: 0.01
+          max: 0.5
+          step: 0.01
+          mode: box
+    min_common_bins:
+      name: Minimum common bins
+      description: >-
+        Minimum number of shared sun-position bins two planes must both have
+        learned before their similarity counts as evidence; below it the pair is
+        reported as insufficient and never grouped.
+      required: false
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 500
+          mode: box

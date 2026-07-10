@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`suggest_shade_groups` service — data-driven shade grouping.** Since v0.13.0
+  every module's shading is learned individually; this read-only action compares
+  the per-plane shademap channels bin-wise (n-weighted mean transmittance
+  difference over the bins both planes learned) and returns a similarity matrix
+  plus a grouping suggestion built by complete-linkage agglomeration, so the
+  operator no longer eyeballs the polar tables (or the card's Group/Single
+  toggle) to decide which planes share shade. Two thresholds are configurable per
+  call (`max_diff`, `min_common_bins`); the response also echoes the CURRENT
+  grouping for comparison. Planes with no learned evidence are flagged
+  `insufficient_data`. Pure similarity math in `core/shademap.py`
+  (`channel_similarity` / `suggest_shade_groups`). See SPEC §5.
+
 ### Changed
 - **Quality-scale housekeeping (no behaviour change).** Entity icons moved out
   of hardcoded `_attr_icon` into the central `icons.json`, keyed by

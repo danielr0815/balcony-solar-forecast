@@ -48,7 +48,9 @@ mit gleicher Verschattung (Gebäudekante, Baumreihe) bilden dann einen
 **Verschattungs-Pool**. Jede Ebene lernt weiterhin einzeln (Speicherung je
 Modul-Kanal); gepoolt wird nur **beim Lesen** (n-gewichtet), sodass Gruppieren
 und Auflösen jederzeit **verlustfrei reversibel** sind. Die Schattenprofil-Karte
-zeigt Gruppen- und Einzelsicht zum direkten Vergleich.
+zeigt Gruppen- und Einzelsicht zum direkten Vergleich. Der Service
+**`suggest_shade_groups`** vergleicht die einzeln gelernten Kanäle bin-weise und
+schlägt datengetrieben Gruppen vor, statt sie am Diagramm abzuschätzen.
 
 Nachträglich lassen sich über **Konfigurieren** (Optionen) anpassen:
 

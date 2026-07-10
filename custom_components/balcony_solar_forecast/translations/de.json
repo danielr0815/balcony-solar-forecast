@@ -145,6 +145,24 @@
           "description": "Überschreibt ein Dashboard, das bereits Inhalte enthält, die diese Integration nicht erstellt hat. Ein zuvor von dieser Aktion geschriebenes Dashboard wird auch ohne diese Option aktualisiert."
         }
       }
+    },
+    "suggest_shade_groups": {
+      "name": "Verschattungsgruppen vorschlagen",
+      "description": "Vergleicht die individuell gelernte Schattenkarte jedes Moduls Bin für Bin und schlägt vor, welche Ebenen dieselbe Verschattung teilen – so wird die Gruppierung datengetrieben statt geschätzt. Liefert eine Ähnlichkeitsmatrix, einen Gruppierungsvorschlag und die aktuelle Gruppierung zum Vergleich.",
+      "fields": {
+        "entry_id": {
+          "name": "Konfigurationseintrag",
+          "description": "Ziel-Konfigurationseintrag. Nur weglassen, wenn genau eine Anlage konfiguriert ist."
+        },
+        "max_diff": {
+          "name": "Maximale mittlere Tau-Differenz",
+          "description": "Zwei Ebenen gelten als gleich verschattet, wenn ihre n-gewichtete mittlere Transmittanz-Differenz über die gemeinsam gelernten Bins höchstens diesen Wert erreicht. Kleiner ist strenger."
+        },
+        "min_common_bins": {
+          "name": "Minimale gemeinsame Bins",
+          "description": "Mindestanzahl gemeinsam gelernter Sonnenstands-Bins, die zwei Ebenen aufweisen müssen, bevor ihre Ähnlichkeit als Beleg zählt; darunter gilt das Paar als unzureichend und wird nicht gruppiert."
+        }
+      }
     }
   },
   "config": {

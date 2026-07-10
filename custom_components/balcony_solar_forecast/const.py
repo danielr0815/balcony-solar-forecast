@@ -408,6 +408,18 @@ SHADEMAP_KC_PIVOT_ELEV_DEG = 20.0  # elevation where the lo bound reaches HIGH_S
 SHADEMAP_NEIGHBOUR_STABILITY = 0.15  # max relative k_c change vs. adjacent slot
 SHADEMAP_MIN_BEAM_SHARE = 0.05     # modeled beam POA power must exceed 5% Wp
 
+# --- Shade-group similarity (suggest_shade_groups service, SPEC §5) ---------
+# The suggest_shade_groups service compares two planes' per-channel shademaps
+# bin-wise (n-weighted mean |tau_a - tau_b| over the bins both channels visited)
+# and proposes a data-driven grouping via complete-linkage agglomeration.
+# Two channels of the SAME occlusion, both EMA-smoothed (SHADEMAP_EMA_ALPHA),
+# rarely diverge past ~0.05 on their common bins, so 0.06 is a safe "same shade"
+# threshold; a pair above it is flagged as differently shaded.
+SHADE_SIM_MAX_MEAN_DIFF = 0.06
+# Fewer than this many shared sun positions (bins) is anecdote, not evidence: a
+# pair below it is "insufficient" and never merged, however close its tau looks.
+SHADE_SIM_MIN_COMMON_BINS = 30
+
 # --- GUARDS (SPEC §5 all mandatory) ----------------------------------------
 # Label gates (trainer): frozen sensor detection.
 LABEL_FROZEN_STALE_SECONDS = 3 * 3600   # unchanged value + last_updated older => missing
@@ -487,6 +499,7 @@ SERVICE_IMPORT_BOOTSTRAP = "import_bootstrap"   # ingest scripts/backfill.py JSO
 SERVICE_DUMP_SHADEMAP = "dump_shademap"         # polar-table diagnostic export
 SERVICE_ROLLBACK_LEARNERS = "rollback_learners"  # restore learner state from the ring
 SERVICE_INSTALL_DASHBOARD = "install_dashboard"  # write the observability dashboard
+SERVICE_SUGGEST_SHADE_GROUPS = "suggest_shade_groups"  # data-driven shade-group suggestion
 
 # --- Bootstrap JSON schema (SPEC §6; scripts/backfill.py <-> store) ---------
 # The import service validates + clamps and REJECTS unknown schema versions.

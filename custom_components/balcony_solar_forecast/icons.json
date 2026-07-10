@@ -38,6 +38,7 @@
     "import_bootstrap": "mdi:database-import",
     "dump_shademap": "mdi:map",
     "rollback_learners": "mdi:history",
-    "install_dashboard": "mdi:view-dashboard"
+    "install_dashboard": "mdi:view-dashboard",
+    "suggest_shade_groups": "mdi:group"
   }
 }

@@ -42,6 +42,8 @@ Extra pure helpers the engine / store / diagnostics call (all owned here):
     apply_shademap_to_beam(beam_w, *, tau) -> float
     dump_polar_table(state) -> list[dict]
     ingest_bootstrap_shademap(raw, *, max_bin_n) -> ShademapState
+    channel_similarity(state, channel_a, channel_b) -> dict
+    suggest_shade_groups(state, plane_names, *, max_diff, min_common_bins) -> dict
 
 All tunables come from const. Every load/apply path is validate-and-clamp;
 a corrupt/absent state degrades to the static prior, never an exception.
@@ -79,6 +81,8 @@ __all__ = [
     "apply_shademap_to_beam",
     "dump_polar_table",
     "ingest_bootstrap_shademap",
+    "channel_similarity",
+    "suggest_shade_groups",
 ]
 
 
@@ -568,3 +572,232 @@ def ingest_bootstrap_shademap(raw: object, *, max_bin_n: int) -> ShademapState:
             capped_bins[bin_key] = ShademapBin(tau=binv.tau, n=min(binv.n, cap))
         channels[channel] = capped_bins
     return ShademapState(channels=channels, version=base.version)
+
+
+# ---------------------------------------------------------------------------
+# Shade-group similarity + suggestion (SPEC §5, suggest_shade_groups service)
+# ---------------------------------------------------------------------------
+
+
+def _channel_bins(state: ShademapState, channel: str) -> dict[str, ShademapBin]:
+    """The ``{bin_key: ShademapBin}`` map of one channel, or {} if absent.
+
+    Duck-typed + validate-and-clamp: a state without a ``channels`` mapping, an
+    absent channel, or a non-dict bins value all degrade to an empty map so the
+    similarity math never raises on a corrupt / partial state.
+    """
+    channels = getattr(state, "channels", None)
+    if not isinstance(channels, dict):
+        return {}
+    bins = channels.get(channel)
+    return bins if isinstance(bins, dict) else {}
+
+
+def _valid_bin(binv: object) -> tuple[int, float] | None:
+    """Extract ``(n, tau)`` from a bin, or None when malformed / evidence-free.
+
+    Mirrors the :func:`effective_tau_pooled` guard: a bin whose ``n`` / ``tau``
+    are non-numeric, whose ``tau`` is non-finite, or whose ``n <= 0`` (no
+    evidence) is skipped rather than raising — a corrupt bin must never poison a
+    similarity comparison.
+    """
+    try:
+        n = int(binv.n)  # type: ignore[attr-defined]
+        tau = float(binv.tau)  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if n <= 0 or not math.isfinite(tau):
+        return None
+    return n, tau
+
+
+def _channel_has_data(state: ShademapState, channel: str) -> bool:
+    """True when a channel holds at least one evidence-bearing (valid) bin."""
+    return any(_valid_bin(b) is not None for b in _channel_bins(state, channel).values())
+
+
+def channel_similarity(
+    state: ShademapState, channel_a: str, channel_b: str
+) -> dict:
+    """Bin-wise similarity of two shademap channels (SPEC §5).
+
+    Compares the two channels over the INTERSECTION of their bin keys — the sun
+    positions BOTH have actually learned. Each common bin contributes weight
+    ``w = min(n_a, n_b)`` (the evidence the weaker side backs it with), and the
+    headline metric is the n-weighted mean absolute transmittance difference::
+
+        mean_abs_diff = sum(w * |tau_a - tau_b|) / sum(w)
+
+    Returns a plain dict::
+
+        {"common_bins": <count of shared, valid bins>,
+         "weight":      <sum of w over those bins>,
+         "mean_abs_diff": <weighted mean |Δtau|>  or None when no common bins,
+         "max_abs_diff":  <max |Δtau| over common bins> or None}
+
+    A malformed / evidence-free bin (non-numeric or non-finite tau, ``n <= 0``)
+    is skipped on either side (validate-and-clamp ethos); a missing channel
+    yields an empty bin map, so disjoint / absent channels return ``common_bins
+    == 0`` with ``None`` diffs. Never raises.
+    """
+    bins_a = _channel_bins(state, channel_a)
+    bins_b = _channel_bins(state, channel_b)
+    common = 0
+    weight_sum = 0.0
+    wdiff_sum = 0.0
+    max_diff: float | None = None
+    for key in bins_a.keys() & bins_b.keys():
+        va = _valid_bin(bins_a[key])
+        vb = _valid_bin(bins_b[key])
+        if va is None or vb is None:
+            continue
+        n_a, tau_a = va
+        n_b, tau_b = vb
+        w = float(min(n_a, n_b))
+        diff = abs(tau_a - tau_b)
+        common += 1
+        weight_sum += w
+        wdiff_sum += w * diff
+        if max_diff is None or diff > max_diff:
+            max_diff = diff
+    # weight_sum > 0 whenever common > 0 (every valid bin carries n >= 1), so
+    # the mean is None exactly when there is no common evidence.
+    mean = wdiff_sum / weight_sum if weight_sum > 0 else None
+    return {
+        "common_bins": common,
+        "weight": weight_sum,
+        "mean_abs_diff": mean,
+        "max_abs_diff": max_diff,
+    }
+
+
+def _verdict(sim: dict, *, max_diff: float, min_common_bins: int) -> str:
+    """Classify one similarity dict: similar / different / insufficient."""
+    mean = sim["mean_abs_diff"]
+    if sim["common_bins"] < min_common_bins or mean is None:
+        return "insufficient"
+    return "similar" if mean <= max_diff else "different"
+
+
+def suggest_shade_groups(
+    state: ShademapState,
+    plane_names,
+    *,
+    max_diff: float,
+    min_common_bins: int,
+) -> dict:
+    """Data-driven shade-group suggestion from the per-plane shademaps (SPEC §5).
+
+    Each plane's learned shading is stored INDIVIDUALLY (its own channel, keyed
+    by the plane name since v0.13.0). This compares every plane pair via
+    :func:`channel_similarity` and proposes a grouping by GREEDY, COMPLETE-
+    LINKAGE agglomeration:
+
+      * a pair is ``"similar"`` when it has ``>= min_common_bins`` common bins
+        AND ``mean_abs_diff <= max_diff``, ``"different"`` when it clears the
+        evidence bar but exceeds ``max_diff``, and ``"insufficient"`` otherwise;
+      * clusters start as singletons; similar pairs are visited in ASCENDING
+        ``mean_abs_diff`` order and two clusters merge only when EVERY cross-pair
+        between them is ``"similar"`` (complete linkage) — this prevents chaining
+        A~B~C into one group when A and C are themselves too different;
+      * a plane whose channel is missing / carries no evidence-bearing bin stays
+        a singleton flagged ``insufficient_data``.
+
+    The suggested group name for a multi-plane cluster is the FIRST member in
+    config order (the v0.12.0 "named after a member" idiom); singletons get a
+    ``null`` ``suggested_group``. Returns::
+
+        {"groups": [{"planes": [...], "suggested_group": <name|None>,
+                     "insufficient_data": <bool>}, ...],
+         "pairs":  [{"a", "b", "common_bins", "mean_abs_diff",
+                     "max_abs_diff", "verdict"}, ...],
+         "thresholds": {"max_diff": ..., "min_common_bins": ...}}
+
+    Groups are ordered by their first member's config index; pairs preserve the
+    upper-triangular config order. Pure + total (never raises).
+    """
+    names = list(plane_names)
+    n = len(names)
+
+    # Pairwise similarity over the upper triangle, in config order.
+    pairs_out: list[dict] = []
+    sim_by_pair: dict[tuple[int, int], tuple[dict, str]] = {}
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim = channel_similarity(state, names[i], names[j])
+            verdict = _verdict(
+                sim, max_diff=max_diff, min_common_bins=min_common_bins
+            )
+            sim_by_pair[(i, j)] = (sim, verdict)
+            pairs_out.append(
+                {
+                    "a": names[i],
+                    "b": names[j],
+                    "common_bins": sim["common_bins"],
+                    "mean_abs_diff": sim["mean_abs_diff"],
+                    "max_abs_diff": sim["max_abs_diff"],
+                    "verdict": verdict,
+                }
+            )
+
+    def _pair_similar(a: int, b: int) -> bool:
+        entry = sim_by_pair.get((a, b) if a < b else (b, a))
+        return entry is not None and entry[1] == "similar"
+
+    # Only planes with evidence-bearing data participate in clustering; the rest
+    # are insufficient-data singletons.
+    data_idx = [i for i in range(n) if _channel_has_data(state, names[i])]
+    data_set = set(data_idx)
+    clusters: list[set[int]] = [{i} for i in data_idx]
+
+    # Greedy merge candidates: similar pairs (both data planes), ascending diff.
+    candidates = [
+        (sim["mean_abs_diff"], i, j)
+        for (i, j), (sim, verdict) in sim_by_pair.items()
+        if verdict == "similar" and i in data_set and j in data_set
+    ]
+    candidates.sort(key=lambda t: (t[0], t[1], t[2]))
+
+    def _cluster_index(idx: int) -> int:
+        for k, cluster in enumerate(clusters):
+            if idx in cluster:
+                return k
+        return -1
+
+    for _mad, i, j in candidates:
+        ci = _cluster_index(i)
+        cj = _cluster_index(j)
+        if ci == cj:
+            continue
+        # Complete linkage: only merge when EVERY cross-pair is similar.
+        if all(_pair_similar(a, b) for a in clusters[ci] for b in clusters[cj]):
+            merged = clusters[ci] | clusters[cj]
+            for k in sorted((ci, cj), reverse=True):
+                del clusters[k]
+            clusters.append(merged)
+
+    # Assemble groups: data clusters + insufficient singletons, each as a sorted
+    # (config-order) index list, then ordered by first member.
+    index_groups: list[list[int]] = [sorted(c) for c in clusters]
+    index_groups.extend([i] for i in range(n) if i not in data_set)
+    index_groups.sort(key=lambda idxs: idxs[0])
+
+    groups_out: list[dict] = []
+    for idxs in index_groups:
+        is_insufficient = len(idxs) == 1 and idxs[0] not in data_set
+        groups_out.append(
+            {
+                "planes": [names[i] for i in idxs],
+                "suggested_group": names[idxs[0]] if len(idxs) > 1 else None,
+                "insufficient_data": is_insufficient,
+            }
+        )
+
+    return {
+        "groups": groups_out,
+        "pairs": pairs_out,
+        "thresholds": {
+            "max_diff": max_diff,
+            "min_common_bins": min_common_bins,
+        },
+    }
