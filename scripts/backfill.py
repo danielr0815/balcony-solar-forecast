@@ -679,6 +679,11 @@ def _process_day_impl(
             shademap_day_ok = False
     for plane in (planes if shademap_day_ok else ()):
         chan = plane.name
+        # Measured/modeled lookups stay per PLANE (keyed by plane name), but the
+        # learned samples are STORED under the plane's shade channel so grouped
+        # planes pool into one channel — mirrors the live nightly trainer and the
+        # coordinator's plane->shade_channel mapping (SPEC §5). Ungrouped: == chan.
+        store_chan = plane.shade_channel
         measured_hourly = _resolve_hourly_measured(
             chan,
             actuals_daily=actuals_daily,
@@ -727,7 +732,7 @@ def _process_day_impl(
             # diffuse floor, divide by the modeled beam.
             measured_t = (p_meas - r.diffuse_wh) / r.beam_wh
             bin_key = shademap_bin_key(r.sun_az, r.sun_el, _doy_of(hkey))
-            _shade_update(acc, chan, bin_key, measured_t)
+            _shade_update(acc, store_chan, bin_key, measured_t)
             contributed = True
 
     # --- 3) DAY-AHEAD BIAS: aggregate site Wh per (cloud class x day part). ---

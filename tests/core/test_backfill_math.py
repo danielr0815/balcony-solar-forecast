@@ -420,6 +420,42 @@ def test_process_day_populates_shademap_and_bias(site: SiteConfig):
     assert all(0.7 <= t <= 1.1 for t in taus)
 
 
+def test_backfill_group_members_pool_into_one_channel():
+    """Two grouped planes accumulate into ONE shade channel (SPEC §5, Phase 5).
+
+    The backfill mirrors the live plane->shade_channel routing: measurement stays
+    per plane (keyed by plane name), but the learned samples are stored under the
+    plane's shade_channel. Two members hitting the same bin the same day are two
+    EMA samples via the SAME ``_shade_update`` as before (parity preserved).
+    """
+    import copy
+
+    raw = copy.deepcopy(const.DEFAULT_SITE)
+    # Group the two lower-balcony front planes M2 and M3 (both azimuth 115).
+    for p in raw["planes"]:
+        if p["name"] in ("M2", "M3"):
+            p[const.CONF_SHADE_GROUP] = "front"
+    grouped = SiteConfig.from_dict(raw)
+    svf = _svf(grouped)
+    weather = _clear_summer_noon_hours()
+    hourly_actuals = _tracked_actuals(grouped, weather, svf, factor=1.0)
+
+    acc = bf.BootstrapAccumulator()
+    used = bf.process_day_hourly(
+        acc, grouped, weather, hourly_actuals, svf_by_plane=svf
+    )
+    assert used is True
+    # M2 and M3 pool into the shared "front" channel, never their own names.
+    assert "front" in acc.shade
+    assert "M2" not in acc.shade
+    assert "M3" not in acc.shade
+    # Both members share the az-115 geometry -> identical bins -> >=2 samples in
+    # at least one pooled bin (the pooling win).
+    assert any(cell[1] >= 2 for cell in acc.shade["front"].values())
+    # An ungrouped plane (M1) keeps its own per-plane channel.
+    assert "M1" in acc.shade
+
+
 def test_process_day_daily_fallback_disaggregates(site: SiteConfig):
     """The daily-total fallback path (process_day) trains without hourly LTS.
 

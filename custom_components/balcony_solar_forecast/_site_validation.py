@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from .const import CONF_PLANES, CONF_SHADE_GROUP
 from .core.types import PlaneConfig, SiteConfig
 
 # Upper sanity bound for an inverter-group AC limit (W). Local guard only;
@@ -54,14 +55,32 @@ def validate_site(raw: Any) -> SiteConfig:
     if not site.planes:
         raise SiteValidationError("no_planes")
 
+    # Raw plane dicts (parallel to ``site.planes``; from_dict + the horizon-only
+    # sort preserve plane order) so an EXPLICIT empty/whitespace shade_group can
+    # be rejected — from_dict has already normalised such a value to None, so the
+    # parsed config alone cannot tell "blank field" from "no field".
+    raw_planes = raw.get(CONF_PLANES, [])
+    if not isinstance(raw_planes, list):
+        raw_planes = []
+
     plane_names: set[str] = set()
     normalised_planes: list[PlaneConfig] = []
-    for plane in site.planes:
+    for idx, plane in enumerate(site.planes):
         if not plane.name:
             raise SiteValidationError("plane_no_name")
         if plane.name in plane_names:
             raise SiteValidationError("plane_dup_name")
         plane_names.add(plane.name)
+
+        raw_plane = raw_planes[idx] if idx < len(raw_planes) else None
+        if isinstance(raw_plane, dict) and CONF_SHADE_GROUP in raw_plane:
+            raw_group = raw_plane.get(CONF_SHADE_GROUP)
+            # A present-but-blank value is a fat-finger, not "no group": reject
+            # it rather than silently dropping the operator's grouping intent.
+            if raw_group is not None and (
+                not isinstance(raw_group, str) or not raw_group.strip()
+            ):
+                raise SiteValidationError("shade_group_empty")
 
         if not 0.0 <= plane.azimuth_deg <= 360.0:
             raise SiteValidationError("bad_azimuth")
@@ -76,6 +95,7 @@ def validate_site(raw: Any) -> SiteConfig:
         normalised_planes.append(replace(plane, horizon=sorted_horizon))
 
     _validate_groups(site, plane_names)
+    _validate_shade_groups(site)
     return replace(site, planes=tuple(normalised_planes))
 
 
@@ -100,6 +120,26 @@ def _validate_horizon(horizon) -> tuple:
             raise SiteValidationError("seasonal_missing_tau")
 
     return tuple(sorted(horizon, key=lambda r: r.azimuth_deg))
+
+
+def _validate_shade_groups(site: SiteConfig) -> None:
+    """Guard the shade-group → shademap-channel aliasing (SPEC §5).
+
+    A ``shade_group`` is the shademap channel its member planes pool their shade
+    learning into (``PlaneConfig.shade_channel``). It must not equal the NAME of
+    a plane that does NOT itself carry that same group: otherwise that plane's
+    OWN per-plane channel (``shade_channel == name``) would silently collide with
+    the group's pooled channel, aliasing a non-member's learning into the pool.
+    A group named after one of its own members is allowed and means "the others
+    share that module's shading" (the named plane carries the group too).
+    """
+    for plane in site.planes:
+        group = plane.shade_group
+        if group is None:
+            continue
+        named = site.plane_by_name(group)
+        if named is not None and named.shade_group != group:
+            raise SiteValidationError("shade_group_collision")
 
 
 def _validate_groups(site: SiteConfig, plane_names: set[str]) -> None:

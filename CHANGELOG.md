@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Configurable shade groups (shared shademap learning).** An optional
+  `shade_group` per plane lets modules that see the same sky occlusion (a
+  building edge, a tree line — a property of the *site*, not one module) pool
+  their slow-learner shade map into ONE channel instead of one per measurement
+  channel, so a bin the south module proves also informs the north module (only
+  the per-plane beam-share impact still differs). Default (no group) is
+  per-plane, exactly as before. The measurement and all quasi-clear gates stay
+  per plane; only the storage/read channel is shared (`PlaneConfig.shade_channel
+  = shade_group or name` is the single source of truth, applied in the
+  coordinator's `beam_tau` hook, the nightly trainer and `scripts/backfill.py`).
+  Grouping existing planes migrates their persisted per-plane channels into the
+  group channel once via the new pure `shademap.merge_channels` (n-weighted bin
+  merge); dissolving a group is a documented one-way step (planes restart from
+  the static prior, the group channel lingers as a harmless orphan, recoverable
+  via `rollback_learners`). Validation guards against a group name aliasing a
+  non-member plane's own channel. See SPEC §5.
+
 ## [0.11.0] - 2026-07-10
 
 ### Added

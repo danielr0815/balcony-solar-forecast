@@ -151,7 +151,7 @@
     "step": {
       "user": {
         "title": "Balkon-Solar-Prognose einrichten",
-        "description": "Name, Standort und Aktualisierungsintervalle festlegen. Das Feld „Standort-Konfiguration“ enthält bereits das vollständige Betreiber-Setup (8 Module, Horizonttabellen, Wechselrichter-Gruppen) – für die Referenzanlage einfach bestätigen, ansonsten frei bearbeiten. Azimut: 0° = Nord, im Uhrzeigersinn (90° = Ost, 180° = Süd). Neigung: Grad gegen die Horizontale (90° = senkrecht).",
+        "description": "Name, Standort und Aktualisierungsintervalle festlegen. Das Feld „Standort-Konfiguration“ enthält bereits das vollständige Betreiber-Setup (8 Module, Horizonttabellen, Wechselrichter-Gruppen) – für die Referenzanlage einfach bestätigen, ansonsten frei bearbeiten. Azimut: 0° = Nord, im Uhrzeigersinn (90° = Ost, 180° = Süd). Neigung: Grad gegen die Horizontale (90° = senkrecht). Optional je Ebene: eine „shade_group“ – Ebenen mit gleicher Verschattung (Gebäudekante, Baumreihe) teilen sich eine gemeinsam gelernte Verschattungskarte, wenn ihnen dieselbe Gruppe gegeben wird.",
         "data": {
           "name": "Name",
           "latitude": "Breitengrad",
@@ -168,7 +168,7 @@
       },
       "reconfigure": {
         "title": "Balkon-Solar-Prognose neu konfigurieren",
-        "description": "Die strukturelle Einrichtung bearbeiten: Standort, Aktualisierungsintervalle und die vollständige Standort-Konfiguration (Ebenen, Horizonttabellen, WR-Gruppen). Die Laufzeit-Stellgrößen – Lerner-Schalter, Quantilbänder und Vergleichssensoren – liegen im Optionen-Dialog („Konfigurieren“). Der Name bleibt nach der Einrichtung unveränderlich. Azimut: 0° = Nord, im Uhrzeigersinn (90° = Ost, 180° = Süd). Neigung: Grad gegen die Horizontale (90° = senkrecht).",
+        "description": "Die strukturelle Einrichtung bearbeiten: Standort, Aktualisierungsintervalle und die vollständige Standort-Konfiguration (Ebenen, Horizonttabellen, WR-Gruppen). Die Laufzeit-Stellgrößen – Lerner-Schalter, Quantilbänder und Vergleichssensoren – liegen im Optionen-Dialog („Konfigurieren“). Der Name bleibt nach der Einrichtung unveränderlich. Azimut: 0° = Nord, im Uhrzeigersinn (90° = Ost, 180° = Süd). Neigung: Grad gegen die Horizontale (90° = senkrecht). Optional je Ebene: eine „shade_group“ – Ebenen mit gleicher Verschattung (Gebäudekante, Baumreihe) teilen sich eine gemeinsam gelernte Verschattungskarte, wenn ihnen dieselbe Gruppe gegeben wird.",
         "data": {
           "latitude": "Breitengrad",
           "longitude": "Längengrad",
@@ -201,7 +201,9 @@
       "group_dup_name": "Gruppennamen müssen eindeutig sein.",
       "group_no_planes": "Jede Gruppe muss mindestens eine Ebene enthalten.",
       "group_unknown_plane": "Eine Gruppe verweist auf eine unbekannte Ebene.",
-      "bad_ac_limit": "Das AC-Limit muss größer als 0 sein."
+      "bad_ac_limit": "Das AC-Limit muss größer als 0 sein.",
+      "shade_group_empty": "Eine Verschattungsgruppe muss ein nicht-leerer Name sein.",
+      "shade_group_collision": "Eine Verschattungsgruppe darf nicht dem Namen einer Ebene entsprechen, die nicht selbst zu dieser Gruppe gehört."
     },
     "abort": {
       "already_configured": "Eine Anlage mit diesem Namen ist bereits eingerichtet."
@@ -246,7 +248,9 @@
       "group_dup_name": "Gruppennamen müssen eindeutig sein.",
       "group_no_planes": "Jede Gruppe muss mindestens eine Ebene enthalten.",
       "group_unknown_plane": "Eine Gruppe verweist auf eine unbekannte Ebene.",
-      "bad_ac_limit": "Das AC-Limit muss größer als 0 sein."
+      "bad_ac_limit": "Das AC-Limit muss größer als 0 sein.",
+      "shade_group_empty": "Eine Verschattungsgruppe muss ein nicht-leerer Name sein.",
+      "shade_group_collision": "Eine Verschattungsgruppe darf nicht dem Namen einer Ebene entsprechen, die nicht selbst zu dieser Gruppe gehört."
     }
   }
 }

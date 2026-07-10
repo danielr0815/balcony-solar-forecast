@@ -209,6 +209,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             seconds=int(cfg.get(CONF_FETCH_INTERVAL, FETCH_INTERVAL_SECONDS))
         )
         self._site = SiteConfig.from_dict(cfg[CONF_SITE])
+        # Plane → shademap-channel mapping (SPEC §5 shade groups): grouped planes
+        # pool their shade learning into one channel. Rebuilt on every reload
+        # (site is immutable within a coordinator lifetime); the single source of
+        # truth is PlaneConfig.shade_channel.
+        self._shade_channel_map = self._build_shade_channel_map()
 
         # Resolved kill switches (options-flow). Rebuilt on every reload.
         self._learner_config = LearnerConfig.from_dict(cfg)
@@ -327,6 +332,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # real OFF->ON option transition inside rebuild_learner_config (a plain
         # restart with the option untouched keeps the flag, SPEC §5).
         self.rebuild_learner_config()
+        # If the operator just grouped existing planes, pool their stale per-plane
+        # shademap channels into the group channel once (idempotent, SPEC §5).
+        self._migrate_shademap_channels()
 
         last = self._store.get_last_payload()
         if not last:
@@ -389,6 +397,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """
         cfg = {**self.entry.data, **self.entry.options}
         self._learner_config = LearnerConfig.from_dict(cfg)
+        # Refresh the plane → shade-channel mapping on rebuild (single source of
+        # truth: PlaneConfig.shade_channel).
+        self._shade_channel_map = self._build_shade_channel_map()
         drift = self._drift_state
         changed = False
 
@@ -453,6 +464,60 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Current in-memory shademap for the dump_shademap polar diagnostic."""
         self._load_learner_states()
         return self._shademap_state
+
+    # ------------------------------------------------------------------
+    # Shade groups: plane -> shademap-channel mapping + migration (SPEC §5)
+    # ------------------------------------------------------------------
+
+    def _build_shade_channel_map(self) -> dict[str, str]:
+        """Build ``{plane.name: plane.shade_channel}`` from the current site."""
+        return {p.name: p.shade_channel for p in self._site.planes}
+
+    def _shade_channel_mapping(self) -> dict[str, str]:
+        """The plane → shademap-channel mapping (grouped planes share a channel).
+
+        Returns the cached map built on construction / rebuild, falling back to
+        building it from the current site so a bare coordinator (tests using
+        ``__new__``) that never ran ``__init__`` still resolves the mapping. The
+        single source of truth is ``PlaneConfig.shade_channel``.
+        """
+        mapping = getattr(self, "_shade_channel_map", None)
+        if mapping is None:
+            return self._build_shade_channel_map()
+        return mapping
+
+    def _migrate_shademap_channels(self) -> None:
+        """Pool stale per-plane shademap channels into their group ONCE (SPEC §5).
+
+        When the operator groups existing planes (sets a ``shade_group``), the
+        persisted shademap still carries the old per-plane channels. If a loaded
+        channel IS a current plane name whose ``shade_channel`` now differs (the
+        plane was just grouped), the n-weighted ``shademap.merge_channels`` folds
+        every such channel into its group channel and the result is persisted
+        through the normal store path. Idempotent: after the merge those source
+        channels are gone, so a re-run finds nothing to migrate.
+
+        DOCUMENTED LIMITATION (SPEC §5): dissolving a group does NOT split the
+        learned map back — those planes restart from the static prior and the
+        group channel lingers as a harmless orphan (recoverable via
+        ``rollback_learners``).
+        """
+        self._load_learner_states()
+        state = self._shademap_state
+        needs_merge = any(
+            p.name in state.channels and p.shade_channel != p.name
+            for p in self._site.planes
+        )
+        if not needs_merge:
+            return
+        self._shademap_state = shademap_mod.merge_channels(
+            state, self._shade_channel_mapping()
+        )
+        self._persist_shademap_state()
+        # A merged shademap changes what the next served curve applies; drop the
+        # shade-profile memo so the diagram reflects the pooled channel.
+        self._shade_profile_cache = None
+        _LOGGER.info("Migrated per-plane shademap channels into shade groups")
 
     # ------------------------------------------------------------------
     # Shade-profile diagram (sun path vs learned shade) — SPEC §15
@@ -535,11 +600,15 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if cache is not None and cache[0] == key:
             return cache[1]
         shademap = self._shademap_state if slow_active else ShademapState()
+        # Grouped planes share a shade channel: the diagram for either member
+        # renders THAT channel's learned shading for this module's own geometry,
+        # which is exactly the semantics the served forecast applies (SPEC §5).
+        channel = self._shade_channel_mapping().get(module, module)
         tz = dt_util.get_time_zone(self.hass.config.time_zone) or UTC
         result = shadeprofile_mod.compute_shade_profile(
             plane=plane,
             shademap=shademap,
-            channel=module,
+            channel=channel,
             latitude=self._site.latitude,
             longitude=self._site.longitude,
             day=day,
@@ -751,10 +820,17 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         Factored out so BOTH the served-curve pass (:meth:`_build_learner_hooks`)
         and the nightly slow-only attribution pass (:meth:`_slow_only_hourly`)
         build the closure identically — the binding can never diverge.
+
+        The engine calls the hook per PLANE (channel == plane name); the mapping
+        redirects grouped planes to their shared shade channel (SPEC §5), so the
+        north module reads the shading the south module proved. Ungrouped planes
+        map to their own name — bit-identical to the pre-groups behaviour.
         """
         shd = self._shademap_state
+        mapping = self._shade_channel_mapping()
 
         def beam_tau(channel, sun_az, sun_el, doy, static_prior):
+            channel = mapping.get(channel, channel)
             return shademap_mod.effective_tau(
                 shd, channel=channel, sun_az=sun_az, sun_el=sun_el,
                 doy=doy, static_prior=static_prior,

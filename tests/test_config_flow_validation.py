@@ -32,6 +32,7 @@ from balcony_solar_forecast.const import (
     CONF_HZ_TAU_LEAFED,
     CONF_PLANE_NAME,
     CONF_PLANES,
+    CONF_SHADE_GROUP,
     CONF_TILT,
     CONF_WP,
     DEFAULT_SITE,
@@ -314,6 +315,61 @@ def test_site_with_no_groups_ok() -> None:
 
 
 # --------------------------------------------------------------------------
+# Shade groups (SPEC §5): shared shademap channel + aliasing guard.
+# --------------------------------------------------------------------------
+
+
+def test_shade_group_shared_by_two_planes_ok() -> None:
+    """Two planes may share a group named neither of them (a site channel)."""
+    site = _site()
+    site[CONF_PLANES][0][CONF_SHADE_GROUP] = "south"
+    site[CONF_PLANES][3][CONF_SHADE_GROUP] = "south"
+    result = validate_site(site)
+    assert result.plane_by_name("M1").shade_channel == "south"
+    assert result.plane_by_name("M4").shade_channel == "south"
+
+
+def test_shade_group_named_after_own_member_ok() -> None:
+    """A group named after a plane that itself carries the group is allowed."""
+    site = _site()
+    # M1 and M2 both share M2's shading -> group "M2", member M2 carries it.
+    site[CONF_PLANES][0][CONF_SHADE_GROUP] = "M2"
+    site[CONF_PLANES][1][CONF_SHADE_GROUP] = "M2"
+    result = validate_site(site)
+    assert result.plane_by_name("M1").shade_channel == "M2"
+    assert result.plane_by_name("M2").shade_channel == "M2"
+
+
+def test_shade_group_collides_with_non_member_plane_name() -> None:
+    """A group equal to a plane name the plane does not itself carry -> error."""
+    site = _site()
+    # M1 groups under "M2" but M2 does NOT carry group "M2": M2's own channel
+    # would silently alias into the pool.
+    site[CONF_PLANES][0][CONF_SHADE_GROUP] = "M2"
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "shade_group_collision"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_shade_group_empty_rejected(blank) -> None:
+    """An explicit blank / whitespace shade_group is a fat-finger, not None."""
+    site = _site()
+    site[CONF_PLANES][0][CONF_SHADE_GROUP] = blank
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "shade_group_empty"
+
+
+def test_shade_group_absent_is_backward_compatible() -> None:
+    """No shade_group anywhere -> every plane keeps its own channel."""
+    result = validate_site(_site())
+    for plane in result.planes:
+        assert plane.shade_group is None
+        assert plane.shade_channel == plane.name
+
+
+# --------------------------------------------------------------------------
 # Translation coverage: every raisable code must exist in both locales.
 # --------------------------------------------------------------------------
 
@@ -336,6 +392,8 @@ _ALL_ERROR_CODES = {
     "group_no_planes",
     "group_unknown_plane",
     "bad_ac_limit",
+    "shade_group_empty",
+    "shade_group_collision",
 }
 
 

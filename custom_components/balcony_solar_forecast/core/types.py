@@ -37,6 +37,7 @@ from ..const import (
     CONF_LONGITUDE,
     CONF_PLANE_NAME,
     CONF_PLANES,
+    CONF_SHADE_GROUP,
     CONF_TILT,
     CONF_WP,
     DAY_AHEAD_BIAS_MAX,
@@ -140,6 +141,15 @@ class PlaneConfig:
     ``horizon`` is kept sorted by ascending azimuth (validated at the config
     boundary). ``actual_entity`` is the HA entity id of the measured DC power
     for this plane; it is opaque to the pure core (used only by the logger).
+
+    ``shade_group`` (optional) pools the SLOW learner: planes sharing the same
+    non-empty ``shade_group`` learn ONE shademap channel instead of one per
+    plane. The obstruction geometry (a building edge, a tree line) is a property
+    of the SITE, not of one module — all planes on the same balcony see the same
+    sky occlusion; only the IMPACT differs by orientation, which the engine
+    already handles per plane via the beam share (SPEC §5). Default None ==
+    per-plane channel (backward compatible). :attr:`shade_channel` is THE single
+    definition of the plane→channel mapping.
     """
 
     name: str
@@ -149,12 +159,29 @@ class PlaneConfig:
     efficiency: float = DEFAULT_EFFICIENCY
     horizon: tuple[HorizonRow, ...] = ()
     actual_entity: str | None = None
+    shade_group: str | None = None
+
+    @property
+    def shade_channel(self) -> str:
+        """The shademap channel this plane trains / reads (SPEC §5).
+
+        ``shade_group`` when set, else the plane name — so grouped planes pool
+        their shade learning into one channel while a plain plane keeps its own
+        per-plane channel (backward compatible). This is THE single definition
+        of the mapping; the glue (coordinator / nightly trainer / backfill) all
+        route through it.
+        """
+        return self.shade_group or self.name
 
     @classmethod
     def from_dict(cls, d: dict) -> PlaneConfig:
         horizon = tuple(
             HorizonRow.from_dict(r) for r in d.get(CONF_HORIZON, [])
         )
+        # An empty / whitespace-only group means "no group" (backward compatible
+        # with a blank object-editor field): normalise it to None.
+        raw_group = d.get(CONF_SHADE_GROUP)
+        shade_group = raw_group.strip() or None if isinstance(raw_group, str) else None
         return cls(
             name=str(d[CONF_PLANE_NAME]),
             azimuth_deg=float(d[CONF_AZIMUTH]),
@@ -163,10 +190,11 @@ class PlaneConfig:
             efficiency=float(d.get(CONF_EFFICIENCY, DEFAULT_EFFICIENCY)),
             horizon=horizon,
             actual_entity=d.get(CONF_ACTUAL_ENTITY),
+            shade_group=shade_group,
         )
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             CONF_PLANE_NAME: self.name,
             CONF_AZIMUTH: self.azimuth_deg,
             CONF_TILT: self.tilt_deg,
@@ -175,6 +203,11 @@ class PlaneConfig:
             CONF_HORIZON: [r.to_dict() for r in self.horizon],
             CONF_ACTUAL_ENTITY: self.actual_entity,
         }
+        # Write the group only when set, so an ungrouped plane round-trips to the
+        # exact v0.10 dict (no new key) — backward compatible.
+        if self.shade_group:
+            d[CONF_SHADE_GROUP] = self.shade_group
+        return d
 
 
 @dataclass(frozen=True, slots=True)

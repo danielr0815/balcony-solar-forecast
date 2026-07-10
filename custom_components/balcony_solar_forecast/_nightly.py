@@ -701,6 +701,11 @@ def train_channel(
     plane = coord._site.plane_by_name(channel)
     if plane is None:
         return state, False
+    # The measurement + gating stay per PLANE (beam-referenced T, quasi-clear
+    # gates on this plane's own modeled/measured), but samples are STORED under
+    # the plane's shade channel — grouped planes pool into one channel so a bin
+    # proved by one member informs the others (SPEC §5). Ungrouped: == channel.
+    store_channel = plane.shade_channel
     changed = False
     hkeys = sorted(modeled.beam_wh)
     # Precompute the measured/modeled-gated ratio per hour for the neighbour-
@@ -751,7 +756,7 @@ def train_channel(
             doy = mid.timetuple().tm_yday
             state = shademap_mod.update_bin(
                 state,
-                channel=channel,
+                channel=store_channel,
                 sun_az=sun_az,
                 sun_el=sun_el,
                 doy=doy,
