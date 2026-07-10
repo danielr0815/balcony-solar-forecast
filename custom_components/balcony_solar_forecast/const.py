@@ -481,6 +481,7 @@ SHADEMAP_MEASURED_CLEAR_MIN_FRAC = 0.8
 SERVICE_IMPORT_BOOTSTRAP = "import_bootstrap"   # ingest scripts/backfill.py JSON
 SERVICE_DUMP_SHADEMAP = "dump_shademap"         # polar-table diagnostic export
 SERVICE_ROLLBACK_LEARNERS = "rollback_learners"  # restore learner state from the ring
+SERVICE_INSTALL_DASHBOARD = "install_dashboard"  # write the observability dashboard
 
 # --- Bootstrap JSON schema (SPEC §6; scripts/backfill.py <-> store) ---------
 # The import service validates + clamps and REJECTS unknown schema versions.

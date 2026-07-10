@@ -50,6 +50,11 @@ Nachträglich lassen sich über **Konfigurieren** (Optionen) anpassen:
 - die **Quantilbänder** (P10/P50/P90) an- oder abschalten,
 - die **Vergleichssensoren** für das Skill-Scoreboard.
 
+Das Observability-Dashboard lässt sich mit einem Aufruf einrichten: ein leeres
+Dashboard über **Einstellungen → Dashboards** anlegen (URL `balcony-solar`) und
+danach die Aktion `balcony_solar_forecast.install_dashboard` ausführen — siehe
+[docs/DASHBOARD.md](docs/DASHBOARD.md).
+
 Ergänzende Anleitungen:
 
 - **[docs/DASHBOARD.md](docs/DASHBOARD.md)** — fertiges Observability-Dashboard

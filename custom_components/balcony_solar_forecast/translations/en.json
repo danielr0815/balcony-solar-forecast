@@ -126,6 +126,24 @@
           "description": "How many nightly snapshots to go back. 1 restores the newest snapshot (last night's pre-training state)."
         }
       }
+    },
+    "install_dashboard": {
+      "name": "Install observability dashboard",
+      "description": "Write the full observability dashboard, wired to this install's real entity ids, into a dashboard you created empty in the UI (Settings → Dashboards → Add dashboard, URL \"balcony-solar\"). Re-run any time to refresh it after an update.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "Target config entry. Omit only if a single site is configured."
+        },
+        "dashboard": {
+          "name": "Dashboard URL",
+          "description": "URL path of the empty storage-mode dashboard to write into (the value in its URL field, which must contain a hyphen)."
+        },
+        "overwrite": {
+          "name": "Overwrite existing content",
+          "description": "Replace a dashboard that already has content this integration did not create. A dashboard this action previously wrote is refreshed without it."
+        }
+      }
     }
   },
   "config": {

@@ -126,6 +126,24 @@
           "description": "Wie viele nächtliche Snapshots zurückgegangen wird. 1 stellt den neuesten Snapshot wieder her (Zustand vor dem letzten Training)."
         }
       }
+    },
+    "install_dashboard": {
+      "name": "Observability-Dashboard installieren",
+      "description": "Schreibt das vollständige Observability-Dashboard – verdrahtet mit den echten Entity-IDs dieser Installation – in ein Dashboard, das zuvor leer über die UI angelegt wurde (Einstellungen → Dashboards → Dashboard hinzufügen, URL \"balcony-solar\"). Jederzeit erneut ausführbar, um es nach einem Update zu aktualisieren.",
+      "fields": {
+        "entry_id": {
+          "name": "Konfigurationseintrag",
+          "description": "Ziel-Konfigurationseintrag. Nur weglassen, wenn genau eine Anlage konfiguriert ist."
+        },
+        "dashboard": {
+          "name": "Dashboard-URL",
+          "description": "URL-Pfad des leeren Storage-Dashboards, in das geschrieben wird (der Wert im URL-Feld, der einen Bindestrich enthalten muss)."
+        },
+        "overwrite": {
+          "name": "Vorhandenen Inhalt überschreiben",
+          "description": "Überschreibt ein Dashboard, das bereits Inhalte enthält, die diese Integration nicht erstellt hat. Ein zuvor von dieser Aktion geschriebenes Dashboard wird auch ohne diese Option aktualisiert."
+        }
+      }
     }
   },
   "config": {
