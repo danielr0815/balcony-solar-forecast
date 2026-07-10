@@ -1,0 +1,44 @@
+{
+  "entity": {
+    "sensor": {
+      "energy_production_today": {"default": "mdi:solar-power"},
+      "energy_production_tomorrow": {"default": "mdi:solar-power"},
+      "energy_production_d2": {"default": "mdi:solar-power"},
+      "power_production_now": {"default": "mdi:solar-power-variant"},
+      "measured_dc_power_total": {"default": "mdi:solar-power"},
+      "last_fetch_age_min": {"default": "mdi:timer-sand"},
+      "source_status": {"default": "mdi:stairs"},
+      "intraday_scalar": {"default": "mdi:tune-variant"},
+      "drift_mae_corrected": {"default": "mdi:chart-bell-curve-cumulative"},
+      "learner_status_fast": {"default": "mdi:brain"},
+      "learner_status_slow": {"default": "mdi:brain"},
+      "learner_status_day_ahead": {"default": "mdi:brain"},
+      "daily_kwh_mae": {"default": "mdi:chart-line"},
+      "hourly_mae": {"default": "mdi:chart-bell-curve"},
+      "vs_best_baseline_pct": {"default": "mdi:trophy-outline"},
+      "energy_production_today_p10": {"default": "mdi:solar-power"},
+      "energy_production_today_p90": {"default": "mdi:solar-power"},
+      "shade_profile": {"default": "mdi:sun-angle"}
+    },
+    "binary_sensor": {
+      "degraded": {"default": "mdi:alert-decagram-outline"},
+      "fast_learner_active": {"default": "mdi:brain"},
+      "slow_learner_active": {"default": "mdi:brain"},
+      "kill_gate_passed": {"default": "mdi:gate"}
+    },
+    "select": {
+      "shade_profile_module": {"default": "mdi:solar-panel"}
+    },
+    "date": {
+      "shade_profile_date": {"default": "mdi:calendar"}
+    }
+  },
+  "services": {
+    "get_forecast": "mdi:chart-line",
+    "import_bootstrap": "mdi:database-import",
+    "dump_shademap": "mdi:map",
+    "rollback_learners": "mdi:history",
+    "install_dashboard": "mdi:view-dashboard",
+    "suggest_shade_groups": "mdi:group"
+  }
+}

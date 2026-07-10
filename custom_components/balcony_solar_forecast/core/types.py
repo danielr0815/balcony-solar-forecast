@@ -37,6 +37,7 @@ from ..const import (
     CONF_LONGITUDE,
     CONF_PLANE_NAME,
     CONF_PLANES,
+    CONF_ROSS_COEFF,
     CONF_SHADE_GROUP,
     CONF_TILT,
     CONF_WP,
@@ -150,6 +151,12 @@ class PlaneConfig:
     already handles per plane via the beam share (SPEC §5). Default None ==
     per-plane channel (backward compatible). :attr:`shade_channel` is THE single
     definition of the plane→channel mapping.
+
+    ``ross_coeff`` (optional) overrides the default Ross cell-temperature
+    coefficient (const ``ROSS_COEFF``) for this plane. Mounting geometry sets it
+    — a free-standing, well-ventilated module runs cooler (~0.02) than a
+    facade-parallel one with poor back-ventilation (~0.056). Default None ==
+    use the global default (backward compatible).
     """
 
     name: str
@@ -160,6 +167,7 @@ class PlaneConfig:
     horizon: tuple[HorizonRow, ...] = ()
     actual_entity: str | None = None
     shade_group: str | None = None
+    ross_coeff: float | None = None
 
     @property
     def shade_channel(self) -> str:
@@ -191,6 +199,10 @@ class PlaneConfig:
             horizon=horizon,
             actual_entity=d.get(CONF_ACTUAL_ENTITY),
             shade_group=shade_group,
+            ross_coeff=(
+                None if d.get(CONF_ROSS_COEFF) is None
+                else float(d[CONF_ROSS_COEFF])
+            ),
         )
 
     def to_dict(self) -> dict:
@@ -207,6 +219,10 @@ class PlaneConfig:
         # exact v0.10 dict (no new key) — backward compatible.
         if self.shade_group:
             d[CONF_SHADE_GROUP] = self.shade_group
+        # Same for the Ross override: only emit the key when the operator set it,
+        # so a default plane round-trips without the new field.
+        if self.ross_coeff is not None:
+            d[CONF_ROSS_COEFF] = self.ross_coeff
         return d
 
 

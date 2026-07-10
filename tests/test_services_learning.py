@@ -434,3 +434,128 @@ async def test_dump_shademap_returns_imported_bins():
     resp = svc._handle_dump_shademap(fake_hass, _Call({}))
     bins = resp["entries"]["e1"]["channels"]["M1"]["bins"]
     assert bins and bins[0]["tau"] == pytest.approx(0.3)
+
+
+# --------------------------------------------------------------------------
+# suggest_shade_groups handler.
+# --------------------------------------------------------------------------
+
+
+def _shade_site(names, *, shade_groups=None):
+    from balcony_solar_forecast.core.types import PlaneConfig, SiteConfig
+
+    shade_groups = shade_groups or {}
+    planes = tuple(
+        PlaneConfig(
+            name=n, azimuth_deg=115.0, tilt_deg=70.0, wp=370.0,
+            shade_group=shade_groups.get(n),
+        )
+        for n in names
+    )
+    return SiteConfig(latitude=48.5, longitude=12.2, planes=planes, groups=())
+
+
+class _ShadeCoordinator:
+    """Fake coordinator exposing a site + a live shademap state."""
+
+    def __init__(self, site, state):
+        self._site = site
+        self._state = state
+
+    def get_shademap_state(self):
+        return self._state
+
+
+def _shade_state(channels):
+    """{channel: {bin_key: (tau, n)}} -> ShademapState."""
+    from balcony_solar_forecast.core.types import ShademapBin, ShademapState
+
+    return ShademapState(channels={
+        ch: {k: ShademapBin(tau=t, n=n) for k, (t, n) in bins.items()}
+        for ch, bins in channels.items()
+    })
+
+
+def _uniform(tau, *, n=10, count=30):
+    return {f"{i}:0:0": (tau, n) for i in range(count)}
+
+
+def test_suggest_shade_groups_response_shape_and_defaults():
+    from balcony_solar_forecast.const import (
+        SHADE_SIM_MAX_MEAN_DIFF,
+        SHADE_SIM_MIN_COMMON_BINS,
+    )
+
+    # A == B over 30 bins (share shade); C deviates by 0.4 -> different.
+    state = _shade_state({
+        "A": _uniform(0.3), "B": _uniform(0.3), "C": _uniform(0.7),
+    })
+    coord = _ShadeCoordinator(_shade_site(["A", "B", "C"]), state)
+    hass = _FakeHass({"e1": coord})
+    resp = svc._handle_suggest_shade_groups(hass, _Call({}))
+    result = resp["result"]
+    # thresholds echo the const defaults when the fields are omitted.
+    assert result["thresholds"] == {
+        "max_diff": SHADE_SIM_MAX_MEAN_DIFF,
+        "min_common_bins": SHADE_SIM_MIN_COMMON_BINS,
+    }
+    # current_groups reflects each plane's shade_channel (its own name here).
+    assert result["current_groups"] == {"A": "A", "B": "B", "C": "C"}
+    # The suggestion groups A with B and leaves C out.
+    plane_sets = sorted(tuple(g["planes"]) for g in result["groups"])
+    assert plane_sets == [("A", "B"), ("C",)]
+    ab = next(g for g in result["groups"] if g["planes"] == ["A", "B"])
+    assert ab["suggested_group"] == "A"
+    # pairs carry the full similarity record.
+    assert {"a", "b", "common_bins", "mean_abs_diff", "max_abs_diff", "verdict"} <= set(
+        result["pairs"][0]
+    )
+
+
+def test_suggest_shade_groups_custom_thresholds_honoured():
+    # A vs B differ by 0.1 over only 4 bins: below the default bar on both axes,
+    # but a loosened max_diff + lowered min_common_bins should merge them.
+    state = _shade_state({
+        "A": _uniform(0.3, count=4), "B": _uniform(0.4, count=4),
+    })
+    coord = _ShadeCoordinator(_shade_site(["A", "B"]), state)
+    hass = _FakeHass({"e1": coord})
+    resp = svc._handle_suggest_shade_groups(
+        hass, _Call({"max_diff": 0.15, "min_common_bins": 4})
+    )
+    result = resp["result"]
+    assert result["thresholds"] == {"max_diff": 0.15, "min_common_bins": 4}
+    assert sorted(tuple(g["planes"]) for g in result["groups"]) == [("A", "B")]
+    # Under the DEFAULT thresholds the same state does NOT group (diff 0.1 > 0.06
+    # AND 4 bins < 30) — proving the custom values actually drove the merge.
+    resp_default = svc._handle_suggest_shade_groups(hass, _Call({}))
+    assert sorted(
+        tuple(g["planes"]) for g in resp_default["result"]["groups"]
+    ) == [("A",), ("B",)]
+
+
+def test_suggest_shade_groups_current_groups_uses_shade_channel():
+    state = _shade_state({})  # empty is fine; only current_groups is asserted
+    site = _shade_site(["M1", "M2"], shade_groups={"M1": "south"})
+    coord = _ShadeCoordinator(site, state)
+    hass = _FakeHass({"e1": coord})
+    resp = svc._handle_suggest_shade_groups(hass, _Call({}))
+    assert resp["result"]["current_groups"] == {"M1": "south", "M2": "M2"}
+
+
+def test_suggest_shade_groups_no_planes_raises():
+    from balcony_solar_forecast.core.types import ShademapState
+
+    coord = _ShadeCoordinator(_shade_site([]), ShademapState())
+    hass = _FakeHass({"e1": coord})
+    with pytest.raises(ServiceValidationError):
+        svc._handle_suggest_shade_groups(hass, _Call({}))
+
+
+def test_suggest_shade_groups_unsupported_coordinator_raises():
+    class _Bare:
+        _site = None
+
+    hass = _FakeHass({"e1": _Bare()})
+    with pytest.raises(ServiceValidationError):
+        svc._handle_suggest_shade_groups(hass, _Call({}))

@@ -48,7 +48,9 @@ mit gleicher Verschattung (Gebäudekante, Baumreihe) bilden dann einen
 **Verschattungs-Pool**. Jede Ebene lernt weiterhin einzeln (Speicherung je
 Modul-Kanal); gepoolt wird nur **beim Lesen** (n-gewichtet), sodass Gruppieren
 und Auflösen jederzeit **verlustfrei reversibel** sind. Die Schattenprofil-Karte
-zeigt Gruppen- und Einzelsicht zum direkten Vergleich.
+zeigt Gruppen- und Einzelsicht zum direkten Vergleich. Der Service
+**`suggest_shade_groups`** vergleicht die einzeln gelernten Kanäle bin-weise und
+schlägt datengetrieben Gruppen vor, statt sie am Diagramm abzuschätzen.
 
 Nachträglich lassen sich über **Konfigurieren** (Optionen) anpassen:
 
@@ -77,7 +79,9 @@ Ergänzende Anleitungen:
   statt isotroper Server-GTI, die auf steilen Ebenen 6–12 % daneben liegt.
 - **Horizont richtig:** je Ebene ein Profil (Azimut, Elevation,
   Transmittanz) — Fernfeld aus PVGIS, Nahfeld vom Betreiber; Direktstrahl
-  UND Diffusanteil (Sky-View-Faktor) werden korrigiert.
+  UND Diffusanteil (Sky-View-Faktor) werden korrigiert — der Himmel unter
+  der Horizontlinie ist auch fürs Diffus halbtransparent (saisonal), eine
+  Baumreihe verdunkelt es also nicht wie eine Wand.
 - **Selbstlernend:** zwei Zeitskalen — ein geometrisches
   Transmissionsfeld je Messkanal × Sonnenstand (lernt Hang, Bäume,
   Gebäudekante) und ein Intraday-Bias-Korrektor (rettet Nebelmorgen).

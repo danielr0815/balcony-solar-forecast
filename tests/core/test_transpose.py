@@ -376,3 +376,45 @@ def test_hay_davies_exports_cos_theta_passthrough():
     # Below the horizon: passthrough present but zero (no beam either).
     c = hay_davies_poa(0.0, 0.0, 10.0, 180.0, -5.0, 180.0, 70.0, 0.2)
     assert c["cos_theta"] == 0.0 and c["beam"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Solar-distance eccentricity in the anisotropy index (audit #30)
+# ---------------------------------------------------------------------------
+
+
+def test_eccentricity_ai_uses_doy_corrected_solar_constant():
+    # Flat plane (tilt 0): cos_theta = cos_zenith = sin(el), so Rb = 1 and the
+    # circumsolar term is exactly DHI*Ai with Ai = DNI / E0n(doy). Hand-compute
+    # E0n with the Spencer/Duffie-Beckman eccentricity factor for a fixed doy.
+    ghi, dni, dhi, el, doy = 500.0, 400.0, 200.0, 40.0, 100
+    c = hay_davies_poa(ghi, dni, dhi, 180.0, el, 180.0, 0.0, 0.2, doy=doy)
+    dni_extra = 1361.0 * (1.0 + 0.033 * math.cos(2.0 * math.pi * doy / 365.0))
+    ai = dni / dni_extra
+    assert c["circumsolar"] == pytest.approx(dhi * ai, rel=1e-12)
+
+
+def test_ai_doy_none_is_the_fixed_mean_solar_constant():
+    # Backward-compatible: doy=None divides DNI by the bare mean solar constant.
+    dni, dhi, el = 400.0, 200.0, 40.0
+    c = hay_davies_poa(500.0, dni, dhi, 180.0, el, 180.0, 0.0, 0.2)  # no doy
+    ai = dni / 1361.0
+    assert c["circumsolar"] == pytest.approx(dhi * ai, rel=1e-12)
+
+
+def test_circumsolar_larger_at_aphelion_than_perihelion():
+    # Same inputs, only doy differs. At aphelion (early July, doy ~185) the
+    # Earth-Sun distance is largest -> E0n smallest -> Ai (and circumsolar)
+    # largest; at perihelion (early January, doy ~3) the opposite. doy=None uses
+    # the mean solar constant, falling strictly between the two.
+    kw = dict(ghi=500.0, dni=600.0, dhi=200.0, sun_az=180.0, sun_el=45.0,
+              plane_az=180.0, plane_tilt=70.0, albedo=0.2)
+    peri = hay_davies_poa(**kw, doy=3)
+    aph = hay_davies_poa(**kw, doy=185)
+    mean = hay_davies_poa(**kw)
+    assert aph["circumsolar"] > mean["circumsolar"] > peri["circumsolar"]
+    # The isotropic remainder = DHI*(1-Ai)*tilt_factor moves the OTHER way.
+    assert aph["isotropic"] < mean["isotropic"] < peri["isotropic"]
+    # Beam and ground carry no Ai, so the eccentricity leaves them untouched.
+    for k in ("beam", "ground"):
+        assert aph[k] == pytest.approx(peri[k], rel=1e-12)

@@ -24,6 +24,9 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from .const import DOMAIN, SELECT_SHADE_PROFILE_MODULE
 from .sensor import BalconyForecastEntity
 
+# Coordinator-centralised I/O — entity updates are local, no throttling needed.
+PARALLEL_UPDATES = 0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -39,7 +42,6 @@ class ShadeProfileModuleSelect(BalconyForecastEntity, SelectEntity, RestoreEntit
     """Pick which module/plane the shade-profile diagram renders."""
 
     _attr_entity_category = EntityCategory.CONFIG
-    _attr_icon = "mdi:solar-panel"
 
     def __init__(self, coordinator: Any) -> None:
         super().__init__(coordinator, SELECT_SHADE_PROFILE_MODULE)

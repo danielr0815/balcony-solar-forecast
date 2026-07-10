@@ -88,6 +88,35 @@ def test_dc_power_absurd_heat_never_negative():
     assert dc_power(huge, 430.0, 60.0, 0.96) == 0.0
 
 
+# --- per-plane Ross coefficient (audit #29) -------------------------------
+
+
+def test_dc_power_ross_coeff_none_matches_default():
+    # Omitting the coefficient (or passing None) uses the module-wide default.
+    assert dc_power(800.0, 430.0, 30.0, 0.96) == dc_power(
+        800.0, 430.0, 30.0, 0.96, ross_coeff=ROSS_COEFF
+    )
+
+
+def test_dc_power_ross_coeff_matches_reference_model():
+    poa, wp, temp, eff, k = 800.0, 430.0, 30.0, 0.96, 0.05
+    t_cell = temp + k * poa
+    factor = 1.0 + TEMP_COEFF_PER_K * (t_cell - TEMP_REF_C)
+    exp = wp * (poa / 1000.0) * factor * eff
+    assert dc_power(poa, wp, temp, eff, ross_coeff=k) == pytest.approx(exp)
+
+
+def test_dc_power_higher_ross_coeff_derates_more_when_warm():
+    # Warm regime (Tcell well above 25 C): a facade-parallel mount (high Ross
+    # coeff -> hotter cell) loses more than a free-standing one (low coeff).
+    facade = dc_power(800.0, 430.0, 30.0, 0.96, ross_coeff=0.056)
+    free_standing = dc_power(800.0, 430.0, 30.0, 0.96, ross_coeff=0.02)
+    assert facade < free_standing
+    # Both bracket the default coefficient.
+    default = dc_power(800.0, 430.0, 30.0, 0.96)
+    assert facade < default < free_standing
+
+
 # --------------------------------------------------------------------------
 # clamp_groups
 # --------------------------------------------------------------------------

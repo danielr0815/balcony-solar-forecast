@@ -364,6 +364,7 @@ def reconstruct_plane_hour(
         plane_az=plane.azimuth_deg,
         plane_tilt=plane.tilt_deg,
         albedo=albedo,
+        doy=doy,
     )
     beam = comps.get("beam", 0.0)
     circ = comps.get("circumsolar", 0.0)
@@ -371,7 +372,7 @@ def reconstruct_plane_hour(
     ground = comps.get("ground", 0.0)
 
     # Incidence-angle modifier (ASHRAE, const IAM_B0) — byte-identical to
-    # engine._plane_poa_split: applied to beam+circumsolar BEFORE the ungated
+    # engine._plane_poa_components: applied to beam+circumsolar BEFORE the ungated
     # reference so the bootstrap trains the same optics-corrected T as live.
     cos_theta = comps.get("cos_theta")
     if cos_theta is not None:
@@ -406,7 +407,8 @@ def reconstruct_plane_hour(
     # tau (so the ungated beam is exactly beam_gated / static_tau).
     gated_total_poa = beam_poa_gated + diffuse_poa
     gated_total_dc = electrical.dc_power(
-        gated_total_poa, plane.wp, wx.temp_c, plane.efficiency
+        gated_total_poa, plane.wp, wx.temp_c, plane.efficiency,
+        ross_coeff=plane.ross_coeff,
     )
     conv = (gated_total_dc / gated_total_poa) if gated_total_poa > 0.0 else 0.0
 
@@ -623,11 +625,27 @@ def _process_day_impl(
     # neighbour-stability gate.
     kc_by_hour: dict[str, float] = {}
 
+    # SVF is now doy-dependent (the horizon is semi-transparent to the diffuse,
+    # so a seasonal foliage row ramps it with the day). Recompute it per (plane,
+    # doy) here — mirroring engine.compute_forecast — so the bootstrap's diffuse
+    # floor matches the live engine's exactly (live/backfill parity). This
+    # supersedes the static ``svf_by_plane`` (doy=None) the caller passes in.
+    svf_doy_cache: dict[tuple[str, int], float] = {}
+
+    def _svf_for(plane: PlaneConfig, doy: int) -> float:
+        key = (plane.name, doy)
+        svf = svf_doy_cache.get(key)
+        if svf is None:
+            svf = horizon.sky_view_factor(plane, doy=doy)
+            svf_doy_cache[key] = svf
+        return svf
+
     for wx in day_weather:
         hkey = wx.start.isoformat()
+        doy = _hour_midpoint(wx.start).timetuple().tm_yday
         for plane in planes:
             r = reconstruct_plane_hour(
-                plane, svf_by_plane[plane.name], wx,
+                plane, _svf_for(plane, doy), wx,
                 latitude=lat, longitude=lon,
             )
             recon[plane.name][hkey] = r

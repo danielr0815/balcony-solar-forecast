@@ -13,6 +13,7 @@ problem found; the config flow surfaces that code as a field error.
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from typing import Any
 
@@ -90,6 +91,14 @@ def validate_site(raw: Any) -> SiteConfig:
             raise SiteValidationError("bad_wp")
         if not 0.0 <= plane.efficiency <= 1.0:
             raise SiteValidationError("bad_efficiency")
+        # Optional Ross override: a generous physical band (Ross/Skoplaki
+        # literature spans ~0.02..0.056; the [0.005, 0.12] guard just rejects
+        # nonsense / non-finite values, not tuning choices).
+        if plane.ross_coeff is not None and not (
+            math.isfinite(plane.ross_coeff)
+            and 0.005 <= plane.ross_coeff <= 0.12
+        ):
+            raise SiteValidationError("bad_ross_coeff")
 
         sorted_horizon = _validate_horizon(plane.horizon)
         normalised_planes.append(replace(plane, horizon=sorted_horizon))

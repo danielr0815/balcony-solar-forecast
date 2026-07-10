@@ -21,18 +21,22 @@ def dc_power(
     wp: float,
     temp_amb: float,
     efficiency: float,
+    ross_coeff: float | None = None,
 ) -> float:
     """DC power (W) for one plane in one slot.
 
-    Ross cell temperature Tcell = temp_amb + ROSS_COEFF * poa_w_m2; output is
-    derated by TEMP_COEFF_PER_K per K above TEMP_REF_C. ``wp`` is scaled by
-    POA / 1000 (STC reference irradiance) and by ``efficiency``.
+    Ross cell temperature Tcell = temp_amb + k * poa_w_m2, where k is
+    ``ross_coeff`` when given else the default ROSS_COEFF; output is derated by
+    TEMP_COEFF_PER_K per K above TEMP_REF_C. ``wp`` is scaled by POA / 1000
+    (STC reference irradiance) and by ``efficiency``.
 
     Args:
         poa_w_m2: plane-of-array irradiance for the plane, W/m^2.
         wp: module STC peak power, W.
         temp_amb: ambient air temperature, deg C.
         efficiency: system/DC efficiency (0..1).
+        ross_coeff: per-plane Ross cell-temperature coefficient (mounting-
+            dependent); None uses the module-wide default ROSS_COEFF.
 
     Returns:
         DC power in watts (>= 0).
@@ -42,8 +46,10 @@ def dc_power(
     if poa_w_m2 <= 0.0:
         return 0.0
 
-    # Ross NOCT-style cell temperature: linear in POA (SPEC §4).
-    t_cell = temp_amb + ROSS_COEFF * poa_w_m2
+    # Ross NOCT-style cell temperature: linear in POA (SPEC §4). The mounting
+    # geometry sets the coefficient; fall back to the default when unset.
+    k_ross = ross_coeff if ross_coeff is not None else ROSS_COEFF
+    t_cell = temp_amb + k_ross * poa_w_m2
 
     # Temperature derate relative to the 25 C STC reference. Above 25 C this
     # loses power (coeff is negative); below 25 C it is a small gain, which is

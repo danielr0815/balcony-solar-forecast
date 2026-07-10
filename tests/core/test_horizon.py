@@ -266,6 +266,85 @@ def test_svf_higher_tilt_more_wall_sensitive_but_bounded():
 
 
 # ---------------------------------------------------------------------------
+# sky_view_factor: semi-transparent horizon for the diffuse (audit #11)
+# ---------------------------------------------------------------------------
+
+
+def _ring(tau, **kw):
+    """A 40-deg-elevation horizon ring at transmittance ``tau`` (south plane)."""
+    return _plane(_rows((0.0, 40.0, tau), (180.0, 40.0, tau)), az=180.0, tilt=70.0)
+
+
+def test_svf_transparent_horizon_row_is_exactly_one():
+    # A raised but fully transmissive (tau 1) line blocks no diffuse at all:
+    # the below-line wedge contributes its FULL value, so SVF == 1 exactly.
+    assert H.sky_view_factor(_ring(1.0)) == 1.0
+
+
+def test_svf_opaque_horizon_is_bit_exact_old_opaque_path():
+    # tau=0 collapses the semi-transparent column to the old opaque
+    # above-horizon integral, so the SVF is BIT-IDENTICAL to the pre-fix path
+    # (which summed _inner_elevation_integral(h) with no tau term). Reconstruct
+    # that exact algorithm here and assert equality to the last ULP.
+    p = _ring(0.0)
+    beta = math.radians(p.tilt_deg)
+    az_p = math.radians(p.azimuth_deg)
+    n = H._SVF_AZ_SAMPLES
+    daz = 2.0 * math.pi / n
+    num = 0.0
+    den = 0.0
+    for i in range(n):
+        az_deg = (i + 0.5) * (360.0 / n)
+        az_rad = math.radians(az_deg)
+        h = H.interp_elevation(p, az_deg)
+        num += H._inner_elevation_integral(h, az_rad, az_p, beta)
+        den += H._inner_elevation_integral(0.0, az_rad, az_p, beta)
+    old = (num * daz / math.pi) / (den * daz / math.pi)
+    old = 1.0 if old >= 1.0 else 1e-6 if old <= 0.0 else old
+    assert 0.0 < old < 1.0  # the ring really does obstruct
+    assert H.sky_view_factor(p) == old  # bit-for-bit
+
+
+def test_svf_semi_transparent_strictly_between_opaque_and_open():
+    opaque = H.sky_view_factor(_ring(0.0))
+    half = H.sky_view_factor(_ring(0.5))
+    clear = H.sky_view_factor(_ring(1.0))
+    assert opaque < half < clear
+    assert clear == 1.0
+
+
+def test_svf_seasonal_winter_higher_than_summer():
+    # Bare winter (tau 0.8, more transparent) lets more diffuse past the tree
+    # line than leafed summer (tau 0.45), so the winter SVF is strictly larger.
+    rows = (
+        HorizonRow(0.0, 40.0, 0.45, seasonal=True, tau_leafed=0.45, tau_bare=0.8),
+        HorizonRow(180.0, 40.0, 0.45, seasonal=True, tau_leafed=0.45, tau_bare=0.8),
+    )
+    p = _plane(rows, az=180.0, tilt=70.0)
+    winter = H.sky_view_factor(p, doy=1)     # bare
+    summer = H.sky_view_factor(p, doy=200)   # leafed
+    assert winter > summer
+    assert 0.0 < summer < winter < 1.0
+
+
+def test_svf_doy_none_uses_static_row_tau():
+    # doy=None resolves seasonal rows at their STATIC tau (0.45 fallback), so it
+    # matches a non-seasonal plane with the same fixed tau — no foliage ramp.
+    seasonal = _plane(
+        (
+            HorizonRow(0.0, 40.0, 0.45, seasonal=True, tau_leafed=0.45, tau_bare=0.8),
+            HorizonRow(180.0, 40.0, 0.45, seasonal=True, tau_leafed=0.45, tau_bare=0.8),
+        ),
+        az=180.0,
+        tilt=70.0,
+    )
+    static = _plane(
+        _rows((0.0, 40.0, 0.45), (180.0, 40.0, 0.45)), az=180.0, tilt=70.0
+    )
+    assert H.sky_view_factor(seasonal) == H.sky_view_factor(static)
+
+
+# ---------------------------------------------------------------------------
 # Operator default site: load + internal consistency
 # ---------------------------------------------------------------------------
 

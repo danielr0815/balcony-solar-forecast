@@ -207,7 +207,29 @@ class _PlanePoaSplit:
     beam_poa_ungated: float
 
 
-def _plane_poa_split(
+@dataclass(frozen=True, slots=True)
+class _PlanePoaComponents:
+    """Tau-independent POA decomposition for one plane in one slot (W/m^2).
+
+    The RAW and CORRECTED curves differ ONLY in which transmittance gates the
+    beam+circumsolar (static horizon tau vs a learned tau), so everything that
+    does NOT depend on tau is computed ONCE per plane/slot and shared between
+    them (audit #9): the IAM-corrected ``beam`` / ``circ`` (pre-gate), the
+    ``diffuse_poa`` floor (isotropic*SVF + ground, never touched by the beam
+    gate), the ``beam_poa_ungated`` reference (tau := 1) and the plane's
+    ``static_tau`` at this sun position (the shademap's ``static_prior``). The
+    per-tau gate :func:`_gate_split` then derives each curve's
+    :class:`_PlanePoaSplit` from this shared result.
+    """
+
+    beam: float              # beam after IAM, before the horizon gate
+    circ: float              # circumsolar after IAM, before the horizon gate
+    diffuse_poa: float       # isotropic*SVF + ground, clamped >=0 (gate-independent)
+    beam_poa_ungated: float  # max(beam + circ, 0): the shademap's beam reference
+    static_tau: float        # static horizon tau at this sun position (static_prior)
+
+
+def _plane_poa_components(
     plane: PlaneConfig,
     svf: float,
     slot: WeatherSlot,
@@ -215,18 +237,18 @@ def _plane_poa_split(
     sun_el: float,
     albedo: float,
     doy: int,
-    beam_tau: BeamTauHook | None,
-) -> _PlanePoaSplit:
-    """Horizon-gated Hay-Davies POA split (W/m^2) for one plane in one slot.
+) -> _PlanePoaComponents:
+    """Tau-independent Hay-Davies POA decomposition (W/m^2) for one plane/slot.
 
-    Beam + circumsolar are multiplied by the plane's transmittance when the sun
-    sits at or below the interpolated horizon line. The transmittance is the
-    STATIC horizon tau (raw physics) unless ``beam_tau`` is given, in which case
-    the learned/blended tau REPLACES it (SPEC §5 slow learner). The isotropic
-    diffuse is always scaled by the plane's static sky-view factor; the ground
-    reflection is unaffected by the horizon (it comes from below). Neither the
-    diffuse nor the ground term is ever touched by the beam transmittance, so a
-    fully occluding wall bin (tau=0) kills the beam but keeps the diffuse floor.
+    Runs the transposition, the ASHRAE IAM on beam+circumsolar, the horizon
+    interpolation (yielding the STATIC transmittance at this sun position) and
+    the SVF-scaled diffuse floor exactly ONCE. The RAW and CORRECTED splits are
+    then a cheap gate-arithmetic step over this shared result
+    (:func:`_gate_split`) — the only thing that differs between the two curves is
+    which tau attenuates the beam (SPEC §5 slow learner). The isotropic diffuse
+    is always scaled by the plane's static sky-view factor and the ground
+    reflection is never touched by the beam gate, so a fully occluding wall bin
+    (tau=0) kills the beam but keeps the diffuse floor.
     """
     comps = transpose.hay_davies_poa(
         ghi=slot.ghi,
@@ -237,6 +259,7 @@ def _plane_poa_split(
         plane_az=plane.azimuth_deg,
         plane_tilt=plane.tilt_deg,
         albedo=albedo,
+        doy=doy,
     )
 
     beam = comps.get("beam", 0.0)
@@ -258,12 +281,13 @@ def _plane_poa_split(
         beam *= f_iam
         circ *= f_iam
 
-    # Horizon beam gate: only when the sun is actually behind the horizon line
-    # for this azimuth do we attenuate the direct components. Above the line
-    # the static tau is irrelevant (full transmission), but a learned bin can
-    # still darken the beam (near-field trees / building edge the static table
-    # missed), so consult the hook there too — with static_prior = 1.0 above
-    # the line, a shrinkage blend leans on the learned tau exactly as intended.
+    # Static horizon beam prior: only when the sun is actually behind the horizon
+    # line for this azimuth does the static tau attenuate the direct components.
+    # Above the line the static tau is irrelevant (full transmission, 1.0), but
+    # a learned bin can still darken the beam (near-field trees / building edge
+    # the static table missed), so the CORRECTED gate consults its hook there too
+    # — with static_prior = 1.0 above the line, a shrinkage blend leans on the
+    # learned tau exactly as intended.
     horizon_elev = horizon.interp_elevation(plane, sun_az)
     if sun_el <= horizon_elev:
         static_tau = horizon.transmittance_at(plane, sun_az, doy)
@@ -271,36 +295,53 @@ def _plane_poa_split(
         static_tau = 1.0
 
     # UNGATED beam+circumsolar (tau := 1): the shademap's beam reference. Capture
-    # it BEFORE the tau multiply (linear in tau, so ungated == gated / tau).
+    # it BEFORE any tau multiply (linear in tau, so ungated == gated / tau).
     beam_poa_ungated = beam + circ
     if beam_poa_ungated < 0.0:
         beam_poa_ungated = 0.0
 
-    if beam_tau is not None:
-        tau = beam_tau(plane.name, sun_az, sun_el, doy, static_tau)
-    else:
-        tau = static_tau
-
-    if tau != 1.0:
-        beam *= tau
-        circ *= tau
-
     # Diffuse sky-view gate: static per-plane reduction of the isotropic sky
     # dome (fixes E4 — diffuse was never reduced by obstructions). Never gated
-    # by the beam transmittance.
+    # by the beam transmittance, so it is identical for the raw and corrected
+    # curves.
     iso *= svf
-
-    beam_poa = beam + circ
-    if beam_poa < 0.0:
-        beam_poa = 0.0
     diffuse_poa = iso + ground
     if diffuse_poa < 0.0:
         diffuse_poa = 0.0
 
-    return _PlanePoaSplit(
-        beam_poa=beam_poa,
+    return _PlanePoaComponents(
+        beam=beam,
+        circ=circ,
         diffuse_poa=diffuse_poa,
         beam_poa_ungated=beam_poa_ungated,
+        static_tau=static_tau,
+    )
+
+
+def _gate_split(comps: _PlanePoaComponents, tau: float) -> _PlanePoaSplit:
+    """Gate the shared components with a beam transmittance ``tau`` -> POA split.
+
+    ``tau`` gates beam+circumsolar (the static horizon tau for the RAW curve, the
+    learned/blended tau for the CORRECTED curve); the diffuse floor and the
+    ungated beam reference are carried straight through from ``comps``. The
+    ``tau != 1.0`` guard skips the multiply when the beam is fully transmitted —
+    bit-identical to multiplying (``x * 1.0 == x``), and byte-for-byte the same
+    arithmetic the single-pass predecessor ran.
+    """
+    beam = comps.beam
+    circ = comps.circ
+    if tau != 1.0:
+        beam *= tau
+        circ *= tau
+
+    beam_poa = beam + circ
+    if beam_poa < 0.0:
+        beam_poa = 0.0
+
+    return _PlanePoaSplit(
+        beam_poa=beam_poa,
+        diffuse_poa=comps.diffuse_poa,
+        beam_poa_ungated=comps.beam_poa_ungated,
     )
 
 
@@ -318,7 +359,10 @@ def _dc_split(
     is a faithful decomposition of the plane's unclamped DC power.
     """
     total_poa = split.beam_poa + split.diffuse_poa
-    total_dc = electrical.dc_power(total_poa, plane.wp, temp_c, plane.efficiency)
+    total_dc = electrical.dc_power(
+        total_poa, plane.wp, temp_c, plane.efficiency,
+        ross_coeff=plane.ross_coeff,
+    )
     if total_poa <= 0.0 or total_dc <= 0.0:
         return 0.0, 0.0
     beam_frac = split.beam_poa / total_poa
@@ -409,18 +453,19 @@ def compute_forecast(
     hk = hooks if hooks is not None else _NEUTRAL_HOOKS
     beam_tau_hook = hk.beam_tau
     slot_factor_hook = hk.slot_factor
-    learners_active = beam_tau_hook is not None or slot_factor_hook is not None
 
     lat = site.latitude
     lon = site.longitude
     planes = site.planes
     groups = site.groups
 
-    # Sky-view factor is a static per-plane property of geometry + horizon;
-    # compute it once, not per slot.
-    svf_by_plane: dict[str, float] = {
-        plane.name: horizon.sky_view_factor(plane) for plane in planes
-    }
+    # Sky-view factor is a per-plane, per-day-of-year property (the horizon is
+    # semi-transparent to the diffuse, so a seasonal foliage row ramps the SVF
+    # with the day). It is memoized at MODULE level inside
+    # ``horizon.sky_view_factor`` (keyed on the plane geometry + doy), so the
+    # O(360) quadrature runs at most once per plane per day for the WHOLE process
+    # and survives across the 15-min recompute cycles — no per-call memo here
+    # (audit #9b).
 
     # Static AC ceiling ingredients for the per-slot band cap (SPEC §6/§10). The
     # most the site can deliver in a slot is the sum of every group's AC limit
@@ -507,12 +552,19 @@ def compute_forecast(
         cor_diffuse_dc: dict[str, float] = {}
 
         for plane in planes:
-            svf = svf_by_plane[plane.name]
+            svf = horizon.sky_view_factor(plane, doy=doy)
 
-            # RAW: static horizon tau gates the beam.
-            raw_split = _plane_poa_split(
-                plane, svf, slot, sun_az, sun_el, albedo, doy, beam_tau=None
+            # Shared, tau-independent POA decomposition — computed ONCE per
+            # plane/slot. The RAW and CORRECTED curves differ ONLY in which
+            # transmittance gates the beam+circumsolar, so the Hay-Davies
+            # transposition, IAM, horizon interpolation and diffuse floor are
+            # shared here instead of being redone for each curve (audit #9).
+            comps = _plane_poa_components(
+                plane, svf, slot, sun_az, sun_el, albedo, doy
             )
+
+            # RAW: the static horizon tau gates the beam.
+            raw_split = _gate_split(comps, comps.static_tau)
             raw_beam_dc, raw_diffuse_dc = _dc_split(raw_split, plane, slot.temp_c)
             raw_unclamped[plane.name] = raw_beam_dc + raw_diffuse_dc
 
@@ -532,14 +584,16 @@ def compute_forecast(
             )
             diffuse_ref_series[plane.name].append(raw_diffuse_dc)
 
-            if learners_active:
-                # CORRECTED: learned tau gates the beam (shademap). Only the
-                # beam_tau hook changes the POA; the slot_factor is applied to
-                # the site total after the clamp.
-                cor_split = _plane_poa_split(
-                    plane, svf, slot, sun_az, sun_el, albedo, doy,
-                    beam_tau=beam_tau_hook,
+            # CORRECTED: the learned tau REPLACES the static tau on the SHARED
+            # components (shademap; only the beam gate differs). The slot_factor
+            # is applied to the site total AFTER the clamp, not here. With NO
+            # shademap hook the corrected split IS the raw split, so we reuse the
+            # raw DC directly — no second transposition or DC computation.
+            if beam_tau_hook is not None:
+                cor_tau = beam_tau_hook(
+                    plane.name, sun_az, sun_el, doy, comps.static_tau
                 )
+                cor_split = _gate_split(comps, cor_tau)
                 b_dc, d_dc = _dc_split(cor_split, plane, slot.temp_c)
             else:
                 b_dc, d_dc = raw_beam_dc, raw_diffuse_dc

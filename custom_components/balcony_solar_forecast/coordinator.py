@@ -136,6 +136,7 @@ from .core import (
     ScoreboardState,
     ShademapState,
     SiteConfig,
+    WeatherSeries,
     clearsky,
     compute_forecast,
     solpos,
@@ -257,6 +258,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._last_attempt_at: datetime | None = None
         self._last_fetch_ok: bool = False
         self._last_error: str | None = None
+        # Parsed-weather cache: the raw Open-Meteo payload is re-read every 15-min
+        # recompute (and by the nightly snapshot), but parsing it into an
+        # immutable WeatherSeries is pure and identical between fetches. Cache the
+        # parsed series keyed by the payload OBJECT IDENTITY (a new fetch replaces
+        # the stored dict wholesale, so ``is`` misses and we re-parse); holding a
+        # strong reference means the id can never be reused for another object.
+        # WeatherSeries is frozen, so sharing it across cycles is safe (audit #31).
+        self._weather_cache: tuple[dict, WeatherSeries] | None = None
 
         self._unsub_nightly = None
 
@@ -563,7 +572,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         The learned shademap is blended in ONLY when the slow learner is active
         (:meth:`_slow_active`) — matching what the served forecast actually
-        applies (engine ``_plane_poa_split``). When it is off / drift-disabled /
+        applies (engine ``_plane_poa_components``). When it is off / drift-disabled /
         collapse-frozen the diagram shows the static config shading alone, exactly
         as the forecast does. The result is memoised on
         ``(module, date, slow_active, id(shademap))`` so the O(azimuth×elevation)
@@ -915,11 +924,22 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         last = self._store.get_last_payload()
         if not last:
             return None
+        payload = last["payload"]
+        # Reuse the parsed series while the SAME payload is served: parsing is
+        # pure and the payload object is only replaced when a new fetch lands, so
+        # the 15-min recompute cadence (and the nightly snapshot) share one parse
+        # instead of re-parsing the identical body every cycle (audit #31).
+        # ``getattr`` default keeps a bare (__new__-built) coordinator working.
+        cache = getattr(self, "_weather_cache", None)
+        if cache is not None and cache[0] is payload:
+            return cache[1]
         try:
-            return parse_weather(last["payload"])
+            weather = parse_weather(payload)
         except FetchError as err:
             _LOGGER.error("Stored payload no longer parses: %s", err)
             return None
+        self._weather_cache = (payload, weather)
+        return weather
 
     def _status_for_age(self, age: timedelta) -> str:
         if age < timedelta(0):

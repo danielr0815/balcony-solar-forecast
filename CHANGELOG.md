@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`suggest_shade_groups` service — data-driven shade grouping.** Since v0.13.0
+  every module's shading is learned individually; this read-only action compares
+  the per-plane shademap channels bin-wise (n-weighted mean transmittance
+  difference over the bins both planes learned) and returns a similarity matrix
+  plus a grouping suggestion built by complete-linkage agglomeration, so the
+  operator no longer eyeballs the polar tables (or the card's Group/Single
+  toggle) to decide which planes share shade. Two thresholds are configurable per
+  call (`max_diff`, `min_common_bins`); the response also echoes the CURRENT
+  grouping for comparison. Planes with no learned evidence are flagged
+  `insufficient_data`. Pure similarity math in `core/shademap.py`
+  (`channel_similarity` / `suggest_shade_groups`). See SPEC §5.
+
+### Changed
+- **Recompute-path performance (BIT-IDENTICAL outputs).** Three hot-path
+  optimisations, each proven equal to the prior implementation by test (no
+  forecast number moves): (1) the engine no longer runs the Hay-Davies
+  transposition + horizon interpolation TWICE per plane per slot when a learner
+  is active — the tau-independent POA decomposition is computed once and the RAW
+  (static-tau) and CORRECTED (learned-tau) curves are derived by re-gating the
+  shared beam; (2) the sky-view-factor quadrature is memoised at module level,
+  keyed on the plane geometry + day-of-year, so it survives across the 15-min
+  recompute cycles instead of being redone once per `compute_forecast` call; and
+  (3) the cached Open-Meteo payload is parsed into a `WeatherSeries` once per
+  fetch and reused across recomputes rather than re-parsed every tick.
+- **Three physics refinements (forecast numbers shift slightly).** (1) The
+  Hay-Davies anisotropy index now divides DNI by the *eccentricity-corrected*
+  extraterrestrial normal irradiance `E0n = 1361·(1 + 0.033·cos(2π·doy/365))`
+  (Spencer/Duffie-Beckman) instead of the fixed solar constant, so the
+  circumsolar weight tracks the ±3.3 % Earth-Sun distance over the year — this
+  moves our transposition toward pvlib (worst golden-vector deviation ~1.9 % →
+  ~0.28 %, tolerance tightened 1.5 % → 0.5 %). (2) The Ross cell-temperature
+  coefficient is now overridable per plane (`ross_coeff`, ~0.02 free-standing …
+  ~0.056 facade-parallel; validated to a finite `[0.005, 0.12]`), defaulting to
+  the global `ROSS_COEFF`. (3) The sky-view factor treats the horizon as
+  *semi-transparent to the diffuse*: sky below the horizon line contributes the
+  row's (seasonally-resolved) transmittance of its value instead of being fully
+  blocked, so a tree line no longer darkens the diffuse like a wall — the SVF is
+  now day-of-year-dependent (foliage ramp), memoized per (plane, doy). The beam
+  path is unchanged except for the anisotropy weighting, so no shademap
+  re-convergence is needed. Live and backfill share the identical refined
+  physics.
+- **Quality-scale housekeeping (no behaviour change).** Entity icons moved out
+  of hardcoded `_attr_icon` into the central `icons.json`, keyed by
+  translation_key (plus icons for the five services); the one dynamic
+  per-comparison MAE sensor keeps its icon inline because it has no stable
+  translation_key. Every entity platform module (`sensor`, `binary_sensor`,
+  `select`, `date`) also declares `PARALLEL_UPDATES = 0`, since all I/O is
+  centralised in the coordinator and entity updates are local.
+
 ## [0.13.0] - 2026-07-10
 
 ### Changed

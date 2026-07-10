@@ -1,5 +1,15 @@
 """Integration-wide services: ``get_forecast``, ``import_bootstrap``,
-``dump_shademap``, ``rollback_learners`` and ``install_dashboard``.
+``dump_shademap``, ``rollback_learners``, ``install_dashboard`` and
+``suggest_shade_groups``.
+
+  * ``suggest_shade_groups`` (SPEC §5, ``SupportsResponse.ONLY``): compare every
+    plane's individually-learned shademap channel bin-wise and return a
+    similarity matrix plus a data-driven grouping suggestion (complete-linkage
+    agglomeration over the n-weighted mean tau difference), so the operator no
+    longer eyeballs the polar tables to decide shade groups. The similarity math
+    is pure + HA-free (:func:`shademap.suggest_shade_groups`); this layer only
+    resolves the target coordinator, hands it the site's plane names + the live
+    ``ShademapState``, and adds the CURRENT grouping for comparison.
 
   * ``install_dashboard`` (SPEC §14.3, ``SupportsResponse.OPTIONAL``): write the
     observability dashboard config — with THIS install's real entity ids — into
@@ -70,9 +80,13 @@ from .const import (
     SERVICE_IMPORT_BOOTSTRAP,
     SERVICE_INSTALL_DASHBOARD,
     SERVICE_ROLLBACK_LEARNERS,
+    SERVICE_SUGGEST_SHADE_GROUPS,
+    SHADE_SIM_MAX_MEAN_DIFF,
+    SHADE_SIM_MIN_COMMON_BINS,
     SHADEMAP_AZ_BIN_DEG,
     SHADEMAP_EL_BIN_DEG,
 )
+from .core.shademap import suggest_shade_groups
 
 # Service field names.
 ATTR_ENTRY_ID = "entry_id"
@@ -81,6 +95,8 @@ ATTR_PATH = "path"
 ATTR_SNAPSHOTS_BACK = "snapshots_back"
 ATTR_DASHBOARD = "dashboard"
 ATTR_OVERWRITE = "overwrite"
+ATTR_MAX_DIFF = "max_diff"
+ATTR_MIN_COMMON_BINS = "min_common_bins"
 
 # The default UI dashboard URL the operator is told to create (must contain a
 # hyphen — Home Assistant rejects single-word storage-dashboard url_paths).
@@ -96,6 +112,21 @@ IMPORT_BOOTSTRAP_SCHEMA = vol.Schema(
 )
 
 DUMP_SHADEMAP_SCHEMA = vol.Schema({vol.Optional(ATTR_ENTRY_ID): str})
+
+SUGGEST_SHADE_GROUPS_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_ENTRY_ID): str,
+        # Similarity threshold in tau units, bounded (0, 0.5]; default from const.
+        vol.Optional(ATTR_MAX_DIFF, default=SHADE_SIM_MAX_MEAN_DIFF): vol.All(
+            vol.Coerce(float),
+            vol.Range(min=0, max=0.5, min_included=False, max_included=True),
+        ),
+        # Minimum shared bins before a pair is treated as evidence, >= 1.
+        vol.Optional(
+            ATTR_MIN_COMMON_BINS, default=SHADE_SIM_MIN_COMMON_BINS
+        ): vol.All(vol.Coerce(int), vol.Range(min=1)),
+    }
+)
 
 GET_FORECAST_SCHEMA = vol.Schema({vol.Optional(ATTR_ENTRY_ID): str})
 
@@ -197,6 +228,19 @@ def async_register_services(hass: HomeAssistant) -> None:
             _install_dashboard,
             schema=INSTALL_DASHBOARD_SCHEMA,
             supports_response=SupportsResponse.OPTIONAL,
+        )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_SUGGEST_SHADE_GROUPS):
+
+        async def _suggest_shade_groups(call: ServiceCall) -> ServiceResponse:
+            return _handle_suggest_shade_groups(hass, call)
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_SUGGEST_SHADE_GROUPS,
+            _suggest_shade_groups,
+            schema=SUGGEST_SHADE_GROUPS_SCHEMA,
+            supports_response=SupportsResponse.ONLY,
         )
 
 
@@ -517,6 +561,50 @@ def _dump_one(coordinator: Any) -> dict[str, Any]:
     except Exception as err:  # noqa: BLE001 -- a dump must never raise
         return {"channels": {}, "error": repr(err)}
     return build_polar_table(state)
+
+
+# ---------------------------------------------------------------------------
+# suggest_shade_groups
+# ---------------------------------------------------------------------------
+
+
+def _handle_suggest_shade_groups(
+    hass: HomeAssistant, call: ServiceCall
+) -> ServiceResponse:
+    """Compare the per-plane shademaps and propose a data-driven grouping.
+
+    Resolves the single target coordinator, reads the site's plane names (config
+    order) and the live shademap state via ``get_shademap_state``, runs the pure
+    :func:`suggest_shade_groups`, and returns the suggestion alongside the
+    CURRENT grouping (each plane's ``shade_channel``) so the operator can compare
+    the data-driven proposal against what is configured today.
+    """
+    coordinator = _resolve_single_coordinator(hass, call.data.get(ATTR_ENTRY_ID))
+    getter = getattr(coordinator, "get_shademap_state", None)
+    if not callable(getter):
+        raise ServiceValidationError(
+            "This installation does not support shade-group suggestions."
+        )
+    site = getattr(coordinator, "_site", None)
+    planes = tuple(getattr(site, "planes", ()) or ())
+    if not planes:
+        raise ServiceValidationError(
+            "The selected site has no planes to compare."
+        )
+
+    state = getter()
+    result = suggest_shade_groups(
+        state,
+        [plane.name for plane in planes],
+        max_diff=call.data.get(ATTR_MAX_DIFF, SHADE_SIM_MAX_MEAN_DIFF),
+        min_common_bins=call.data.get(
+            ATTR_MIN_COMMON_BINS, SHADE_SIM_MIN_COMMON_BINS
+        ),
+    )
+    # Also surface the CURRENT grouping (plane -> its shademap channel) so the
+    # response is directly comparable against the suggestion.
+    result["current_groups"] = {plane.name: plane.shade_channel for plane in planes}
+    return {"result": result}
 
 
 # ---------------------------------------------------------------------------

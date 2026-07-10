@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,7 @@ from balcony_solar_forecast.const import (
     CONF_HZ_TAU_LEAFED,
     CONF_PLANE_NAME,
     CONF_PLANES,
+    CONF_ROSS_COEFF,
     CONF_SHADE_GROUP,
     CONF_TILT,
     CONF_WP,
@@ -151,6 +153,32 @@ def test_efficiency_out_of_range(eff) -> None:
     with pytest.raises(SiteValidationError) as exc:
         validate_site(site)
     assert exc.value.code == "bad_efficiency"
+
+
+@pytest.mark.parametrize("rc", [0.0, 0.004, 0.13, 1.0, -0.02, float("nan"), float("inf")])
+def test_ross_coeff_out_of_range(rc) -> None:
+    # The per-plane Ross override must land in the generous physical band
+    # [0.005, 0.12] and be finite; anything else is a fat-finger (audit #29).
+    site = _site()
+    site[CONF_PLANES][0][CONF_ROSS_COEFF] = rc
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "bad_ross_coeff"
+
+
+@pytest.mark.parametrize("rc", [0.005, 0.02, 0.0342, 0.056, 0.12])
+def test_ross_coeff_in_band_ok(rc) -> None:
+    site = _site()
+    site[CONF_PLANES][0][CONF_ROSS_COEFF] = rc
+    result = validate_site(site)
+    assert result.planes[0].ross_coeff == pytest.approx(rc)
+
+
+def test_ross_coeff_absent_is_none_and_round_trips() -> None:
+    # Ungrouped default plane carries no override and does not emit the key.
+    result = validate_site(_site())
+    assert all(p.ross_coeff is None for p in result.planes)
+    assert CONF_ROSS_COEFF not in result.planes[0].to_dict()
 
 
 def test_plane_no_name() -> None:
@@ -383,6 +411,7 @@ _ALL_ERROR_CODES = {
     "bad_tilt",
     "bad_wp",
     "bad_efficiency",
+    "bad_ross_coeff",
     "bad_horizon_azimuth",
     "bad_horizon_elevation",
     "bad_tau",
@@ -514,3 +543,71 @@ def test_de_and_en_entity_and_service_keys_match() -> None:
     assert set(de["entity"]["sensor"]) == set(en["entity"]["sensor"])
     assert set(de["entity"]["binary_sensor"]) == set(en["entity"]["binary_sensor"])
     assert set(de["services"]) == set(en["services"])
+
+
+# --------------------------------------------------------------------------
+# icons.json (quality-scale): entity icons belong in the central icons file,
+# keyed by translation_key, not hardcoded as _attr_icon. Every migrated entity
+# icon key must resolve to a translated entity name, every icon (entity + the
+# five services) must be an mdi glyph, and the platform modules must no longer
+# hardcode an icon that now lives in icons.json.
+# --------------------------------------------------------------------------
+
+_PLATFORM_MODULES = ("sensor.py", "binary_sensor.py", "select.py", "date.py")
+
+# The single _attr_icon deliberately NOT migrated to icons.json: the dynamic
+# per-comparison MAE sensor sets translation_key = None (its object id is
+# slug-suffixed), so there is no stable translation_key for icons.json to key an
+# entity icon by. Any OTHER remaining _attr_icon in a platform module is a bug.
+_ALLOWED_SOURCE_ICONS = {"mdi:chart-line-variant"}
+
+
+def _load_icons() -> dict:
+    return json.loads((_COMPONENT_DIR / "icons.json").read_text("utf-8"))
+
+
+def test_icons_json_entity_keys_have_translations_and_are_mdi() -> None:
+    en = json.loads((_COMPONENT_DIR / "translations" / "en.json").read_text("utf-8"))
+    en_entity = en["entity"]
+    for platform, keys in _load_icons()["entity"].items():
+        section = en_entity.get(platform, {})
+        for key, spec in keys.items():
+            assert key in section, (
+                f"icons.json entity.{platform}.{key} has no en.json entity name"
+            )
+            assert spec["default"].startswith("mdi:"), (
+                f"icons.json entity.{platform}.{key} icon is not an mdi glyph"
+            )
+
+
+def test_icons_json_service_icons_are_declared_and_mdi() -> None:
+    en = json.loads((_COMPONENT_DIR / "translations" / "en.json").read_text("utf-8"))
+    for service, icon in _load_icons().get("services", {}).items():
+        assert service in en["services"], (
+            f"icons.json services.{service} is not a declared service"
+        )
+        assert icon.startswith("mdi:"), (
+            f"icons.json services.{service} icon is not an mdi glyph"
+        )
+
+
+def test_platform_modules_do_not_hardcode_migrated_icons() -> None:
+    migrated = {
+        spec["default"]
+        for keys in _load_icons()["entity"].values()
+        for spec in keys.values()
+    }
+    pattern = re.compile(r'_attr_icon\s*=\s*"([^"]+)"')
+    for module in _PLATFORM_MODULES:
+        src = (_COMPONENT_DIR / module).read_text(encoding="utf-8")
+        found = set(pattern.findall(src))
+        # No icon that now lives in icons.json may still be hardcoded on a class.
+        assert not (found & migrated), (
+            f"{module} still hardcodes migrated icon(s): {found & migrated}"
+        )
+        # The only _attr_icon left anywhere is the translation_key-less
+        # comparison sensor's, which cannot be keyed in icons.json.
+        assert found <= _ALLOWED_SOURCE_ICONS, (
+            f"{module} hardcodes unexpected _attr_icon(s): "
+            f"{found - _ALLOWED_SOURCE_ICONS}"
+        )

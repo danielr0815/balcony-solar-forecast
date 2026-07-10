@@ -17,12 +17,15 @@ Model (Hay & Davies 1980):
   isotropic   = DHI * (1 - Ai) * (1 + cos(tilt))/2
   ground      = albedo * GHI * (1 - cos(tilt))/2
 
-``E0n`` is the extraterrestrial normal irradiance. The full model modulates
-the mean solar constant by the day-of-year eccentricity factor
-``1 + 0.033*cos(2*pi*doy/365)`` (+/-3.3 %); ``doy`` is not part of this pure
-geometric signature, so the mean solar constant is used. ``Ai`` is a
-dimensionless weight clamped to [0, 1], where the eccentricity term is
-negligible; the engine may refine this later without changing callers.
+``E0n`` is the extraterrestrial NORMAL irradiance. It varies +/-3.3 % over the
+year as the Earth-Sun distance changes (perihelion in early January), so the
+mean solar constant systematically under-weights the circumsolar term in
+winter and over-weights it in summer. When a day-of-year ``doy`` is supplied
+``E0n`` is the mean solar constant scaled by the eccentricity factor
+``1 + 0.033*cos(2*pi*doy/365)`` (Spencer 1971 simple form, Duffie & Beckman
+"Solar Engineering of Thermal Processes" eq. 1.4.1a); when ``doy`` is None the
+mean solar constant is used (backward-compatible for pure callers). ``Ai`` is a
+dimensionless weight clamped to [0, 1].
 """
 
 from __future__ import annotations
@@ -100,12 +103,20 @@ def hay_davies_poa(
     plane_az: float,
     plane_tilt: float,
     albedo: float,
+    doy: int | None = None,
 ) -> dict[str, float]:
     """Hay-Davies POA irradiance components for one plane and one slot.
 
     All azimuths use the INTERNAL convention (0=N clockwise); tilt is degrees
     from horizontal. Below LOW_SUN_CUTOFF_DEG elevation the circumsolar term
     is 0 and Rb is capped at RB_CAP (low-sun explosion guard).
+
+    The anisotropy index ``Ai = DNI / E0n`` uses the extraterrestrial NORMAL
+    irradiance ``E0n``. When ``doy`` is given, ``E0n`` carries the Earth-Sun
+    eccentricity factor ``1 + 0.033*cos(2*pi*doy/365)`` (Spencer 1971 simple
+    form, Duffie & Beckman eq. 1.4.1a; +/-3.3 % over the year, perihelion early
+    January) so the circumsolar weight is correct across the seasons; ``doy``
+    None falls back to the mean solar constant (backward-compatible).
 
     Args:
         ghi: global horizontal irradiance, W/m^2 (interval mean).
@@ -116,6 +127,8 @@ def hay_davies_poa(
         plane_az: plane azimuth, deg (0=N clockwise).
         plane_tilt: plane tilt, deg from horizontal.
         albedo: ground albedo (0.2 default, 0.5 with snow), caller-supplied.
+        doy: day-of-year (1..366) for the Earth-Sun eccentricity correction of
+            the anisotropy index; None uses the mean solar constant.
 
     Returns:
         Dict with keys ``beam``, ``circumsolar``, ``isotropic``, ``ground``
@@ -139,8 +152,17 @@ def hay_davies_poa(
     ground = albedo * ghi * tilt_factor_gnd
 
     # --- diffuse split needs the anisotropy index ---
-    # Ai weights how much of DHI behaves like the beam (forward-scattered).
-    ai = dni / _SOLAR_CONSTANT
+    # Ai weights how much of DHI behaves like the beam (forward-scattered),
+    # Ai = DNI / E0n. E0n is the mean solar constant scaled by the day-of-year
+    # eccentricity factor when a doy is supplied (Spencer/Duffie-Beckman simple
+    # form), else the bare mean solar constant (backward-compatible).
+    if doy is not None:
+        dni_extra = _SOLAR_CONSTANT * (
+            1.0 + 0.033 * math.cos(2.0 * math.pi * doy / 365.0)
+        )
+    else:
+        dni_extra = _SOLAR_CONSTANT
+    ai = dni / dni_extra
     if ai < 0.0:
         ai = 0.0
     elif ai > 1.0:

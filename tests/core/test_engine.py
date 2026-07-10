@@ -76,7 +76,7 @@ def _ang_diff(a: float, b: float) -> float:
 
 
 def fake_hay_davies_poa(
-    ghi, dni, dhi, sun_az, sun_el, plane_az, plane_tilt, albedo
+    ghi, dni, dhi, sun_az, sun_el, plane_az, plane_tilt, albedo, doy=None
 ):
     """Directional POA stand-in.
 
@@ -123,7 +123,7 @@ def make_fake_horizon(wall_planes: set[str], wall_az: float, wall_from_el=90.0):
             return 0.0
         return 1.0
 
-    def fake_sky_view_factor(plane):
+    def fake_sky_view_factor(plane, doy=None):
         # Slightly reduced dome for the walled planes so SVF scaling is visible.
         return 0.7 if plane.name in wall_planes else 0.9
 
@@ -223,7 +223,7 @@ class TestPipeline:
         """
         # A transpose stand-in faithful to the real contract: below the horizon
         # only the isotropic diffuse + ground survive (beam/circumsolar = 0).
-        def twilight_poa(ghi, dni, dhi, sun_az, sun_el, plane_az, plane_tilt, albedo):
+        def twilight_poa(ghi, dni, dhi, sun_az, sun_el, plane_az, plane_tilt, albedo, doy=None):
             if sun_el <= 0.0:
                 return {
                     "beam": 0.0,
@@ -539,3 +539,89 @@ class TestIncidenceAngleModifier:
         res = engine.compute_forecast(site, weather, now=_TEST_DATE)
         total = sum(res.total_watts)
         assert total > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Solar-distance eccentricity: the engine threads the slot's doy (audit #30)
+# ---------------------------------------------------------------------------
+
+
+class TestEccentricityThreading:
+    def test_engine_passes_slot_doy_to_transpose(self, monkeypatch):
+        """The engine forwards each slot's day-of-year into hay_davies_poa so
+        the anisotropy index carries the Earth-Sun eccentricity (same doy it
+        already derives for the foliage ramp / shademap)."""
+        seen: list[int | None] = []
+
+        def spy(*args, **kwargs):  # noqa: ANN002, ANN003
+            seen.append(kwargs.get("doy"))
+            return {
+                "beam": 100.0, "circumsolar": 0.0,
+                "isotropic": 0.0, "ground": 0.0, "cos_theta": 0.5,
+            }
+
+        monkeypatch.setattr(engine.solpos, "sun_position", fake_sun_position)
+        monkeypatch.setattr(engine.transpose, "hay_davies_poa", spy)
+        interp, tau, svf = make_fake_horizon(set(), wall_az=999.0)
+        monkeypatch.setattr(engine.horizon, "interp_elevation", interp)
+        monkeypatch.setattr(engine.horizon, "transmittance_at", tau)
+        monkeypatch.setattr(engine.horizon, "sky_view_factor", svf)
+
+        engine.compute_forecast(_two_plane_site(), _clear_sky_series(), now=_TEST_DATE)
+
+        expected_doy = _TEST_DATE.timetuple().tm_yday  # every slot is that day
+        assert seen  # the spy was actually exercised
+        assert all(d == expected_doy for d in seen)
+
+
+# ---------------------------------------------------------------------------
+# Per-plane Ross coefficient (audit #29)
+# ---------------------------------------------------------------------------
+
+
+class TestPerPlaneRossCoeff:
+    def _warm_site(self, ross_coeff):
+        # A steep south plane, no AC clamp (it would mask the thermal derate).
+        return SiteConfig(
+            latitude=48.5, longitude=12.2,
+            planes=(PlaneConfig(name="S", azimuth_deg=180.0, tilt_deg=75.0,
+                                wp=430.0, ross_coeff=ross_coeff),),
+            groups=(),
+        )
+
+    def _warm_weather(self):
+        base = datetime(2026, 7, 5, 4, 0, tzinfo=UTC)
+        slots = tuple(
+            WeatherSlot(start=base + timedelta(minutes=15 * i),
+                        ghi=600.0, dni=700.0, dhi=120.0, temp_c=30.0)
+            for i in range(64)  # warm July daytime
+        )
+        return WeatherSeries(slots=slots)
+
+    def test_ross_coeff_shifts_energy_in_the_known_direction(self):
+        weather = self._warm_weather()
+        default = engine.compute_forecast(
+            self._warm_site(None), weather, now=_TEST_DATE
+        )
+        facade = engine.compute_forecast(
+            self._warm_site(0.056), weather, now=_TEST_DATE  # hot mount
+        )
+        free_standing = engine.compute_forecast(
+            self._warm_site(0.02), weather, now=_TEST_DATE  # cool mount
+        )
+        # Warm midday (Tcell >> 25 C): a higher Ross coeff runs the cell hotter
+        # and loses more energy; a lower one runs cooler and keeps more.
+        assert sum(facade.total_watts) < sum(default.total_watts)
+        assert sum(default.total_watts) < sum(free_standing.total_watts)
+
+    def test_ross_coeff_none_equals_default_constant(self):
+        from balcony_solar_forecast.const import ROSS_COEFF
+
+        weather = self._warm_weather()
+        none_res = engine.compute_forecast(
+            self._warm_site(None), weather, now=_TEST_DATE
+        )
+        eq_res = engine.compute_forecast(
+            self._warm_site(ROSS_COEFF), weather, now=_TEST_DATE
+        )
+        assert sum(none_res.total_watts) == pytest.approx(sum(eq_res.total_watts))

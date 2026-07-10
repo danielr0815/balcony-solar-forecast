@@ -11,7 +11,7 @@ learned shade horizon (the elevation below which the effective transmittance
 stays under a threshold).
 
 The effective transmittance replicates engine.py's gate EXACTLY (engine.py
-`_plane_poa_split`): the static prior fed to the shademap is the plane's
+`_plane_poa_components`): the static prior fed to the shademap is the plane's
 horizon transmittance only when the sun sits at/below the interpolated horizon
 line, else 1.0; the learned/blended tau then REPLACES it via
 :func:`shademap.effective_tau`. So a point plotted here is the same beam
@@ -108,7 +108,7 @@ def effective_tau_at(
 ) -> float:
     """Effective beam transmittance at one sun position (engine-exact gate).
 
-    Mirrors ``engine._plane_poa_split``: the static prior is the plane's horizon
+    Mirrors ``engine._plane_poa_components``: the static prior is the plane's horizon
     transmittance only when the sun is at/below the interpolated horizon line
     (else 1.0), and the learned shademap then blends over it via
     :func:`shademap.effective_tau`. The result equals what the forecast

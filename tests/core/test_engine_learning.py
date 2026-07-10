@@ -76,7 +76,7 @@ def _ang_diff(a: float, b: float) -> float:
     return min(d, 360.0 - d)
 
 
-def fake_hay_davies_poa(ghi, dni, dhi, sun_az, sun_el, plane_az, plane_tilt, albedo):
+def fake_hay_davies_poa(ghi, dni, dhi, sun_az, sun_el, plane_az, plane_tilt, albedo, doy=None):
     """Directional POA stand-in with a clearly separable beam vs. diffuse.
 
     ``beam`` scales with how squarely the plane faces the sun and dies beyond
@@ -109,7 +109,7 @@ def make_fake_horizon(wall_planes, wall_az, wall_from_el=90.0):
             return 0.0
         return 1.0
 
-    def fake_sky_view_factor(plane):
+    def fake_sky_view_factor(plane, doy=None):
         return 0.7 if plane.name in wall_planes else 0.9
 
     return fake_interp_elevation, fake_transmittance_at, fake_sky_view_factor
@@ -540,7 +540,7 @@ class TestBeamRefSeries:
         beam (linear in tau at the run's own operating point, FIX-3)."""
         monkeypatch.setattr(engine.solpos, "sun_position", fake_sun_position)
         monkeypatch.setattr(engine.transpose, "hay_davies_poa", fake_hay_davies_poa)
-        monkeypatch.setattr(engine.horizon, "sky_view_factor", lambda p: 0.9)
+        monkeypatch.setattr(engine.horizon, "sky_view_factor", lambda p, doy=None: 0.9)
         weather = _clear_sky_series()
         site = _two_plane_site()
 
