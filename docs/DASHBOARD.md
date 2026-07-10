@@ -161,8 +161,12 @@ comparison_sensors:
   `engine_vs_best_baseline_pct`; positive = engine better on daily-kWh MAE.
 - **Skill scoreboard** (entities) — engine daily-kWh MAE, engine hourly MAE,
   engine-vs-best percent, plus each configured comparison's daily-kWh MAE.
-- **Forecast vs measured** (history-graphs) — engine today/tomorrow kWh and
-  power-now vs the 8 per-module measured DC-power sensors (ground truth).
+- **Forecast power (time-accurate)** + **Measured DC power per module**
+  (history-graphs) — today's cumulative kWh forecast and the instantaneous
+  forecast power, paired top-to-bottom with the 8 per-module measured DC-power
+  sensors (ground truth, labelled by plane M1…M8). Tomorrow's kWh is not shown:
+  juxtaposing today's forecast with tomorrow's says nothing about accuracy (a
+  true total-measured-vs-forecast overlay lands in a later phase).
 - **Measured daily energy per module** (statistics-graph) — daily LTS sums per
   representative module (bar), a best-effort per-plane view.
 - **Today's forecast band** (entities) — P10 / P50 / P90 for today (SPEC §6).
@@ -170,7 +174,9 @@ comparison_sensors:
   weather-image age, each learner's status, the applied intraday scalar, and
   the corrected-vs-physics drift MAE.
 - **Drift MAE trend** (history-graph).
-- **Shademap** (markdown) — see below.
+- **Shademap** (markdown) — how to pull the learned transmittance table via
+  `dump_shademap` and eyeball it against your site's known obstructions; see
+  below.
 
 ---
 

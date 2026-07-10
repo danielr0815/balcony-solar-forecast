@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Dashboard UX fixes.** The observability dashboard (both the generated one and
+  the shipped copy-paste YAML) is tidied: the forecast graph drops the pointless
+  today-vs-tomorrow juxtaposition and is retitled *Forecast power (time-accurate)*
+  so it pairs top-to-bottom with the measured per-module card; the measured
+  DC-power graph now labels its rows by plane (M1…M8) instead of the inverter
+  ports' ambiguous own names. The generated dashboard additionally drops its
+  redundant *Shade profile (per date & module)* controls card (those controls are
+  embedded in the bundled diagram card) and its shademap note now points at
+  *your* site's obstructions generically instead of hardcoding the reference
+  install's east-hill/wall/tree sectors.
+
 ## [0.9.0] - 2026-07-10
 
 ### Added

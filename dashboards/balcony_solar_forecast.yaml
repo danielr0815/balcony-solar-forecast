@@ -101,19 +101,19 @@ views:
             name: Alt 1600W
 
       # ----------------------------------------------------------------
-      # Forecast total forecast vs measured total site energy (SPEC §14.3).
-      # The forecast today-kWh sensor and the sum of the per-module actual
-      # DC power sensors, over the recorder history. history-graph is a
-      # built-in card.
+      # Time-accurate forecast power (SPEC §14.3): today's cumulative kWh and
+      # the instantaneous forecast power, over the recorder history. Pairs
+      # top-to-bottom with the measured per-module DC-power card below.
+      # Tomorrow's kWh is deliberately NOT shown — juxtaposing today's
+      # forecast with tomorrow's says nothing about accuracy. history-graph
+      # is a built-in card.
       # ----------------------------------------------------------------
       - type: history-graph
-        title: Forecast (today kWh) vs recent horizon
+        title: Forecast power (time-accurate)
         hours_to_show: 72
         entities:
           - entity: sensor.balcony_solar_forecast_energy_production_today
             name: Forecast — today
-          - entity: sensor.balcony_solar_forecast_energy_production_tomorrow
-            name: Forecast — tomorrow
           - entity: sensor.balcony_solar_forecast_power_production_now
             name: Forecast — power now
 
@@ -134,21 +134,21 @@ views:
         hours_to_show: 48
         entities:
           - entity: sensor.inverter_port_1_dc_power
-            name: M1 (N, lower)
+            name: M1
           - entity: sensor.inverter_port_2_dc_power
-            name: M2 (front, lower)
+            name: M2
           - entity: sensor.inverter_port_1_dc_power_2
-            name: M3 (front, lower)
+            name: M3
           - entity: sensor.inverter_port_2_dc_power_2
-            name: M4 (S, lower)
+            name: M4
           - entity: sensor.inverter_port_1_dc_power_3
-            name: M5 (N, upper)
+            name: M5
           - entity: sensor.inverter_port_2_dc_power_3
-            name: M6 (front, upper)
+            name: M6
           - entity: sensor.inverter_port_1_dc_power_4
-            name: M7 (front, upper)
+            name: M7
           - entity: sensor.inverter_port_2_dc_power_4
-            name: M8 (S, upper)
+            name: M8
 
       # ----------------------------------------------------------------
       # Per-plane forecast-vs-actual (best-effort with built-in cards).

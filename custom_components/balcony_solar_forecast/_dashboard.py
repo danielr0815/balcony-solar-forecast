@@ -38,7 +38,6 @@ from .const import (
     SENSOR_ENERGY_TODAY,
     SENSOR_ENERGY_TODAY_P10,
     SENSOR_ENERGY_TODAY_P90,
-    SENSOR_ENERGY_TOMORROW,
     SENSOR_FORECAST_DAILY_KWH_MAE,
     SENSOR_FORECAST_HOURLY_MAE,
     SENSOR_FORECAST_VS_BEST_BASELINE_PCT,
@@ -76,7 +75,6 @@ DASHBOARD_ENTITY_KEYS: tuple[str, ...] = (
     SENSOR_FORECAST_DAILY_KWH_MAE,
     SENSOR_FORECAST_HOURLY_MAE,
     SENSOR_ENERGY_TODAY,
-    SENSOR_ENERGY_TOMORROW,
     SENSOR_POWER_NOW,
     SENSOR_ENERGY_TODAY_P10,
     SENSOR_ENERGY_TODAY_P90,
@@ -164,15 +162,18 @@ def build_dashboard_config(
     *,
     entity_map: dict[str, str],
     comparison_slugs: list[tuple[str, str]],
-    measured_entities: list[str],
+    measured_entities: list[tuple[str, str]],
     version: str,
 ) -> dict[str, Any]:
     """Assemble the full Lovelace config, mirroring the shipped YAML.
 
     ``entity_map`` maps entity KEY (unique_id suffix) → real entity_id;
     ``comparison_slugs`` is ``[(name, entity_id), ...]`` for the configured
-    comparison MAE sensors; ``measured_entities`` are the planes' measured
-    DC-power entity ids. ``version`` stamps the :data:`MANAGED_MARKER`.
+    comparison MAE sensors; ``measured_entities`` is ``[(plane_name,
+    entity_id), ...]`` for the planes' measured DC-power sensors — the
+    ``plane_name`` becomes each row's label so the graph reads M1…M8 instead
+    of the sensors' ambiguous own friendly names. ``version`` stamps the
+    :data:`MANAGED_MARKER`.
 
     A card referencing an entity missing from ``entity_map`` is omitted; an
     entities-card drops just that row. Returns
@@ -190,7 +191,6 @@ def build_dashboard_config(
     _add_learners(cards, entity_map)
     _add_drift_trend(cards, entity_map)
     _add_shademap_markdown(cards)
-    _add_shade_profile_controls(cards, entity_map)
     _add_shade_profile_card(cards, entity_map)
     _add_comparison_reminder(cards)
 
@@ -295,11 +295,16 @@ def _add_scoreboard(
 def _add_forecast_history(
     cards: list[dict[str, Any]], entity_map: dict[str, str]
 ) -> None:
-    """Forecast today/tomorrow kWh + power-now history-graph (SPEC §14.3)."""
+    """Forecast today-kWh + power-now history-graph (SPEC §14.3).
+
+    Time-accurate: today's cumulative kWh and the instantaneous forecast
+    power, paired with the measured per-module DC-power card immediately
+    below. Tomorrow's kWh is deliberately NOT shown here — juxtaposing today's
+    forecast with tomorrow's tells the operator nothing about accuracy.
+    """
     rows: list[dict[str, Any]] = []
     for key, name in (
         (SENSOR_ENERGY_TODAY, "Forecast — today"),
-        (SENSOR_ENERGY_TOMORROW, "Forecast — tomorrow"),
         (SENSOR_POWER_NOW, "Forecast — power now"),
     ):
         row = _row(entity_map, key, name)
@@ -309,7 +314,7 @@ def _add_forecast_history(
         cards.append(
             {
                 "type": "history-graph",
-                "title": "Forecast (today kWh) vs recent horizon",
+                "title": "Forecast power (time-accurate)",
                 "hours_to_show": 72,
                 "entities": rows,
             }
@@ -317,9 +322,13 @@ def _add_forecast_history(
 
 
 def _add_measured_power(
-    cards: list[dict[str, Any]], measured_entities: list[str]
+    cards: list[dict[str, Any]], measured_entities: list[tuple[str, str]]
 ) -> None:
-    """Measured DC power per module (ground truth) history-graph (SPEC §14.3)."""
+    """Measured DC power per module (ground truth) history-graph (SPEC §14.3).
+
+    Each row carries the plane NAME (M1…M8) so the graph is legible instead of
+    showing the per-port sensors' own ambiguous friendly names.
+    """
     if not measured_entities:
         return
     cards.append(
@@ -327,13 +336,15 @@ def _add_measured_power(
             "type": "history-graph",
             "title": "Measured DC power per module (ground truth)",
             "hours_to_show": 48,
-            "entities": [{"entity": eid} for eid in measured_entities],
+            "entities": [
+                {"entity": eid, "name": name} for name, eid in measured_entities
+            ],
         }
     )
 
 
 def _add_measured_lts(
-    cards: list[dict[str, Any]], measured_entities: list[str]
+    cards: list[dict[str, Any]], measured_entities: list[tuple[str, str]]
 ) -> None:
     """Measured daily energy per module (LTS) statistics-graph (SPEC §14.3)."""
     if not measured_entities:
@@ -346,7 +357,7 @@ def _add_measured_lts(
             "stat_types": ["sum"],
             "chart_type": "bar",
             "days_to_show": 14,
-            "entities": list(measured_entities),
+            "entities": [eid for _name, eid in measured_entities],
         }
     )
 
@@ -442,30 +453,6 @@ def _add_shademap_markdown(cards: list[dict[str, Any]]) -> None:
     )
 
 
-def _add_shade_profile_controls(
-    cards: list[dict[str, Any]], entity_map: dict[str, str]
-) -> None:
-    """Shade-profile module/date/fraction controls (SPEC §15)."""
-    rows: list[dict[str, Any]] = []
-    for key, name in (
-        (SELECT_SHADE_PROFILE_MODULE, "Module"),
-        (DATE_SHADE_PROFILE_DATE, "Date"),
-        (SENSOR_SHADE_PROFILE, "Shaded fraction of daylight"),
-    ):
-        row = _row(entity_map, key, name)
-        if row is not None:
-            rows.append(row)
-    if rows:
-        cards.append(
-            {
-                "type": "entities",
-                "title": "Shade profile (per date & module)",
-                "show_header_toggle": False,
-                "entities": rows,
-            }
-        )
-
-
 def _add_shade_profile_card(
     cards: list[dict[str, Any]], entity_map: dict[str, str]
 ) -> None:
@@ -527,13 +514,10 @@ _SHADEMAP_MARKDOWN = (
     "(enable *\"Return response\"*). Each channel returns bins of "
     "`{az_deg, el_deg, tau, n}`; a richer polar plot can be rendered offline "
     "from that JSON.\n\n\n"
-    "Eyeball the learned τ against the known obstructions (SPEC §13):\n\n"
-    "- **East hill** — reduced τ at low elevation, sun-azimuth ~60–100° "
-    "(morning), all channels.\n\n"
-    "- **Building wall** — τ → 0 above the edge for the **south** modules "
-    "M4/M8 at sun-azimuth ~205–218° (early afternoon beam collapse).\n\n"
-    "- **Trees** (seasonal) — reduced τ on M4 (strong) / M8 (weak) at "
-    "sun-azimuth ~135–175°, elevation ~30–45°; lower in leaf.\n\n\n"
+    "Eyeball the learned τ against your site's known obstructions — persistent "
+    "low-τ wedges should line up with real objects (buildings, trees, terrain) "
+    "as seen from the modules, at the sun-azimuth and elevation where each one "
+    "cuts the beam.\n\n\n"
     "Shademap status and bin count are in the *Learners, drift & degradation* "
     "card above."
 )

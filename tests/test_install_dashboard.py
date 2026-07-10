@@ -17,6 +17,8 @@ Needs Home Assistant (the handler imports ServiceValidationError / the lovelace
 
 from __future__ import annotations
 
+import json
+
 import homeassistant.helpers.entity_registry as er_mod
 import pytest
 
@@ -30,6 +32,7 @@ from balcony_solar_forecast.const import (  # noqa: E402
     DOMAIN,
     INTEGRATION_VERSION,
     SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX,
+    SENSOR_ENERGY_TOMORROW,
 )
 from homeassistant.components.lovelace.const import (  # noqa: E402
     LOVELACE_DATA,
@@ -62,7 +65,7 @@ def test_build_full_inventory_matches_shipped_yaml():
             ("8-Entry Baseline", "sensor.cmp_a"),
             ("Alt 1600W", "sensor.cmp_b"),
         ],
-        measured_entities=["sensor.m1", "sensor.m2"],
+        measured_entities=[("M1", "sensor.m1"), ("M2", "sensor.m2")],
         version=INTEGRATION_VERSION,
     )
     # Marker present, carries the version.
@@ -72,12 +75,19 @@ def test_build_full_inventory_matches_shipped_yaml():
     views = config["views"]
     assert len(views) == 1
     assert views[0]["path"] == "forecast"
-    # 13 cards: the shipped YAML's inventory (apexcharts markdown -> bundled card).
+    # 12 cards: the shipped YAML's built-in-card inventory MINUS the redundant
+    # "Shade profile (per date & module)" entities card (its module/date/fraction
+    # controls are embedded in the bundled diagram card) — apexcharts markdown ->
+    # bundled card.
     cards = views[0]["cards"]
-    assert len(cards) == 13
+    assert len(cards) == 12
     types = _card_types(config)
     for required in ("markdown", "gauge", "entities", "history-graph", "statistics-graph"):
         assert required in types
+    # The redundant shade-profile controls entities card is gone from the builder.
+    assert not any(
+        c.get("title") == "Shade profile (per date & module)" for c in cards
+    )
     # The bundled shade-profile card replaces the opt-in apexcharts snippet,
     # wired to the three real ids.
     custom = [c for c in cards if c["type"] == "custom:balcony-shade-profile-card"]
@@ -92,6 +102,29 @@ def test_build_full_inventory_matches_shipped_yaml():
     # The gauge binds the vs-best-baseline entity.
     gauge = next(c for c in cards if c["type"] == "gauge")
     assert gauge["entity"] == "sensor.real_vs_best_baseline_pct"
+    # Measured DC-power rows carry the plane-name label (not the sensors' own).
+    measured = next(
+        c for c in cards if c.get("title", "").startswith("Measured DC power")
+    )
+    assert [(r["entity"], r["name"]) for r in measured["entities"]] == [
+        ("sensor.m1", "M1"),
+        ("sensor.m2", "M2"),
+    ]
+    # The pointless today-vs-tomorrow juxtaposition is gone: tomorrow's kWh is
+    # referenced nowhere in the built config, and the card is retitled.
+    assert SENSOR_ENERGY_TOMORROW not in json.dumps(config)
+    assert not any(
+        c.get("title") == "Forecast (today kWh) vs recent horizon" for c in cards
+    )
+    assert any(c.get("title") == "Forecast power (time-accurate)" for c in cards)
+    # The shademap markdown no longer hardcodes the reference site's obstructions.
+    shademap = next(
+        c
+        for c in cards
+        if c["type"] == "markdown" and c.get("title", "").startswith("Shademap")
+    )
+    assert "East hill" not in shademap["content"]
+    assert "dump_shademap" in shademap["content"]  # the how-to is kept
     # Comparison rows carried through into the scoreboard card.
     scoreboard = next(c for c in cards if c.get("title") == "Skill scoreboard")
     labels = [r.get("label") for r in scoreboard["entities"] if "label" in r]
@@ -166,18 +199,20 @@ def test_build_measured_cards_use_measured_entities():
     config = d.build_dashboard_config(
         entity_map=_full_entity_map(),
         comparison_slugs=[],
-        measured_entities=["sensor.a", "sensor.b", "sensor.c"],
+        measured_entities=[("M1", "sensor.a"), ("M2", "sensor.b"), ("M3", "sensor.c")],
         version="0.0.0",
     )
     cards = config["views"][0]["cards"]
     hist = next(
         c for c in cards if c.get("title", "").startswith("Measured DC power")
     )
-    assert [r["entity"] for r in hist["entities"]] == [
-        "sensor.a",
-        "sensor.b",
-        "sensor.c",
+    # The history-graph carries plane-name labels on each row.
+    assert [(r["entity"], r["name"]) for r in hist["entities"]] == [
+        ("sensor.a", "M1"),
+        ("sensor.b", "M2"),
+        ("sensor.c", "M3"),
     ]
+    # The LTS statistics-graph takes bare entity ids (no per-row name support).
     stats = next(c for c in cards if c["type"] == "statistics-graph")
     assert stats["entities"] == ["sensor.a", "sensor.b", "sensor.c"]
 
