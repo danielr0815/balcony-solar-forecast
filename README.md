@@ -72,9 +72,10 @@ Ergänzende Anleitungen:
   Alles geclamped, driftüberwacht, abschaltbar.
 - **Verschattung sichtbar:** für ein wählbares Modul und Datum zeigt ein
   Diagramm die Sonnenbahn (Elevation über Azimut) mit der aktuell gelernten
-  Verschattung (Transmission τ, eingefärbt) und den Horizontlinien —
-  Bedienelemente (Modul/Datum) und Rohdaten als Entitäten der Integration,
-  das Diagramm selbst als optionale ApexCharts-Karte
+  Verschattung (Transmission τ, eingefärbt) und den Horizontlinien — die
+  **Karte bringt die Integration selbst mit** (im Kartenwähler als „Balcony
+  Shade Profile", keine HACS-/Zusatzinstallation, die Lovelace-Ressource wird
+  automatisch registriert); alternativ weiterhin als ApexCharts-Karte
   (siehe [docs/DASHBOARD.md](docs/DASHBOARD.md)).
 - **Keine schweren Abhängigkeiten:** stdlib-only zur Laufzeit
   (kein numpy/pandas/pvlib), HA-freier Kern mit Golden-Tests.

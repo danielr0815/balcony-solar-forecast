@@ -195,11 +195,44 @@ excluded from the recorder like the energy-curve dicts:
   the learned shade horizon (elevation below which the beam is mostly blocked)
   on an azimuth grid over the day's daylight span.
 
-### The chart (needs the HACS `apexcharts-card`)
+### The chart (bundled card — no HACS install)
 
-The diagram itself is the one thing a built-in Lovelace card cannot draw (a
-parametric elevation-over-azimuth curve for a specific date), so it lives as an
-opt-in snippet:
+The diagram now ships **with the integration** as a self-contained custom card
+— no HACS frontend install and no YAML snippet. The integration serves the
+card's JavaScript and, in storage-mode Lovelace, auto-registers it as a
+dashboard resource, so it appears directly in the card picker:
+
+1. Open your dashboard → **Edit dashboard** → **＋ Add card**.
+2. Pick **"Balcony Shade Profile"** from the card list (type *shade* to filter),
+   then add it. A live preview renders straight away.
+3. Pick a module + date in the card's own header controls; the chart redraws.
+   Reading it: the yellow line is the sun's elevation, the dots recolour green →
+   amber → red as the learned τ falls (free → partial → shaded), the grey area
+   is the learned shade horizon and the thin dashed grey line the static
+   configured horizon. The x-axis is the sun azimuth (90° = East, 180° = South,
+   270° = West).
+
+The card auto-discovers the three shade-profile entities above, so the default
+YAML is simply `type: custom:balcony-shade-profile-card`. It has four optional
+keys — `sensor`, `module_select`, `date_entity`, `title` — set them only to pin
+a specific device's entities (e.g. multiple installs). It changes no state
+except through the module/date controls.
+
+> **YAML-mode Lovelace only.** Auto-registration needs storage-mode Lovelace
+> (the default). If your dashboards are configured in YAML, the integration logs
+> the resource URL on start; add it once yourself:
+>
+> ```yaml
+> lovelace:
+>   resources:
+>     - url: /balcony_solar_forecast/frontend/shade_profile_card.js?v=0.7.0
+>       type: module
+> ```
+
+### Alternative: the ApexCharts card (HACS)
+
+The same picture can also be drawn by the HACS `apexcharts-card` from an opt-in
+snippet, if you prefer it over the bundled card:
 
 1. Install **`apexcharts-card`** via HACS → Frontend.
 2. Add a **Manual** card and paste

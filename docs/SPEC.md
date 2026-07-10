@@ -579,3 +579,16 @@ HACS-Artefakt (`dashboards/shade_profile_apexcharts.yaml`,
 `custom:apexcharts-card`): x = Sonnen-Azimut, y = Grad, Sonnenbahn nach τ
 eingefärbt (Schwellen an `SHADE_PROFILE_TAU_THRESHOLD` ausgerichtet), beide
 Horizontlinien überlagert. Details in `docs/DASHBOARD.md` §4b.
+
+Seit v0.7 liefert die Integration zusätzlich eine **eigene, abhängigkeitsfreie
+Lovelace-Karte** mit (`custom:balcony-shade-profile-card`, vanilla
+`HTMLElement` + programmatisches SVG, keine HACS-Frontend-Installation nötig):
+das Frontend-JS wird unter `FRONTEND_URL`
+(`/balcony_solar_forecast/frontend/shade_profile_card.js`) als statischer Pfad
+ausgeliefert und — im Lovelace-Storage-Modus — beim Start automatisch als
+Dashboard-Ressource registriert (Modul-Typ), sodass die Karte direkt im
+Kartenwähler erscheint. Die Ressourcen-URL ist per `?v=<INTEGRATION_VERSION>`
+cache-gebustet (einziger Cache-Busting-Mechanismus); im YAML-Lovelace-Modus wird
+statt der Registrierung ein INFO-Hinweis mit der manuell einzutragenden
+Ressourcen-Zeile geloggt. Die Registrierung ist ein Zusatznutzen, nie ein
+Setup-Blocker: jeder Fehler wird geschluckt und protokolliert.
