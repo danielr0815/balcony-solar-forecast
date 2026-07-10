@@ -1257,3 +1257,32 @@ def test_per_plane_modeled_hourly_kc_is_energy_weighted():
     assert got == pytest.approx(clearsky.hourly_kc(samples))
     # Regression: NOT the last slot's value, and close to the clear majority.
     assert got > 0.6
+
+
+def test_per_plane_modeled_trims_night_hours_and_rounds():
+    """Store trim: all-zero night hours are dropped from the issued snapshot's
+    per-plane curves and values are rounded (the 90-day ring dominated the
+    store with night zeros and 17-digit floats)."""
+    c = _make_coordinator()
+    day = datetime(2026, 6, 20, 12, 0, tzinfo=UTC)     # daylight hour
+    night = datetime(2026, 6, 20, 22, 0, tzinfo=UTC)   # after sunset
+    starts = (day, night)
+    pr = PlaneResult(
+        name="M1",
+        watts=(100.0, 0.0),
+        beam_ref_watts=(80.123456789, 0.0),
+        diffuse_ref_watts=(20.987654321, 0.0),
+        kc=(0.9123456789, 0.0),
+    )
+    c._last_result = ForecastResult(
+        slot_starts=starts, total_watts=(100.0, 0.0),
+        plane_results=(pr,), hourly_wh={},
+    )
+
+    modeled = c._per_plane_modeled("2026-06-20")["M1"]
+    # The night hour is gone from every curve; the day hour is rounded.
+    assert set(modeled.beam_wh) == {day.isoformat()}
+    assert set(modeled.kc) == {day.isoformat()}
+    assert modeled.beam_wh[day.isoformat()] == round(80.123456789 * 0.25, 2)
+    # And the vestigial ghi dict no longer serializes at all.
+    assert "ghi" not in modeled.to_dict()

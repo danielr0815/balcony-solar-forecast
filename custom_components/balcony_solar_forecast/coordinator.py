@@ -1416,7 +1416,6 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 continue  # engine without the reference export: do NOT train
             beam_wh: dict[str, float] = {}
             diffuse_wh: dict[str, float] = {}
-            ghi: dict[str, float] = {}
             for i, start in enumerate(result.slot_starts):
                 if dt_util.as_local(dt_util.as_utc(start)).date().isoformat() != iso:
                     continue
@@ -1425,9 +1424,30 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     beam_wh[hkey] = beam_wh.get(hkey, 0.0) + pr.beam_ref_watts[i] * 0.25
                 if i < len(pr.diffuse_ref_watts):
                     diffuse_wh[hkey] = diffuse_wh.get(hkey, 0.0) + pr.diffuse_ref_watts[i] * 0.25
+            # Store trim: the issued ring keeps 90 days of these — drop NIGHT
+            # hours (all-zero, nothing to train on: the trainer skips beam<=0
+            # anyway) and round to 0.01 Wh / 6-decimal kc, far below trainer
+            # noise, instead of 17-significant-digit floats.
+            keep = {
+                h
+                for h in set(beam_wh) | set(diffuse_wh) | set(kc_by_hour)
+                if beam_wh.get(h, 0.0) > 0.0
+                or diffuse_wh.get(h, 0.0) > 0.0
+                or kc_by_hour.get(h, 0.0) > 0.0
+            }
             out[pr.name] = PlaneHourlyModeled(
-                beam_wh=beam_wh, diffuse_wh=diffuse_wh, ghi=ghi,
-                kc=dict(kc_by_hour),
+                beam_wh={
+                    h: round(v, 2) for h, v in beam_wh.items() if h in keep
+                },
+                diffuse_wh={
+                    h: round(v, 2) for h, v in diffuse_wh.items() if h in keep
+                },
+                ghi={},
+                kc={
+                    h: round(v, 6)
+                    for h, v in kc_by_hour.items()
+                    if h in keep
+                },
             )
         return out
 

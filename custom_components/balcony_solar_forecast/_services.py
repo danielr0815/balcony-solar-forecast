@@ -1,8 +1,12 @@
-"""Integration-wide services: ``import_bootstrap`` and ``dump_shademap``.
+"""Integration-wide services: ``get_forecast``, ``import_bootstrap``,
+``dump_shademap`` and ``rollback_learners``.
 
-Owner: platforms. Registered once (from ``async_setup_entry`` on the first
-entry) and removed when the last entry unloads, mirroring the ``get_forecast``
-service in ``sensor.py``.
+Owner: platforms. ALL services are registered once from ``async_setup``
+(quality-scale ``action-setup``) and stay registered for the lifetime of HA —
+independent of config-entry load state, so callers get a clear
+ServiceValidationError instead of "Service not found" while no entry is
+loaded. The ``get_forecast`` response builder itself stays in ``sensor.py``
+(imported lazily by its handler).
 
   * ``import_bootstrap`` (SPEC §6): ingest the offline backfill JSON to pre-seed
     the day-ahead bias + shademap learner states. The heavy lifting (schema
@@ -41,6 +45,7 @@ from .const import (
     DOMAIN,
     LEARNER_SNAPSHOT_RING,
     SERVICE_DUMP_SHADEMAP,
+    SERVICE_GET_FORECAST,
     SERVICE_IMPORT_BOOTSTRAP,
     SERVICE_ROLLBACK_LEARNERS,
     SHADEMAP_AZ_BIN_DEG,
@@ -64,6 +69,8 @@ IMPORT_BOOTSTRAP_SCHEMA = vol.Schema(
 
 DUMP_SHADEMAP_SCHEMA = vol.Schema({vol.Optional(ATTR_ENTRY_ID): str})
 
+GET_FORECAST_SCHEMA = vol.Schema({vol.Optional(ATTR_ENTRY_ID): str})
+
 ROLLBACK_LEARNERS_SCHEMA = vol.Schema(
     {
         vol.Optional(ATTR_ENTRY_ID): str,
@@ -76,12 +83,34 @@ ROLLBACK_LEARNERS_SCHEMA = vol.Schema(
 
 @callback
 def async_register_services(hass: HomeAssistant) -> None:
-    """Register the learner services once for the whole integration.
+    """Register ALL integration services once, from ``async_setup``.
 
-    Idempotent: safe to call from every entry's setup; only the first call
-    actually registers. Removal happens in ``__init__.async_unload_entry`` when
-    the last entry unloads.
+    Quality-scale ``action-setup``: services are registered when the component
+    loads — independent of any config entry — and stay registered, so an
+    automation calling e.g. ``get_forecast`` during a startup Open-Meteo outage
+    gets a clear ServiceValidationError ("no entry set up / loaded") instead of
+    "Service not found". Every handler resolves its target coordinator(s)
+    dynamically from ``hass.data[DOMAIN]``, so registration needs no live
+    coordinator. Kept idempotent as a belt-and-braces guard.
     """
+    if not hass.services.has_service(DOMAIN, SERVICE_GET_FORECAST):
+
+        async def _get_forecast(call: ServiceCall) -> ServiceResponse:
+            # Lazy import: the response builder lives in sensor.py (its tests
+            # exercise it there); importing it at module load would pull the
+            # whole sensor platform in before HA needs it.
+            from .sensor import _build_forecast_response
+
+            return _build_forecast_response(hass, call.data.get(ATTR_ENTRY_ID))
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_GET_FORECAST,
+            _get_forecast,
+            schema=GET_FORECAST_SCHEMA,
+            supports_response=SupportsResponse.ONLY,
+        )
+
     if not hass.services.has_service(DOMAIN, SERVICE_IMPORT_BOOTSTRAP):
 
         async def _import_bootstrap(call: ServiceCall) -> ServiceResponse:
@@ -120,18 +149,6 @@ def async_register_services(hass: HomeAssistant) -> None:
             schema=ROLLBACK_LEARNERS_SCHEMA,
             supports_response=SupportsResponse.OPTIONAL,
         )
-
-
-@callback
-def async_remove_services(hass: HomeAssistant) -> None:
-    """Remove the learner services (called when the last entry unloads)."""
-    for name in (
-        SERVICE_IMPORT_BOOTSTRAP,
-        SERVICE_DUMP_SHADEMAP,
-        SERVICE_ROLLBACK_LEARNERS,
-    ):
-        if hass.services.has_service(DOMAIN, name):
-            hass.services.async_remove(DOMAIN, name)
 
 
 def _resolve_single_coordinator(hass: HomeAssistant, entry_id: str | None) -> Any:
