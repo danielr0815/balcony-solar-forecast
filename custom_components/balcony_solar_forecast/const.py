@@ -131,6 +131,10 @@ SENSOR_ENERGY_TODAY = "energy_production_today"
 SENSOR_ENERGY_TOMORROW = "energy_production_tomorrow"
 SENSOR_ENERGY_D2 = "energy_production_d2"
 SENSOR_POWER_NOW = "power_production_now"
+# Measured site-total DC power: the live sum of the planes' actual_entity
+# sensors (ground truth), an integration-owned sensor independent of the
+# forecast coordinator (see sensor.MeasuredDcTotalSensor).
+SENSOR_MEASURED_DC_TOTAL = "measured_dc_power_total"
 BINARY_SENSOR_DEGRADED = "degraded"
 
 # --- Shade-profile visualisation entities (sun path vs learned shade) -------

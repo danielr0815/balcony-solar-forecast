@@ -203,6 +203,12 @@ nächsten ~6 h abklingend angewandt, Clamp [0,25 … 2,5], nach HA-Neustart
 Re-Init auf 1,0 (nie alten Zustand laden). Rettet Nebelmorgen ohne
 falsche Geometrie. Optional später: 1 RLS-Bias-Skalar je
 (Wolkenklasse × Tagesabschnitt) für Day-ahead.
+Alle Lerner-Korrekturen (Intraday-Skalar, Day-ahead-Bias) und die
+Quantilbänder (P10/P50/P90) werden als **letzte Stufe erneut auf das
+WR-AC-Limit geclampt** (`clamp_groups` läuft nach dem Slot-Faktor ein
+zweites Mal): eine Hochkorrektur (Faktor > 1) kann die ausgelieferte Kurve
+nie über die konfigurierte Wechselrichtergrenze heben. Ebenen ohne WR-Gruppe
+haben keine konfigurierte Obergrenze und passieren beide Clamps unverändert.
 
 **Schutzmechanismen (Jury-Auflagen, verbindlich):**
 - Label-Gates im Trainer: eingefrorene Sensoren (unverändert + altes

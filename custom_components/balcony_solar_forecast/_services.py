@@ -466,18 +466,25 @@ def _comparison_slugs(
     return out
 
 
-def _measured_entities(coordinator: Any) -> list[str]:
-    """The planes' measured DC-power entity ids (order-preserving, deduped)."""
+def _measured_entities(coordinator: Any) -> list[tuple[str, str]]:
+    """The planes' ``(name, measured DC-power entity id)`` pairs.
+
+    Order-preserving and deduped on entity id; the plane NAME (M1…M8) labels
+    the measured-power graph rows so they are not shown under the per-port
+    sensors' own ambiguous friendly names. Planes without an ``actual_entity``
+    are skipped.
+    """
     site = getattr(coordinator, "_site", None)
     if site is None:
         return []
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for plane in getattr(site, "planes", ()):
         entity_id = getattr(plane, "actual_entity", None)
         if isinstance(entity_id, str) and entity_id and entity_id not in seen:
             seen.add(entity_id)
-            out.append(entity_id)
+            name = getattr(plane, "name", None)
+            out.append((str(name) if name else entity_id, entity_id))
     return out
 
 
