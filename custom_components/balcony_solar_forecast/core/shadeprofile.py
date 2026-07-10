@@ -1,7 +1,7 @@
 """Sun-path vs. learned-shade profile for one plane on one date (stdlib only).
 
 Owner: shadeprofile. Pure, HA-free. Builds the data behind the "shade profile"
-diagram (SPEC §5 visualisation): for a chosen module/plane and a chosen local
+diagram (SPEC §15): for a chosen module/plane and a chosen local
 date it walks the sun across the sky and reports, at each step, the sun's
 azimuth + elevation and the *effective* beam transmittance the engine would
 apply there — i.e. the currently-known shading (static config horizon blended

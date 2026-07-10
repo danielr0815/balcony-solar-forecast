@@ -350,7 +350,10 @@ def reconstruct_plane_hour(
     sun_az, sun_el = solpos.sun_position(midpoint, latitude, longitude)
     doy = midpoint.timetuple().tm_yday
     albedo = _slot_albedo(wx.snow_depth_m)
-    kc = clearsky.clear_sky_index(wx.ghi, sun_el)
+    # THE shared hourly-kc reduction (clearsky.hourly_kc), same estimator the
+    # live nightly trainer applies to its 15-min slots; at this hourly
+    # resolution the single sample reduces exactly to clear_sky_index.
+    kc = clearsky.hourly_kc(((wx.ghi, sun_el),))
 
     comps = transpose.hay_davies_poa(
         ghi=wx.ghi,
@@ -366,6 +369,15 @@ def reconstruct_plane_hour(
     circ = comps.get("circumsolar", 0.0)
     iso = comps.get("isotropic", 0.0)
     ground = comps.get("ground", 0.0)
+
+    # Incidence-angle modifier (ASHRAE, const IAM_B0) — byte-identical to
+    # engine._plane_poa_split: applied to beam+circumsolar BEFORE the ungated
+    # reference so the bootstrap trains the same optics-corrected T as live.
+    cos_theta = comps.get("cos_theta")
+    if cos_theta is not None:
+        f_iam = transpose.ashrae_iam(cos_theta)
+        beam *= f_iam
+        circ *= f_iam
 
     # UNGATED beam+circumsolar POA (static tau = 1): the counterfactual clear-
     # horizon beam the shademap references, so a shaded bin still has a non-zero
@@ -631,7 +643,36 @@ def _process_day_impl(
     # the (possibly wrong) static horizon prior — circular training on the
     # model's own output (backfill:792). The day-ahead bias below still uses the
     # daily disaggregation, where the daily ratio IS the real signal.
-    for plane in (planes if actuals_hourly is not None else ()):
+    #
+    # Day-level hygiene gates (mirror the LIVE nightly trainer, SPEC §5): two
+    # years of history certainly contain snow-cover and frozen-sensor days, and
+    # without these gates a snow day passes every per-hour check (forecast-side
+    # kc is clear, the measured/modeled ratio is uniformly near-zero so the
+    # neighbour-stability leg HOLDS) and seeds tau~0 into every winter bin.
+    #   * measured-clear day gate (mirrors coordinator._day_is_measured_clear):
+    #     the day's TRUE measured site energy must reach
+    #     SHADEMAP_MEASURED_CLEAR_MIN_FRAC of the gated modeled forecast, else
+    #     the reality was overcast/collapsed and training would write weather
+    #     (or snow occlusion) into the geometry;
+    #   * per-hour snow gate: hours with snow depth above the albedo threshold
+    #     never train (snow on the panels is weather, not geometry);
+    #   * frozen-channel gate (mirrors coordinator._is_frozen_channel): a module
+    #     whose hourly means repeat byte-identically is a stuck sensor — drop
+    #     the module-day.
+    snow_by_hour = {wx.start.isoformat(): wx.snow_depth_m for wx in day_weather}
+    shademap_day_ok = actuals_hourly is not None
+    if shademap_day_ok:
+        site_modeled_gated = sum(
+            sum(modeled_total_by_plane[p.name].values()) for p in planes
+        )
+        site_measured_true = sum(
+            sum(hours.values()) for hours in actuals_hourly.values()
+        )
+        if site_modeled_gated <= 0.0 or site_measured_true < (
+            const.SHADEMAP_MEASURED_CLEAR_MIN_FRAC * site_modeled_gated
+        ):
+            shademap_day_ok = False
+    for plane in (planes if shademap_day_ok else ()):
         chan = plane.name
         measured_hourly = _resolve_hourly_measured(
             chan,
@@ -641,6 +682,10 @@ def _process_day_impl(
         )
         if not measured_hourly:
             continue  # channel dropout for this module today -> skip module
+        if _is_frozen_hourly(
+            [measured_hourly[h] for h in sorted(measured_hourly)]
+        ):
+            continue  # stuck Hoymiles/DTU sensor: drop the module-day
         # Per-hour measured/modeled energy ratio for the neighbour-stability leg
         # (ratio-space, identical to the live nightly trainer); None where no
         # usable ratio exists. Gating on the measured ratio — not the smooth
@@ -662,6 +707,8 @@ def _process_day_impl(
                 continue
             if r.beam_wh <= 0.0:
                 continue  # no modeled beam -> transmittance undefined
+            if snow_by_hour.get(hkey, 0.0) > const.SNOW_DEPTH_THRESHOLD_M:
+                continue  # snow on the panels: weather occlusion, not geometry
             neighbour_ratio = ratio_seq[idx - 1] if idx > 0 else None
             if not is_quasi_clear(
                 kc=r.kc,
@@ -722,6 +769,25 @@ def _doy_of(iso_hour: str) -> int:
     dt = datetime.fromisoformat(iso_hour)
     mid = dt + timedelta(minutes=30)
     return mid.timetuple().tm_yday
+
+
+def _is_frozen_hourly(values: list[float]) -> bool:
+    """True when hourly means show a frozen sensor (stuck non-zero value).
+
+    Mirrors ``coordinator._is_frozen_channel`` (which lives in the HA glue and
+    cannot be imported here): the SAME non-zero value held for
+    ``LABEL_FROZEN_MIN_REPEATS`` or more consecutive hours. A run of identical
+    zeros is legitimate night/shade and never trips the gate.
+    """
+    run = 1
+    for i in range(1, len(values)):
+        if values[i] == values[i - 1] and values[i] != 0.0:
+            run += 1
+            if run >= const.LABEL_FROZEN_MIN_REPEATS:
+                return True
+        else:
+            run = 1
+    return False
 
 
 def _resolve_hourly_measured(

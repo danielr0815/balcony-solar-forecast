@@ -296,8 +296,12 @@ def test_reconstruct_shaded_bin_learns_full_occlusion(site: SiteConfig):
         )
         for h in range(3)
     ]
-    # Measured = diffuse floor only (beam fully blocked by the wall).
-    hourly_actuals = {"M4": {}}
+    # A realistic site day: every module reports (tracking its model) — the
+    # measured-clear day gate mirrors the live trainer and would rightly reject
+    # a partial-site fabrication. Only M4 measures its diffuse floor (the wall
+    # blocks its beam), which is what its bins must learn.
+    hourly_actuals = _tracked_actuals(site, weather, svf, factor=1.0)
+    hourly_actuals["M4"] = {}
     for wx in weather:
         r = bf.reconstruct_plane_hour(
             plane, svf["M4"], wx, latitude=site.latitude, longitude=site.longitude
@@ -675,3 +679,104 @@ def test_group_by_day_and_filter_actuals():
     }
     day = bf._filter_actuals_for_day(hourly_actuals, "2025-06-21")
     assert day == {"M2": {"2025-06-21T09:00:00+00:00": 300.0}}
+
+
+# ---------------------------------------------------------------------------
+# Day-level hygiene gates in the shademap section (mirror the live trainer):
+# measured-clear day gate, per-hour snow gate, frozen-channel module drop.
+# ---------------------------------------------------------------------------
+
+
+def _clear_hours(n: int, snow_depth_m: float = 0.0) -> list[bf.HourlyWeather]:
+    """Like _clear_summer_noon_hours but n hours (9..9+n-1 UTC) + optional snow."""
+    base = datetime(2025, 6, 21, 9, 0, tzinfo=UTC)
+    return [
+        bf.HourlyWeather(
+            start=base.replace(hour=9 + h),
+            ghi=780.0, dni=820.0, dhi=120.0, temp_c=24.0,
+            snow_depth_m=snow_depth_m,
+        )
+        for h in range(n)
+    ]
+
+
+def _tracked_actuals(
+    site: SiteConfig, weather: list, svf: dict, factor: float = 1.0
+) -> dict[str, dict[str, float]]:
+    """Hourly actuals tracking factor x the modeled (ungated) plane totals."""
+    out: dict[str, dict[str, float]] = {}
+    for plane in site.planes:
+        hh = {}
+        for wx in weather:
+            r = bf.reconstruct_plane_hour(
+                plane, svf[plane.name], wx,
+                latitude=site.latitude, longitude=site.longitude,
+            )
+            total = (r.beam_wh + r.diffuse_wh) * factor
+            if total > 0.0:
+                hh[wx.start.isoformat()] = total
+        if hh:
+            out[plane.name] = hh
+    return out
+
+
+def test_is_frozen_hourly_mirrors_live_gate():
+    n = const.LABEL_FROZEN_MIN_REPEATS
+    assert bf._is_frozen_hourly([180.0] * n) is True
+    assert bf._is_frozen_hourly([180.0] * (n - 1) + [181.0]) is False
+    # A run of identical ZEROS is legitimate night/shade, never frozen.
+    assert bf._is_frozen_hourly([0.0] * (n + 3)) is False
+
+
+def test_process_day_shademap_skipped_on_overcast_reality(site: SiteConfig):
+    """Measured far below the gated forecast (overcast/snow-covered reality):
+    the day must not train the GEOMETRY — without the gate the uniform low
+    ratio passes every per-hour check and seeds tau~0 into the traversed bins."""
+    acc = bf.BootstrapAccumulator()
+    weather = _clear_summer_noon_hours()
+    svf = _svf(site)
+    hourly_actuals = _tracked_actuals(site, weather, svf, factor=0.3)
+
+    bf.process_day_hourly(acc, site, weather, hourly_actuals, svf_by_plane=svf)
+
+    assert acc.shade_samples == 0
+    assert not acc.shade
+    # The day-ahead bias still trains (the daily ratio IS its real signal).
+    assert len(acc.bias) > 0
+
+
+def test_process_day_shademap_skips_snow_hours(site: SiteConfig):
+    """Snow on the panels is weather occlusion, not geometry: snowy hours never
+    train the shademap even when the measured energy tracks the (snow-albedo)
+    model well enough to pass the measured-clear day gate."""
+    acc = bf.BootstrapAccumulator()
+    weather = _clear_hours(3, snow_depth_m=0.05)  # > SNOW_DEPTH_THRESHOLD_M
+    svf = _svf(site)
+    hourly_actuals = _tracked_actuals(site, weather, svf, factor=1.0)
+
+    bf.process_day_hourly(acc, site, weather, hourly_actuals, svf_by_plane=svf)
+
+    assert acc.shade_samples == 0
+    assert not acc.shade
+
+
+def test_process_day_drops_frozen_module_only(site: SiteConfig):
+    """A module whose hourly means repeat byte-identically (stuck Hoymiles/DTU
+    sensor) is dropped for the day — the other modules keep training."""
+    n_hours = const.LABEL_FROZEN_MIN_REPEATS + 1
+    acc = bf.BootstrapAccumulator()
+    weather = _clear_hours(n_hours)
+    svf = _svf(site)
+    hourly_actuals = _tracked_actuals(site, weather, svf, factor=1.0)
+
+    # Freeze M2 (a front plane that would otherwise train): the SAME non-zero
+    # value every hour. Its own average keeps the site measured-clear gate
+    # satisfied, so only the frozen-channel gate can reject it.
+    m2 = hourly_actuals["M2"]
+    frozen_value = sum(m2.values()) / len(m2)
+    hourly_actuals["M2"] = {h: frozen_value for h in m2}
+
+    bf.process_day_hourly(acc, site, weather, hourly_actuals, svf_by_plane=svf)
+
+    assert acc.shade_samples > 0, "healthy modules must still train"
+    assert "M2" not in acc.shade, "the frozen module-day must be dropped"

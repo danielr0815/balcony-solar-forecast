@@ -17,8 +17,9 @@ the reference is 0.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 
-__all__ = ["haurwitz_ghi", "clear_sky_index"]
+__all__ = ["haurwitz_ghi", "clear_sky_index", "hourly_kc"]
 
 # Haurwitz coefficients (Reno & Hansen clear-sky review; original 1945 fit).
 _HAURWITZ_A = 1098.0
@@ -55,4 +56,35 @@ def clear_sky_index(ghi: float, elevation_deg: float) -> float:
     if reference <= 0.0:
         return 0.0
     k_c = ghi / reference
+    return k_c if k_c > 0.0 else 0.0
+
+
+def hourly_kc(samples: Iterable[tuple[float, float]]) -> float:
+    """Clear-sky-energy-weighted k_c over an hour's ``(ghi, elevation)`` samples.
+
+    THE one hourly-kc reduction shared by the live nightly shademap trainer and
+    the offline backfill, so both training paths gate quasi-clear on the same
+    estimator:
+
+        k_c(hour) = sum(ghi_i) / sum(haurwitz_ghi(el_i))
+
+    over the samples whose clear-sky reference is positive (sun up). Weighting
+    by the clear-sky energy makes the reduction robust at dawn/dusk — a
+    near-horizon slot with a crude Haurwitz reference contributes almost
+    nothing, instead of (as a plain last-write or mean would) dominating the
+    hour. A single sample reduces exactly to :func:`clear_sky_index`, which is
+    what the hourly-resolution backfill passes. Returns 0.0 for an empty /
+    all-below-horizon hour, mirroring :func:`clear_sky_index`.
+    """
+    ghi_total = 0.0
+    ref_total = 0.0
+    for ghi, elevation_deg in samples:
+        reference = haurwitz_ghi(elevation_deg)
+        if reference <= 0.0:
+            continue
+        ghi_total += max(ghi, 0.0)
+        ref_total += reference
+    if ref_total <= 0.0:
+        return 0.0
+    k_c = ghi_total / ref_total
     return k_c if k_c > 0.0 else 0.0

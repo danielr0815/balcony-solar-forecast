@@ -200,13 +200,26 @@ def test_comparison_sensor_unique_id_and_slug():
     # Slug drops punctuation; unique id embeds it so a rename mints a new sensor.
     assert cmp.slug == "8_entry_baseline"
     assert sensor.unique_id == "abc123_comparison_daily_kwh_mae_8_entry_baseline"
-    # Name is chosen so the derived object_id matches the documented dashboard id
-    # (`…_comparison_daily_kwh_mae_<slug>`); suggested_object_id pins it.
     assert sensor.name == "Comparison daily kWh MAE 8-Entry Baseline!"
-    assert (
-        sensor._attr_suggested_object_id
-        == "balcony_solar_forecast_comparison_daily_kwh_mae_8_entry_baseline"
+    # The object_id is pinned via the SUPPORTED integration-suggested path — a
+    # pre-set entity_id (the former _attr_suggested_object_id does not exist in
+    # HA and was silently ignored). It must equal the documented dashboard id.
+    assert sensor.entity_id == (
+        "sensor.balcony_solar_forecast_comparison_daily_kwh_mae_8_entry_baseline"
     )
+
+
+def test_comparison_slug_is_strictly_ascii():
+    """A non-ASCII label ("Süd") must slugify to ASCII: the slug is embedded in
+    the unique_id AND the pre-set entity_id, where non-ASCII is invalid — and
+    the documented dashboard id must name the real entity."""
+    cmp = ComparisonConfig(name="PV Süd", daily_entity="sensor.z")
+    assert cmp.slug == "pv_s_d"
+    sensor = ComparisonDailyKwhMaeSensor(_FakeCoordinator({}), cmp)
+    assert sensor.entity_id == (
+        "sensor.balcony_solar_forecast_comparison_daily_kwh_mae_pv_s_d"
+    )
+    assert sensor.entity_id.isascii()
 
 
 # ==========================================================================

@@ -11,8 +11,9 @@ Consumer-facing outputs (SPEC §8):
   * diagnostic ``last_fetch_age_min`` and ``source_status`` — the degradation
     ladder made visible (SPEC §7).
 
-Also registers the ``get_forecast`` service-with-response (SPEC §8) once, on
-the first entry, returning the 15-min and hourly curves after the pattern of
+The ``get_forecast`` service-with-response (SPEC §8) is registered from
+``async_setup`` (see ``_services.py``); this module owns only its response
+builder (:func:`_build_forecast_response`), after the pattern of
 ``weather.get_forecasts``.
 
 Coordinator contract read here (glue owns ``coordinator.py``): ``self.data``
@@ -32,7 +33,6 @@ import logging
 from datetime import timedelta
 from typing import Any
 
-import voluptuous as vol
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -40,12 +40,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower, UnitOfTime
-from homeassistant.core import (
-    HomeAssistant,
-    ServiceResponse,
-    SupportsResponse,
-    callback,
-)
+from homeassistant.core import HomeAssistant, ServiceResponse, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -98,7 +93,6 @@ from .const import (
     SENSOR_INTRADAY_SCALAR,
     SENSOR_POWER_NOW,
     SENSOR_SHADE_PROFILE,
-    SERVICE_GET_FORECAST,
     STATUS_CACHED,
     STATUS_FRESH,
     STATUS_PHYSICS_FALLBACK,
@@ -158,16 +152,13 @@ _Q_P10 = FORECAST_RESP_KEY_P10
 _Q_P50 = FORECAST_RESP_KEY_P50
 _Q_P90 = FORECAST_RESP_KEY_P90
 
-# Optional service field: restrict the returned curve to one config entry.
-SERVICE_GET_FORECAST_SCHEMA = vol.Schema({vol.Optional("entry_id"): str})
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the Balcony Solar Forecast sensors and the get_forecast service."""
+    """Set up the Balcony Solar Forecast sensors."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities: list[SensorEntity] = [
@@ -198,7 +189,7 @@ async def async_setup_entry(
         # --- v0.4 quantile bands (SPEC §6/§10): today's P10/P90 ---
         EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P10, _Q_P10),
         EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P90, _Q_P90),
-        # --- Shade-profile diagram data (SPEC §5 visualisation) ---
+        # --- Shade-profile diagram data (SPEC §15) ---
         ShadeProfileSensor(coordinator),
     ]
 
@@ -217,20 +208,9 @@ async def async_setup_entry(
     _prune_stale_comparison_sensors(hass, entry, comparisons)
 
     async_add_entities(entities)
-
-    # Register the response service exactly once for the whole integration.
-    if not hass.services.has_service(DOMAIN, SERVICE_GET_FORECAST):
-
-        async def _get_forecast(call) -> ServiceResponse:
-            return _build_forecast_response(hass, call.data.get("entry_id"))
-
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_GET_FORECAST,
-            _get_forecast,
-            schema=SERVICE_GET_FORECAST_SCHEMA,
-            supports_response=SupportsResponse.ONLY,
-        )
+    # NOTE: the get_forecast service is registered in async_setup (see
+    # _services.async_register_services, quality-scale action-setup); only its
+    # response builder (_build_forecast_response below) lives in this module.
 
 
 def _prune_stale_comparison_sensors(
@@ -805,15 +785,20 @@ class ComparisonDailyKwhMaeSensor(_ScoreboardSensor):
         # A per-comparison entity name so the dynamic sensors are distinguishable
         # in the UI (the shared translation_key would otherwise name them all
         # identically). has_entity_name stays True: this becomes the object name.
-        # The name is chosen so the derived object_id is DETERMINISTIC and matches
-        # the documented dashboard id
-        # `…_comparison_daily_kwh_mae_<slug>` (HA slugifies the name; for these
-        # labels the name-slug equals ComparisonConfig.slug). A `suggested_object_id`
-        # pins it even if HA's slugify differs, so the dashboard ids never drift.
         self._attr_translation_key = None
         self._attr_name = f"Comparison daily kWh MAE {comparison.name}"
-        self._attr_suggested_object_id = (
-            f"{DOMAIN}_{SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX}_{comparison.slug}"
+        # Pin the object_id to the documented dashboard id
+        # `…_comparison_daily_kwh_mae_<slug>` via the SUPPORTED integration-
+        # suggested path: a pre-set ``entity_id`` (HA 2026 stores it as the
+        # suggested object id for new registry entries). The formerly used
+        # ``_attr_suggested_object_id`` does not exist in HA — it was silently
+        # ignored and the id fell back to slugifying the name, which diverges
+        # from ComparisonConfig.slug for non-ASCII labels ("Süd"). The slug is
+        # strictly ASCII (types.ComparisonConfig.slug), so this entity_id is
+        # always valid.
+        self.entity_id = (
+            f"sensor.{DOMAIN}_"
+            f"{SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX}_{comparison.slug}"
         )
 
     def _comparison_mae_map(self) -> dict[str, Any]:
@@ -876,7 +861,7 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
 
 
 # ---------------------------------------------------------------------------
-# Shade-profile diagram (sun path vs learned shade) — SPEC §5 visualisation
+# Shade-profile diagram (sun path vs learned shade) — SPEC §15
 # ---------------------------------------------------------------------------
 
 

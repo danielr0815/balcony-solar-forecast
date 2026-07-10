@@ -232,6 +232,20 @@ def _plane_poa_split(
     iso = comps.get("isotropic", 0.0)
     ground = comps.get("ground", 0.0)
 
+    # Incidence-angle modifier (ASHRAE, const IAM_B0): glass reflection cuts
+    # the DIRECT share at high AOI — 5-15% on the steep facade planes. Applied
+    # HERE (pvlib-style, after the pure transposition) so the golden vectors
+    # stay pvlib-comparable, and BEFORE the ungated-reference capture below so
+    # the shademap trains against the optics-corrected beam instead of
+    # absorbing the deficit as AOI-shaped phantom shading (SPEC §4). A
+    # transposition stand-in without the cos_theta key (analytic test fakes)
+    # skips the modifier.
+    cos_theta = comps.get("cos_theta")
+    if cos_theta is not None:
+        f_iam = transpose.ashrae_iam(cos_theta)
+        beam *= f_iam
+        circ *= f_iam
+
     # Horizon beam gate: only when the sun is actually behind the horizon line
     # for this azimuth do we attenuate the direct components. Above the line
     # the static tau is irrelevant (full transmission), but a learned bin can

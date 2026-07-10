@@ -13,10 +13,12 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import Event, HomeAssistant
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.typing import ConfigType
 
-from ._services import async_register_services, async_remove_services
-from .const import DOMAIN, SERVICE_GET_FORECAST
+from ._services import async_register_services
+from .const import DOMAIN
 from .coordinator import BalconySolarCoordinator
 from .fetcher import OpenMeteoFetcher
 from .store import ForecastStore
@@ -30,7 +32,23 @@ PLATFORMS: list[Platform] = [
     Platform.SENSOR,
 ]
 
+# Config-entry-only integration: no YAML config beyond the entry system.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
 type BalconySolarConfigEntry = ConfigEntry[BalconySolarCoordinator]
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the integration services (quality-scale ``action-setup``).
+
+    All four services (get_forecast / import_bootstrap / dump_shademap /
+    rollback_learners) are registered here — once, independent of any config
+    entry — and stay registered, so an automation firing while no entry is
+    loaded gets a clear ServiceValidationError instead of "Service not found".
+    The handlers resolve their coordinators dynamically from ``hass.data``.
+    """
+    async_register_services(hass)
+    return True
 
 
 async def async_setup_entry(
@@ -57,10 +75,6 @@ async def async_setup_entry(
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    # Integration-wide learner services (import_bootstrap / dump_shademap).
-    # Idempotent: registered once, shared across entries (SPEC §5/§6).
-    async_register_services(hass)
 
     coordinator.async_start_nightly_job()
 
@@ -103,14 +117,8 @@ async def async_unload_entry(
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         if not hass.data.get(DOMAIN):
             hass.data.pop(DOMAIN, None)
-            # The get_forecast service is registered once (from the sensor
-            # platform) and shared across entries; remove it when the last
-            # entry unloads so it does not linger returning empty results.
-            if hass.services.has_service(DOMAIN, SERVICE_GET_FORECAST):
-                hass.services.async_remove(DOMAIN, SERVICE_GET_FORECAST)
-            # Same lifecycle for the learner services (import_bootstrap /
-            # dump_shademap), registered from async_setup_entry.
-            async_remove_services(hass)
+        # Services stay registered (action-setup): with no loaded entry each
+        # handler raises a clear ServiceValidationError instead of vanishing.
     return unload_ok
 
 

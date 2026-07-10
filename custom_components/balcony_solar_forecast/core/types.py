@@ -835,12 +835,20 @@ class PlaneHourlyModeled:
         )
 
     def to_dict(self) -> dict:
-        return {
-            "beam_wh": dict(self.beam_wh),
-            "diffuse_wh": dict(self.diffuse_wh),
-            "ghi": dict(self.ghi),
-            "kc": dict(self.kc),
-        }
+        # Store trim: omit EMPTY curves entirely. ``from_dict`` treats a missing
+        # key as {}, so this is round-trip safe — and it stops serializing the
+        # vestigial ``ghi`` dict (never populated by the coordinator) into every
+        # plane of every snapshot of the 90-day issued ring.
+        out: dict = {}
+        for key, curve in (
+            ("beam_wh", self.beam_wh),
+            ("diffuse_wh", self.diffuse_wh),
+            ("ghi", self.ghi),
+            ("kc", self.kc),
+        ):
+            if curve:
+                out[key] = dict(curve)
+        return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -953,10 +961,17 @@ class ComparisonConfig:
 
     @property
     def slug(self) -> str:
-        """Lowercase ascii-alnum slug of ``name`` (stable sensor/ring key)."""
+        """Lowercase ASCII-alnum slug of ``name`` (stable sensor/ring key).
+
+        STRICTLY ASCII: a non-ASCII letter ("Süd") becomes a separator — the
+        slug is embedded in the sensor's unique_id AND its pre-set entity_id,
+        where non-ASCII characters are invalid. Keeping this aligned with HA's
+        own slugify boundary means the documented dashboard id
+        ``…_comparison_daily_kwh_mae_<slug>`` always names the real entity.
+        """
         out = []
         for ch in self.name.strip().lower():
-            if ch.isalnum():
+            if ch.isascii() and ch.isalnum():
                 out.append(ch)
             elif out and out[-1] != "_":
                 out.append("_")

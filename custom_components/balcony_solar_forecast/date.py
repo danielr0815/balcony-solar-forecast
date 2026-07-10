@@ -1,4 +1,4 @@
-"""Date platform: pick the date for the shade-profile diagram (SPEC §5).
+"""Date platform: pick the date for the shade-profile diagram (SPEC §15).
 
 A single ``shade_profile_date`` date entity choosing which local calendar day
 the ``shade_profile`` sensor visualises (the sun path + learned shade differ by

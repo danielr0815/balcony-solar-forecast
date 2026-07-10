@@ -1,6 +1,6 @@
 """Tests for the shade-profile builder (pure, HA-free).
 
-Covers (SPEC §5 visualisation):
+Covers (SPEC §15):
   - a clear plane (empty horizon + empty shademap): full transmittance, flat
     zero horizon lines, daylight-only monotonic sun path;
   - engine-exact gate replication: every sun-path transmittance equals an

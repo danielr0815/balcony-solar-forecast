@@ -311,7 +311,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Last computed ForecastResult (for the nightly per-plane snapshot).
         self._last_result: ForecastResult | None = None
 
-        # --- Shade-profile diagram selection (SPEC §5 visualisation) --------
+        # --- Shade-profile diagram selection (SPEC §15) ---------------------
         # Which module/plane + local date the shade-profile sensor renders. The
         # select entity owns the persisted module (RestoreEntity) and pushes it
         # here; the date entity always defaults to today (not restored). None =>
@@ -482,7 +482,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return self._shademap_state
 
     # ------------------------------------------------------------------
-    # Shade-profile diagram (sun path vs learned shade) — SPEC §5
+    # Shade-profile diagram (sun path vs learned shade) — SPEC §15
     # ------------------------------------------------------------------
 
     def shade_profile_plane_names(self) -> list[str]:
@@ -525,7 +525,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         shademap only attenuates the served beam when the layer is enabled, not
         drift-auto-disabled, not collapse-frozen for today, and has learned bins.
         The shade-profile diagram consults the SAME gate so it never paints
-        learned shading the forecast is not applying (SPEC §5).
+        learned shading the forecast is not applying (SPEC §15).
         """
         return (
             self._learner_config.slow_enabled
@@ -1383,14 +1383,39 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         result = getattr(self, "_last_result", None)
         if result is None:
             return {}
+
+        # Site-level hourly kc via THE shared reduction (clearsky.hourly_kc):
+        # the clear-sky-energy-weighted mean over the hour's slots, the same
+        # estimator the offline backfill applies to its hourly data. The
+        # previous per-slot last-write-wins collapsed each hour to its FINAL
+        # slot — the highest-elevation slot of a morning hour but the LOWEST of
+        # an evening hour — so the quasi-clear gate was azimuth-asymmetric and
+        # diverged from the backfill. The slot GHI is recovered by inverting
+        # the engine's unclamped kc = ghi / haurwitz(midpoint elevation).
+        kc_samples: dict[str, list[tuple[float, float]]] = {}
+        site_kc = result.plane_results[0].kc if result.plane_results else ()
+        for i, start in enumerate(result.slot_starts):
+            if i >= len(site_kc):
+                break
+            start_utc = dt_util.as_utc(start)
+            if dt_util.as_local(start_utc).date().isoformat() != iso:
+                continue
+            mid = start_utc + timedelta(minutes=7, seconds=30)
+            _az, el = solpos.sun_position(
+                mid, self._site.latitude, self._site.longitude
+            )
+            hw = clearsky.haurwitz_ghi(el)
+            kc_samples.setdefault(_hour_key(start), []).append(
+                (site_kc[i] * hw, el)
+            )
+        kc_by_hour = {h: clearsky.hourly_kc(s) for h, s in kc_samples.items()}
+
         out: dict[str, PlaneHourlyModeled] = {}
         for pr in result.plane_results:
             if not pr.beam_ref_watts and not pr.diffuse_ref_watts:
                 continue  # engine without the reference export: do NOT train
             beam_wh: dict[str, float] = {}
             diffuse_wh: dict[str, float] = {}
-            ghi: dict[str, float] = {}
-            kc: dict[str, float] = {}
             for i, start in enumerate(result.slot_starts):
                 if dt_util.as_local(dt_util.as_utc(start)).date().isoformat() != iso:
                     continue
@@ -1399,12 +1424,30 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     beam_wh[hkey] = beam_wh.get(hkey, 0.0) + pr.beam_ref_watts[i] * 0.25
                 if i < len(pr.diffuse_ref_watts):
                     diffuse_wh[hkey] = diffuse_wh.get(hkey, 0.0) + pr.diffuse_ref_watts[i] * 0.25
-                if i < len(pr.kc):
-                    # mean k_c per hour (last write wins is fine as a proxy; the
-                    # trainer uses it only for the quasi-clear gate)
-                    kc[hkey] = pr.kc[i]
+            # Store trim: the issued ring keeps 90 days of these — drop NIGHT
+            # hours (all-zero, nothing to train on: the trainer skips beam<=0
+            # anyway) and round to 0.01 Wh / 6-decimal kc, far below trainer
+            # noise, instead of 17-significant-digit floats.
+            keep = {
+                h
+                for h in set(beam_wh) | set(diffuse_wh) | set(kc_by_hour)
+                if beam_wh.get(h, 0.0) > 0.0
+                or diffuse_wh.get(h, 0.0) > 0.0
+                or kc_by_hour.get(h, 0.0) > 0.0
+            }
             out[pr.name] = PlaneHourlyModeled(
-                beam_wh=beam_wh, diffuse_wh=diffuse_wh, ghi=ghi, kc=kc
+                beam_wh={
+                    h: round(v, 2) for h, v in beam_wh.items() if h in keep
+                },
+                diffuse_wh={
+                    h: round(v, 2) for h, v in diffuse_wh.items() if h in keep
+                },
+                ghi={},
+                kc={
+                    h: round(v, 6)
+                    for h, v in kc_by_hour.items()
+                    if h in keep
+                },
             )
         return out
 

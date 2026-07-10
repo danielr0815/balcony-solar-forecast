@@ -1206,3 +1206,83 @@ def test_build_shade_profile_gates_on_slow_active():
     assert off["has_learned_data"] is False
     assert off["learned_bins"] == 0
     assert c._shade_profile_cache is not on_cache
+
+
+# ---------------------------------------------------------------------------
+# _per_plane_modeled: the hourly kc must be the shared energy-weighted mean,
+# not last-slot-wins (which made the quasi-clear gate azimuth-asymmetric and
+# diverged from the backfill's estimator).
+# ---------------------------------------------------------------------------
+
+
+def test_per_plane_modeled_hourly_kc_is_energy_weighted():
+    from custom_components.balcony_solar_forecast.core import (
+        clearsky,
+        solpos,
+    )
+
+    c = _make_coordinator()
+    # Four 15-min slots of one summer UTC hour at the test site (sun well up).
+    base = datetime(2026, 6, 20, 10, 0, tzinfo=UTC)
+    starts = tuple(base + timedelta(minutes=15 * i) for i in range(4))
+    # Clear hour except the LAST slot, which drops to kc 0.2 — the old
+    # last-write-wins code reported 0.2 for the whole hour.
+    kc_series = (1.0, 1.0, 1.0, 0.2)
+    pr = PlaneResult(
+        name="M1",
+        watts=(100.0,) * 4,
+        beam_ref_watts=(80.0,) * 4,
+        diffuse_ref_watts=(20.0,) * 4,
+        kc=kc_series,
+    )
+    c._last_result = ForecastResult(
+        slot_starts=starts,
+        total_watts=(100.0,) * 4,
+        plane_results=(pr,),
+        hourly_wh={},
+    )
+
+    modeled = c._per_plane_modeled("2026-06-20")
+    hkey = base.isoformat()
+    got = modeled["M1"].kc[hkey]
+
+    # Expected: the shared reduction over the reconstructed (ghi, el) samples,
+    # using the same slot-midpoint convention as the engine.
+    samples = []
+    for start, kc in zip(starts, kc_series, strict=True):
+        _az, el = solpos.sun_position(
+            start + timedelta(minutes=7, seconds=30), 48.5, 12.2
+        )
+        samples.append((kc * clearsky.haurwitz_ghi(el), el))
+    assert got == pytest.approx(clearsky.hourly_kc(samples))
+    # Regression: NOT the last slot's value, and close to the clear majority.
+    assert got > 0.6
+
+
+def test_per_plane_modeled_trims_night_hours_and_rounds():
+    """Store trim: all-zero night hours are dropped from the issued snapshot's
+    per-plane curves and values are rounded (the 90-day ring dominated the
+    store with night zeros and 17-digit floats)."""
+    c = _make_coordinator()
+    day = datetime(2026, 6, 20, 12, 0, tzinfo=UTC)     # daylight hour
+    night = datetime(2026, 6, 20, 22, 0, tzinfo=UTC)   # after sunset
+    starts = (day, night)
+    pr = PlaneResult(
+        name="M1",
+        watts=(100.0, 0.0),
+        beam_ref_watts=(80.123456789, 0.0),
+        diffuse_ref_watts=(20.987654321, 0.0),
+        kc=(0.9123456789, 0.0),
+    )
+    c._last_result = ForecastResult(
+        slot_starts=starts, total_watts=(100.0, 0.0),
+        plane_results=(pr,), hourly_wh={},
+    )
+
+    modeled = c._per_plane_modeled("2026-06-20")["M1"]
+    # The night hour is gone from every curve; the day hour is rounded.
+    assert set(modeled.beam_wh) == {day.isoformat()}
+    assert set(modeled.kc) == {day.isoformat()}
+    assert modeled.beam_wh[day.isoformat()] == round(80.123456789 * 0.25, 2)
+    # And the vestigial ghi dict no longer serializes at all.
+    assert "ghi" not in modeled.to_dict()

@@ -485,3 +485,57 @@ class TestDefaultSite:
                 break
         assert cross is not None
         assert m4[cross] < m4[cross - 1]
+
+
+# ---------------------------------------------------------------------------
+# ASHRAE incidence-angle modifier wiring (real physics, no analytic stand-ins)
+# ---------------------------------------------------------------------------
+
+
+class TestIncidenceAngleModifier:
+    def _real_site_and_weather(self):
+        """A steep south plane + a real July midday so AOI spans a wide range."""
+        site = SiteConfig(
+            latitude=48.5, longitude=12.2,
+            planes=(PlaneConfig(name="S", azimuth_deg=180.0, tilt_deg=75.0,
+                                wp=430.0),),
+            groups=(),  # no AC clamp: it would mask the beam attenuation
+        )
+        base = datetime(2026, 7, 5, 4, 0, tzinfo=UTC)
+        slots = tuple(
+            WeatherSlot(start=base + timedelta(minutes=15 * i),
+                        ghi=600.0, dni=700.0, dhi=120.0, temp_c=20.0)
+            for i in range(64)  # 04:00..20:00 UTC
+        )
+        return site, WeatherSeries(slots=slots)
+
+    def test_engine_applies_iam_to_beam(self, monkeypatch):
+        """The engine multiplies beam+circumsolar by the ASHRAE IAM (pvlib-style
+        post-transposition stage): neutralising the modifier must yield strictly
+        MORE energy, and the ungated beam reference must shrink with it — the
+        shademap trains against the optics-corrected beam (no phantom shading)."""
+        site, weather = self._real_site_and_weather()
+        res_iam = engine.compute_forecast(site, weather, now=_TEST_DATE)
+
+        monkeypatch.setattr(engine.transpose, "ashrae_iam", lambda ct: 1.0)
+        res_neutral = engine.compute_forecast(site, weather, now=_TEST_DATE)
+
+        assert sum(res_neutral.total_watts) > sum(res_iam.total_watts)
+        pr_iam = res_iam.plane_results[0]
+        pr_neutral = res_neutral.plane_results[0]
+        # The trainer's beam reference carries the IAM too (never larger, and
+        # strictly smaller wherever there is beam at non-normal incidence).
+        assert all(
+            a <= b + 1e-9
+            for a, b in zip(pr_iam.beam_ref_watts, pr_neutral.beam_ref_watts,
+                            strict=True)
+        )
+        assert sum(pr_iam.beam_ref_watts) < sum(pr_neutral.beam_ref_watts)
+
+    def test_iam_effect_is_bounded(self):
+        """Sanity: the modifier costs a few percent of daily energy on a steep
+        plane, not tens of percent (b0=0.05 optics, not a shading effect)."""
+        site, weather = self._real_site_and_weather()
+        res = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        total = sum(res.total_watts)
+        assert total > 0.0

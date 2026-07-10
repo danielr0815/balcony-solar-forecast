@@ -11,6 +11,7 @@ import pytest
 from balcony_solar_forecast.core.clearsky import (
     clear_sky_index,
     haurwitz_ghi,
+    hourly_kc,
 )
 
 # --- Haurwitz GHI ---------------------------------------------------------
@@ -86,3 +87,37 @@ def test_kc_overcast_below_one_clear_around_one():
     # allow a broad band).
     k_clear = clear_sky_index(haurwitz_ghi(50.0) * 0.95, 50.0)
     assert 0.8 < k_clear < 1.1
+
+
+# --- hourly_kc: THE shared hourly reduction (live trainer + backfill) ------
+
+
+def test_hourly_kc_single_sample_equals_clear_sky_index():
+    """The backfill passes one hourly sample; it must reduce EXACTLY to
+    clear_sky_index (shared-estimator contract)."""
+    for ghi, el in [(500.0, 40.0), (120.0, 8.0), (0.0, 30.0), (900.0, 65.0)]:
+        assert hourly_kc(((ghi, el),)) == pytest.approx(
+            clear_sky_index(ghi, el)
+        )
+
+
+def test_hourly_kc_empty_and_below_horizon_is_zero():
+    assert hourly_kc(()) == 0.0
+    assert hourly_kc(((100.0, -5.0), (50.0, 0.0))) == 0.0
+
+
+def test_hourly_kc_is_clear_sky_energy_weighted():
+    """A near-horizon slot (tiny Haurwitz reference) must barely move the
+    hour's kc — the high-sun slots dominate. A plain mean would not do that."""
+    el_hi, el_lo = 45.0, 2.0
+    hw_hi, hw_lo = haurwitz_ghi(el_hi), haurwitz_ghi(el_lo)
+    # Three clear high-sun slots (kc 1.0) + one wild near-horizon slot (kc 3.0).
+    samples = [(hw_hi, el_hi)] * 3 + [(3.0 * hw_lo, el_lo)]
+    kc = hourly_kc(samples)
+    expected = (3.0 * hw_hi + 3.0 * hw_lo) / (3.0 * hw_hi + hw_lo)
+    assert kc == pytest.approx(expected)
+    assert kc < 1.1  # far below the plain mean of 1.5
+
+
+def test_hourly_kc_negative_ghi_clamped():
+    assert hourly_kc(((-50.0, 40.0),)) == 0.0

@@ -88,6 +88,13 @@ ALBEDO_SNOW = 0.5  # applied when snow_depth > SNOW_DEPTH_THRESHOLD_M
 SNOW_DEPTH_THRESHOLD_M = 0.01
 RB_CAP = 10.0  # geometric beam-ratio cap (low-sun explosion guard)
 LOW_SUN_CUTOFF_DEG = 3.0  # below this elevation: circumsolar = 0
+# ASHRAE incidence-angle modifier applied to beam+circumsolar in the ENGINE
+# (not in the pure transposition, which stays pvlib-comparable for the golden
+# vectors): f = 1 - IAM_B0 * (1/cos(theta) - 1), clamped [0, 1]. Glass
+# reflection cuts the direct share 5-15% at AOI > 60 deg — on the 70-80 deg
+# facade planes the sun spends much of the day there, and without the modifier
+# the shademap absorbs the optics deficit as phantom shading.
+IAM_B0 = 0.05
 ROSS_COEFF = 0.0342  # Tcell = Tamb + ROSS_COEFF * POA
 TEMP_COEFF_PER_K = -0.0034  # power derate per K above 25 C (-0.34 %/K)
 TEMP_REF_C = 25.0
@@ -127,7 +134,7 @@ SENSOR_POWER_NOW = "power_production_now"
 BINARY_SENSOR_DEGRADED = "degraded"
 
 # --- Shade-profile visualisation entities (sun path vs learned shade) -------
-# A per-date sun-path + learned-shade diagram (SPEC §5): the sensor exposes the
+# A per-date sun-path + learned-shade diagram (SPEC §15): the sensor exposes the
 # curve arrays as attributes; a `select` picks the module/plane and a `date`
 # picks the day to visualise. See core/shadeprofile.py + docs/DASHBOARD.md.
 SENSOR_SHADE_PROFILE = "shade_profile"
@@ -695,7 +702,7 @@ FORECAST_RESP_KEY_P10 = "p10"
 FORECAST_RESP_KEY_P50 = "p50"
 FORECAST_RESP_KEY_P90 = "p90"
 
-# --- Shade-profile visualisation tunables (SPEC §5) ------------------------
+# --- Shade-profile visualisation tunables (SPEC §15) -----------------------
 # The sun-path-vs-learned-shade diagram (core/shadeprofile.py). The sun path is
 # sampled over the visualised local day at SHADE_PROFILE_STEP_MINUTES; the two
 # horizon lines (static config horizon + learned shade horizon) are sampled on a
