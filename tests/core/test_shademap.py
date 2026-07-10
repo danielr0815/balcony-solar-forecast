@@ -122,21 +122,13 @@ def _high_sun_kc_ok() -> float:
 
 
 def test_quasi_clear_accepts_clean_high_sun_sample():
-    assert S.is_quasi_clear(
-        kc=_high_sun_kc_ok(),
-        sun_el=45.0,
-        beam_share=0.5,
-        neighbour_kc=None,
-    )
+    assert S.is_quasi_clear(kc=_high_sun_kc_ok(), sun_el=45.0, beam_share=0.5)
 
 
 def test_quasi_clear_rejects_low_kc_at_high_sun():
     # Below the tight high-sun floor.
     assert not S.is_quasi_clear(
-        kc=SHADEMAP_KC_LO_HIGH_SUN - 0.05,
-        sun_el=40.0,
-        beam_share=0.5,
-        neighbour_kc=None,
+        kc=SHADEMAP_KC_LO_HIGH_SUN - 0.05, sun_el=40.0, beam_share=0.5
     )
 
 
@@ -144,16 +136,14 @@ def test_quasi_clear_relaxes_lower_bound_at_low_sun():
     # A k_c between the low-sun and high-sun floors: accepted at low elevation,
     # rejected at high elevation (the elevation-dependent gate).
     kc = (SHADEMAP_KC_LO_LOW_SUN + SHADEMAP_KC_LO_HIGH_SUN) / 2.0
-    assert S.is_quasi_clear(kc=kc, sun_el=1.0, beam_share=0.5, neighbour_kc=None)
+    assert S.is_quasi_clear(kc=kc, sun_el=1.0, beam_share=0.5)
     assert not S.is_quasi_clear(
-        kc=kc, sun_el=SHADEMAP_KC_PIVOT_ELEV_DEG + 5.0, beam_share=0.5, neighbour_kc=None
+        kc=kc, sun_el=SHADEMAP_KC_PIVOT_ELEV_DEG + 5.0, beam_share=0.5
     )
 
 
 def test_quasi_clear_rejects_high_kc_over_ceiling():
-    assert not S.is_quasi_clear(
-        kc=SHADEMAP_KC_HI + 0.1, sun_el=40.0, beam_share=0.5, neighbour_kc=None
-    )
+    assert not S.is_quasi_clear(kc=SHADEMAP_KC_HI + 0.1, sun_el=40.0, beam_share=0.5)
 
 
 def test_quasi_clear_rejects_low_beam_share():
@@ -161,37 +151,54 @@ def test_quasi_clear_rejects_low_beam_share():
         kc=_high_sun_kc_ok(),
         sun_el=40.0,
         beam_share=SHADEMAP_MIN_BEAM_SHARE - 0.001,
-        neighbour_kc=None,
     )
     # exactly at the threshold is NOT strictly greater -> rejected
     assert not S.is_quasi_clear(
-        kc=_high_sun_kc_ok(),
-        sun_el=40.0,
-        beam_share=SHADEMAP_MIN_BEAM_SHARE,
-        neighbour_kc=None,
+        kc=_high_sun_kc_ok(), sun_el=40.0, beam_share=SHADEMAP_MIN_BEAM_SHARE
     )
 
 
-def test_quasi_clear_neighbour_stability():
+def test_quasi_clear_neighbour_stability_on_ratio():
     kc = _high_sun_kc_ok()
-    # Stable neighbour (tiny relative change) -> accepted.
+    ratio = 0.95
+    # A stable neighbour ratio (tiny relative change) -> accepted.
     assert S.is_quasi_clear(
         kc=kc, sun_el=40.0, beam_share=0.5,
-        neighbour_kc=kc * (1.0 + SHADEMAP_NEIGHBOUR_STABILITY / 2.0),
+        stability_ratio=ratio,
+        neighbour_ratio=ratio * (1.0 + SHADEMAP_NEIGHBOUR_STABILITY / 2.0),
     )
-    # Volatile neighbour (large relative change) -> rejected (lone bright slot).
+    # A volatile neighbour ratio (large relative change) -> rejected: a lone
+    # bright measured slot between shaded ones is a fluctuation.
     assert not S.is_quasi_clear(
         kc=kc, sun_el=40.0, beam_share=0.5,
-        neighbour_kc=kc * (1.0 + SHADEMAP_NEIGHBOUR_STABILITY * 2.0),
+        stability_ratio=ratio,
+        neighbour_ratio=ratio * (1.0 + SHADEMAP_NEIGHBOUR_STABILITY * 2.0),
     )
+    # The stability leg keys on the RATIO pair, not on k_c: an identical ratio
+    # passes even though k_c is not used for stability.
+    assert S.is_quasi_clear(
+        kc=kc, sun_el=40.0, beam_share=0.5,
+        stability_ratio=ratio, neighbour_ratio=ratio,
+    )
+
+
+def test_quasi_clear_stability_leg_skipped_without_both_values():
+    kc = _high_sun_kc_ok()
+    # Only one side of the ratio pair given -> the stability leg is skipped, so a
+    # band-valid sample is still accepted.
+    assert S.is_quasi_clear(kc=kc, sun_el=40.0, beam_share=0.5, stability_ratio=0.5)
+    assert S.is_quasi_clear(kc=kc, sun_el=40.0, beam_share=0.5, neighbour_ratio=0.5)
 
 
 def test_quasi_clear_rejects_non_finite():
+    assert not S.is_quasi_clear(kc=float("nan"), sun_el=40.0, beam_share=0.5)
     assert not S.is_quasi_clear(
-        kc=float("nan"), sun_el=40.0, beam_share=0.5, neighbour_kc=None
+        kc=_high_sun_kc_ok(), sun_el=40.0, beam_share=float("inf")
     )
+    # A non-finite ratio in the stability leg also fails the gate.
     assert not S.is_quasi_clear(
-        kc=_high_sun_kc_ok(), sun_el=40.0, beam_share=float("inf"), neighbour_kc=None
+        kc=_high_sun_kc_ok(), sun_el=40.0, beam_share=0.5,
+        stability_ratio=float("nan"), neighbour_ratio=0.9,
     )
 
 

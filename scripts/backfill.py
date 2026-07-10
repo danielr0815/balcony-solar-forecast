@@ -621,7 +621,6 @@ def _process_day_impl(
             kc_by_hour[hkey] = any_r.kc
 
     hours_sorted = sorted(kc_by_hour.keys())
-    kc_seq = [kc_by_hour[h] for h in hours_sorted]
 
     contributed = False
 
@@ -642,6 +641,18 @@ def _process_day_impl(
         )
         if not measured_hourly:
             continue  # channel dropout for this module today -> skip module
+        # Per-hour measured/modeled energy ratio for the neighbour-stability leg
+        # (ratio-space, identical to the live nightly trainer); None where no
+        # usable ratio exists. Gating on the measured ratio — not the smooth
+        # forecast k_c — is what rejects a real cloud fluctuation.
+        ratio_seq: list[float | None] = []
+        for hkey in hours_sorted:
+            rr = recon[chan].get(hkey)
+            pm = measured_hourly.get(hkey)
+            denom = (rr.beam_wh + rr.diffuse_wh) if rr is not None else 0.0
+            ratio_seq.append(
+                pm / denom if (pm is not None and denom > 0.0) else None
+            )
         for idx, hkey in enumerate(hours_sorted):
             r = recon[chan].get(hkey)
             if r is None:
@@ -651,12 +662,13 @@ def _process_day_impl(
                 continue
             if r.beam_wh <= 0.0:
                 continue  # no modeled beam -> transmittance undefined
-            neighbour_kc = _neighbour_kc(kc_seq, idx)
+            neighbour_ratio = ratio_seq[idx - 1] if idx > 0 else None
             if not is_quasi_clear(
                 kc=r.kc,
                 sun_el=r.sun_el,
                 beam_share=r.beam_share,
-                neighbour_kc=neighbour_kc,
+                stability_ratio=ratio_seq[idx],
+                neighbour_ratio=neighbour_ratio,
             ):
                 continue
             # Beam-referenced transmittance (SPEC §5): subtract the modeled
@@ -710,20 +722,6 @@ def _doy_of(iso_hour: str) -> int:
     dt = datetime.fromisoformat(iso_hour)
     mid = dt + timedelta(minutes=30)
     return mid.timetuple().tm_yday
-
-
-def _neighbour_kc(kc_seq: list[float], idx: int) -> float | None:
-    """Neighbour k_c for the stability gate: the adjacent daylight hour.
-
-    Prefer the previous hour; fall back to the next. Returns None at the edges
-    (a lone hour has no neighbour to compare against, so the gate skips the
-    stability test rather than rejecting).
-    """
-    if idx - 1 >= 0:
-        return kc_seq[idx - 1]
-    if idx + 1 < len(kc_seq):
-        return kc_seq[idx + 1]
-    return None
 
 
 def _resolve_hourly_measured(
