@@ -17,11 +17,9 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from balcony_solar_forecast.const import DEFAULT_SITE
 from balcony_solar_forecast.core import horizon as H
 from balcony_solar_forecast.core.types import HorizonRow, PlaneConfig, SiteConfig
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / builders
@@ -138,7 +136,7 @@ def test_foliage_monotonic_within_ramps():
     lo = FOLIAGE_LEAF_ON_DOY - FOLIAGE_RAMP_DAYS
     hi = FOLIAGE_LEAF_ON_DOY + FOLIAGE_RAMP_DAYS
     vals = [H.foliage_fraction(d) for d in range(lo, hi + 1)]
-    assert all(b >= a - 1e-12 for a, b in zip(vals, vals[1:]))  # rising
+    assert all(b >= a - 1e-12 for a, b in zip(vals, vals[1:], strict=False))  # rising
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +379,7 @@ def test_default_south_svf_lower_than_north():
 def test_default_site_round_trips_through_dict():
     site = SiteConfig.from_dict(DEFAULT_SITE)
     again = SiteConfig.from_dict(site.to_dict())
-    for a, b in zip(site.planes, again.planes):
+    for a, b in zip(site.planes, again.planes, strict=False):
         assert H.sky_view_factor(a) == pytest.approx(H.sky_view_factor(b))
         for az in (80.0, 155.0, 220.0):
             assert H.interp_elevation(a, az) == pytest.approx(

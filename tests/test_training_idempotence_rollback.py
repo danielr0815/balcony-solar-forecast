@@ -19,7 +19,7 @@ Same bare-coordinator harness as ``test_coordinator_learning`` (built via
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -37,13 +37,10 @@ from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     ShademapBin,
     ShademapState,
 )
-
 from tests.test_coordinator_learning import (  # noqa: E402
     _FakeStore,
     _make_coordinator,
 )
-
-UTC = timezone.utc
 
 
 def _losing_issued(iso: str) -> dict:

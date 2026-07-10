@@ -12,10 +12,35 @@ from __future__ import annotations
 
 from homeassistant.core import HomeAssistant, callback
 
-from .const import ATTR_WATTS, ATTR_WH_PERIOD
+from .const import (
+    ATTR_SP_AZIMUTH,
+    ATTR_SP_HORIZON_AZIMUTH,
+    ATTR_SP_SHADE_HORIZON,
+    ATTR_SP_STATIC_HORIZON,
+    ATTR_SP_SUN_ELEVATION,
+    ATTR_SP_TIME,
+    ATTR_SP_TRANSMITTANCE,
+    ATTR_WATTS,
+    ATTR_WH_PERIOD,
+)
 
 
 @callback
 def exclude_attributes(hass: HomeAssistant) -> set[str]:
-    """Attribute names the recorder must not persist for this integration."""
-    return {ATTR_WATTS, ATTR_WH_PERIOD}
+    """Attribute names the recorder must not persist for this integration.
+
+    The energy sensors' 15-min curve dicts and the shade-profile diagram's curve
+    arrays change every recompute / selection and would bloat the database; only
+    what gets written to history is trimmed (live state/attributes are intact).
+    """
+    return {
+        ATTR_WATTS,
+        ATTR_WH_PERIOD,
+        ATTR_SP_TIME,
+        ATTR_SP_AZIMUTH,
+        ATTR_SP_SUN_ELEVATION,
+        ATTR_SP_TRANSMITTANCE,
+        ATTR_SP_HORIZON_AZIMUTH,
+        ATTR_SP_STATIC_HORIZON,
+        ATTR_SP_SHADE_HORIZON,
+    }

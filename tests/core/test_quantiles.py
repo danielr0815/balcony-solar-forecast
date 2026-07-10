@@ -16,10 +16,9 @@ Plain pytest, no Home Assistant imports (SPEC §4). These cover:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from balcony_solar_forecast.const import (
     QUANTILE_MIN_FORECAST_WH,
     QUANTILE_MIN_SAMPLES,
@@ -28,9 +27,7 @@ from balcony_solar_forecast.const import (
     QUANTILE_P_LOW,
     QUANTILE_P_MID,
     QUANTILE_REL_ERR_MAX,
-    QUANTILE_RING_DAYS,
 )
-from balcony_solar_forecast.core import quantiles
 from balcony_solar_forecast.core.quantiles import (
     QuantileSample,
     apply_bands,
@@ -45,9 +42,6 @@ from balcony_solar_forecast.core.types import (
     QuantileBands,
     QuantileState,
 )
-
-UTC = timezone.utc
-
 
 # ---------------------------------------------------------------------------
 # empirical_percentile

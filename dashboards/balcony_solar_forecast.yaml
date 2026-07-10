@@ -261,6 +261,40 @@ views:
           degradation* card above.
 
       # ----------------------------------------------------------------
+      # Shade profile (sun path vs learned shading) — SPEC §5. The controls
+      # and the shaded-fraction headline are built-in; the full per-date
+      # diagram needs the HACS apexcharts-card (separate snippet
+      # dashboards/shade_profile_apexcharts.yaml + docs/DASHBOARD.md).
+      # ----------------------------------------------------------------
+      - type: entities
+        title: Shade profile (per date & module)
+        show_header_toggle: false
+        entities:
+          - entity: select.balcony_solar_forecast_shade_profile_module
+            name: Module
+          - entity: date.balcony_solar_forecast_shade_profile_date
+            name: Date
+          - entity: sensor.balcony_solar_forecast_shade_profile
+            name: Shaded fraction of daylight
+      - type: markdown
+        title: Shade profile diagram
+        content: >
+          Pick a **module** and a **date** above; the *Shaded fraction of
+          daylight* sensor then reports how much of that day's sunlight the
+          currently-learned shading blocks for that module.
+
+
+          The full **sun-path-vs-shading diagram** (sun elevation over azimuth,
+          coloured by the learned transmittance τ, with the learned and static
+          horizon lines) needs the HACS **`apexcharts-card`** — it is the one
+          card a built-in Lovelace card cannot draw. Paste
+          `dashboards/shade_profile_apexcharts.yaml` as a Manual card after
+          installing it. The curve arrays live in the
+          `sensor.balcony_solar_forecast_shade_profile` **attributes**
+          (`azimuth`, `sun_elevation`, `transmittance`, `shade_horizon`,
+          `static_horizon`). See docs/DASHBOARD.md.
+
+      # ----------------------------------------------------------------
       # Comparison-sensor configuration reminder (D-P9: shipped EMPTY).
       # ----------------------------------------------------------------
       - type: markdown

@@ -9,7 +9,6 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from balcony_solar_forecast.const import (
     ROSS_COEFF,
     TEMP_COEFF_PER_K,

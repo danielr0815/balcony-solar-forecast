@@ -983,7 +983,7 @@ class ComparisonConfig:
         }
 
     @staticmethod
-    def list_from_options(raw: object) -> tuple["ComparisonConfig", ...]:
+    def list_from_options(raw: object) -> tuple[ComparisonConfig, ...]:
         """Parse the CONF_COMPARISON_SENSORS options list into configs.
 
         Skips malformed rows and rows missing a name or a daily_entity so a

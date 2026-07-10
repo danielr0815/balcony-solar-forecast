@@ -22,11 +22,9 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from balcony_solar_forecast.const import (
     BOOTSTRAP_MAX_BIN_N,
     SHADEMAP_AZ_BIN_DEG,
-    SHADEMAP_EL_BIN_DEG,
     SHADEMAP_EMA_ALPHA,
     SHADEMAP_KC_HI,
     SHADEMAP_KC_LO_HIGH_SUN,

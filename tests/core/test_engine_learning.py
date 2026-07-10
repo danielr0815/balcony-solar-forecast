@@ -24,10 +24,9 @@ stand-ins keeps these learner tests decoupled from the real physics merge.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from balcony_solar_forecast.const import (
     CORRECTION_SOURCE_BOTH,
     CORRECTION_SOURCE_INTRADAY,
@@ -44,8 +43,6 @@ from balcony_solar_forecast.core.types import (
     WeatherSeries,
     WeatherSlot,
 )
-
-UTC = timezone.utc
 
 _TEST_DATE = datetime(2024, 6, 21, 0, 0, tzinfo=UTC)  # summer solstice-ish
 _NOON_INDEX = 48
@@ -226,7 +223,7 @@ class TestIdentityInvariant:
         )
         assert active.raw_total_watts == plain.total_watts
         assert active.raw_hourly_wh == plain.hourly_wh
-        for pra, prp in zip(active.plane_results, plain.plane_results):
+        for pra, prp in zip(active.plane_results, plain.plane_results, strict=False):
             assert pra.raw_watts == prp.watts
 
 
@@ -342,10 +339,10 @@ class TestSlotFactor:
                                correction_source=CORRECTION_SOURCE_INTRADAY),
         )
         # Corrected == 2 * raw everywhere (site total and per plane).
-        for c, r in zip(res.total_watts, res.raw_total_watts):
+        for c, r in zip(res.total_watts, res.raw_total_watts, strict=False):
             assert c == pytest.approx(2.0 * r)
         for pr in res.plane_results:
-            for c, r in zip(pr.watts, pr.raw_watts):
+            for c, r in zip(pr.watts, pr.raw_watts, strict=False):
                 assert c == pytest.approx(2.0 * r)
         # Hourly / daily corrected == 2 * raw too.
         for k in res.raw_hourly_wh:
@@ -590,7 +587,7 @@ class TestBeamRefSeries:
             site, weather, now=_TEST_DATE,
             hooks=LearnerHooks(beam_tau=lambda *a: 0.0, slot_factor=lambda s: 2.0),
         )
-        for pp, pa in zip(plain.plane_results, active.plane_results):
+        for pp, pa in zip(plain.plane_results, active.plane_results, strict=False):
             assert pp.beam_ref_watts == pa.beam_ref_watts
             assert pp.diffuse_ref_watts == pa.diffuse_ref_watts
         # On the clipped peak slot the reference beam exceeds the clamped raw.

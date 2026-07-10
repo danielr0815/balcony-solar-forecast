@@ -162,6 +162,59 @@ Eyeball the learned τ against the known obstructions (SPEC §13):
 
 ---
 
+## 4b. Shade profile diagram (sun path vs. learned shading)
+
+A per-date, per-module picture of the shading: the **sun path** for a chosen
+date (elevation over azimuth) with the **currently-learned** beam transmittance
+τ coloured along it, plus the learned and static **horizon lines**. It answers
+"on *this* date, where along the sun's path is *this* module shaded, and how
+much?" — the interactive companion to the `dump_shademap` polar table.
+
+Three integration-owned entities drive it (device **Balcony Solar Forecast**):
+
+| Entity | Purpose |
+|---|---|
+| `select.balcony_solar_forecast_shade_profile_module` | pick the module/plane |
+| `date.balcony_solar_forecast_shade_profile_date` | pick the date to visualise |
+| `sensor.balcony_solar_forecast_shade_profile` | state = shaded fraction of daylight (%); the curve arrays are its attributes |
+
+The **date** always defaults to **today** (it is not remembered across
+restarts, so the diagram re-opens on the current day), and the **module**
+defaults to a **front-facing plane** (the orientation the most modules share,
+e.g. the reference site's 115° module `M2`); a manual module pick is remembered.
+
+The **module select** and the **date picker** appear on the built-in dashboard
+(the *Shade profile* cards) together with the shaded-fraction state — no custom
+card needed for those. The sensor's attributes carry the plottable arrays,
+excluded from the recorder like the energy-curve dicts:
+
+- `azimuth`, `sun_elevation`, `transmittance`, `time` — one entry per daylight
+  sun-path sample (transmittance is the *effective* beam τ the forecast applies
+  there: the static config horizon blended with the learned shademap);
+- `horizon_azimuth`, `static_horizon`, `shade_horizon` — the config horizon and
+  the learned shade horizon (elevation below which the beam is mostly blocked)
+  on an azimuth grid over the day's daylight span.
+
+### The chart (needs the HACS `apexcharts-card`)
+
+The diagram itself is the one thing a built-in Lovelace card cannot draw (a
+parametric elevation-over-azimuth curve for a specific date), so it lives as an
+opt-in snippet:
+
+1. Install **`apexcharts-card`** via HACS → Frontend.
+2. Add a **Manual** card and paste
+   [`dashboards/shade_profile_apexcharts.yaml`](../dashboards/shade_profile_apexcharts.yaml).
+3. Pick a module + date; the chart redraws. Reading it: the yellow line is the
+   sun's elevation; the dots recolour green → amber → red as the learned τ falls
+   (free → partial → shaded); the grey area is the learned shade horizon and the
+   thin grey line the static configured horizon. The x-axis is the sun azimuth
+   (90° = East, 180° = South, 270° = West).
+
+The snippet reads only the three entity ids above; adjust them if your entity
+ids differ. It changes no state.
+
+---
+
 ## 5. Notes
 
 - Every card here is a **built-in** Lovelace card (`markdown`, `entities`,

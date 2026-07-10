@@ -349,7 +349,7 @@ def test_bias_state_roundtrip():
     store.set_bias_state(bs)
     got = store.get_bias_state()
     # n >= RLS_MIN_SAMPLES so it applies.
-    assert 4 >= RLS_MIN_SAMPLES
+    assert RLS_MIN_SAMPLES <= 4
     assert got.get_bias("clear", "midday") == pytest.approx(1.2)
 
 

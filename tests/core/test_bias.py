@@ -16,10 +16,9 @@ Covers every edge case the contract calls out:
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from balcony_solar_forecast.const import (
     CLOUD_CLASS_CLEAR,
     CLOUD_CLASS_FOG,
@@ -50,9 +49,6 @@ from balcony_solar_forecast.core.bias import (
     train_day_ahead_bias,
 )
 from balcony_solar_forecast.core.types import BiasCell, BiasState
-
-UTC = timezone.utc
-
 
 # ===========================================================================
 # Helpers

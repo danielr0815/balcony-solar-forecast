@@ -48,13 +48,20 @@
       "hourly_mae": {"name": "Prognose Stunden-Fehler"},
       "vs_best_baseline_pct": {"name": "Prognose vs. beste Baseline"},
       "energy_production_today_p10": {"name": "Energieertrag heute (P10)"},
-      "energy_production_today_p90": {"name": "Energieertrag heute (P90)"}
+      "energy_production_today_p90": {"name": "Energieertrag heute (P90)"},
+      "shade_profile": {"name": "Verschattungsprofil"}
     },
     "binary_sensor": {
       "degraded": {"name": "Eingeschränkt"},
       "fast_learner_active": {"name": "Schneller Lerner aktiv"},
       "slow_learner_active": {"name": "Shademap-Lerner aktiv"},
       "kill_gate_passed": {"name": "Kill-Gate bestanden"}
+    },
+    "select": {
+      "shade_profile_module": {"name": "Verschattungsprofil Modul"}
+    },
+    "date": {
+      "shade_profile_date": {"name": "Verschattungsprofil Datum"}
     }
   },
   "issues": {
@@ -188,7 +195,7 @@
           "slow_learner_enabled": "Lernt über eine Saison die kanalweise Beam-Transmittanz je Sonnenstand (Verschattung, Bäume, Gebäudekante).",
           "day_ahead_bias_enabled": "Wendet einen nächtlich trainierten multiplikativen Bias je Wolkenklasse und Tagesabschnitt an.",
           "quantiles_enabled": "Gibt empirische P10/P50/P90-Unsicherheitsbänder aus dem 90-Tage-Fehlerring aus (kollabiert auf P50, bis ein Bin genügend Samples hat).",
-          "comparison_sensors": "Liste externer Tages-kWh-Prognosesensoren, gegen die das Scoreboard den Motor bewertet. Jede Zeile ist {name, daily_entity}. Wird leer ausgeliefert; z. B. name \"8-Entry Baseline\" -> sensor.pv_prognose_heute_alle_module."
+          "comparison_sensors": "Liste externer Tages-kWh-Prognosesensoren, gegen die das Scoreboard den Motor bewertet. Jede Zeile hat einen Namen und eine daily_entity. Wird leer ausgeliefert; z. B. name \"8-Entry Baseline\" -> sensor.pv_prognose_heute_alle_module."
         }
       }
     },

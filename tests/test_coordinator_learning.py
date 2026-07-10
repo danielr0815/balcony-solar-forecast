@@ -13,7 +13,7 @@ package), so HA must be installed; the whole module is skipped otherwise.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -21,7 +21,9 @@ pytest.importorskip("homeassistant")
 
 from homeassistant.core import State  # noqa: E402
 
-from custom_components.balcony_solar_forecast import coordinator as coord_mod  # noqa: E402
+from custom_components.balcony_solar_forecast import (
+    coordinator as coord_mod,  # noqa: E402
+)
 from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     CLOUD_CLASS_CLEAR,
     COLLAPSE_FORECAST_MIN_WH,
@@ -44,16 +46,13 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     LEARNER_STATUS_FROZEN,
     RLS_MIN_SAMPLES,
 )
-from custom_components.balcony_solar_forecast import const as const_mod  # noqa: E402
 from custom_components.balcony_solar_forecast.coordinator import (  # noqa: E402
     BalconySolarCoordinator,
-    _DayAheadSample,
     _is_frozen_channel,
     _usable_power,
 )
 from custom_components.balcony_solar_forecast.core import LearnerHooks  # noqa: E402
 from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
-    BiasCell,
     BiasState,
     DriftState,
     ForecastResult,
@@ -66,7 +65,6 @@ from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     SiteConfig,
 )
 
-UTC = timezone.utc
 DOMAIN = "balcony_solar_forecast"
 
 
@@ -216,6 +214,10 @@ def _make_coordinator(store: _FakeStore | None = None) -> BalconySolarCoordinato
     c._correction_source = CORRECTION_SOURCE_NONE
     c._last_result = None
     c._last_error = None
+    # Shade-profile diagram selection + memo (normally set in __init__).
+    c._shade_profile_module = None
+    c._shade_profile_date = None
+    c._shade_profile_cache = None
     # v0.4 scoreboard attributes (_build_data now assembles the scoreboard
     # summary): neutral empty ring, defaults, no comparisons.
     from custom_components.balcony_solar_forecast.const import (
@@ -1001,3 +1003,41 @@ def _filter_hourly(self, issued, iso):
 
 # Bind the helper so the day-ahead filter test can call it.
 BalconySolarCoordinator._filter_hourly = _filter_hourly
+
+
+# ---------------------------------------------------------------------------
+# Shade-profile diagram: the learned shademap is blended into the diagram ONLY
+# when the slow learner is active, matching what the served forecast applies
+# (review finding — the diagram must not paint shading the forecast is not using).
+# ---------------------------------------------------------------------------
+
+
+def test_build_shade_profile_gates_on_slow_active():
+    from custom_components.balcony_solar_forecast.core import shademap as sm
+
+    c = _make_coordinator()
+    day = datetime(2026, 6, 21).date()  # doy 172 -> half-year 1
+    doy = day.timetuple().tm_yday
+    # Train a fully-occluded bin for the front plane M1 (half-year 1).
+    state = ShademapState()
+    for _ in range(300):
+        state = sm.update_bin(
+            state, channel="M1", sun_az=115.0, sun_el=30.0, doy=doy, measured_t=0.0
+        )
+    c._shademap_state = state
+    c._shade_profile_module = "M1"
+    c._shade_profile_date = day
+
+    # Slow learner ON -> the diagram blends the learned bin.
+    c._learner_config = LearnerConfig(slow_enabled=True)
+    on = c.build_shade_profile()
+    assert on["has_learned_data"] is True
+    on_cache = c._shade_profile_cache
+
+    # Slow learner OFF -> the forecast applies static shading only; so must the
+    # diagram (slow_active is part of the cache key, so this recomputes).
+    c._learner_config = LearnerConfig(slow_enabled=False)
+    off = c.build_shade_profile()
+    assert off["has_learned_data"] is False
+    assert off["learned_bins"] == 0
+    assert c._shade_profile_cache is not on_cache

@@ -69,7 +69,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone, tzinfo
+from datetime import UTC, datetime, tzinfo
 
 from ..const import (
     ALBEDO_DEFAULT,
@@ -319,10 +319,7 @@ def _split_clamp(
     for name in beam_dc:
         unc = unclamped_total.get(name, 0.0)
         cl = clamped_total.get(name, 0.0)
-        if unc > 0.0:
-            f = cl / unc
-        else:
-            f = 1.0
+        f = cl / unc if unc > 0.0 else 1.0
         beam_out[name] = beam_dc[name] * f
         diffuse_out[name] = diffuse_dc[name] * f
     return beam_out, diffuse_out
@@ -376,7 +373,7 @@ def compute_forecast(
         physics. Each ``PlaneResult`` carries corrected ``watts`` plus the raw
         ``raw_watts`` and the per-slot ``beam_watts`` / ``diffuse_watts`` / ``kc``.
     """
-    cal_tz = tz if tz is not None else timezone.utc
+    cal_tz = tz if tz is not None else UTC
     hk = hooks if hooks is not None else _NEUTRAL_HOOKS
     beam_tau_hook = hk.beam_tau
     slot_factor_hook = hk.slot_factor
@@ -540,7 +537,7 @@ def compute_forecast(
         total_watts.append(cor_slot_total)
 
         # --- energy roll-ups (interval-mean power * slot hours) ---
-        hour_start = start.astimezone(timezone.utc).replace(
+        hour_start = start.astimezone(UTC).replace(
             minute=0, second=0, microsecond=0
         )
         hkey = hour_start.isoformat()
@@ -588,7 +585,7 @@ def compute_forecast(
         )
         for i, start in enumerate(slot_starts):
             hkey = (
-                start.astimezone(timezone.utc)
+                start.astimezone(UTC)
                 .replace(minute=0, second=0, microsecond=0)
                 .isoformat()
             )

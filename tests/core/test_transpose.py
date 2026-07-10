@@ -17,7 +17,6 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from balcony_solar_forecast.const import (
     ALBEDO_DEFAULT,
     ALBEDO_SNOW,

@@ -21,10 +21,9 @@ quantile hook is tested against the same clear-sky two-plane site.
 
 from __future__ import annotations
 
-from datetime import timezone
+from datetime import UTC
 
 import pytest
-
 from balcony_solar_forecast.core import engine
 from balcony_solar_forecast.core.engine import LearnerHooks
 from balcony_solar_forecast.core.types import QuantileBands
@@ -36,8 +35,6 @@ from .test_engine_learning import (  # noqa: F401  (patched_physics is a fixture
     _two_plane_site,
     patched_physics,
 )
-
-UTC = timezone.utc
 
 _SLOT_HOURS = 0.25
 
@@ -122,7 +119,7 @@ class TestActiveBands:
     def test_bands_monotonic_pointwise(self, patched_physics):
         band = QuantileBands(p10=0.6, p50=0.95, p90=1.4, n=40)
         _, res = self._run_with_band(band)
-        for a, b, c in zip(res.p10_watts, res.p50_watts, res.p90_watts):
+        for a, b, c in zip(res.p10_watts, res.p50_watts, res.p90_watts, strict=False):
             assert a <= b <= c
 
     def test_curves_aligned_to_slot_starts(self, patched_physics):

@@ -18,15 +18,13 @@ import pytest
 pytest.importorskip("homeassistant")
 pytest.importorskip("voluptuous")
 
-from homeassistant.exceptions import ServiceValidationError  # noqa: E402
-
 from balcony_solar_forecast import _services as svc  # noqa: E402
 from balcony_solar_forecast.const import (  # noqa: E402
     DOMAIN,
     SHADEMAP_AZ_BIN_DEG,
     SHADEMAP_EL_BIN_DEG,
 )
-
+from homeassistant.exceptions import ServiceValidationError  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Pure polar-table builder.

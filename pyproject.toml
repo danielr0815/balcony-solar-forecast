@@ -1,3 +1,40 @@
+# This is a Home Assistant CUSTOM COMPONENT, not a PyPI package — it is loaded
+# by Home Assistant from custom_components/, not `pip install`ed. There is
+# deliberately no [build-system]; this file carries project metadata, the dev
+# dependency group, and the tool configuration (ruff, pytest).
+#
+# Runtime version source of truth: custom_components/balcony_solar_forecast/
+# manifest.json. The value below is metadata only.
+
+[project]
+name = "balcony-solar-forecast"
+version = "0.5.0"
+description = "Self-learning multi-plane PV forecast for Home Assistant: raw-irradiance transposition, per-channel shade learning, quantile bands and a skill scoreboard."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+authors = [{ name = "Daniel R." }]
+keywords = ["home-assistant", "hacs", "solar", "pv", "forecast", "energy"]
+
+[project.urls]
+Homepage = "https://github.com/danielr0815/balcony-solar-forecast"
+Documentation = "https://github.com/danielr0815/balcony-solar-forecast/blob/main/docs/SPEC.md"
+Issues = "https://github.com/danielr0815/balcony-solar-forecast/issues"
+
+# Dev tooling (PEP 735 dependency group), identical to the battery-manager-ha
+# setup. Install with `pip install --group dev` (pip >= 25.1), or run
+# `make install` / scripts/setup-env.{sh,ps1} which create the venv for you.
+# `homeassistant` is unpinned; `pytest-homeassistant-custom-component` pins the
+# matching HA version. There are no RUNTIME dependencies (manifest requirements
+# is []); these packages only run the tests + linter.
+[dependency-groups]
+dev = [
+    "homeassistant",
+    "pytest",
+    "pytest-homeassistant-custom-component",
+    "ruff",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -18,3 +55,10 @@ select = [
     "SIM", # simplify
 ]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest fixtures imported into a test module for dependency injection are then
+# used as test-function parameters; pyflakes reads each parameter as a
+# redefinition of the imported name (F811). This is the standard pytest pattern,
+# not a real redefinition, so F811 is suppressed for the test tree.
+"tests/**" = ["F811"]
