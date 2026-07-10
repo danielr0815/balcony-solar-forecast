@@ -21,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`channel_similarity` / `suggest_shade_groups`). See SPEC §5.
 
 ### Changed
+- **Recompute-path performance (BIT-IDENTICAL outputs).** Three hot-path
+  optimisations, each proven equal to the prior implementation by test (no
+  forecast number moves): (1) the engine no longer runs the Hay-Davies
+  transposition + horizon interpolation TWICE per plane per slot when a learner
+  is active — the tau-independent POA decomposition is computed once and the RAW
+  (static-tau) and CORRECTED (learned-tau) curves are derived by re-gating the
+  shared beam; (2) the sky-view-factor quadrature is memoised at module level,
+  keyed on the plane geometry + day-of-year, so it survives across the 15-min
+  recompute cycles instead of being redone once per `compute_forecast` call; and
+  (3) the cached Open-Meteo payload is parsed into a `WeatherSeries` once per
+  fetch and reused across recomputes rather than re-parsed every tick.
 - **Three physics refinements (forecast numbers shift slightly).** (1) The
   Hay-Davies anisotropy index now divides DNI by the *eccentricity-corrected*
   extraterrestrial normal irradiance `E0n = 1361·(1 + 0.033·cos(2π·doy/365))`

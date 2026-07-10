@@ -372,7 +372,7 @@ def reconstruct_plane_hour(
     ground = comps.get("ground", 0.0)
 
     # Incidence-angle modifier (ASHRAE, const IAM_B0) — byte-identical to
-    # engine._plane_poa_split: applied to beam+circumsolar BEFORE the ungated
+    # engine._plane_poa_components: applied to beam+circumsolar BEFORE the ungated
     # reference so the bootstrap trains the same optics-corrected T as live.
     cos_theta = comps.get("cos_theta")
     if cos_theta is not None:

@@ -634,7 +634,7 @@ die gezeigte Kurve nie beeinflussen), `sunrise`/`sunset`, `max_elevation`.
 ### 15.2 Semantik (Engine-exakt, nie „schöner als die Prognose")
 
 Die Transmittanz je Sonnenposition repliziert die Engine-Gate-Logik
-(`engine._plane_poa_split`) **exakt**: statischer Prior =
+(`engine._plane_poa_components`) **exakt**: statischer Prior =
 `horizon.transmittance_at` nur bei Sonne ≤ interpolierte Horizontlinie, sonst
 1,0; darüber blendet `shademap.effective_tau`. **Slow-Active-Kopplung:** die
 gelernte Shademap fließt NUR ein, wenn der Slow-Learner aktiv ist

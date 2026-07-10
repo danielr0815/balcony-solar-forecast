@@ -357,6 +357,47 @@ def _diffuse_view_integral(
     return acc * daz / math.pi
 
 
+@lru_cache(maxsize=512)
+def _sky_view_factor_cached(
+    horizon_rows: tuple[HorizonRow, ...],
+    tilt_deg: float,
+    azimuth_deg: float,
+    doy: int | None,
+) -> float:
+    """SVF for one plane GEOMETRY on one day-of-year (module-level memo).
+
+    Keyed on the hashable geometry the quadrature actually depends on — the
+    horizon rows tuple (frozen ``HorizonRow`` => hashable), tilt, azimuth and doy
+    — so the O(360) integral runs at most once per distinct (geometry, day) for
+    the WHOLE process, not once per plane per 15-min recompute. A config change
+    yields a different rows tuple / tilt / azimuth => a different key, so
+    invalidation is STRUCTURAL (no manual clearing needed). maxsize 512 easily
+    covers a handful of planes x the ~3 forecast-window days x seasonal doys.
+    See :func:`sky_view_factor` for the physics and the module derivation above.
+    """
+    if not horizon_rows:
+        return 1.0
+    # Rebuild a minimal plane (only tilt / azimuth / horizon feed the quadrature;
+    # name / wp / etc. are irrelevant) so the existing view integral is reused
+    # verbatim — the result is byte-identical to the pre-memo per-plane call.
+    plane = PlaneConfig(
+        name="", azimuth_deg=azimuth_deg, tilt_deg=tilt_deg, wp=0.0,
+        horizon=horizon_rows,
+    )
+    f_flat = _diffuse_view_integral(plane, use_horizon=False)
+    if f_flat <= 0.0:
+        # Degenerate geometry (e.g. tilt >= 180); nothing sensible to scale.
+        return 1.0
+    f_obs = _diffuse_view_integral(plane, use_horizon=True, doy=doy)
+
+    svf = f_obs / f_flat
+    if svf >= 1.0:
+        return 1.0
+    if svf <= 0.0:
+        return 1e-6
+    return svf
+
+
 def sky_view_factor(plane: PlaneConfig, doy: int | None = None) -> float:
     """Isotropic-diffuse sky-view factor in (0, 1] for this plane.
 
@@ -381,18 +422,6 @@ def sky_view_factor(plane: PlaneConfig, doy: int | None = None) -> float:
     is bounded to (0, 1]; a fully walled dome floors at a tiny positive epsilon
     rather than exactly zero.
     """
-    if not plane.horizon:
-        return 1.0
-
-    f_flat = _diffuse_view_integral(plane, use_horizon=False)
-    if f_flat <= 0.0:
-        # Degenerate geometry (e.g. tilt >= 180); nothing sensible to scale.
-        return 1.0
-    f_obs = _diffuse_view_integral(plane, use_horizon=True, doy=doy)
-
-    svf = f_obs / f_flat
-    if svf >= 1.0:
-        return 1.0
-    if svf <= 0.0:
-        return 1e-6
-    return svf
+    return _sky_view_factor_cached(
+        plane.horizon, plane.tilt_deg, plane.azimuth_deg, doy
+    )
