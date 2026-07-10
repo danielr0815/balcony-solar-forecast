@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Drift monitor no longer auto-disables a learner on rounding-scale noise.**
+  A "losing" day now requires the corrected daily-kWh MAE to exceed physics by
+  both the relative margin AND an absolute floor (`DRIFT_LOSS_MIN_ABS_WH`, 50
+  Wh). Previously, on a well-trained/clear day where corrected and raw totals
+  differ by only a few Wh, the >2%-relative test was a coin flip on rounding
+  noise; seven such flips would auto-disable the layer and roll its state back
+  seven snapshots, destroying weeks of legitimate learning over meaningless
+  deltas.
 - **Channel dropout now discards the whole training day (SPEC §5).** A
   configured module with no usable LTS rows (dead/unavailable DTU port), or one
   covering too little of the daylight span (died mid-day), previously slipped

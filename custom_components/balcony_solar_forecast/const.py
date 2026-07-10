@@ -421,8 +421,13 @@ DRIFT_WINDOW_DAYS = 7
 DRIFT_LOSS_STREAK_DAYS = 7        # consecutive losing days => auto-disable layer
 DRIFT_ROLLBACK_SNAPSHOTS = 3     # legacy alias; the live ring depth is LEARNER_SNAPSHOT_RING (must exceed the loss streak)
 # A "losing" day = corrected daylight MAE strictly worse than physics MAE by
-# more than this relative margin (avoids flapping on ties/noise).
+# more than this relative margin AND by more than DRIFT_LOSS_MIN_ABS_WH in
+# absolute Wh. The absolute floor stops a well-trained/clear day (where raw and
+# corrected daily totals differ by only a few Wh) from counting as a "loss" on
+# rounding-scale noise — seven such coin-flips would otherwise auto-disable and
+# roll back a layer over statistically meaningless deltas.
 DRIFT_LOSS_MARGIN = 0.02
+DRIFT_LOSS_MIN_ABS_WH = 50.0
 
 # Collapse detector (SPEC §5): all channels ~0 while forecast high => snow /
 # total dropout => freeze BOTH learners for the day; only the clamped intraday

@@ -515,6 +515,44 @@ def test_drift_mae_is_one_day_energy_error():
     assert c._drift_state.daily_mae["2026-05-01"]["raw"] == pytest.approx(200.0)
 
 
+def test_drift_noise_level_delta_is_not_a_loss():
+    """A rounding-scale corrected-vs-raw delta on a well-trained/clear day must
+    NOT count as a losing day — the absolute floor guards against seven such
+    coin-flips auto-disabling a layer over meaningless Wh (SPEC §5)."""
+    from custom_components.balcony_solar_forecast.const import (
+        DRIFT_LOSS_MIN_ABS_WH,
+    )
+
+    c = _make_coordinator()
+    c._learner_config = LearnerConfig(fast_enabled=True, slow_enabled=False)
+    iso = "2026-05-01"
+    h = f"{iso}T11:00:00+00:00"
+
+    # raw perfect (raw_mae 0); corrected off by < DRIFT_LOSS_MIN_ABS_WH -> the
+    # relative margin is technically exceeded (0 * 1.02 == 0) but the absolute
+    # floor blocks it: not a loss.
+    noise = DRIFT_LOSS_MIN_ABS_WH - 10.0
+    issued = IssuedSnapshot(
+        issued_at="x", status="fresh",
+        raw_hourly_wh={h: 1000.0},
+        corrected_hourly_wh={h: 1000.0 + noise},
+    ).to_dict()
+    c._update_drift(iso, issued, {"M1": 1000.0})
+    assert c._drift_state.fast_loss_streak == 0
+
+    # A materially worse corrected curve (> the floor) still counts.
+    iso2 = "2026-05-02"
+    h2 = f"{iso2}T11:00:00+00:00"
+    real = DRIFT_LOSS_MIN_ABS_WH + 100.0
+    issued2 = IssuedSnapshot(
+        issued_at="x", status="fresh",
+        raw_hourly_wh={h2: 1000.0},
+        corrected_hourly_wh={h2: 1000.0 + real},
+    ).to_dict()
+    c._update_drift(iso2, issued2, {"M1": 1000.0})
+    assert c._drift_state.fast_loss_streak == 1
+
+
 def test_drift_streak_resets_on_a_winning_day():
     c = _make_coordinator()
     c._learner_config = LearnerConfig(fast_enabled=True, slow_enabled=False)
