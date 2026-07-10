@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Shade-profile card hover readout.** Moving the mouse (or touching) over the
+  bundled shade-profile card now snaps a crosshair to the nearest sun-path sample
+  and shows a fixed status line with its time, azimuth + compass direction,
+  shading % (τ) and elevation — the exact shading value is surfaced here rather
+  than as a second curve. The card keeps its single elevation y-axis.
+
+### Changed
+- **Year-stable shade-profile x-axis.** The card's azimuth axis is fixed to the
+  site's widest whole-year daylight span (both solstices, exposed by the sensor
+  as `axis_azimuth_min` / `axis_azimuth_max` and defensively unioned with the
+  per-date data span) so the sun path stays comparable across dates instead of
+  rescaling with the season.
+
 ## [0.8.0] - 2026-07-10
 
 ### Added

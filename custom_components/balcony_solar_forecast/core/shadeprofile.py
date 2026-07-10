@@ -36,6 +36,8 @@ from datetime import UTC, datetime, timedelta, tzinfo
 from datetime import date as _date
 
 from ..const import (
+    ATTR_SP_AXIS_AZ_MAX,
+    ATTR_SP_AXIS_AZ_MIN,
     ATTR_SP_AZIMUTH,
     ATTR_SP_HORIZON_AZIMUTH,
     ATTR_SP_SHADE_HORIZON,
@@ -54,6 +56,7 @@ from . import solpos
 from .types import PlaneConfig, ShademapState
 
 __all__ = [
+    "axis_azimuth_domain",
     "compute_shade_profile",
     "default_module",
     "effective_tau_at",
@@ -170,8 +173,68 @@ def _local_midnight(day: _date, tz: tzinfo) -> datetime:
     return datetime(day.year, day.month, day.day, tzinfo=tz)
 
 
-def _empty_profile(channel: str, day: _date, tau_threshold: float) -> dict:
-    """The zeroed result for a day with no daylight (polar night / degenerate)."""
+def axis_azimuth_domain(
+    *,
+    latitude: float,
+    longitude: float,
+    year: int,
+    tz: tzinfo,
+    step_minutes: int = 10,
+) -> tuple[float, float]:
+    """Widest daylight sun-azimuth span of the whole ``year`` at the site.
+
+    Runs the SAME daylight sweep as :func:`compute_shade_profile` (elevation > 0,
+    NOAA :func:`solpos.sun_position`, local-midnight anchored) for BOTH solstices
+    of ``year`` — ``date(year, 6, 21)`` (northern summer) and
+    ``date(year, 12, 21)`` (southern summer) — and returns the ``(min, max)`` of
+    every daylight azimuth across both days, rounded to 2 decimals.
+
+    This is the year's widest daylight azimuth span at the site and is
+    hemisphere-agnostic: June covers the northern-summer extremes (sunrise NE /
+    sunset NW), December the southern-summer extremes, so whichever hemisphere the
+    site is in, one of the two days carries the widest span. The card uses it to
+    fix its x-axis so the sun path stays comparable from date to date instead of
+    rescaling with the season.
+
+    A coarse ``step_minutes`` (default 10) is enough: this bounds the axis, not
+    the plotted samples, and the caller defensively unions the returned span with
+    the (finer-sampled) per-date data span. Returns the full circle
+    ``(0.0, 360.0)`` when NEITHER solstice yields a daylight sample (a degenerate
+    polar case), so the axis is never empty. Never raises.
+    """
+    step = max(1, int(step_minutes))
+    max_minute = 24 * 60
+    az_values: list[float] = []
+    for day in (_date(year, 6, 21), _date(year, 12, 21)):
+        midnight = _local_midnight(day, tz)
+        minute = 0
+        while minute <= max_minute:
+            local_dt = midnight + timedelta(minutes=minute)
+            minute += step
+            utc_dt = local_dt.astimezone(UTC)
+            az, el = solpos.sun_position(utc_dt, latitude, longitude)
+            if el <= 0.0:
+                continue
+            az_values.append(az)
+    if not az_values:
+        return (0.0, 360.0)
+    return (round(min(az_values), 2), round(max(az_values), 2))
+
+
+def _empty_profile(
+    channel: str,
+    day: _date,
+    tau_threshold: float,
+    axis_az_min: float,
+    axis_az_max: float,
+) -> dict:
+    """The zeroed result for a day with no daylight (polar night / degenerate).
+
+    Still carries the year-stable axis bounds (``axis_az_min``/``axis_az_max``):
+    they are pure site geometry (lat/lon/year), independent of whether THIS day
+    has daylight, so the card can fix its x-axis even on an empty (polar-night)
+    profile.
+    """
     return {
         "module": channel,
         "date": day.isoformat(),
@@ -192,6 +255,8 @@ def _empty_profile(channel: str, day: _date, tau_threshold: float) -> dict:
         ATTR_SP_HORIZON_AZIMUTH: [],
         ATTR_SP_STATIC_HORIZON: [],
         ATTR_SP_SHADE_HORIZON: [],
+        ATTR_SP_AXIS_AZ_MIN: axis_az_min,
+        ATTR_SP_AXIS_AZ_MAX: axis_az_max,
     }
 
 
@@ -230,6 +295,14 @@ def compute_shade_profile(
 
     midnight = _local_midnight(day, tz)
 
+    # Year-stable x-axis bounds: the widest daylight azimuth span of the whole
+    # year at the site (both solstices). Computed once per call (two coarse
+    # sweeps) BEFORE the early-return so the empty-profile branch carries them
+    # too — they are pure site geometry, independent of this day's daylight.
+    axis_az_min, axis_az_max = axis_azimuth_domain(
+        latitude=latitude, longitude=longitude, year=day.year, tz=tz
+    )
+
     times: list[str] = []
     azimuths: list[float] = []
     elevations: list[float] = []
@@ -255,7 +328,9 @@ def compute_shade_profile(
         taus.append(round(tau, 3))
 
     if not azimuths:
-        return _empty_profile(channel, day, tau_threshold)
+        return _empty_profile(
+            channel, day, tau_threshold, axis_az_min, axis_az_max
+        )
 
     # Horizon lines on a fixed azimuth grid across the daylight azimuth span.
     # At the target mid-latitudes (poleward of the tropics, DE/AT/CH) the daytime
@@ -322,4 +397,6 @@ def compute_shade_profile(
         ATTR_SP_HORIZON_AZIMUTH: horizon_az,
         ATTR_SP_STATIC_HORIZON: static_horizon,
         ATTR_SP_SHADE_HORIZON: shade_horizon,
+        ATTR_SP_AXIS_AZ_MIN: axis_az_min,
+        ATTR_SP_AXIS_AZ_MAX: axis_az_max,
     }

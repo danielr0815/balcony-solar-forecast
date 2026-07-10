@@ -33,6 +33,8 @@ from custom_components.balcony_solar_forecast import date as date_mod  # noqa: E
 from custom_components.balcony_solar_forecast import select as select_mod  # noqa: E402
 from custom_components.balcony_solar_forecast import sensor as sensor_mod  # noqa: E402
 from custom_components.balcony_solar_forecast.const import (  # noqa: E402
+    ATTR_SP_AXIS_AZ_MAX,
+    ATTR_SP_AXIS_AZ_MIN,
     ATTR_SP_AZIMUTH,
     ATTR_SP_HORIZON_AZIMUTH,
     ATTR_SP_SHADE_HORIZON,
@@ -337,7 +339,9 @@ def test_sensor_available_even_when_update_failed():
     assert s.available is True
 
 
-def test_sensor_unrecorded_attributes_are_exactly_the_seven_arrays():
+def test_sensor_unrecorded_attributes_are_exactly_the_curve_and_axis_attrs():
+    # The seven per-selection curve arrays PLUS the two year-stable axis bounds
+    # (constant site geometry — recorder history is noise) are excluded.
     assert sensor_mod.ShadeProfileSensor._unrecorded_attributes == frozenset(
         {
             ATTR_SP_TIME,
@@ -347,6 +351,8 @@ def test_sensor_unrecorded_attributes_are_exactly_the_seven_arrays():
             ATTR_SP_HORIZON_AZIMUTH,
             ATTR_SP_STATIC_HORIZON,
             ATTR_SP_SHADE_HORIZON,
+            ATTR_SP_AXIS_AZ_MIN,
+            ATTR_SP_AXIS_AZ_MAX,
         }
     )
 

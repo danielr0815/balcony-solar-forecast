@@ -48,6 +48,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    ATTR_SP_AXIS_AZ_MAX,
+    ATTR_SP_AXIS_AZ_MIN,
     ATTR_SP_AZIMUTH,
     ATTR_SP_HORIZON_AZIMUTH,
     ATTR_SP_SHADE_HORIZON,
@@ -888,7 +890,9 @@ class ShadeProfileSensor(BalconyForecastEntity, SensorEntity):
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_icon = "mdi:sun-angle"
     # The bulky curve arrays are kept out of the recorder (mirrors the energy
-    # sensors' curve dicts) via _unrecorded_attributes + recorder.py.
+    # sensors' curve dicts) via _unrecorded_attributes + recorder.py. The two
+    # year-stable axis bounds ride along: constant site geometry, so their
+    # recorder history is pure noise.
     _unrecorded_attributes = frozenset(
         {
             ATTR_SP_TIME,
@@ -898,6 +902,8 @@ class ShadeProfileSensor(BalconyForecastEntity, SensorEntity):
             ATTR_SP_HORIZON_AZIMUTH,
             ATTR_SP_STATIC_HORIZON,
             ATTR_SP_SHADE_HORIZON,
+            ATTR_SP_AXIS_AZ_MIN,
+            ATTR_SP_AXIS_AZ_MAX,
         }
     )
 

@@ -21,6 +21,8 @@ from datetime import UTC, date, timedelta, timezone
 
 import pytest
 from balcony_solar_forecast.const import (
+    ATTR_SP_AXIS_AZ_MAX,
+    ATTR_SP_AXIS_AZ_MIN,
     SHADE_PROFILE_TAU_THRESHOLD,
 )
 from balcony_solar_forecast.core import horizon as horizon_mod
@@ -294,6 +296,99 @@ def test_unknown_channel_falls_back_to_static_prior():
     assert p["has_learned_data"] is False
     # No horizon + no learned bin for this channel => pure static prior (1.0).
     assert all(t == 1.0 for t in p["transmittance"])
+
+
+# ---------------------------------------------------------------------------
+# Year-stable x-axis: widest daylight azimuth span of the whole year (SPEC §15)
+# ---------------------------------------------------------------------------
+
+
+def test_axis_domain_mid_northern_is_wide():
+    # A mid-northern site: summer sunrise is well NE (< 90) and sunset well NW
+    # (> 270), so the year's widest daylight azimuth span reaches both.
+    lo, hi = shadeprofile.axis_azimuth_domain(
+        latitude=LAT, longitude=LON, year=2026, tz=TZ
+    )
+    assert lo < 90.0
+    assert hi > 270.0
+    assert lo < hi
+    # Rounded to 2 decimals, as documented.
+    assert lo == round(lo, 2)
+    assert hi == round(hi, 2)
+
+
+def test_axis_domain_contains_equinox_and_winter_spans():
+    # The whole-year domain must CONTAIN every single date's daylight azimuth
+    # span, so the axis never rescales and no sample falls off the plot. We check
+    # an equinox-ish date and a winter date (both strictly inside the June-wide
+    # span). NOT the summer solstice itself: the domain uses a coarse 10-min
+    # sweep while a per-date profile samples finer, so a solstice sample can sit a
+    # hair outside — which is exactly why the CARD defensively unions the two.
+    plane = _south_wall_plane()
+    lo, hi = shadeprofile.axis_azimuth_domain(
+        latitude=LAT, longitude=LON, year=2026, tz=TZ
+    )
+    for day in (date(2026, 3, 20), WINTER):
+        p = _profile(plane, day=day)
+        assert p["sample_count"] > 0
+        assert lo <= min(p["azimuth"])
+        assert max(p["azimuth"]) <= hi
+
+
+def test_axis_domain_southern_hemisphere_is_comparably_wide():
+    # Hemisphere-agnostic: at lat -35 the December (southern-summer) solstice
+    # supplies the wide span (the noon sun crosses through the north, so daylight
+    # azimuths sweep across 0/360). The domain is comparably wide to the northern
+    # site — min well below 90, max well above 270.
+    lo, hi = shadeprofile.axis_azimuth_domain(
+        latitude=-35.0, longitude=LON, year=2026, tz=TZ
+    )
+    assert lo < 90.0
+    assert hi > 270.0
+
+
+def test_profile_carries_axis_keys_populated_and_empty():
+    # The exact ATTR_SP_ strings the card reads, present in BOTH branches.
+    assert ATTR_SP_AXIS_AZ_MIN == "axis_azimuth_min"
+    assert ATTR_SP_AXIS_AZ_MAX == "axis_azimuth_max"
+
+    lo, hi = shadeprofile.axis_azimuth_domain(
+        latitude=LAT, longitude=LON, year=SUMMER.year, tz=TZ
+    )
+
+    # Populated profile: the two keys equal the standalone helper for the year.
+    p = _profile(_south_wall_plane(), day=SUMMER)
+    assert p[ATTR_SP_AXIS_AZ_MIN] == lo
+    assert p[ATTR_SP_AXIS_AZ_MAX] == hi
+
+    # Empty (polar-night) profile still carries the axis bounds: pure site
+    # geometry, independent of whether THIS day has daylight. The June solstice
+    # (polar day at lat 80) supplies the span even though December is dark.
+    empty = shadeprofile.compute_shade_profile(
+        plane=PlaneConfig(name="P", azimuth_deg=180.0, tilt_deg=90.0, wp=400.0),
+        shademap=ShademapState(),
+        channel="P",
+        latitude=80.0,
+        longitude=0.0,
+        day=WINTER,
+        tz=UTC,
+    )
+    assert empty["sample_count"] == 0
+    epLo, epHi = shadeprofile.axis_azimuth_domain(
+        latitude=80.0, longitude=0.0, year=WINTER.year, tz=UTC
+    )
+    assert empty[ATTR_SP_AXIS_AZ_MIN] == epLo
+    assert empty[ATTR_SP_AXIS_AZ_MAX] == epHi
+    # The June polar day yields daylight, so the bounds are real (not the
+    # degenerate 0/360 fallback).
+    assert (epLo, epHi) != (0.0, 360.0)
+
+
+# NOTE: the degenerate (0.0, 360.0) fallback (NEITHER solstice yields daylight)
+# is not exercised because it is unreachable for any real latitude: on June 21
+# every site with lat > -66.6° has daylight and on Dec 21 every site with
+# lat < 66.6° does, and no latitude is simultaneously above 66.6° and below
+# -66.6°. So at least one solstice always contributes a daylight sample.
 
 
 # ---------------------------------------------------------------------------

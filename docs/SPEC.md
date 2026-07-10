@@ -593,6 +593,15 @@ statt der Registrierung ein INFO-Hinweis mit der manuell einzutragenden
 Ressourcen-Zeile geloggt. Die Registrierung ist ein Zusatznutzen, nie ein
 Setup-Blocker: jeder Fehler wird geschluckt und protokolliert.
 
+Seit v0.9 fixiert die Karte ihre x-Achse auf die **jahresstabile**
+Tageslicht-Azimutspanne (Minimum/Maximum aus beiden Sonnenwenden, Python-seitig
+als `axis_azimuth_min`/`axis_azimuth_max` berechnet und mit der Tages-Datenspanne
+defensiv vereinigt), sodass die Sonnenbahn über Datumswechsel hinweg vergleichbar
+bleibt statt saisonal umzuskalieren. Zusätzlich zeigt ein **Hover-Cursor** (SVG-
+Overlay über der Plot-Fläche, per Maus/Touch) am nächstgelegenen Bahn-Sample ein
+Fadenkreuz plus eine feste Ablese-Zeile mit Uhrzeit, Azimut samt Himmelsrichtung,
+Verschattung in % (τ) und Elevation.
+
 ### 15.5 Dashboard-Installation per Aktion (Ein-Klick)
 
 Statt das Referenz-YAML zu kopieren und die Objekt-IDs von Hand anzupassen,

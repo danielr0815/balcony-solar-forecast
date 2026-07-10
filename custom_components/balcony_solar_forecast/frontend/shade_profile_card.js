@@ -50,6 +50,11 @@ const A_TIME = "time";
 const A_HORIZON_AZIMUTH = "horizon_azimuth";
 const A_SHADE_HORIZON = "shade_horizon";
 const A_STATIC_HORIZON = "static_horizon";
+// Year-stable x-axis bounds (widest daylight azimuth span of the whole year at
+// the site, both solstices — computed Python-side). Fixing the axis to these
+// keeps the sun path comparable across dates instead of rescaling per season.
+const A_AXIS_AZ_MIN = "axis_azimuth_min";
+const A_AXIS_AZ_MAX = "axis_azimuth_max";
 
 // Entity auto-discovery patterns (entity_id shapes; the device slug already
 // carries "balcony_solar_forecast", so a loose contains-match is safe).
@@ -66,6 +71,10 @@ const I18N = {
     noEntities:
       "No shade-profile entities found — is the Balcony Solar Forecast integration set up?",
     noSamples: "No daylight samples for this date.",
+    hoverIdle: "Hover the chart for details",
+    hoverShading: "Shading",
+    hoverElevation: "Elevation",
+    compass: ["N", "NE", "E", "SE", "S", "SW", "W", "NW"],
   },
   de: {
     module: "Modul",
@@ -74,6 +83,10 @@ const I18N = {
     noEntities:
       "Keine Verschattungsprofil-Entitäten gefunden — ist die Integration „Balcony Solar Forecast“ eingerichtet?",
     noSamples: "Keine Tageslicht-Datenpunkte für dieses Datum.",
+    hoverIdle: "Über das Diagramm fahren für Details",
+    hoverShading: "Verschattung",
+    hoverElevation: "Elevation",
+    compass: ["N", "NO", "O", "SO", "S", "SW", "W", "NW"],
   },
 };
 
@@ -220,7 +233,20 @@ class BalconyShadeProfileCard extends HTMLElement {
     }
 
     body.appendChild(this._controls(hass, ids, s, sel, d, t));
+    // Fixed-height hover status line (idle hint when not hovering); lives in the
+    // header area so the crosshair readout never shifts the layout. Kept on
+    // `this` so the plot's hover handler can update it without a re-render.
+    this._readoutEl = this._statusLine(t);
+    body.appendChild(this._readoutEl);
     body.appendChild(this._plot(s, t));
+  }
+
+  /** Fixed-height status readout, starting on the idle hint. */
+  _statusLine(t) {
+    const div = document.createElement("div");
+    div.className = "readout idle";
+    div.textContent = t.hoverIdle;
+    return div;
   }
 
   _style() {
@@ -247,6 +273,13 @@ class BalconyShadeProfileCard extends HTMLElement {
         color: var(--primary-text-color); font-weight: 600; white-space: nowrap;
       }
       .plot { width: 100%; height: auto; display: block; }
+      .readout {
+        min-height: 1.4em; line-height: 1.4em;
+        padding: 0 0 8px; color: var(--primary-text-color);
+        font-size: 0.9rem; font-variant-numeric: tabular-nums;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .readout.idle { color: var(--secondary-text-color); font-style: italic; }
       .msg {
         padding: 24px 8px; text-align: center;
         color: var(--secondary-text-color);
@@ -373,6 +406,19 @@ class BalconyShadeProfileCard extends HTMLElement {
     for (let i = 0; i < nHor; i++) azValues.push(horAz[i]);
     let xMin = Math.min(...azValues);
     let xMax = Math.max(...azValues);
+    // Year-stable x-axis: union the site's whole-year daylight azimuth span
+    // (both solstices, from the sensor) with this date's data span, so the axis
+    // does NOT rescale season to season and curves stay comparable across dates.
+    // The union is defensive — the year sweep is coarser than the per-date
+    // sampling, so a sample must never be able to fall outside the axis. When the
+    // attributes are absent or degenerate (max <= min), fall back to the plain
+    // per-date span.
+    const axisMin = Number(a[A_AXIS_AZ_MIN]);
+    const axisMax = Number(a[A_AXIS_AZ_MAX]);
+    if (Number.isFinite(axisMin) && Number.isFinite(axisMax) && axisMax > axisMin) {
+      xMin = Math.min(xMin, axisMin);
+      xMax = Math.max(xMax, axisMax);
+    }
     if (xMin === xMax) {
       xMin -= 1;
       xMax += 1;
@@ -470,6 +516,50 @@ class BalconyShadeProfileCard extends HTMLElement {
         dot.appendChild(title);
         el.appendChild(dot);
       }
+
+      // (5) hover crosshair + status readout. A transparent overlay over the
+      // plot area captures pointer moves; a dedicated group holds the crosshair
+      // line + highlight ring, rebuilt per hover (never a full card re-render).
+      const crosshair = svg("g", { class: "crosshair" });
+      el.appendChild(crosshair);
+      const overlay = svg("rect", {
+        x: m.left,
+        y: m.top,
+        width: plotW,
+        height: plotH,
+        fill: "transparent",
+        "pointer-events": "all",
+      });
+      el.appendChild(overlay);
+
+      // Context the single move handler reads; rebuilt each render so a hass
+      // push simply swaps it (the old SVG + its listeners are discarded when the
+      // shadow DOM is cleared on the next _render).
+      const ctx = {
+        svgEl: el,
+        crosshair,
+        readout: this._readoutEl,
+        t,
+        sunAz,
+        sunEl,
+        tau,
+        time,
+        n: nSun,
+        X,
+        Y,
+        xMin,
+        xMax,
+        m,
+        plotW,
+        plotH,
+        W,
+      };
+      const onMove = (ev) => this._hoverMove(ev, ctx);
+      const onLeave = () => this._hoverLeave(ctx);
+      overlay.addEventListener("mousemove", onMove);
+      overlay.addEventListener("mouseleave", onLeave);
+      overlay.addEventListener("touchstart", onMove, { passive: true });
+      overlay.addEventListener("touchmove", onMove, { passive: true });
     }
 
     // No sun-path samples but horizons drawn → annotate.
@@ -483,6 +573,91 @@ class BalconyShadeProfileCard extends HTMLElement {
       return box;
     }
     return el;
+  }
+
+  // --- hover crosshair ----------------------------------------------------
+
+  /** Pointer move over the plot → snap to the nearest sample, draw crosshair. */
+  _hoverMove(ev, ctx) {
+    const rect = ctx.svgEl.getBoundingClientRect();
+    if (!rect.width) return;
+    const clientX =
+      ev.touches && ev.touches.length ? ev.touches[0].clientX : ev.clientX;
+    if (typeof clientX !== "number") return;
+    // Map the pointer's client-x into the fixed viewBox, then invert the
+    // x-scale to an azimuth (the viewBox aspect is fixed, so no letterboxing).
+    const vbx = ((clientX - rect.left) / rect.width) * ctx.W;
+    const az =
+      ctx.xMin + ((vbx - ctx.m.left) / ctx.plotW) * (ctx.xMax - ctx.xMin);
+    // Nearest sun-path sample by azimuth (arrays ~150 long → a linear scan).
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < ctx.n; i++) {
+      const dd = Math.abs(ctx.sunAz[i] - az);
+      if (dd < bestD) {
+        bestD = dd;
+        best = i;
+      }
+    }
+    this._drawCrosshair(ctx, best);
+    ctx.readout.classList.remove("idle");
+    ctx.readout.textContent = this._hoverText(ctx, best);
+  }
+
+  /** Pointer left the plot → drop the crosshair group + restore the idle hint. */
+  _hoverLeave(ctx) {
+    const g = ctx.crosshair;
+    while (g.firstChild) g.removeChild(g.firstChild);
+    ctx.readout.classList.add("idle");
+    ctx.readout.textContent = ctx.t.hoverIdle;
+  }
+
+  /** (Re)build the crosshair group for the snapped sample index ``i``. */
+  _drawCrosshair(ctx, i) {
+    const g = ctx.crosshair;
+    while (g.firstChild) g.removeChild(g.firstChild);
+    const x = ctx.X(ctx.sunAz[i]);
+    const y = ctx.Y(ctx.sunEl[i]);
+    // (a) vertical crosshair line across the whole plot height.
+    g.appendChild(
+      svg("line", {
+        x1: x,
+        y1: ctx.m.top,
+        x2: x,
+        y2: ctx.m.top + ctx.plotH,
+        stroke: "var(--secondary-text-color)",
+        "stroke-width": "1",
+        opacity: "0.6",
+        "stroke-dasharray": "4 3",
+      }),
+    );
+    // (b) highlight ring around the snapped sample's dot.
+    g.appendChild(
+      svg("circle", {
+        cx: x,
+        cy: y,
+        r: "6",
+        fill: "none",
+        stroke: "var(--primary-text-color)",
+        "stroke-width": "2",
+      }),
+    );
+  }
+
+  /** Status readout string for the snapped sample (localized compass + τ). */
+  _hoverText(ctx, i) {
+    const t = ctx.t;
+    const az = Number(ctx.sunAz[i]);
+    const el = Number(ctx.sunEl[i]);
+    const tau = Number(ctx.tau[i]);
+    const sector = ((Math.round(az / 45) % 8) + 8) % 8;
+    const compass = (t.compass && t.compass[sector]) || "";
+    const shadingPct = Math.round((1 - tau) * 100);
+    return (
+      `${ctx.time[i]} · ${Math.round(az)}° ${compass} · ` +
+      `${t.hoverShading} ${shadingPct} % (τ ${tau.toFixed(2)}) · ` +
+      `${t.hoverElevation} ${Math.round(el)}°`
+    );
   }
 
   /** Axis frame: gridlines, x ticks every 30° (+ E/S/W), y ticks every 15°. */
