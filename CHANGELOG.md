@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Reconfigure flow.** Structural setup (location, update cadences, the full
+  site object) is now edited via the integration's "Reconfigure" action
+  straight into `entry.data` (HA quality-scale pattern); stale structural keys
+  left in `entry.options` by the legacy options flow are stripped atomically on
+  the first reconfigure. The options dialog is slimmed to runtime tunables
+  (learner switches, quantile bands, comparison sensors) and preserves existing
+  option keys so legacy entries keep their live site until reconfigured.
+- **Structured comparison-sensor editor.** The scoreboard comparison list is a
+  proper per-row form (name + entity picker filtered to `sensor`) instead of a
+  raw object editor.
+- **CONTRIBUTING.md** (hand-formatting policy, SPEC-is-contract rule, dev env,
+  test architecture, release process) and a real HACS store page: the README
+  gains installation + configuration sections and links the previously
+  orphaned `docs/BACKFILL.md`.
 - **ASHRAE incidence-angle modifier on beam + circumsolar** (`IAM_B0` = 0.05,
   SPEC §4). Glass reflection costs 5–15 % of the direct share at AOI > 60° —
   a large part of the day on 70–80° facade planes — and without the modifier
@@ -21,7 +35,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slow-active gating, tunables); the code's stale "§5" citations now point at
   it, and §4 records the IAM.
 
+- Tests for the previously uncovered SPEC §7 degradation ladder (status rungs,
+  fetch failure/success/coverage-refusal, end-to-end cached/unavailable paths,
+  learner-hook composition) and for the initial config-flow submit path
+  (including the lat/lon-into-site merge that prevents forecasting for the
+  wrong location), plus the channel-dropout gates.
+
 ### Changed
+- **Coordinator split into concern-group modules** (pure code motion, no
+  behaviour change): the 2900-line `coordinator.py` now delegates to
+  `_actuals.py` (LTS reader + dropout gates), `_nightly.py` (training/guard
+  sweep), `_scoreboard_glue.py` (leak-free scorer) and `_glue_util.py` (shared
+  helpers).
+
 - **One shared hourly-kc reduction for both training paths**
   (`clearsky.hourly_kc`, the clear-sky-energy-weighted mean). The live nightly
   trainer previously collapsed each hour to its final slot's kc — the highest-
@@ -42,6 +68,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outages.
 
 ### Fixed
+- **HTTP 429 from Open-Meteo is now retried and Retry-After honoured.** 429 was
+  misclassified as a permanent client error; the fetcher now treats it as
+  transient, honours a parseable delta-seconds Retry-After exactly (instead of
+  jittered backoff), and never stalls the recompute tick longer than 30 s — a
+  longer server wait defers to the coordinator's own cadence with the last-good
+  cache serving (SPEC §7).
 - **Comparison-MAE sensor object-id pinning actually works now.** The formerly
   used `_attr_suggested_object_id` does not exist in HA 2026 and was silently
   ignored; the id is now pinned via a pre-set `entity_id` (the supported
@@ -77,13 +109,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installs) is replaced by a guard that fails the release when the tag does not
   match the tagged commit's manifest/pyproject/const version strings. Also
   removes the unpinned third-party push action.
-
-### Added
-- Tests for the previously uncovered SPEC §7 degradation ladder (status rungs,
-  fetch failure/success/coverage-refusal, end-to-end cached/unavailable paths,
-  learner-hook composition) and for the initial config-flow submit path
-  (including the lat/lon-into-site merge that prevents forecasting for the
-  wrong location), plus the channel-dropout gates.
 
 ## [0.5.0] - 2026-07-09
 
