@@ -146,6 +146,21 @@
           "fetch_interval_seconds": "Wie oft Open-Meteo abgefragt wird (Standard 1800 = 30 min).",
           "recompute_interval_seconds": "Wie oft die Prognose neu gerechnet wird (Standard 900 = 15 min)."
         }
+      },
+      "reconfigure": {
+        "title": "Balkon-Solar-Prognose neu konfigurieren",
+        "description": "Die strukturelle Einrichtung bearbeiten: Standort, Aktualisierungsintervalle und die vollständige Standort-Konfiguration (Ebenen, Horizonttabellen, WR-Gruppen). Die Laufzeit-Stellgrößen – Lerner-Schalter, Quantilbänder und Vergleichssensoren – liegen im Optionen-Dialog („Konfigurieren“). Der Name bleibt nach der Einrichtung unveränderlich. Azimut: 0° = Nord, im Uhrzeigersinn (90° = Ost, 180° = Süd). Neigung: Grad gegen die Horizontale (90° = senkrecht).",
+        "data": {
+          "latitude": "Breitengrad",
+          "longitude": "Längengrad",
+          "fetch_interval_seconds": "Abrufintervall Wetterdaten (Sekunden)",
+          "recompute_interval_seconds": "Neuberechnungsintervall (Sekunden)",
+          "site": "Standort-Konfiguration (Ebenen, Horizont, WR-Gruppen)"
+        },
+        "data_description": {
+          "fetch_interval_seconds": "Wie oft Open-Meteo abgefragt wird (Standard 1800 = 30 min).",
+          "recompute_interval_seconds": "Wie oft die Prognose neu gerechnet wird (Standard 900 = 15 min)."
+        }
       }
     },
     "error": {
@@ -176,14 +191,9 @@
   "options": {
     "step": {
       "init": {
-        "title": "Balkon-Solar-Prognose bearbeiten",
-        "description": "Standort, Intervalle, die vollständige Standort-Konfiguration und die Lernschichten anpassen. Der Name bleibt nach der Einrichtung unveränderlich.",
+        "title": "Balkon-Solar-Prognose – Optionen",
+        "description": "Nur Laufzeit-Stellgrößen: die Lernschichten, Quantilbänder und Vergleichssensoren. Die strukturelle Einrichtung (Standort, Intervalle, die vollständige Standort-Konfiguration) ist nach „Neu konfigurieren“ im Drei-Punkte-Menü der Integration umgezogen.",
         "data": {
-          "latitude": "Breitengrad",
-          "longitude": "Längengrad",
-          "fetch_interval_seconds": "Abrufintervall Wetterdaten (Sekunden)",
-          "recompute_interval_seconds": "Neuberechnungsintervall (Sekunden)",
-          "site": "Standort-Konfiguration (Ebenen, Horizont, WR-Gruppen)",
           "fast_learner_enabled": "Schneller Lerner (Intraday-Korrektur)",
           "slow_learner_enabled": "Shademap-Lerner (kanalweise Verschattungskarte)",
           "day_ahead_bias_enabled": "Day-ahead-Bias-Korrektur",

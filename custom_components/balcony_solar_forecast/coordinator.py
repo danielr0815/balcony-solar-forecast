@@ -29,23 +29,47 @@ degradation is never silent (SPEC §5 Schutzmechanismen).
 from __future__ import annotations
 
 import logging
-import math
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, State, callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
+# Extracted concern groups (HA-glue level). The coordinator keeps every public /
+# tested method name as a thin delegate into these modules (code motion only —
+# SPEC unchanged); they reach coordinator state back through the ``coord`` param.
+from . import _actuals, _nightly, _scoreboard_glue
+from ._actuals import (
+    _actuals_from_stats,  # noqa: F401  re-exported for tests
+    _is_frozen_channel,  # noqa: F401  re-exported for tests
+)
+
+# Pure helpers moved to _glue_util; imported for the coordinator's own use AND
+# re-exported so the historical ``coordinator.<name>`` import path / monkeypatch
+# surface the tests rely on keeps resolving (# noqa: F401 = re-export only).
+from ._glue_util import (
+    _UNUSABLE_STATES,  # noqa: F401
+    _daily_kwh_from_hourly,  # noqa: F401
+    _filter_hourly_to_local_day,  # noqa: F401
+    _hour_key,  # noqa: F401
+    _iso,
+    _local_daily_kwh,
+    _power_at,  # noqa: F401
+    _power_now,
+    _raw_power_now,
+    _replace_drift,
+    _round3,
+    _slot_index_at,
+    _usable_power,
+)
+from ._nightly import _NIGHTLY_HOUR, _NIGHTLY_MINUTE
 from .const import (
-    CLOUD_CLASS_CLEAR,
-    COLLAPSE_FORECAST_MIN_WH,
-    COLLAPSE_MEASURED_MAX_FRAC,
     CONF_COMPARISON_SENSORS,
     CONF_FETCH_INTERVAL,
     CONF_QUANTILES_ENABLED,
@@ -67,18 +91,12 @@ from .const import (
     DATA_KEY_QUANTILE_CURVES,
     DATA_KEY_RAW_HOURLY_WH,
     DATA_KEY_SCOREBOARD,
-    DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE,
     DAY_AHEAD_BIAS_NEUTRAL,
-    DAY_PART_MIDDAY,
     DEFAULT_QUANTILES_ENABLED,
     DEFAULT_SCOREBOARD_ENABLED,
     DEFAULT_SCOREBOARD_GATE_MARGIN,
     DEFAULT_SCOREBOARD_WINDOW_DAYS,
     DOMAIN,
-    DRIFT_LOSS_MARGIN,
-    DRIFT_LOSS_MIN_ABS_WH,
-    DRIFT_LOSS_STREAK_DAYS,
-    DRIFT_WINDOW_DAYS,
     FETCH_INTERVAL_SECONDS,
     FORECAST_DAYS,
     FORECAST_RESP_KEY_P10,
@@ -89,8 +107,6 @@ from .const import (
     INTRADAY_TRAILING_WINDOW_MINUTES,
     ISSUE_FAST_LEARNER_DISABLED,
     ISSUE_SLOW_LEARNER_DISABLED,
-    LABEL_FROZEN_MIN_REPEATS,
-    LABEL_FROZEN_STALE_SECONDS,
     LEARNER_LAYER_DAY_AHEAD,
     LEARNER_LAYER_FAST,
     LEARNER_LAYER_SLOW,
@@ -100,10 +116,7 @@ from .const import (
     LEARNER_STATUS_OFF,
     MAX_PAYLOAD_AGE_HOURS,
     MAX_PHYSICS_FALLBACK_AGE_HOURS,
-    NIGHTLY_CATCHUP_MAX_DAYS,
     RECOMPUTE_INTERVAL_SECONDS,
-    SCOREBOARD_COMPARISON_UNIT_KWH,
-    SHADEMAP_MEASURED_CLEAR_MIN_FRAC,
     STATUS_CACHED,
     STATUS_FRESH,
     STATUS_PHYSICS_FALLBACK,
@@ -117,7 +130,6 @@ from .core import (
     IssuedSnapshot,
     LearnerConfig,
     LearnerHooks,
-    LearnerSnapshot,
     PlaneHourlyModeled,
     QuantileBands,
     QuantileState,
@@ -131,9 +143,6 @@ from .core import (
 from .core import bias as bias_mod
 from .core import (
     quantiles as quantiles_mod,
-)
-from .core import (
-    scoreboard as scoreboard_mod,
 )
 from .core import (
     shademap as shademap_mod,
@@ -151,38 +160,12 @@ from .store import ForecastStore
 
 _LOGGER = logging.getLogger(__name__)
 
-# Nightly training/snapshot job local wall-clock (SPEC §4: ~01:30 local).
-_NIGHTLY_HOUR = 1
-_NIGHTLY_MINUTE = 30
-# Comparison read horizon: the engine snapshot is issued at the nightly hour, so
-# each comparison is read at the SAME day-ahead horizon (the first usable state
-# at/after the issue time), never the settled end-of-day value — a live-updating
-# "today" forecast sensor that blends actuals intraday must not be judged on a
-# value that has converged toward the measured truth (biases the gate).
-_COMPARISON_ISSUE_HOUR = _NIGHTLY_HOUR
-_COMPARISON_ISSUE_MINUTE = _NIGHTLY_MINUTE
-# How long after the issue time to look for the first usable comparison state
-# (a comparison that does not refresh right at 01:30 is still captured).
-_COMPARISON_ISSUE_WINDOW_HOURS = 8
-# A comparison daily-kWh value this many times the site's physical daily ceiling
-# (installed Wp x 24 h, expressed in kWh) is discarded as a unit artifact /
-# garbage rather than scored (e.g. a Wh-reporting sensor read as kWh).
-_COMPARISON_MAX_PHYSICAL_FACTOR = 1.0
-# Scoreboard leakage guard: a day is only scored when its issued snapshot was
-# logged BEFORE this local-hour cutoff of the scored day. A snapshot issued
-# later (e.g. a mid-day startup catch-up recomputed from a fresh Open-Meteo
-# fetch that has assimilated the scored day's observed weather) is a
-# hindcast/nowcast, not a day-ahead forecast, and must not flatter the engine.
-_SCOREBOARD_ISSUE_CUTOFF_HOUR = 6
-
-# Live-actual state guards: states we never treat as a measurement.
-_UNUSABLE_STATES = ("unknown", "unavailable", "none", "")
-
 
 # ---------------------------------------------------------------------------
-# Duck-typed sample containers handed to core/bias.py. The bias contract only
+# Duck-typed sample container handed to core/bias.py. The bias contract only
 # requires attribute access (SPEC §5: "may realise it as a frozen dataclass");
 # the coordinator builds these so the two owners share only the const tunables.
+# (The nightly ``_DayAheadSample`` sibling lives in ``_nightly.py``.)
 # ---------------------------------------------------------------------------
 
 
@@ -193,16 +176,6 @@ class _IntradaySample:
     at: datetime
     measured_kc: float
     modeled_kc: float
-    modeled_wh: float
-
-
-@dataclass(frozen=True, slots=True)
-class _DayAheadSample:
-    """One nightly day-part-aggregated observation for the RLS bias."""
-
-    cloud_class: str
-    day_part: str
-    measured_wh: float
     modeled_wh: float
 
 
@@ -1227,229 +1200,24 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     # ------------------------------------------------------------------
 
     async def _async_nightly_job(self, now: datetime | None = None) -> None:
-        """Snapshot today's issued forecast, log actuals, train + guard.
-
-        Order (all idempotent, keyed by ISO date):
-          1) snapshot the issued (v2 dual-curve) forecast for today;
-          2) read yesterday's measured per-module energy from LTS (day gate);
-          3) take a rollback snapshot of the pre-training learner state;
-          4) collapse detector on yesterday (freeze BOTH learners today if
-             dropout);
-          5) train the day-ahead RLS bias + the shademap under label gates;
-          6) drift monitor: update rolling MAE, auto-disable a losing layer.
-
-        Every step is wrapped so a single failure never aborts the rest or
-        crashes HA (SPEC §5). Recorder reads run in the recorder executor.
-        """
-        local_now = dt_util.as_local(now or dt_util.utcnow())
-        today = local_now.date()
-
-        self._load_learner_states()
-
-        # 1) Snapshot the forecast we are issuing today (v2 dual-curve).
-        await self._snapshot_issued(today)
-
-        # 2-6) Catch-up sweep: run the actuals-read + training/guard logic for
-        # every closed day back to the last one we processed, bounded to a few
-        # days (SPEC §5 idempotent/date-keyed). A missed 01:30 job (HA down at
-        # night, multi-day outage) would otherwise silently lose those days'
-        # training, drift and collapse detection.
-        yesterday = today - timedelta(days=1)
-        for day in self._catchup_days(yesterday):
-            iso = day.isoformat()
-            if not self._store.has_actuals(iso):
-                read = await self._read_actuals_safe(day)
-                if read is not None:
-                    daily, hourly = read
-                    # A day that failed the frozen-channel gate returns empty;
-                    # do NOT record it, so a later manual re-run can fill it.
-                    if daily:
-                        self._store.record_actuals(iso, daily)
-                    if hourly:
-                        self._store.record_hourly_actuals(iso, hourly)
-            try:
-                await self._train_and_guard(day)
-            except Exception:  # pragma: no cover - never crash the scheduler
-                _LOGGER.warning(
-                    "Nightly training/guard failed for %s", day, exc_info=True
-                )
-            # Skill scoreboard (SPEC §9/§10): score this closed day's engine
-            # forecast-as-issued + each comparison AS IT STOOD that day against
-            # the measured site energy, and persist it into the rolling window.
-            # Independently guarded so a scoreboard failure never aborts the
-            # training sweep (and vice-versa).
-            try:
-                await self._score_scoreboard_day(day)
-            except Exception:  # pragma: no cover - never crash the scheduler
-                _LOGGER.warning(
-                    "Nightly scoreboard scoring failed for %s", day, exc_info=True
-                )
+        """Snapshot today's issued forecast, log actuals, train + guard."""
+        return await _nightly.async_nightly_job(self, now)
 
     def _catchup_days(self, latest: date) -> list[date]:
-        """Closed local days to (re)process, oldest first, bounded and idempotent.
-
-        Sweeps from the day after the newest already-recorded actuals up to
-        ``latest`` (yesterday), capped at NIGHTLY_CATCHUP_MAX_DAYS so a long
-        outage does not fan out unboundedly. Every step keyed by ISO date is
-        idempotent, so re-processing an already-trained day is safe (the
-        date-keyed store guards make it a no-op where state already reflects it).
-        """
-        try:
-            recorded = self._store.actuals_dates()
-        except Exception:  # pragma: no cover - defensive
-            recorded = []
-        start = latest - timedelta(days=NIGHTLY_CATCHUP_MAX_DAYS - 1)
-        if recorded:
-            newest = date.fromisoformat(recorded[-1])
-            candidate = newest + timedelta(days=1)
-            if candidate > start:
-                start = candidate
-        if start > latest:
-            start = latest
-        days: list[date] = []
-        d = start
-        while d <= latest:
-            days.append(d)
-            d += timedelta(days=1)
-        return days
+        """Closed local days to (re)process, oldest first, bounded/idempotent."""
+        return _nightly.catchup_days(self, latest)
 
     async def _snapshot_issued(self, today: date) -> None:
         """Record today's issued forecast as a v2 dual-curve snapshot."""
-        if self.data is None or self._store.get_issued(today.isoformat()) is not None:
-            return
-        # Slice the full-horizon curves to the snapshot's own LOCAL day so the
-        # 90-day issued ring never carries 4 days of hours per snapshot (store
-        # size / flash-wear) and every nightly consumer sees exactly one day.
-        iso = today.isoformat()
-        raw_hourly = _filter_hourly_to_local_day(
-            self.data.get(DATA_KEY_RAW_HOURLY_WH, {}), iso)
-        corrected_hourly = _filter_hourly_to_local_day(
-            self.data.get(DATA_KEY_CORRECTED_HOURLY_WH, {}), iso)
-        snapshot = IssuedSnapshot(
-            issued_at=dt_util.utcnow().isoformat(),
-            status=str(self.data.get("status", "")),
-            raw_hourly_wh=raw_hourly,
-            corrected_hourly_wh=corrected_hourly,
-            raw_daily_kwh=_daily_kwh_from_hourly(raw_hourly),
-            corrected_daily_kwh=_daily_kwh_from_hourly(corrected_hourly),
-            per_plane=self._per_plane_modeled(iso),
-            cloud_class_by_hour=self._cloud_class_by_hour(iso),
-        )
-        self._store.record_issued(iso, snapshot.to_dict())
+        return await _nightly.snapshot_issued(self, today)
 
     def _cloud_class_by_hour(self, iso: str) -> dict[str, str]:
-        """Per-ISO-hour forecast cloud class for ``iso`` (day-ahead RLS input).
-
-        Derived from the cached weather series so the nightly RLS trains the
-        real (cloud class x day part) cell rather than a fixed "clear" label
-        (SPEC §5). A cloudy/fog/overcast day therefore trains the correct cell,
-        and a genuinely clear day is never routed to a fog-poisoned one. Best
-        effort: an unparseable weather image yields an empty map.
-        """
-        weather = self._cached_weather()
-        if weather is None:
-            return {}
-        out: dict[str, str] = {}
-        for slot in weather.slots:
-            start = dt_util.as_utc(slot.start)
-            if dt_util.as_local(start).date().isoformat() != iso:
-                continue
-            local = dt_util.as_local(start)
-            cc = bias_mod.classify_cloud(
-                cloud_low=slot.cloud_low, cloud_mid=slot.cloud_mid,
-                cloud_high=slot.cloud_high,
-                visibility_m=slot.visibility_m, month=local.month,
-            )
-            hkey = _hour_key(start)
-            # First writer per hour wins (slots within an hour share cloud data).
-            out.setdefault(hkey, cc)
-        return out
+        """Per-ISO-hour forecast cloud class for ``iso`` (day-ahead RLS input)."""
+        return _nightly.cloud_class_by_hour(self, iso)
 
     def _per_plane_modeled(self, iso: str) -> dict[str, PlaneHourlyModeled]:
-        """Per-plane hourly modeled beam/diffuse/ghi/kc for the shademap trainer.
-
-        Reconstructed from the last computed ForecastResult held on ``self`` via
-        ``_last_result``, sliced to the snapshot's LOCAL day ``iso``. The beam /
-        diffuse energy is sourced from the engine's UNGATED, unclamped,
-        un-factored reference series (``beam_ref_watts`` / ``diffuse_ref_watts``,
-        FIX-3): the shademap learns a beam-referenced T that REPLACES the static
-        tau, so the reference must be the raw geometric beam — otherwise T
-        self-references toward sqrt(true_t) and a wall bin (static tau 0) has ~0
-        modeled beam and is untrainable. Engine builds without the reference
-        export are simply not trained (no fallback to the gated series). When
-        ``_last_result`` is absent (v0.1 build), returns an empty mapping (SPEC
-        §6: attempt, not a blocker).
-        """
-        result = getattr(self, "_last_result", None)
-        if result is None:
-            return {}
-
-        # Site-level hourly kc via THE shared reduction (clearsky.hourly_kc):
-        # the clear-sky-energy-weighted mean over the hour's slots, the same
-        # estimator the offline backfill applies to its hourly data. The
-        # previous per-slot last-write-wins collapsed each hour to its FINAL
-        # slot — the highest-elevation slot of a morning hour but the LOWEST of
-        # an evening hour — so the quasi-clear gate was azimuth-asymmetric and
-        # diverged from the backfill. The slot GHI is recovered by inverting
-        # the engine's unclamped kc = ghi / haurwitz(midpoint elevation).
-        kc_samples: dict[str, list[tuple[float, float]]] = {}
-        site_kc = result.plane_results[0].kc if result.plane_results else ()
-        for i, start in enumerate(result.slot_starts):
-            if i >= len(site_kc):
-                break
-            start_utc = dt_util.as_utc(start)
-            if dt_util.as_local(start_utc).date().isoformat() != iso:
-                continue
-            mid = start_utc + timedelta(minutes=7, seconds=30)
-            _az, el = solpos.sun_position(
-                mid, self._site.latitude, self._site.longitude
-            )
-            hw = clearsky.haurwitz_ghi(el)
-            kc_samples.setdefault(_hour_key(start), []).append(
-                (site_kc[i] * hw, el)
-            )
-        kc_by_hour = {h: clearsky.hourly_kc(s) for h, s in kc_samples.items()}
-
-        out: dict[str, PlaneHourlyModeled] = {}
-        for pr in result.plane_results:
-            if not pr.beam_ref_watts and not pr.diffuse_ref_watts:
-                continue  # engine without the reference export: do NOT train
-            beam_wh: dict[str, float] = {}
-            diffuse_wh: dict[str, float] = {}
-            for i, start in enumerate(result.slot_starts):
-                if dt_util.as_local(dt_util.as_utc(start)).date().isoformat() != iso:
-                    continue
-                hkey = _hour_key(start)
-                if i < len(pr.beam_ref_watts):
-                    beam_wh[hkey] = beam_wh.get(hkey, 0.0) + pr.beam_ref_watts[i] * 0.25
-                if i < len(pr.diffuse_ref_watts):
-                    diffuse_wh[hkey] = diffuse_wh.get(hkey, 0.0) + pr.diffuse_ref_watts[i] * 0.25
-            # Store trim: the issued ring keeps 90 days of these — drop NIGHT
-            # hours (all-zero, nothing to train on: the trainer skips beam<=0
-            # anyway) and round to 0.01 Wh / 6-decimal kc, far below trainer
-            # noise, instead of 17-significant-digit floats.
-            keep = {
-                h
-                for h in set(beam_wh) | set(diffuse_wh) | set(kc_by_hour)
-                if beam_wh.get(h, 0.0) > 0.0
-                or diffuse_wh.get(h, 0.0) > 0.0
-                or kc_by_hour.get(h, 0.0) > 0.0
-            }
-            out[pr.name] = PlaneHourlyModeled(
-                beam_wh={
-                    h: round(v, 2) for h, v in beam_wh.items() if h in keep
-                },
-                diffuse_wh={
-                    h: round(v, 2) for h, v in diffuse_wh.items() if h in keep
-                },
-                ghi={},
-                kc={
-                    h: round(v, 6)
-                    for h, v in kc_by_hour.items()
-                    if h in keep
-                },
-            )
-        return out
+        """Per-plane hourly modeled beam/diffuse/ghi/kc for the shademap trainer."""
+        return _nightly.per_plane_modeled(self, iso)
 
     async def _read_actuals_safe(
         self, day: date
@@ -1462,426 +1230,49 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     async def _train_and_guard(self, day: date) -> None:
         """Steps 3-6 of the nightly job for a closed calendar ``day``."""
-        iso = day.isoformat()
-        # Idempotence guard (verify finding 2026-07-06): the startup catch-up
-        # re-sweeps the last processed day on EVERY restart / options reload,
-        # and neither the RLS update nor the drift-streak counters are
-        # internally idempotent — an unguarded re-run double-counts the same
-        # training sample and double-increments the loss streak (spurious
-        # auto-disable after 4 restarts on a bad-weather streak).
-        if self._store.is_day_trained(iso):
-            _LOGGER.debug("Training for %s already recorded; skipping", iso)
-            return
-        # The day whose SERVED forecast the geometric freeze protects: the day
-        # AFTER the analyzed collapse (snow still on the panels the next day).
-        next_iso = (day + timedelta(days=1)).isoformat()
-
-        issued = self._store.get_issued(iso)
-        actuals = self._store.get_actuals(iso)
-
-        # --- 3) Rollback snapshot (pre-training) --------------------------
-        # Take one snapshot per night, idempotently (date-keyed by taken-day).
-        self._maybe_push_rollback_snapshot(iso)
-
-        # --- 4) Collapse detector -----------------------------------------
-        # All channels ~0 while forecast high => snow / total dropout: freeze
-        # BOTH geometric learners for the FOLLOWING served day (SPEC §5), and
-        # skip training the geometric learners on the collapse day itself.
-        if self._is_collapse_day(iso, issued, actuals):
-            self._set_collapse_frozen_date(next_iso)
-            _LOGGER.info(
-                "Collapse detected for %s: freezing geometric learners for %s",
-                iso, next_iso,
-            )
-            # Still run the drift monitor so a persistently bad correction is
-            # caught; do NOT train the geometric learners on a collapse day.
-        else:
-            # A non-collapse day closes: clear any freeze it (or an earlier day)
-            # set that has not been superseded by a later collapse.
-            frozen = self._drift_state.collapse_frozen_date
-            if frozen is not None and frozen <= next_iso:
-                self._set_collapse_frozen_date(None)
-            # --- 5) Training under label gates ----------------------------
-            self._train_day_ahead(iso, issued, actuals)
-            self._train_shademap(iso, issued, actuals)
-
-        # --- 5b) Quantile bands (SPEC §6/§10) -----------------------------
-        # Sample the day's hourly relative errors (measured vs issued-CORRECTED)
-        # into the 90-day ring. Runs on every day (incl. collapse days: a
-        # dropout hour's relerr is legitimately near 0), inside the same
-        # date-keyed idempotence guard as the learners below.
-        self._train_quantiles_day(day)
-
-        # --- 6) Drift monitor --------------------------------------------
-        self._update_drift(iso, issued, actuals)
-
-        # Mark the day consumed ONLY when both inputs existed: a day whose
-        # actuals arrive later (LTS lag, manual re-run) must be retried by a
-        # future catch-up instead of being skipped forever.
-        if issued and actuals:
-            self._store.mark_day_trained(iso)
+        return await _nightly.train_and_guard(self, day)
 
     def _set_collapse_frozen_date(self, iso: str | None) -> None:
         """Persist the collapse-freeze date into DriftState (survives restart)."""
-        if self._drift_state.collapse_frozen_date == iso:
-            return
-        self._drift_state = _replace_drift(
-            self._drift_state, collapse_frozen_date=iso
-        )
-        self._persist_drift_state()
+        return _nightly.set_collapse_frozen_date(self, iso)
 
     # ------------------------------------------------------------------
     # Skill scoreboard (the kill-gate) — SPEC §9/§10
     # ------------------------------------------------------------------
 
     async def _score_scoreboard_day(self, day: date) -> None:
-        """Score one closed local ``day`` into the rolling scoreboard window.
-
-        NO-LEAKAGE (SPEC §9, the whole point of the gate):
-          * the ENGINE number is the forecast AS ISSUED for ``day`` — read from
-            the issued ring's snapshot logged during that day (the CORRECTED
-            served curve, sliced to the local day), NEVER recomputed with today's
-            learned state;
-          * each COMPARISON number is that comparison entity's own value AS IT
-            STOOD during ``day`` — read from its recorder history for that local
-            calendar day (the settled end-of-day forecast the consumer saw),
-            NEVER today's live state;
-          * the MEASURED number is the sum of the per-module actuals in the
-            actuals ring for ``day``.
-        Idempotent + date-keyed: a day already present in the ring is re-scored
-        (engine + measured are deterministic from the rings, so a re-run is a
-        no-op unless a late comparison read now succeeds). A missing comparison
-        is SKIPPED for the day (that source is unscored), never the whole day.
-        """
-        if not self._scoreboard_enabled:
-            return
-        iso = day.isoformat()
-        issued = self._store.get_issued(iso)
-        actuals = self._store.get_actuals(iso)
-        # Need both the issued snapshot and the measured actuals to score a day;
-        # a day missing either is retried by a later catch-up (like training).
-        if not issued or not actuals:
-            return
-
-        snap = IssuedSnapshot.from_dict(issued)
-        # LEAKAGE GUARD (SPEC §9): only score a day whose snapshot was issued
-        # before the early-morning cutoff of that local day. A snapshot issued
-        # later (a mid-day startup catch-up recomputed from a fresh weather fetch
-        # that has assimilated the scored day's observed weather) is a
-        # hindcast/nowcast, not a day-ahead forecast; leave the day UNSCORED so
-        # it never flatters the engine on the kill-gate.
-        if self._issued_after_cutoff(snap, day):
-            _LOGGER.debug(
-                "Skipping scoreboard for %s: snapshot issued after the "
-                "day-ahead cutoff (issued_at=%s)", iso, snap.issued_at,
-            )
-            return
-
-        # Engine AS ISSUED: the CORRECTED served hourly curve, sliced to the day.
-        corrected_hourly = _filter_hourly_to_local_day(
-            snap.corrected_hourly_wh or snap.raw_hourly_wh, iso
-        )
-        engine_kwh = sum(corrected_hourly.values()) / 1000.0
-        # Measured site energy for the day = sum of the per-module actuals.
-        measured_kwh = (
-            sum(
-                float(v)
-                for v in actuals.values()
-                if isinstance(v, (int, float))
-            )
-            / 1000.0
-        )
-        weather_class = self._dominant_weather_class(snap, iso)
-
-        # Engine hourly MAE: issued corrected hourly (Wh) vs measured hourly (Wh).
-        engine_hourly_mae = None
-        hourly_actuals = self._store_hourly_actuals(iso)
-        measured_hourly = self._site_measured_hourly(iso, hourly_actuals)
-        if measured_hourly:
-            engine_hourly_mae = scoreboard_mod.hourly_mae(
-                corrected_hourly, measured_hourly
-            )
-
-        # Comparisons AS THEY STOOD during the day (recorder history), cached in
-        # the comparison ring so a re-run does not re-hit the recorder. A
-        # TRANSIENT recorder failure here (DB locked by a nightly purge/backup)
-        # must NOT lose the whole day for the engine: engine + measured need no
-        # recorder, so we score them anyway and best-effort-merge the comparisons
-        # (a later re-run fills them in).
-        try:
-            comparison_kwh = await self._comparison_kwh_for_day(day)
-        except Exception:  # pragma: no cover - recorder is best-effort
-            _LOGGER.warning(
-                "Comparison read failed for %s; scoring engine/measured only",
-                iso, exc_info=True,
-            )
-            comparison_kwh = {}
-
-        day_score = scoreboard_mod.score_day(
-            iso_date=iso,
-            weather_class=weather_class,
-            measured_kwh=measured_kwh,
-            engine_kwh=engine_kwh,
-            comparison_kwh=comparison_kwh,
-            engine_hourly_mae=engine_hourly_mae,
-        )
-        # eMMC-wear guard (minor): a deterministic re-score with an identical
-        # DayScore (restart-heavy day, same rings) is a no-op — skip the write.
-        if self._scoreboard_state.days.get(iso) == day_score:
-            return
-        days = dict(self._scoreboard_state.days)
-        days[iso] = day_score
-        state = ScoreboardState(days=days, version=self._scoreboard_state.version)
-        # Trim to the configured window so the ring never grows unbounded.
-        state = scoreboard_mod.trim_window(
-            state, window_days=self._scoreboard_window_days
-        )
-        self._scoreboard_state = state
-        self._persist_scoreboard_state()
+        """Score one closed local ``day`` into the rolling scoreboard window."""
+        return await _scoreboard_glue.score_scoreboard_day(self, day)
 
     def _issued_after_cutoff(self, snap: IssuedSnapshot, day: date) -> bool:
-        """True when the snapshot was issued after the day-ahead cutoff of ``day``.
-
-        The cutoff is ``_SCOREBOARD_ISSUE_CUTOFF_HOUR`` local time of ``day``.
-        A snapshot with an unparseable / empty ``issued_at`` is treated as valid
-        (not after cutoff) — a legacy/v0.1 snapshot pre-dates the catch-up
-        recompute path this guard defends against.
-        """
-        issued_at = dt_util.parse_datetime(snap.issued_at or "")
-        if issued_at is None:
-            return False
-        cutoff = dt_util.start_of_local_day(
-            datetime(day.year, day.month, day.day)
-        ) + timedelta(hours=_SCOREBOARD_ISSUE_CUTOFF_HOUR)
-        return dt_util.as_utc(issued_at) > dt_util.as_utc(cutoff)
+        """True when the snapshot was issued after the day-ahead cutoff of ``day``."""
+        return _scoreboard_glue.issued_after_cutoff(self, snap, day)
 
     def _dominant_weather_class(self, snap: IssuedSnapshot, iso: str) -> str:
-        """Yesterday's DOMINANT cloud class from the issued snapshot (SPEC §9).
-
-        The issued snapshot stores the forecast cloud class per ISO-UTC hour
-        (``cloud_class_by_hour``); the dominant class is the one carrying the most
-        forecast ENERGY over the local day (weighted by the issued Wh per hour),
-        so nocturnal / near-zero-Wh hours cannot outvote the handful of daylight
-        hours where the PV error actually lives — a radiation-fog morning is filed
-        under 'fog', not 'clear'. Ties broken by the const CLOUD_CLASSES order.
-        Falls back to CLEAR when the snapshot carries no per-hour classes (v0.1
-        issued / empty), so a day is never left unstratified.
-        """
-        weight_by_hour = snap.corrected_hourly_wh or snap.raw_hourly_wh or {}
-        weights: dict[str, float] = {}
-        for hkey, cc in snap.cloud_class_by_hour.items():
-            dt = dt_util.parse_datetime(hkey)
-            if dt is None:
-                continue
-            if dt_util.as_local(dt_util.as_utc(dt)).date().isoformat() != iso:
-                continue
-            # Weight by issued Wh (daylight energy); a near-zero-Wh night hour
-            # contributes essentially nothing. Fall back to an equal +1 vote when
-            # no Wh curve exists so an all-zero-weight day still stratifies.
-            w = weight_by_hour.get(hkey, 0.0)
-            weights[cc] = weights.get(cc, 0.0) + (float(w) if w > 0.0 else 0.0)
-        if not any(v > 0.0 for v in weights.values()):
-            # No daylight-energy signal: fall back to an unweighted hour count so
-            # a Wh-less (legacy) snapshot still gets a class.
-            weights = {}
-            for hkey, cc in snap.cloud_class_by_hour.items():
-                dt = dt_util.parse_datetime(hkey)
-                if dt is None:
-                    continue
-                if dt_util.as_local(dt_util.as_utc(dt)).date().isoformat() != iso:
-                    continue
-                weights[cc] = weights.get(cc, 0.0) + 1.0
-        if not weights:
-            return CLOUD_CLASS_CLEAR
-        best_n = max(weights.values())
-        from .const import CLOUD_CLASSES
-
-        for cls in CLOUD_CLASSES:
-            if abs(weights.get(cls, 0.0) - best_n) < 1e-9:
-                return cls
-        # A class outside the canonical tuple (defensive): return any max.
-        return max(weights, key=lambda c: weights[c])
+        """Yesterday's DOMINANT cloud class from the issued snapshot (SPEC §9)."""
+        return _scoreboard_glue.dominant_weather_class(self, snap, iso)
 
     async def _comparison_kwh_for_day(self, day: date) -> dict[str, float]:
-        """Per-comparison daily-kWh AS IT STOOD during ``day`` (no leakage).
-
-        Uses the cached comparison ring when present (idempotent re-runs, and a
-        successful earlier read is authoritative); otherwise reads each
-        configured comparison entity's recorder history for the day's LOCAL
-        calendar and caches the result. A comparison with no usable recorded
-        state that day is ABSENT from the returned map (that source is unscored
-        for the day, SPEC §9), never a fabricated zero.
-        """
-        if not self._comparisons:
-            return {}
-        iso = day.isoformat()
-        cached = None
-        try:
-            cached = self._store.get_comparison(iso)
-        except Exception:  # pragma: no cover - defensive
-            cached = None
-        # Read only the comparisons not already cached (a renamed/added
-        # comparison mid-window is filled on its first close).
-        cached = dict(cached) if isinstance(cached, dict) else {}
-        missing = [c for c in self._comparisons if c.name not in cached]
-        if missing:
-            read = await self._async_read_comparison_history(day, missing)
-            if read:
-                cached.update(read)
-                try:
-                    self._store.record_comparison(iso, cached)
-                except Exception:  # pragma: no cover - defensive
-                    _LOGGER.debug(
-                        "Could not cache comparison ring for %s", iso, exc_info=True
-                    )
-        return cached
+        """Per-comparison daily-kWh AS IT STOOD during ``day`` (no leakage)."""
+        return await _scoreboard_glue.comparison_kwh_for_day(self, day)
 
     async def _async_read_comparison_history(
         self, day: date, comparisons: list[ComparisonConfig]
     ) -> dict[str, float]:
-        """Read each comparison's daily-kWh AT THE ENGINE'S HORIZON for ``day``.
-
-        FAIRNESS (SPEC §9, matched horizon): the engine is scored on its ~01:30
-        issued snapshot, so each comparison is read at the SAME day-ahead horizon
-        — the FIRST usable (numeric, finite, non-unavailable) recorded state
-        at/after the local issue time (01:30), NOT the settled end-of-day value.
-        A live-updating "today" forecast sensor that blends actuals intraday would
-        otherwise converge toward the measured truth by 23:00, giving it an error
-        the 01:30 engine snapshot can never match.
-
-        Robustness guards (each -> comparison OMITTED for the day, never zeroed):
-          * FRESHNESS: the accepted state must have ``last_updated`` inside the
-            scored local day (drops a pure start-of-day carry-in from a
-            comparison that produced no in-day update — a frozen / hung sensor
-            holding its last numeric value);
-          * NON-FINITE: a 'nan' / 'inf' state is rejected (never clamped to 0);
-          * UNIT: the entity's live unit is read; a Wh unit is normalised to kWh;
-          * PHYSICAL SANITY: a value orders of magnitude above the site's daily
-            ceiling (installed Wp x 24 h) is discarded as a unit artifact.
-        Runs the recorder read in the recorder executor (SPEC).
-        """
-        if not comparisons:
-            return {}
-        day_start = dt_util.start_of_local_day(
-            datetime(day.year, day.month, day.day)
+        """Read each comparison's daily-kWh AT THE ENGINE'S HORIZON for ``day``."""
+        return await _scoreboard_glue.async_read_comparison_history(
+            self, day, comparisons
         )
-        day_end = dt_util.start_of_local_day(
-            datetime(day.year, day.month, day.day) + timedelta(days=1)
-        )
-        issue_at = day_start + timedelta(
-            hours=_COMPARISON_ISSUE_HOUR, minutes=_COMPARISON_ISSUE_MINUTE
-        )
-        read_end = min(
-            issue_at + timedelta(hours=_COMPARISON_ISSUE_WINDOW_HOURS), day_end
-        )
-        entity_ids = [c.daily_entity for c in comparisons]
-
-        from homeassistant.components.recorder import get_instance
-
-        def _read() -> dict[str, tuple[str, bool] | None]:
-            """Return {entity: (raw_state, in_day)} for the first usable state."""
-            from homeassistant.components.recorder.history import (
-                state_changes_during_period,
-            )
-
-            out: dict[str, tuple[str, bool] | None] = {}
-            for entity_id in entity_ids:
-                history = state_changes_during_period(
-                    self.hass,
-                    issue_at,
-                    read_end,
-                    entity_id,
-                    include_start_time_state=True,
-                    no_attributes=True,
-                )
-                states = history.get(entity_id) or []
-                chosen: tuple[str, bool] | None = None
-                for st in states:
-                    raw = getattr(st, "state", None)
-                    if raw is None:
-                        continue
-                    if str(raw).strip().lower() in _UNUSABLE_STATES:
-                        continue
-                    last_updated = getattr(st, "last_updated", None)
-                    in_day = bool(
-                        last_updated is not None
-                        and dt_util.as_utc(last_updated) >= day_start
-                    )
-                    chosen = (raw, in_day)
-                    break  # FIRST usable state at/after the issue time
-                out[entity_id] = chosen
-            return out
-
-        raw_by_entity = await get_instance(self.hass).async_add_executor_job(_read)
-        result: dict[str, float] = {}
-        for cfg in comparisons:
-            picked = raw_by_entity.get(cfg.daily_entity)
-            if picked is None:
-                continue  # no usable state at the horizon -> comparison skipped
-            raw, in_day = picked
-            if not in_day:
-                # Only a start-of-day carry-in (no in-day update): a frozen /
-                # hung sensor holding a stale value. Skip (unscored), not zero.
-                continue
-            try:
-                value = float(raw)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(value) or value < 0.0:
-                continue  # 'nan'/'inf'/negative -> unscored, never a fake zero
-            value = self._normalise_comparison_kwh(cfg.daily_entity, value)
-            if value is None:
-                continue  # unusable unit / physically impossible -> skipped
-            result[cfg.name] = value
-        return result
 
     def _normalise_comparison_kwh(
         self, entity_id: str, value: float
     ) -> float | None:
-        """Normalise a raw comparison state to daily kWh, or None if unusable.
-
-        Reads the entity's live ``unit_of_measurement``: 'Wh' is scaled to kWh;
-        'kWh' (or an absent/unknown unit — assumed kWh per the documented
-        contract) passes through; any other energy-incompatible unit ('W', '%',
-        etc.) is rejected with a warning. A value above the site's physical daily
-        ceiling (installed Wp x 24 h) is discarded as a unit artifact.
-        """
-        unit = None
-        try:
-            state = self.hass.states.get(entity_id)
-        except AttributeError:  # a hass stub without a state machine (tests)
-            state = None
-        if state is not None:
-            unit = state.attributes.get("unit_of_measurement")
-        u = str(unit).strip().lower() if unit is not None else ""
-        if u in ("wh", "watt-hour", "watt-hours"):
-            value = value / 1000.0
-        elif u in ("kwh", "", "none"):
-            pass  # kWh (or unit-less -> assumed kWh per the documented contract)
-        elif not SCOREBOARD_COMPARISON_UNIT_KWH:  # pragma: no cover - config-only
-            value = value / 1000.0
-        else:
-            _LOGGER.warning(
-                "Comparison %s reports unit %r, not an energy unit; skipping",
-                entity_id, unit,
-            )
-            return None
-        ceiling = self._site_daily_kwh_ceiling()
-        if ceiling is not None and value > ceiling * _COMPARISON_MAX_PHYSICAL_FACTOR:
-            _LOGGER.warning(
-                "Comparison %s daily value %.1f kWh exceeds the site ceiling "
-                "%.1f kWh; discarding as a unit artifact",
-                entity_id, value, ceiling,
-            )
-            return None
-        return value
+        """Normalise a raw comparison state to daily kWh, or None if unusable."""
+        return _scoreboard_glue.normalise_comparison_kwh(self, entity_id, value)
 
     def _site_daily_kwh_ceiling(self) -> float | None:
         """The site's physical daily-energy ceiling: installed Wp x 24 h (kWh)."""
-        total_wp = sum(p.wp for p in self._site.planes)
-        if total_wp <= 0.0:
-            return None
-        return total_wp * 24.0 / 1000.0
+        return _scoreboard_glue.site_daily_kwh_ceiling(self)
 
     def _persist_scoreboard_state(self) -> None:
         self._call_store_setter(
@@ -1892,69 +1283,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._call_store_setter("set_quantile_state", self._quantile_state)
 
     def _train_quantiles_day(self, day: date) -> None:
-        """Sample one closed ``day`` into the quantile relative-error ring.
-
-        NO-LEAKAGE + consistent frame (SPEC §6): the relative error is
-        ``measured_hourly / issued-CORRECTED-hourly`` — the SAME issued corrected
-        curve the scoreboard scores and the bands are later applied to. Each
-        daylight hour whose corrected Wh exceeds QUANTILE_MIN_FORECAST_WH becomes
-        one sample, classed by the issued snapshot's forecast cloud class for that
-        hour (``cloud_class_by_hour``) x the local day part — the identical
-        (class x part) taxonomy the day-ahead bias and the applier use. Gated on
-        the quantiles kill switch; needs both the issued snapshot and hourly
-        actuals for the day, else it is a no-op (retried by a later catch-up).
-        Idempotence is provided by the same ``is_day_trained`` marker as the
-        learners (see :meth:`_train_and_guard`).
-        """
-        if not self._quantiles_enabled:
-            return
-        iso = day.isoformat()
-        issued = self._store.get_issued(iso)
-        if not issued:
-            return
-        snap = IssuedSnapshot.from_dict(issued)
-        corrected_hourly = _filter_hourly_to_local_day(
-            snap.corrected_hourly_wh or snap.raw_hourly_wh, iso
-        )
-        if not corrected_hourly:
-            return
-        hourly_actuals = self._store_hourly_actuals(iso)
-        measured_hourly = self._site_measured_hourly(iso, hourly_actuals)
-        if not measured_hourly:
-            return
-
-        samples: list[quantiles_mod.QuantileSample] = []
-        for hkey, corrected_wh in corrected_hourly.items():
-            if hkey not in measured_hourly:
-                continue
-            part = self._day_part_for_hourkey(hkey)
-            if part is None:
-                continue
-            cc = snap.cloud_class_by_hour.get(hkey, CLOUD_CLASS_CLEAR)
-            samples.append(
-                quantiles_mod.QuantileSample(
-                    cloud_class=cc,
-                    day_part=part,
-                    measured_wh=float(measured_hourly[hkey]),
-                    corrected_wh=float(corrected_wh),
-                )
-            )
-        if not samples:
-            return
-        self._quantile_state = quantiles_mod.train_quantiles(
-            self._quantile_state, samples
-        )
-        self._persist_quantile_state()
+        """Sample one closed ``day`` into the quantile relative-error ring."""
+        return _nightly.train_quantiles_day(self, day)
 
     def _scoreboard_summary(self) -> dict[str, Any]:
         """The current scoreboard aggregate view for ``self.data`` / platforms."""
-        today = dt_util.as_local(dt_util.utcnow()).date().isoformat()
-        return scoreboard_mod.scoreboard_summary(
-            self._scoreboard_state,
-            window_days=self._scoreboard_window_days,
-            gate_margin=self._scoreboard_gate_margin,
-            today=today,
-        )
+        return _scoreboard_glue.scoreboard_summary(self)
 
     def quantile_state_summary(self) -> dict[str, Any]:
         """Per-bin quantile sample counts for diagnostics (SPEC §6/§10).
@@ -1983,67 +1317,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     def _train_day_ahead(
         self, iso: str, issued: dict | None, actuals: dict | None
     ) -> None:
-        """Train the day-ahead RLS bias from the issued (raw) vs actuals day.
-
-        Aggregates the issued raw hourly curve and the measured site energy into
-        (cloud class x day part) day-parts and runs one RLS step per part. The
-        cloud class is derived from the issued snapshot's per-plane k_c/ghi where
-        available; absent that (v0.1 issued), we fall back to CLEAR so the RLS
-        still learns a coarse bias. Idempotent: a night already reflected in the
-        state is guarded by the date-keyed nightly scheduling.
-        """
-        if not self._learner_config.day_ahead_enabled:
-            return
-        if not issued or not actuals:
-            return
-        snap = IssuedSnapshot.from_dict(issued)
-        # Defense-in-depth: an old-code snapshot's rings can span 4 days; slice
-        # the modeled curve to the training day before aggregating (FIX-2).
-        raw_hourly = _filter_hourly_to_local_day(
-            snap.raw_hourly_wh or snap.corrected_hourly_wh, iso
-        )
-        if not raw_hourly:
-            return
-        # Prefer TRUE per-hour measured site energy (from the hourly-actuals
-        # ring): it gives an independent per-part signal AND real per-part cloud
-        # conditioning. Fall back to the daily-apportioned path only when hourly
-        # actuals are absent (coordinator:935).
-        hourly_actuals = self._store_hourly_actuals(iso)
-        site_measured_hourly = self._site_measured_hourly(iso, hourly_actuals)
-        samples = self._day_ahead_samples(
-            raw_hourly, actuals, snap, site_measured_hourly
-        )
-        if not samples:
-            return
-        try:
-            self._bias_state = bias_mod.train_day_ahead_bias(self._bias_state, samples)
-        except NotImplementedError:
-            return
-        except Exception:  # pragma: no cover - defensive
-            _LOGGER.debug("train_day_ahead_bias failed", exc_info=True)
-            return
-        self._persist_bias_state()
+        """Train the day-ahead RLS bias from the issued (raw) vs actuals day."""
+        return _nightly.train_day_ahead(self, iso, issued, actuals)
 
     def _site_measured_hourly(
         self, iso: str, hourly_actuals: dict[str, dict[str, float]] | None
     ) -> dict[str, float] | None:
-        """Sum per-channel hourly measured Wh into a site total per hour.
-
-        Returns ``{iso_hour: wh}`` sliced to the local day ``iso``, or None when
-        no hourly actuals exist (the caller then apportions the daily total).
-        """
-        if not hourly_actuals:
-            return None
-        site: dict[str, float] = {}
-        for hours in hourly_actuals.values():
-            for hkey, wh in hours.items():
-                dt = dt_util.parse_datetime(hkey)
-                if dt is None:
-                    continue
-                if dt_util.as_local(dt_util.as_utc(dt)).date().isoformat() != iso:
-                    continue
-                site[hkey] = site.get(hkey, 0.0) + float(wh)
-        return site or None
+        """Sum per-channel hourly measured Wh into a site total per hour."""
+        return _nightly.site_measured_hourly(self, iso, hourly_actuals)
 
     def _day_ahead_samples(
         self,
@@ -2051,132 +1332,21 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         actuals: dict,
         snap: IssuedSnapshot,
         site_measured_hourly: dict[str, float] | None,
-    ) -> list[_DayAheadSample]:
-        """Build (cloud class x day part) RLS training samples for one day.
-
-        Modeled Wh per part comes from the issued raw hourly curve; the cloud
-        class is the forecast cloud class of each hour (snap.cloud_class_by_hour,
-        SPEC §5) so a fog/overcast day trains its own cell, not a fixed "clear"
-        one. When TRUE per-hour measured site energy is available
-        (``site_measured_hourly``) each (class, part) cell carries its OWN
-        measured/modeled pair — a real independent per-part signal. Otherwise the
-        day's measured total is apportioned by the modeled shape (coarse
-        fallback, daily ring only).
-        """
-        measured_total = sum(
-            float(v) for v in actuals.values() if isinstance(v, (int, float))
+    ) -> list[_nightly._DayAheadSample]:
+        """Build (cloud class x day part) RLS training samples for one day."""
+        return _nightly.day_ahead_samples(
+            self, raw_hourly, actuals, snap, site_measured_hourly
         )
-        modeled_total = sum(raw_hourly.values())
-        if modeled_total <= 0.0 or measured_total <= 0.0:
-            return []
-
-        # Aggregate modeled (+ measured, when hourly) per (cloud class, day part)
-        # cell keyed on the forecast cloud class of each hour.
-        cell_modeled: dict[tuple[str, str], float] = {}
-        cell_measured: dict[tuple[str, str], float] = {}
-        for hkey, wh in raw_hourly.items():
-            part = self._day_part_for_hourkey(hkey)
-            if part is None:
-                continue
-            cc = snap.cloud_class_by_hour.get(hkey, CLOUD_CLASS_CLEAR)
-            key = (cc, part)
-            cell_modeled[key] = cell_modeled.get(key, 0.0) + float(wh)
-            if site_measured_hourly is not None:
-                cell_measured[key] = cell_measured.get(
-                    key, 0.0
-                ) + float(site_measured_hourly.get(hkey, 0.0))
-
-        samples: list[_DayAheadSample] = []
-        for (cc, part), modeled_wh in cell_modeled.items():
-            if modeled_wh <= 0.0:
-                continue
-            if site_measured_hourly is not None:
-                measured_wh = cell_measured.get((cc, part), 0.0)
-            else:
-                # Daily-only fallback: apportion the measured total by modeled
-                # share of this cell (coarse; only when hourly actuals absent).
-                measured_wh = measured_total * (modeled_wh / modeled_total)
-            samples.append(
-                _DayAheadSample(
-                    cloud_class=cc,
-                    day_part=part,
-                    measured_wh=measured_wh,
-                    modeled_wh=modeled_wh,
-                )
-            )
-        return samples
 
     def _day_part_for_hourkey(self, hkey: str) -> str | None:
-        """Local day part for an ISO-UTC hour key, via core/bias.day_part_for_hour."""
-        dt = dt_util.parse_datetime(hkey)
-        if dt is None:
-            return None
-        local_hour = dt_util.as_local(dt).hour
-        try:
-            return bias_mod.day_part_for_hour(local_hour)
-        except NotImplementedError:
-            # Fall back to the const boundaries directly so training still runs.
-            from .const import (
-                DAY_PART_AFTERNOON,
-                DAY_PART_AFTERNOON_START_HOUR,
-                DAY_PART_MORNING,
-                DAY_PART_MORNING_END_HOUR,
-            )
-            if local_hour < DAY_PART_MORNING_END_HOUR:
-                return DAY_PART_MORNING
-            if local_hour < DAY_PART_AFTERNOON_START_HOUR:
-                return DAY_PART_MIDDAY
-            return DAY_PART_AFTERNOON
+        """Local day part for an ISO-UTC hour key (core/bias.day_part_for_hour)."""
+        return _nightly.day_part_for_hourkey(self, hkey)
 
     def _train_shademap(
         self, iso: str, issued: dict | None, actuals: dict | None
     ) -> None:
-        """Train the shademap from the issued per-plane hourly modeled vs LTS.
-
-        For each plane and each hour with a quasi-clear sample, compute the
-        beam-referenced transmittance ``T = (P_measured - P_diffuse) / P_beam``
-        (against the UNGATED beam reference the snapshot stores, FIX-3) and
-        EMA-update the matched bin (SPEC §5). Measured hourly per-plane energy
-        comes from the store's hourly-actuals ring (populated by the nightly LTS
-        read); when absent the shademap does not train that night (SPEC §6
-        attempt-not-blocker).
-
-        Measured-side clearness gate (coordinator:1015): the whole day must have
-        measured site energy within a band of the modeled forecast, otherwise the
-        forecast wrongly called it clear and every hour would write pure weather
-        error into the geometric map. A day that fails this gate trains nothing.
-        """
-        if not self._learner_config.slow_enabled:
-            return
-        if self._slow_frozen():
-            return  # collapse freeze silences the geometric learner today/next
-        if not issued:
-            return
-        snap = IssuedSnapshot.from_dict(issued)
-        if not snap.per_plane:
-            return  # v0.1 issued or engine breakdown absent: nothing to train
-        hourly_actuals = self._store_hourly_actuals(iso)
-        if not hourly_actuals:
-            return
-        # Measured-side clearness gate at the DAY level: reject days the forecast
-        # called clear but reality was overcast (a transient weather bust must
-        # not darken a geometric bin, SPEC §5). Uses the RAW gated modeled total
-        # (the forecast the engine issued) vs the measured site total.
-        if not self._day_is_measured_clear(iso, snap, hourly_actuals):
-            return
-        state = self._shademap_state
-        trained = False
-        for channel, modeled in snap.per_plane.items():
-            measured_by_hour = hourly_actuals.get(channel)
-            if not measured_by_hour:
-                continue
-            state, changed = self._train_channel(
-                state, channel, modeled, measured_by_hour
-            )
-            trained = trained or changed
-        if trained:
-            self._shademap_state = state
-            self._persist_shademap_state()
+        """Train the shademap from the issued per-plane hourly modeled vs LTS."""
+        return _nightly.train_shademap(self, iso, issued, actuals)
 
     def _day_is_measured_clear(
         self,
@@ -2184,30 +1354,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         snap: IssuedSnapshot,
         hourly_actuals: dict[str, dict[str, float]],
     ) -> bool:
-        """Measured-side clearness gate for shademap training (SPEC §5).
-
-        The candidate day's measured site energy must be at least
-        SHADEMAP_MEASURED_CLEAR_MIN_FRAC of the modeled RAW forecast; otherwise
-        the forecast over-predicted clearness (overcast reality) and training
-        would write weather error into the geometry. The modeled reference is the
-        gated RAW hourly total (what the engine issued), sliced to the day.
-        """
-        modeled = sum(
-            _filter_hourly_to_local_day(
-                snap.raw_hourly_wh or snap.corrected_hourly_wh, iso
-            ).values()
-        )
-        if modeled <= 0.0:
-            return False
-        measured = 0.0
-        for hours in hourly_actuals.values():
-            for hkey, wh in hours.items():
-                dt = dt_util.parse_datetime(hkey)
-                if dt is None:
-                    continue
-                if dt_util.as_local(dt_util.as_utc(dt)).date().isoformat() == iso:
-                    measured += float(wh)
-        return measured >= SHADEMAP_MEASURED_CLEAR_MIN_FRAC * modeled
+        """Measured-side clearness gate for shademap training (SPEC §5)."""
+        return _nightly.day_is_measured_clear(self, iso, snap, hourly_actuals)
 
     def _train_channel(
         self,
@@ -2216,86 +1364,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         modeled: PlaneHourlyModeled,
         measured_by_hour: dict[str, float],
     ) -> tuple[ShademapState, bool]:
-        """EMA-update one channel's bins from its quasi-clear hourly samples.
-
-        The neighbour-stability leg of the gate is applied to the MEASURED/
-        modeled ratio sequence (not the smooth forecast kc, coordinator:1015): a
-        lone bright measured hour between shaded ones is a fluctuation and is
-        rejected.
-        """
-        plane = self._site.plane_by_name(channel)
-        if plane is None:
-            return state, False
-        changed = False
-        hkeys = sorted(modeled.beam_wh)
-        # Precompute the measured/modeled-gated ratio per hour for the neighbour-
-        # stability test (measured-side, not forecast-side).
-        ratio_by_hour: dict[str, float] = {}
-        for hkey in hkeys:
-            beam = modeled.beam_wh.get(hkey, 0.0)
-            diff = modeled.diffuse_wh.get(hkey, 0.0)
-            meas = measured_by_hour.get(hkey)
-            denom = beam + diff
-            if meas is not None and denom > 0.0:
-                ratio_by_hour[hkey] = float(meas) / denom
-        for idx, hkey in enumerate(hkeys):
-            beam_wh = modeled.beam_wh.get(hkey, 0.0)
-            diffuse_wh = modeled.diffuse_wh.get(hkey, 0.0)
-            measured_wh = measured_by_hour.get(hkey)
-            if measured_wh is None or beam_wh <= 0.0:
-                continue
-            beam_share = beam_wh / (plane.wp) if plane.wp else 0.0
-            dt = dt_util.parse_datetime(hkey)
-            if dt is None:
-                continue
-            mid = dt + timedelta(minutes=30)
-            sun_az, sun_el = solpos.sun_position(
-                mid, self._site.latitude, self._site.longitude
-            )
-            # Neighbour-slot stability on the MEASURED/modeled ratio: the smooth
-            # forecast k_c cannot see a real cloud fluctuation, so the gate keys
-            # on this slot's ratio vs the previous slot's (shared with backfill).
-            this_ratio = ratio_by_hour.get(hkey)
-            neighbour_ratio = (
-                ratio_by_hour.get(hkeys[idx - 1]) if idx > 0 else None
-            )
-            try:
-                if not shademap_mod.is_quasi_clear(
-                    kc=modeled.kc.get(hkey, 0.0),
-                    sun_el=sun_el,
-                    beam_share=beam_share,
-                    stability_ratio=this_ratio,
-                    neighbour_ratio=neighbour_ratio,
-                ):
-                    continue
-                measured_t = shademap_mod.beam_referenced_t(
-                    float(measured_wh), diffuse_wh, beam_wh
-                )
-                if measured_t is None:
-                    continue
-                doy = mid.timetuple().tm_yday
-                state = shademap_mod.update_bin(
-                    state,
-                    channel=channel,
-                    sun_az=sun_az,
-                    sun_el=sun_el,
-                    doy=doy,
-                    measured_t=measured_t,
-                )
-                changed = True
-            except NotImplementedError:
-                return state, False
-            except Exception:  # pragma: no cover - defensive
-                _LOGGER.debug("shademap update failed for %s", channel, exc_info=True)
-                continue
-        return state, changed
+        """EMA-update one channel's bins from its quasi-clear hourly samples."""
+        return _nightly.train_channel(
+            self, state, channel, modeled, measured_by_hour
+        )
 
     def _store_hourly_actuals(self, iso: str) -> dict[str, dict[str, float]] | None:
         """Per-plane hourly measured energy for a day from the store ring."""
-        try:
-            return self._store.get_hourly_actuals(iso)
-        except Exception:  # pragma: no cover - defensive
-            return None
+        return _nightly.store_hourly_actuals(self, iso)
 
     # ------------------------------------------------------------------
     # Guards: collapse detector, drift monitor, rollback ring
@@ -2304,165 +1380,18 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     def _is_collapse_day(
         self, iso: str, issued: dict | None, actuals: dict | None
     ) -> bool:
-        """Total-dropout day: measured << forecast (snow / channel loss).
-
-        True when the modeled day is non-trivial (> COLLAPSE_FORECAST_MIN_WH)
-        yet the measured site energy is below COLLAPSE_MEASURED_MAX_FRAC of it
-        (SPEC §5). The modeled total is sliced to the training LOCAL day so an
-        old 4-day snapshot cannot inflate the threshold (FIX-2). Absent either
-        side, not a collapse (can't tell).
-        """
-        if not issued or not actuals:
-            return False
-        snap = IssuedSnapshot.from_dict(issued)
-        forecast_wh = sum(
-            _filter_hourly_to_local_day(
-                snap.raw_hourly_wh or snap.corrected_hourly_wh, iso
-            ).values()
-        )
-        if forecast_wh < COLLAPSE_FORECAST_MIN_WH:
-            return False
-        measured_wh = sum(
-            float(v) for v in actuals.values() if isinstance(v, (int, float))
-        )
-        return measured_wh < COLLAPSE_MEASURED_MAX_FRAC * forecast_wh
+        """Total-dropout day: measured << forecast (snow / channel loss)."""
+        return _nightly.is_collapse_day(self, iso, issued, actuals)
 
     def _update_drift(
         self, iso: str, issued: dict | None, actuals: dict | None
     ) -> None:
-        """Rolling daylight-MAE drift monitor with auto-disable (SPEC §5).
-
-        Compares the corrected served curve against pure physics against the
-        measured day. A "losing" day is one where the corrected daylight MAE is
-        worse than the physics MAE by more than DRIFT_LOSS_MARGIN (relative) AND
-        by more than DRIFT_LOSS_MIN_ABS_WH (absolute) — the absolute floor keeps
-        a rounding-scale delta on a well-trained/clear day from counting as a
-        loss. DRIFT_LOSS_STREAK_DAYS consecutive losing days auto-disables the
-        layer,
-        raises a repair issue and keeps the disable flag until the user
-        re-enables in the options flow. The window is trimmed to
-        DRIFT_WINDOW_DAYS.
-
-        Scope note (FIX-1 residual): the 01:30 issued snapshot's corrected-vs-raw
-        delta reflects shademap + day-ahead only (the intraday scalar is neutral
-        at night). That is intentional — this monitor bounds the two PERSISTED
-        learners; the intraday scalar is transient, restart-neutral and clamped
-        to [0.25, 2.5], so it needs no drift bound.
-        """
-        if not issued or not actuals:
-            return
-        snap = IssuedSnapshot.from_dict(issued)
-        measured_wh = sum(
-            float(v) for v in actuals.values() if isinstance(v, (int, float))
-        )
-        # Slice both curves to the training LOCAL day (FIX-2): an old 4-day
-        # snapshot would otherwise blow the MAE up to ~4x the true one-day error.
-        raw_hourly = _filter_hourly_to_local_day(
-            snap.raw_hourly_wh or snap.corrected_hourly_wh, iso)
-        corrected_hourly = _filter_hourly_to_local_day(
-            snap.corrected_hourly_wh or snap.raw_hourly_wh, iso)
-        raw_total = sum(raw_hourly.values())
-        corrected_total = sum(corrected_hourly.values())
-        if raw_total <= 0.0 and corrected_total <= 0.0:
-            return
-        # Daily-kWh absolute error as the MAE proxy (the operator's primary
-        # metric is daily kWh, SPEC §10/B9; the issued ring stores hourly so a
-        # true daylight-hour MAE is available to a future finer implementation).
-        raw_mae = abs(raw_total - measured_wh)
-        corrected_mae = abs(corrected_total - measured_wh)
-        baseline_mae = raw_mae  # pure physics is the baseline comparison here
-
-        daily = dict(self._drift_state.daily_mae)
-        daily[iso] = {
-            "raw": round(raw_mae, 2),
-            "corrected": round(corrected_mae, 2),
-            "baseline": round(baseline_mae, 2),
-        }
-        # Trim to the window (ISO date order == chronological).
-        for stale in sorted(daily)[:-DRIFT_WINDOW_DAYS]:
-            daily.pop(stale, None)
-
-        losing = (
-            corrected_mae > raw_mae * (1.0 + DRIFT_LOSS_MARGIN)
-            and (corrected_mae - raw_mae) > DRIFT_LOSS_MIN_ABS_WH
-        )
-        # The correction here is the fast (intraday) + slow blend on the served
-        # curve; attribute a losing day to whichever geometric layer is active,
-        # and to the fast layer (it always shapes the served curve when on).
-        fast_streak = self._drift_state.fast_loss_streak
-        slow_streak = self._drift_state.slow_loss_streak
-        fast_on = self._learner_config.fast_enabled and not self._drift_state.fast_disabled
-        slow_on = self._learner_config.slow_enabled and not self._drift_state.slow_disabled
-        if losing:
-            if fast_on:
-                fast_streak += 1
-            if slow_on:
-                slow_streak += 1
-        else:
-            fast_streak = 0
-            slow_streak = 0
-
-        fast_disabled = self._drift_state.fast_disabled
-        slow_disabled = self._drift_state.slow_disabled
-        if fast_on and fast_streak >= DRIFT_LOSS_STREAK_DAYS:
-            fast_disabled = True
-            fast_streak = 0
-            self._restore_layer_snapshot(LEARNER_LAYER_FAST)
-            self._raise_repair_issue(ISSUE_FAST_LEARNER_DISABLED)
-            _LOGGER.warning("Fast learner auto-disabled after %d losing days", DRIFT_LOSS_STREAK_DAYS)
-        if slow_on and slow_streak >= DRIFT_LOSS_STREAK_DAYS:
-            slow_disabled = True
-            slow_streak = 0
-            self._restore_layer_snapshot(LEARNER_LAYER_SLOW)
-            self._raise_repair_issue(ISSUE_SLOW_LEARNER_DISABLED)
-            _LOGGER.warning("Slow learner auto-disabled after %d losing days", DRIFT_LOSS_STREAK_DAYS)
-
-        # Preserve the option-seen + collapse-freeze fields (replace, not
-        # reconstruct, so the FIX-5 transition memory + FIX-7 freeze survive).
-        self._drift_state = _replace_drift(
-            self._drift_state,
-            daily_mae=daily,
-            fast_loss_streak=fast_streak,
-            slow_loss_streak=slow_streak,
-            fast_disabled=fast_disabled,
-            slow_disabled=slow_disabled,
-        )
-        self._persist_drift_state()
+        """Rolling daylight-MAE drift monitor with auto-disable (SPEC §5)."""
+        return _nightly.update_drift(self, iso, issued, actuals)
 
     def _restore_layer_snapshot(self, layer: str) -> str | None:
-        """Roll the auto-disabled layer back to its pre-streak state (SPEC §5).
-
-        Picks the snapshot taken DRIFT_LOSS_STREAK_DAYS nightly runs ago: the
-        ring holds LEARNER_SNAPSHOT_RING (> streak) entries, so the state saved
-        BEFORE the first losing night is still present; on a shorter ring the
-        oldest snapshot is the best available approximation. Restores only the
-        named layer so a healthy sibling keeps its learning. Without this, the
-        ring would be write-only and a later manual re-enable would resume from
-        the exact poisoned state that caused the auto-disable.
-
-        Returns the restored snapshot's ``taken_at``, or None (empty ring).
-        """
-        try:
-            snaps = self._store.get_snapshots()
-        except Exception:  # pragma: no cover - defensive
-            snaps = []
-        if not snaps:
-            _LOGGER.warning(
-                "No rollback snapshot available for %s layer restore", layer
-            )
-            return None
-        snap = snaps[max(0, len(snaps) - DRIFT_LOSS_STREAK_DAYS)]
-        if layer == LEARNER_LAYER_FAST:
-            self._bias_state = snap.bias
-            self._persist_bias_state()
-        else:
-            self._shademap_state = snap.shademap
-            self._persist_shademap_state()
-        _LOGGER.warning(
-            "Rolled %s learner state back to pre-streak snapshot %s",
-            layer, snap.taken_at,
-        )
-        return snap.taken_at
+        """Roll the auto-disabled layer back to its pre-streak state (SPEC §5)."""
+        return _nightly.restore_layer_snapshot(self, layer)
 
     async def async_rollback_learners(
         self, snapshots_back: int = 1
@@ -2494,35 +1423,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         }
 
     def _maybe_push_rollback_snapshot(self, iso: str) -> None:
-        """Push a pre-training rollback snapshot into the ring (idempotent/day).
-
-        Keeps the last LEARNER_SNAPSHOT_RING snapshots (which exceeds
-        DRIFT_LOSS_STREAK_DAYS, so a pre-streak good state survives an
-        auto-disable, SPEC §5) via the store's ``push_snapshot`` /
-        ``get_snapshots`` (the real ForecastStore API). One snapshot per nightly
-        run: the snapshot's ``taken_at`` UTC date is the idempotence key, so a
-        second run the same night is a no-op. ``iso`` (the training day) is
-        accepted for symmetry; the guard keys on the run's own date.
-        """
-        try:
-            existing = self._store.get_snapshots()
-        except Exception:  # pragma: no cover - defensive
-            existing = []
-        now = dt_util.utcnow()
-        run_date = now.date().isoformat()
-        # Idempotence: at most one snapshot per calendar run-day.
-        for snap in existing:
-            if str(snap.taken_at).startswith(run_date):
-                return
-        snapshot = LearnerSnapshot(
-            taken_at=now.isoformat(),
-            bias=self._bias_state,
-            shademap=self._shademap_state,
-        )
-        try:
-            self._store.push_snapshot(snapshot)
-        except Exception:  # pragma: no cover - defensive
-            _LOGGER.debug("Could not push rollback snapshot", exc_info=True)
+        """Push a pre-training rollback snapshot into the ring (idempotent/day)."""
+        return _nightly.maybe_push_rollback_snapshot(self, iso)
 
     def _issue_id_for(self, issue_id: str) -> str:
         """Per-entry issue id: suffix with the entry id so one entry's re-enable
@@ -2598,359 +1500,5 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     async def _async_read_actuals(
         self, day: date
     ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
-        """Per-module measured DC energy for ``day``: (daily totals, hourly).
-
-        Reads the hourly ``mean`` rows once and returns BOTH the per-module daily
-        Wh totals AND the per-module ``{iso_hour: wh}`` buckets (the shademap
-        trainer needs hourly resolution).
-
-        Label gates (SPEC §5, all delegated to :func:`_actuals_from_stats`):
-        a frozen channel, a configured channel with NO usable rows (dead DTU
-        port), or ANY channel covering too little of the daylight span is a
-        DROPOUT — the WHOLE day is discarded for BOTH learners so a partial-site
-        measurement never poisons the write-once ring ("Messkanal-Dropout ⇒
-        ganzen Tag verwerfen"). The window follows the LOCAL calendar day
-        exactly so DST (23/25-h) days are bounded correctly (coordinator:1256).
-        """
-        entity_by_module = {
-            p.name: p.actual_entity
-            for p in self._site.planes
-            if p.actual_entity
-        }
-        if not entity_by_module:
-            return {}, {}
-
-        start = dt_util.start_of_local_day(
-            datetime(day.year, day.month, day.day)
-        )
-        # Follow the LOCAL calendar day exactly (DST-safe): the next local
-        # midnight, not a fixed +24 h (coordinator:1256).
-        end = dt_util.start_of_local_day(
-            datetime(day.year, day.month, day.day) + timedelta(days=1)
-        )
-
-        from homeassistant.components.recorder import get_instance
-
-        def _read() -> tuple[dict[str, float], dict[str, dict[str, float]]]:
-            from homeassistant.components.recorder.statistics import (
-                statistics_during_period,
-            )
-
-            stat_ids = set(entity_by_module.values())
-            stats = statistics_during_period(
-                self.hass,
-                start,
-                end,
-                stat_ids,
-                "hour",
-                None,
-                {"mean", "state"},
-            )
-            expected = _daylight_hours_in_local_day(self._site, start, end)
-            return _actuals_from_stats(
-                stats,
-                entity_by_module,
-                expected_daylight_hours=expected,
-                day=day,
-            )
-
-        return await get_instance(self.hass).async_add_executor_job(_read)
-
-
-# ---------------------------------------------------------------------------
-# Pure helpers
-# ---------------------------------------------------------------------------
-
-
-def _daylight_hours_in_local_day(
-    site: SiteConfig, start: datetime, end: datetime
-) -> int:
-    """Count whole hours in ``[start, end)`` whose mid-point sun elevation > 0.
-
-    Used by the day-completeness gate to know how many hourly LTS rows a full
-    day SHOULD carry. Pure geometry (solpos); never raises — a bad site/time
-    returns 0 (gate skipped). ``start``/``end`` are tz-aware local-day bounds.
-    """
-    try:
-        start_utc = dt_util.as_utc(start)
-        end_utc = dt_util.as_utc(end)
-    except Exception:  # pragma: no cover - defensive
-        return 0
-    count = 0
-    cur = start_utc
-    step = timedelta(hours=1)
-    # Guard against a runaway loop (DST safety): a local day is <= 25 hours.
-    for _ in range(26):
-        if cur >= end_utc:
-            break
-        mid = cur + timedelta(minutes=30)
-        try:
-            _az, el = solpos.sun_position(mid, site.latitude, site.longitude)
-        except Exception:  # pragma: no cover - defensive
-            el = 0.0
-        if el > 0.0:
-            count += 1
-        cur += step
-    return count
-
-
-def _actuals_from_stats(
-    stats: dict[str, list[dict]],
-    entity_by_module: dict[str, str],
-    *,
-    expected_daylight_hours: int,
-    day: date,
-) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
-    """Pure post-processing of LTS rows into per-module (daily, hourly) actuals.
-
-    Applies the SPEC §5 label gates, each of which discards the WHOLE day
-    ("Messkanal-Dropout ⇒ ganzen Tag verwerfen") so a partial-site measurement
-    never becomes the training/scoreboard ground truth against the FULL-site
-    modeled energy (which would read as a production deficit — the same failure
-    mode the intraday scalar guards against with its usable-planes subset):
-
-      * frozen channel — byte-identical non-zero hourly means held for
-        LABEL_FROZEN_MIN_REPEATS+ consecutive hours (:func:`_is_frozen_channel`);
-      * MISSING channel — a configured module with no LTS rows at all, or rows
-        without a single usable mean (a DTU port that went unavailable);
-      * per-module day-completeness — EVERY configured module must cover at
-        least DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE of the day's daylight hours; a
-        healthy sibling must never mask a module that died mid-day. Skipped when
-        the daylight span is unknown (``expected_daylight_hours`` <= 0).
-
-    A discarded day returns ``({}, {})`` and is NOT recorded, so a later nightly
-    catch-up re-reads it once LTS is complete. A permanently dead (but still
-    configured) sensor therefore blocks training until the operator removes it —
-    the warnings name the module + entity id to make that actionable.
-    """
-    daily: dict[str, float] = {}
-    hourly: dict[str, dict[str, float]] = {}
-    covered_hours: dict[str, int] = {}
-    for module, entity_id in entity_by_module.items():
-        rows = stats.get(entity_id)
-        means: list[float] = []
-        hkeys: list[str] = []
-        for row in rows or ():
-            mean = row.get("mean")
-            if mean is None:
-                continue
-            hkey = _stat_row_hour_key(row.get("start"))
-            if hkey is None:
-                continue
-            means.append(float(mean))
-            hkeys.append(hkey)
-        if not means:
-            _LOGGER.warning(
-                "Channel %s (%s) has no usable LTS rows on %s (dead/unavailable "
-                "DTU port?); discarding the whole day for both learners "
-                "(channel dropout, SPEC §5)",
-                module, entity_id, day,
-            )
-            return {}, {}
-        if _is_frozen_channel(means):
-            _LOGGER.warning(
-                "Channel %s (%s) looks frozen on %s (byte-identical "
-                "hourly means during daylight); discarding the whole day "
-                "for both learners (SPEC §5)",
-                module, entity_id, day,
-            )
-            return {}, {}
-        per_hour: dict[str, float] = {}
-        wh = 0.0
-        for hkey, m in zip(hkeys, means, strict=False):
-            per_hour[hkey] = per_hour.get(hkey, 0.0) + m  # W*1h = Wh
-            wh += m
-        daily[module] = round(wh, 1)
-        hourly[module] = per_hour
-        covered_hours[module] = len(set(hkeys))
-    # Per-module day-completeness gate: a mid-day recorder/LTS gap OR a module
-    # dying mid-day yields a partial-hour sum that must NOT become the day's
-    # ground truth. EVERY configured module has to clear the bar — using the
-    # best-covered module here would let one healthy sibling mask a partial one.
-    if expected_daylight_hours > 0 and covered_hours:
-        need = int(
-            math.ceil(expected_daylight_hours * DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE)
-        )
-        worst = min(covered_hours, key=lambda m: covered_hours[m])
-        if covered_hours[worst] < need:
-            _LOGGER.warning(
-                "Actuals for %s: module %s (%s) covers only %d of ~%d daylight "
-                "hours (< %.0f%%); discarding the day as incomplete (recorder "
-                "gap or mid-day channel dropout). A later catch-up will refill "
-                "it.",
-                day, worst, entity_by_module.get(worst),
-                covered_hours[worst], expected_daylight_hours,
-                DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE * 100.0,
-            )
-            return {}, {}
-    return daily, hourly
-
-
-def _is_frozen_channel(means: list[float]) -> bool:
-    """True when hourly means show a frozen sensor: the SAME non-zero value held
-    for >= LABEL_FROZEN_MIN_REPEATS consecutive hours (SPEC §5 label gate).
-
-    A frozen Hoymiles/DTU sensor holds its last value (never goes unavailable),
-    so the recorder carries the same non-zero mean forward hour after hour. A run
-    of identical zeros is legitimate night/shade and never trips the gate.
-    """
-    run = 1
-    for i in range(1, len(means)):
-        if means[i] == means[i - 1] and means[i] != 0.0:
-            run += 1
-            if run >= LABEL_FROZEN_MIN_REPEATS:
-                return True
-        else:
-            run = 1
-    return False
-
-
-def _stat_row_hour_key(start: object) -> str | None:
-    """Normalise a statistics row ``start`` to an ISO-UTC hour key, or None.
-
-    HA recorder returns ``start`` as an epoch-ms number in modern cores or an
-    aware datetime; handle both (mirrors backfill._stat_row_hour).
-    """
-    if isinstance(start, datetime):
-        dt = dt_util.as_utc(start)
-    elif isinstance(start, (int, float)):
-        dt = datetime.fromtimestamp(start / 1000.0, tz=UTC)
-    elif isinstance(start, str):
-        dt = dt_util.parse_datetime(start)
-        if dt is None:
-            return None
-        dt = dt_util.as_utc(dt)
-    else:
-        return None
-    return dt.replace(minute=0, second=0, microsecond=0).isoformat()
-
-
-def _replace_drift(state: DriftState, **changes) -> DriftState:
-    """Return a copy of a DriftState with fields replaced (frozen dataclass)."""
-    from dataclasses import replace
-
-    return replace(state, **changes)
-
-
-def _usable_power(state: State | None, now: datetime) -> float | None:
-    """Numeric live power from a state, or None if unusable / frozen.
-
-    Guards (SPEC §5 label gates applied live): missing state, unknown /
-    unavailable / empty state, non-numeric value, or a stale reading whose
-    ``last_updated`` is older than LABEL_FROZEN_STALE_SECONDS (a frozen sensor
-    holding an old value — treated as missing). A fresh zero is a legitimate
-    night/shade reading and IS usable.
-    """
-    if state is None:
-        return None
-    raw = (state.state or "").strip().lower()
-    if raw in _UNUSABLE_STATES:
-        return None
-    try:
-        value = float(state.state)
-    except (TypeError, ValueError):
-        return None
-    last_updated = getattr(state, "last_updated", None)
-    if last_updated is not None:
-        age = (dt_util.as_utc(now) - dt_util.as_utc(last_updated)).total_seconds()
-        if age > LABEL_FROZEN_STALE_SECONDS:
-            # Frozen: the sensor stopped reporting (value held). Skip it.
-            return None
-    return value
-
-
-def _iso(dt: datetime) -> str:
-    return dt_util.as_utc(dt).isoformat()
-
-
-def _hour_key(dt: datetime) -> str:
-    """ISO-UTC hour-start key for an aligned slot start."""
-
-    return (
-        dt_util.as_utc(dt)
-        .replace(minute=0, second=0, microsecond=0)
-        .astimezone(UTC)
-        .isoformat()
-    )
-
-
-def _round3(value: float | None) -> float | None:
-    return None if value is None else round(value, 3)
-
-
-def _power_at(slot_starts, watts, now: datetime) -> float:
-    """Instantaneous power at the 15-min slot containing ``now`` (shared walk)."""
-    now_utc = dt_util.as_utc(now)
-    slot = timedelta(minutes=15)
-    for start, w in zip(slot_starts, watts, strict=False):
-        start_utc = dt_util.as_utc(start)
-        if start_utc <= now_utc < start_utc + slot:
-            return w
-        if start_utc > now_utc:
-            break
-    return 0.0
-
-
-def _slot_index_at(slot_starts, now: datetime) -> int | None:
-    """Index of the 15-min slot containing ``now``, or None if out of range."""
-    now_utc = dt_util.as_utc(now)
-    slot = timedelta(minutes=15)
-    for i, start in enumerate(slot_starts):
-        start_utc = dt_util.as_utc(start)
-        if start_utc <= now_utc < start_utc + slot:
-            return i
-        if start_utc > now_utc:
-            break
-    return None
-
-
-def _power_now(result: ForecastResult, now: datetime) -> float:
-    """Instantaneous site power at the 15-min slot containing ``now``."""
-    return _power_at(result.slot_starts, result.total_watts, now)
-
-
-def _raw_power_now(result: ForecastResult, now: datetime) -> float:
-    """Instantaneous RAW site power at the slot containing ``now``."""
-    series = result.raw_total_watts or result.total_watts
-    return _power_at(result.slot_starts, series, now)
-
-
-def _local_daily_kwh(result: ForecastResult) -> dict[str, float]:
-    """Roll the 15-min curve up to LOCAL calendar-day kWh."""
-    daily: dict[str, float] = {}
-    for start, watts in zip(result.slot_starts, result.total_watts, strict=False):
-        local_day = dt_util.as_local(dt_util.as_utc(start)).date().isoformat()
-        daily[local_day] = daily.get(local_day, 0.0) + watts * 0.25 / 1000.0
-    return {k: round(v, 3) for k, v in daily.items()}
-
-
-def _filter_hourly_to_local_day(
-    hourly_wh: dict[str, float], iso_day: str
-) -> dict[str, float]:
-    """Keep only hour keys whose LOCAL calendar date equals ``iso_day``.
-
-    The issued curves span the full FORECAST_DAYS window; every trainer/guard
-    compares them against ONE day of measured actuals, so they must only ever
-    see that day's hours (a 22:00 UTC hour belongs to the NEXT local day in
-    CET/CEST — bucket by local date, exactly like _daily_kwh_from_hourly).
-    """
-    out: dict[str, float] = {}
-    for hkey, wh in hourly_wh.items():
-        dt = dt_util.parse_datetime(hkey)
-        if dt is None:
-            continue
-        if dt_util.as_local(dt_util.as_utc(dt)).date().isoformat() == iso_day:
-            out[hkey] = float(wh)
-    return out
-
-
-def _daily_kwh_from_hourly(hourly_wh: dict[str, float]) -> dict[str, float]:
-    """Roll an ISO-UTC-hour Wh curve up to LOCAL calendar-day kWh."""
-    daily: dict[str, float] = {}
-    for hkey, wh in hourly_wh.items():
-        dt = dt_util.parse_datetime(hkey)
-        if dt is None:
-            continue
-        local_day = dt_util.as_local(dt_util.as_utc(dt)).date().isoformat()
-        daily[local_day] = daily.get(local_day, 0.0) + float(wh) / 1000.0
-    return {k: round(v, 3) for k, v in daily.items()}
+        """Per-module measured DC energy for ``day``: (daily totals, hourly)."""
+        return await _actuals.async_read_actuals(self, day)

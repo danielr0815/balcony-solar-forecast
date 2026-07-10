@@ -5,21 +5,58 @@ Balkonkraftwerke mit mehreren Modulausrichtungen, starker
 Standortverschattung (Gelände, Bäume, Gebäude) und Mikrowechselrichtern
 mit Port-genauen Messwerten.
 
-**Status: v0.5.0** (v0.1.0 live deployed — Phase 1, reiner Physik-Motor im
-14-Tage-Parallellauf gegen die 8-Entry-Baseline; **v0.2.0 + v0.3.0 fertig
-implementiert** — Phase 2/3 mit beiden Lernschichten: schneller Intraday-/
-Day-ahead-Bias-Lerner und langsamer Shademap-Lerner, voll in den Motor
-verdrahtet, plus Drift-Monitor mit Auto-Abschaltung, Kollaps-Detektor,
-Rollback-Ring, nächtliche Stunden-Ist-Werte, Catch-up nach Ausfall und
-Previous-Runs-Backfill; **v0.4.0 fertig** — Phase 4: Skill-Scoreboard
-(Kill-Gate: Motor-vs-Baseline-vs-Ist, stratifiziert, leckfrei „as issued"),
-P10/P50/P90-Quantilbänder (historische Simulation im Service/Attributen) und
-ein Observability-Dashboard mit Bordmitteln; alles geclamped, gegated und
-abschaltbar, SPEC §5–§10, §14; **v0.5.0** — Verschattungs-Diagramm je Datum &
-Modul (Sonnenbahn vs. aktuell gelernte Verschattung) plus reproduzierbare
-Dev-Umgebung (venv/make) und GitHub-Actions-CI). Die vollständige Spezifikation
-steht in [docs/SPEC.md](docs/SPEC.md); Dashboard-Installation in
-[docs/DASHBOARD.md](docs/DASHBOARD.md).
+**Status: v0.5.0** — selbstlernende PV-Prognose im Betrieb: Physik-Motor mit
+lokaler Transposition, zwei Lernschichten (Intraday-Bias + Shademap),
+Drift-Überwachung, P10/P50/P90-Quantilbänder und ein Skill-Scoreboard.
+Versionshistorie in [CHANGELOG.md](CHANGELOG.md), vollständige Spezifikation in
+[docs/SPEC.md](docs/SPEC.md).
+
+## Installation
+
+### HACS (empfohlen)
+
+1. In Home Assistant **HACS → Integrationen** öffnen.
+2. Über das Drei-Punkte-Menü **Benutzerdefinierte Repositories** wählen.
+3. URL `https://github.com/danielr0815/balcony-solar-forecast` eintragen,
+   Kategorie **Integration**, dann **Hinzufügen**.
+4. Das neue Repository in der Liste öffnen und **installieren**.
+5. Home Assistant **neu starten**.
+6. Unter **Einstellungen → Geräte & Dienste → Integration hinzufügen** nach
+   *Balcony Solar Forecast* suchen und einrichten.
+
+### Manuell (Fallback)
+
+Den Ordner `custom_components/balcony_solar_forecast` aus diesem Repository in
+das `custom_components/`-Verzeichnis der Home-Assistant-Konfiguration kopieren,
+Home Assistant neu starten und die Integration wie oben hinzufügen.
+
+## Konfiguration
+
+Die Einrichtung läuft vollständig über den **Config-Flow** (UI, kein YAML). Beim
+Hinzufügen der Integration werden abgefragt:
+
+- **Name** der Instanz,
+- **Koordinaten** (Breite/Länge des Standorts),
+- **Intervalle** für Datenabruf und Neuberechnung,
+- das **Site-Objekt**: die Modul-**Ebenen** (Azimut, Neigung, Wp), die
+  **Horizont**-Profile je Ebene und die **Wechselrichter-Gruppen** mit ihren
+  Mess-Entitäten. Das mitgelieferte Referenz-Setup ist als **editierbarer
+  Default** vorbelegt — Vorlage und Testfall, kein Zwang.
+
+Nachträglich lassen sich über **Konfigurieren** (Optionen) anpassen:
+
+- die **Lernschalter** (schneller Bias-Lerner, langsamer Shademap-Lerner,
+  Day-ahead-Bias),
+- die **Quantilbänder** (P10/P50/P90) an- oder abschalten,
+- die **Vergleichssensoren** für das Skill-Scoreboard.
+
+Ergänzende Anleitungen:
+
+- **[docs/DASHBOARD.md](docs/DASHBOARD.md)** — fertiges Observability-Dashboard
+  aus Bordmitteln, inklusive Verschattungsprofil-Diagramm.
+- **[docs/BACKFILL.md](docs/BACKFILL.md)** — optionaler Bootstrap der beiden
+  Lernschichten aus ~2 Jahren historischer Daten (einmaliger Dev-Job, läuft
+  nicht auf Home Assistant).
 
 ## Kernidee
 
@@ -47,56 +84,11 @@ steht in [docs/SPEC.md](docs/SPEC.md); Dashboard-Installation in
 
 ## Entwicklung
 
-Die Integration ist ein Home-Assistant-Custom-Component (wird aus
-`custom_components/` geladen, nicht `pip install`ed) und hat **keine
-Laufzeit-Abhängigkeiten** (`requirements: []`). Für Tests und Linter gibt es eine
-lokale venv — Setup identisch zum
-[battery-manager-ha](https://github.com/danielr0815/battery-manager-ha):
-Home Assistant, pytest, pytest-homeassistant-custom-component und ruff aus der
-`[dependency-groups] dev` in [pyproject.toml](pyproject.toml). Home Assistant ist
-ungepinnt; `pytest-homeassistant-custom-component` legt die passende HA-Version
-fest (aktuell **HA 2026.2.3**).
-
-### Umgebung aufsetzen (neuer Rechner, Linux oder Windows)
-
-```bash
-make install          # legt ./.venv an und installiert die Dev-Tools
-```
-
-Ohne `make` — dasselbe über das plattformübergreifende Bootstrap-Skript:
-
-```bash
-# Linux / macOS / WSL
-./scripts/setup-env.sh            # (oder: bash scripts/setup-env.sh)
-
-# Windows (PowerShell)
-.\scripts\setup-env.ps1
-```
-
-Beide rufen [`scripts/setup_env.py`](scripts/setup_env.py) auf (reine
-Standardbibliothek) und funktionieren auf einem frischen Rechner vor jeder
-Installation. Die venv-Python-Version kommt vom Bootstrap-Interpreter
-(`make`/Windows nutzen `py -3.13`, POSIX `python3`; `requires-python >= 3.13`).
-
-### Tests & Linter
-
-```bash
-make test        # volle Suite (plattformunabhängig, PHACC-Plugin deaktiviert)
-make test-core   # nur der reine Kern (ohne Home Assistant)
-make lint        # ruff check
-make format      # ruff check --fix
-make clean       # venv entfernen
-```
-
-> **Warum `-p no:homeassistant`?** Die Suite ist Unit-Test-artig: jeder
-> HA-Schicht-Test läuft gegen Fakes/Monkeypatch und braucht nur
-> `import homeassistant`, keine echte HA-Instanz. Die autouse-Fixtures von
-> `pytest-homeassistant-custom-component` rufen beim Setup
-> `asyncio.get_event_loop()` auf (wirft auf Python 3.12+ bei den sync-Tests) und
-> der Import zieht das POSIX-only `fcntl` (auf Windows nicht importierbar) — das
-> Plugin bricht also nur eine Suite, die seine Fixtures nie nutzt. Deaktiviert
-> läuft die **volle** Suite überall gleich (`pytest-asyncio` treibt die
-> async-Tests weiter). Genau das macht `make test` und der CI-`tests`-Job.
+Beiträge willkommen. Konventionen, Test-Architektur und Release-Prozess stehen
+in **[CONTRIBUTING.md](CONTRIBUTING.md)** — insbesondere: der Code ist bewusst
+handformatiert (`ruff format` wird **nicht** genutzt) und [docs/SPEC.md](docs/SPEC.md)
+ist der verbindliche Vertrag. Dev-Umgebung aufsetzen: `make install`; Tests:
+`make test` (Kern-Tests: `make test-core`).
 
 ## Lizenz
 

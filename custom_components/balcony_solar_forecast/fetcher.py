@@ -44,6 +44,10 @@ MAX_TRIES = 3
 _BASE_BACKOFF_SECONDS = 1.0
 _MAX_BACKOFF_SECONDS = 20.0
 _REQUEST_TIMEOUT_SECONDS = 30.0
+# A server-requested wait (429 Retry-After) longer than this must NOT stall the
+# recompute tick — raise immediately; the coordinator keeps serving the
+# last-good cache and retries on its own cadence (SPEC §7 degradation ladder).
+_RETRY_AFTER_MAX_INLINE_SECONDS = 30.0
 
 # Near-term window (in 15-min samples) that must carry at least one non-null
 # radiation sample for a payload to count as usable: 24 h * 4 slots/h. The
@@ -54,14 +58,23 @@ _NEAR_TERM_M15_SAMPLES = 24 * 4
 class FetchError(Exception):
     """Raised when a forecast could not be fetched or validated.
 
-    ``retryable`` marks transient failures (network, 5xx, malformed body)
-    versus permanent ones (4xx client error); the coordinator degrades the
-    same way for both, but the flag aids logging and future backoff tuning.
+    ``retryable`` marks transient failures (network, 5xx, 429, malformed body)
+    versus permanent ones (other 4xx client errors); the coordinator degrades
+    the same way for both, but the flag aids logging and future backoff tuning.
+    ``retry_after`` carries a server-requested wait in seconds (from a 429
+    Retry-After header) when one was parseable; it stays None otherwise.
     """
 
-    def __init__(self, message: str, *, retryable: bool = True) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        retry_after: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.retryable = retryable
+        self.retry_after = retry_after
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +297,21 @@ def _backoff_delay(attempt: int) -> float:
     return random.uniform(0.0, ceiling)
 
 
+def _parse_retry_after(value: object) -> float | None:
+    """Non-negative seconds from a Retry-After header, or None. Never raises.
+
+    Only the delta-seconds form (RFC 7231) is honoured; an HTTP-date or any
+    non-numeric value yields None — a plain retryable error with no server
+    wait attached. A negative value is clamped to 0.
+    """
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 class OpenMeteoFetcher:
     """Async Open-Meteo client with SHAPE validation and bounded retries.
 
@@ -318,6 +346,17 @@ class OpenMeteoFetcher:
     async def _async_fetch_payload(
         self, latitude: float, longitude: float, forecast_days: int
     ) -> dict:
+        """Fetch + SHAPE-validate one payload with bounded retries.
+
+        Transient failures retry up to ``MAX_TRIES`` with jittered exponential
+        backoff. A 429 carrying a parseable ``Retry-After`` overrides the
+        jitter — we honour the server's wait exactly, but only inline it when
+        it is short enough (<= ``_RETRY_AFTER_MAX_INLINE_SECONDS``) to hold the
+        recompute tick open; a longer wait is re-raised immediately so the
+        coordinator keeps serving the last-good cache and retries on its own
+        cadence (SPEC §7). Non-retryable errors (other 4xx, malformed body)
+        fail fast.
+        """
         import aiohttp  # lazy: only present inside Home Assistant
 
         params = build_params(latitude, longitude, forecast_days)
@@ -331,7 +370,13 @@ class OpenMeteoFetcher:
                 last_error = err
                 if not err.retryable or attempt == MAX_TRIES:
                     raise
-                delay = _backoff_delay(attempt)
+                if err.retry_after is not None:
+                    # A too-long server wait must not stall the tick (SPEC §7).
+                    if err.retry_after > _RETRY_AFTER_MAX_INLINE_SECONDS:
+                        raise
+                    delay = err.retry_after
+                else:
+                    delay = _backoff_delay(attempt)
                 _LOGGER.debug(
                     "Open-Meteo fetch attempt %d/%d failed (%s); retrying in %.1fs",
                     attempt,
@@ -354,6 +399,17 @@ class OpenMeteoFetcher:
                 if status >= 500:
                     raise FetchError(
                         f"Open-Meteo server error {status}", retryable=True
+                    )
+                # 429 is a transient rate limit, NOT a permanent client error:
+                # honour Retry-After when the server sends a parseable seconds
+                # value so we do not hammer it inside the backoff budget.
+                if status == 429:
+                    raise FetchError(
+                        "Open-Meteo rate limited (429)",
+                        retryable=True,
+                        retry_after=_parse_retry_after(
+                            resp.headers.get("Retry-After")
+                        ),
                     )
                 if status >= 400:
                     raise FetchError(

@@ -1,8 +1,8 @@
 # Spezifikation: Balcony Solar Forecast — Mehrebenen-PV-Prognose mit Selbstlernen
 
-> Status: **v0.1.0 live (2026-07-06, Parallellauf läuft); v0.2.0 + v0.3.0
-> implementiert & adversarial verifiziert (2026-07-06, Deploy ausstehend)**
-> — Lernschichten auf Betreiber-Entscheid vorgezogen, siehe D-P10.
+> Status: **v0.5.0 (2026-07-10)** — alle Phasen bis v0.4 (Scoreboard/
+> Quantile/Dashboard, §14) plus v0.5 (Verschattungsprofil, §15) umgesetzt;
+> v0.1.0 seit 2026-07-06 live im Parallellauf. Historie in CHANGELOG.md.
 > Gründungsdokument des Projekts `balcony_solar_forecast` (eigenständige
 > HA-Custom-Integration, danielr0815/balcony-solar-forecast). Synthese aus
 > drei unabhängigen Designentwürfen (Compose / Physik-Motor / ML-first) +
@@ -11,8 +11,9 @@
 > Jury-Urteil (3/3): dedizierter Physik+Lern-Motor.** Auf Betreiberwunsch
 > als **eigenes Projekt**, nicht als Modul in battery_manager — bestehende
 > Konsumenten koppeln nur über Standard-HA-Schnittstellen.
-> Zielversionen v0.1.0 … v0.4.0, je Phase einzeln deploybar, mit
-> Abbruch-Gates. Umsetzung: Opus 4.8 Ultracode; Prüfungen: Fable 5.
+> Zielversionen v0.1.0 … v0.4.0 (je Phase einzeln deploybar, mit
+> Abbruch-Gates); Erweiterungen ab v0.5 als Addendum-Sektionen (§15 ff.).
+> Umsetzung: Opus 4.8 Ultracode; Prüfungen: Fable 5.
 
 ## 1. Ausgangslage: zwei Engpässe, ein Konfigurationsdefizit
 

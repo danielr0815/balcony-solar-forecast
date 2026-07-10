@@ -356,16 +356,39 @@ def test_translation_covers_all_error_codes(locale) -> None:
 
 
 @pytest.mark.parametrize("locale", ["de", "en"])
-def test_translation_has_user_and_init_steps(locale) -> None:
+def test_translation_has_user_reconfigure_and_init_steps(locale) -> None:
     path = _COMPONENT_DIR / "translations" / f"{locale}.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     assert "user" in data["config"]["step"]
+    # Structural setup now edits into entry.data via the reconfigure flow.
+    assert "reconfigure" in data["config"]["step"]
     assert "init" in data["options"]["step"]
-    # Every schema field must have a label in both steps.
+    # The structural fields carry a label in the user AND the reconfigure step;
+    # the name is set once in the user step and immutable thereafter.
     for field in ("latitude", "longitude", "site"):
         assert field in data["config"]["step"]["user"]["data"]
-        assert field in data["options"]["step"]["init"]["data"]
+        assert field in data["config"]["step"]["reconfigure"]["data"]
     assert "name" in data["config"]["step"]["user"]["data"]
+    assert "name" not in data["config"]["step"]["reconfigure"]["data"]
+    # The slim options step labels only the runtime tunables — no structural
+    # fields (they moved to reconfigure so options can't shadow entry.data).
+    init_data = data["options"]["step"]["init"]["data"]
+    for tunable in (
+        "fast_learner_enabled",
+        "slow_learner_enabled",
+        "day_ahead_bias_enabled",
+        "quantiles_enabled",
+        "comparison_sensors",
+    ):
+        assert tunable in init_data
+    for structural in (
+        "latitude",
+        "longitude",
+        "site",
+        "fetch_interval_seconds",
+        "recompute_interval_seconds",
+    ):
+        assert structural not in init_data
 
 
 def test_de_and_en_have_same_error_keys() -> None:
