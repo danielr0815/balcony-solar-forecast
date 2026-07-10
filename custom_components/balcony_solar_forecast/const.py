@@ -510,7 +510,7 @@ DATA_KEY_RAW_HOURLY_WH = "raw_hourly_wh"          # {iso_hour: Wh} pure physics
 DATA_KEY_CORRECTED_HOURLY_WH = "corrected_hourly_wh"  # {iso_hour: Wh} served curve
 DATA_KEY_INTRADAY_SCALAR = "intraday_scalar"      # current applied scalar
 DATA_KEY_LEARNER_STATUS = "learner_status"        # dict: enabled/frozen/disabled per layer
-DATA_KEY_DRIFT_MAE = "drift_mae"                  # dict: {raw, corrected, baseline} rolling MAE
+DATA_KEY_DRIFT_MAE = "drift_mae"                  # dict: {raw, corrected, baseline, +slow when attributed} rolling MAE
 DATA_KEY_CORRECTION_SOURCE = "correction_source"  # one of CORRECTION_SOURCE_*
 
 # --- New diagnostic entities (SPEC §8) -------------------------------------

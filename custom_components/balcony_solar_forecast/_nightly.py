@@ -195,6 +195,10 @@ async def snapshot_issued(coord, today: date) -> None:
         corrected_daily_kwh=_daily_kwh_from_hourly(corrected_hourly),
         per_plane=coord._per_plane_modeled(iso),
         cloud_class_by_hour=coord._cloud_class_by_hour(iso),
+        # Slow-only (shademap ∘ physics, no day-ahead) curve for the drift
+        # monitor's per-layer attribution (audit #13b); {} when the slow layer
+        # is inactive (slow-only == raw, so nothing extra is stored).
+        slow_only_hourly_wh=coord._slow_only_hourly(iso),
     )
     coord._store.record_issued(iso, snapshot.to_dict())
 
@@ -798,18 +802,29 @@ def is_collapse_day(
 def update_drift(
     coord, iso: str, issued: dict | None, actuals: dict | None
 ) -> None:
-    """Rolling daylight-MAE drift monitor with auto-disable (SPEC §5).
+    """Rolling daylight-MAE drift monitor with per-layer auto-disable (SPEC §5).
 
-    Compares the corrected served curve against pure physics against the
-    measured day. A "losing" day is one where the corrected daylight MAE is
-    worse than the physics MAE by more than DRIFT_LOSS_MARGIN (relative) AND
-    by more than DRIFT_LOSS_MIN_ABS_WH (absolute) — the absolute floor keeps
-    a rounding-scale delta on a well-trained/clear day from counting as a
-    loss. DRIFT_LOSS_STREAK_DAYS consecutive losing days auto-disables the
-    layer,
-    raises a repair issue and keeps the disable flag until the user
-    re-enables in the options flow. The window is trimmed to
-    DRIFT_WINDOW_DAYS.
+    Decomposes the served curve as ``corrected = slow ∘ fast`` and attributes a
+    "losing" day to the GUILTY layer only, so an innocent layer is never
+    auto-disabled and rolled back alongside a drifting sibling (audit #13b). A
+    layer is "losing" when its challenger daily-kWh MAE beats its reference by
+    more than DRIFT_LOSS_MARGIN (relative) AND by more than DRIFT_LOSS_MIN_ABS_WH
+    (absolute) — the absolute floor keeps a rounding-scale delta on a
+    well-trained/clear day from counting as a loss:
+      * SLOW (shademap): slow-only MAE vs raw physics MAE — the shademap made
+        pure physics worse;
+      * FAST (day-ahead): corrected MAE vs slow-only MAE — the day-ahead factor
+        made the slow-only curve worse.
+    The two streaks advance INDEPENDENTLY from their own signal (a non-losing
+    leg resets only that layer's streak). DRIFT_LOSS_STREAK_DAYS consecutive
+    losing days auto-disables that layer, raises a repair issue and rolls it
+    back; the flag stays until the user re-enables in the options flow. The
+    window is trimmed to DRIFT_WINDOW_DAYS.
+
+    LEGACY fallback: when the snapshot carries NO slow-only curve (a pre-upgrade
+    snapshot, or a day the slow layer was inactive so slow-only == raw), the
+    decomposition has no independent slow signal — the monitor keeps exactly the
+    original single corrected-vs-raw signal driving BOTH streaks.
 
     Scope note (FIX-1 residual): the 01:30 issued snapshot's corrected-vs-raw
     delta reflects shademap + day-ahead only (the intraday scalar is neutral
@@ -833,42 +848,71 @@ def update_drift(
     corrected_total = sum(corrected_hourly.values())
     if raw_total <= 0.0 and corrected_total <= 0.0:
         return
+    # Slow-only curve (shademap ∘ physics, no day-ahead) sliced the SAME way.
+    # Empty on a legacy snapshot / slow-inactive day / failed compute: slow-only
+    # == raw, so the per-layer decomposition degrades to the legacy shared
+    # signal below.
+    slow_hourly = _filter_hourly_to_local_day(snap.slow_only_hourly_wh, iso)
+    has_slow = bool(slow_hourly)
+    slow_total = sum(slow_hourly.values()) if has_slow else raw_total
     # Daily-kWh absolute error as the MAE proxy (the operator's primary
     # metric is daily kWh, SPEC §10/B9; the issued ring stores hourly so a
     # true daylight-hour MAE is available to a future finer implementation).
     raw_mae = abs(raw_total - measured_wh)
     corrected_mae = abs(corrected_total - measured_wh)
+    slow_mae = abs(slow_total - measured_wh)
     baseline_mae = raw_mae  # pure physics is the baseline comparison here
 
-    daily = dict(coord._drift_state.daily_mae)
-    daily[iso] = {
+    entry = {
         "raw": round(raw_mae, 2),
         "corrected": round(corrected_mae, 2),
         "baseline": round(baseline_mae, 2),
     }
+    # Record the slow-only leg's MAE only when the snapshot carried a slow-only
+    # curve (keep the dict shape stable on legacy/slow-inactive days).
+    if has_slow:
+        entry["slow"] = round(slow_mae, 2)
+    daily = dict(coord._drift_state.daily_mae)
+    daily[iso] = entry
     # Trim to the window (ISO date order == chronological).
     for stale in sorted(daily)[:-DRIFT_WINDOW_DAYS]:
         daily.pop(stale, None)
 
-    losing = (
-        corrected_mae > raw_mae * (1.0 + DRIFT_LOSS_MARGIN)
-        and (corrected_mae - raw_mae) > DRIFT_LOSS_MIN_ABS_WH
-    )
-    # The correction here is the fast (intraday) + slow blend on the served
-    # curve; attribute a losing day to whichever geometric layer is active,
-    # and to the fast layer (it always shapes the served curve when on).
+    def _losing(challenger_mae: float, reference_mae: float) -> bool:
+        """A materially worse challenger: beats the reference by both the
+        relative margin AND the absolute Wh floor (SPEC §5)."""
+        return (
+            challenger_mae > reference_mae * (1.0 + DRIFT_LOSS_MARGIN)
+            and (challenger_mae - reference_mae) > DRIFT_LOSS_MIN_ABS_WH
+        )
+
     fast_streak = coord._drift_state.fast_loss_streak
     slow_streak = coord._drift_state.slow_loss_streak
     fast_on = coord._learner_config.fast_enabled and not coord._drift_state.fast_disabled
     slow_on = coord._learner_config.slow_enabled and not coord._drift_state.slow_disabled
-    if losing:
+    if has_slow:
+        # Per-layer decomposition (corrected = slow ∘ fast): each active layer's
+        # streak advances or resets from ITS OWN leg — the slow layer on
+        # slow-only-vs-physics, the fast layer on corrected-vs-slow-only.
+        slow_losing = _losing(slow_mae, raw_mae)
+        fast_losing = _losing(corrected_mae, slow_mae)
         if fast_on:
-            fast_streak += 1
+            fast_streak = fast_streak + 1 if fast_losing else 0
         if slow_on:
-            slow_streak += 1
+            slow_streak = slow_streak + 1 if slow_losing else 0
     else:
-        fast_streak = 0
-        slow_streak = 0
+        # LEGACY fallback (no slow-only curve): the original single
+        # corrected-vs-raw signal drives BOTH layers' streaks in lockstep, so
+        # pre-upgrade snapshots and slow-inactive days behave exactly as before.
+        losing = _losing(corrected_mae, raw_mae)
+        if losing:
+            if fast_on:
+                fast_streak += 1
+            if slow_on:
+                slow_streak += 1
+        else:
+            fast_streak = 0
+            slow_streak = 0
 
     fast_disabled = coord._drift_state.fast_disabled
     slow_disabled = coord._drift_state.slow_disabled

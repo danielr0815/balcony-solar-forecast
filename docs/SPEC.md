@@ -212,7 +212,14 @@ falsche Geometrie. Optional später: 1 RLS-Bias-Skalar je
 - **Drift-Monitor**: rollierende 7-Tage-MAE korrigiert vs. reine Physik;
   verliert der Lerner 7 Tage in Folge → Auto-Abschaltung + HA-Repair-
   Issue; letzte 3 Lernstände für Rollback; Store validate-and-clamp beim
-  Laden (korrupt ⇒ Faktoren 1,0, nie Setup-Crash).
+  Laden (korrupt ⇒ Faktoren 1,0, nie Setup-Crash). Der nächtliche
+  Snapshot hält zusätzlich die reine Schattenkarten-Kurve fest
+  (Slow ∘ Physik, ohne Day-ahead-Faktor); ein Verlusttag wird der
+  schuldigen Schicht zugeordnet — Slow: Schattenkarte vs. Physik,
+  Day-ahead/Fast: korrigiert vs. Schattenkarten-Kurve — mit
+  unabhängigen Streaks, sodass eine unschuldige Schicht nicht
+  mitabgeschaltet wird. Alt-Snapshots ohne Schattenkarten-Kurve fallen
+  auf das gemeinsame korrigiert-vs-Physik-Signal zurück.
 - **Kollaps-Detektor**: alle Kanäle ≈ 0 bei hoher Prognose (Schnee auf
   Modulen, Total-Dropout) ⇒ beide Lerner für den Tag einfrieren, nur der
   geclampte Intraday-Skalar reagiert.

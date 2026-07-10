@@ -690,12 +690,14 @@ class DriftState:
 
     ``daily_mae`` holds recent per-day daylight MAE triples keyed by ISO date:
     ``{iso_date: {"raw": mae, "corrected": mae, "baseline": mae}}`` (trimmed to
-    DRIFT_WINDOW_DAYS). ``fast_loss_streak`` / ``slow_loss_streak`` count
-    consecutive days the corrected curve lost to physics for each layer; at
-    DRIFT_LOSS_STREAK_DAYS the coordinator auto-disables that layer and raises
-    a repair issue, setting ``fast_disabled`` / ``slow_disabled``. Disabled
-    layers stay off until the user re-enables via the options flow (which
-    clears the flag).
+    DRIFT_WINDOW_DAYS), plus an optional ``"slow"`` key on days whose snapshot
+    carried a slow-only curve (per-layer attribution, audit #13b).
+    ``fast_loss_streak`` / ``slow_loss_streak`` count consecutive days each
+    layer lost — the fast (day-ahead) layer on corrected-vs-slow-only, the slow
+    (shademap) layer on slow-only-vs-physics; at DRIFT_LOSS_STREAK_DAYS the
+    coordinator auto-disables that layer and raises a repair issue, setting
+    ``fast_disabled`` / ``slow_disabled``. Disabled layers stay off until the
+    user re-enables via the options flow (which clears the flag).
     """
 
     daily_mae: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -860,6 +862,13 @@ class IssuedSnapshot:
     store. ``version`` == 2 distinguishes it from the v1 issued dict (which had
     only ``hourly_wh`` / ``daily_kwh`` / ``status``); the store carries v1
     entries forward untouched and writes v2 going forward.
+
+    ``slow_only_hourly_wh`` (audit #13b) is the hourly Wh curve with ONLY the
+    SLOW layer (shademap beam_tau) applied — no day-ahead factor — so the drift
+    monitor can decompose ``corrected = slow ∘ fast`` and attribute a losing day
+    to the guilty layer. It is written only when the slow layer was active (else
+    it equals raw and is omitted); an empty value means the monitor falls back
+    to the legacy shared corrected-vs-raw signal.
     """
 
     issued_at: str  # iso utc
@@ -873,6 +882,11 @@ class IssuedSnapshot:
     # the nightly RLS trainer can key the (cloud class x day part) cell on the
     # ACTUAL forecast weather, not a fixed "clear" label. Empty on legacy/v0.1.
     cloud_class_by_hour: dict[str, str] = field(default_factory=dict)
+    # Slow-only (shademap ∘ physics, NO day-ahead factor) hourly Wh curve for the
+    # drift monitor's per-layer attribution (audit #13b). Empty on legacy/v0.1 or
+    # a slow-inactive day (slow-only == raw); the monitor then uses the legacy
+    # shared signal.
+    slow_only_hourly_wh: dict[str, float] = field(default_factory=dict)
     version: int = 2
 
     @classmethod
@@ -911,11 +925,12 @@ class IssuedSnapshot:
             corrected_daily_kwh=_fd("corrected_daily_kwh"),
             per_plane=per_plane,
             cloud_class_by_hour=cloud_class_by_hour,
+            slow_only_hourly_wh=_fd("slow_only_hourly_wh"),
             version=_safe_int(d.get("version", 2), 2),
         )
 
     def to_dict(self) -> dict:
-        return {
+        out: dict = {
             "version": self.version,
             "issued_at": self.issued_at,
             "status": self.status,
@@ -926,6 +941,14 @@ class IssuedSnapshot:
             "per_plane": {k: v.to_dict() for k, v in self.per_plane.items()},
             "cloud_class_by_hour": dict(self.cloud_class_by_hour),
         }
+        # Store trim: write the slow-only curve ONLY when non-empty (slow layer
+        # was active). Empty == slow-only == raw, and ``from_dict`` reads a
+        # missing key as {}, so omitting it keeps the round-trip exact while
+        # avoiding a second full copy of the raw curve in every snapshot of the
+        # 90-day issued ring.
+        if self.slow_only_hourly_wh:
+            out["slow_only_hourly_wh"] = dict(self.slow_only_hourly_wh)
+        return out
 
 
 # ===========================================================================

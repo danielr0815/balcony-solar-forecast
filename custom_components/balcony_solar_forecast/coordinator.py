@@ -675,15 +675,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             and self._intraday_scalar != INTRADAY_NEUTRAL
         )
 
-        beam_tau = None
-        if slow_active:
-            shd = self._shademap_state
-
-            def beam_tau(channel, sun_az, sun_el, doy, static_prior):
-                return shademap_mod.effective_tau(
-                    shd, channel=channel, sun_az=sun_az, sun_el=sun_el,
-                    doy=doy, static_prior=static_prior,
-                )
+        beam_tau = self._bind_beam_tau() if slow_active else None
 
         # Per-slot day-ahead factor, precomputed over the weather window so the
         # hook is a dict lookup (keyed by the identical slot.start datetimes the
@@ -751,6 +743,59 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             source = CORRECTION_SOURCE_NONE
         return LearnerHooks(beam_tau=beam_tau, slot_factor=slot_factor,
                             correction_source=source, band_by_slot=band_by_slot)
+
+    def _bind_beam_tau(self):
+        """Bind ``shademap.effective_tau`` over the current ShademapState into
+        the engine's ``beam_tau`` hook.
+
+        Factored out so BOTH the served-curve pass (:meth:`_build_learner_hooks`)
+        and the nightly slow-only attribution pass (:meth:`_slow_only_hourly`)
+        build the closure identically — the binding can never diverge.
+        """
+        shd = self._shademap_state
+
+        def beam_tau(channel, sun_az, sun_el, doy, static_prior):
+            return shademap_mod.effective_tau(
+                shd, channel=channel, sun_az=sun_az, sun_el=sun_el,
+                doy=doy, static_prior=static_prior,
+            )
+
+        return beam_tau
+
+    def _slow_only_hourly(self, iso: str) -> dict[str, float]:
+        """Slow-only (shademap ∘ physics, NO day-ahead factor) hourly Wh for the
+        local day ``iso`` — the drift monitor's per-layer attribution reference
+        (audit #13b).
+
+        Returns {} when the slow layer is not currently active (the same gate as
+        :meth:`_build_learner_hooks`, via :meth:`_slow_active`): callers then
+        treat slow-only == raw and blame only the fast layer, so the raw curve is
+        NOT duplicated into the store. Also {} when no weather is cached or the
+        engine pass raises — the nightly snapshot must never fail on this. Runs
+        ONCE per nightly snapshot, so the extra engine pass is cheap.
+        """
+        if not self._slow_active():
+            return {}
+        weather = self._cached_weather()
+        if weather is None:
+            return {}
+        try:
+            tz = dt_util.get_time_zone(self.hass.config.time_zone)
+            hooks = LearnerHooks(
+                beam_tau=self._bind_beam_tau(),
+                slot_factor=None,
+                correction_source=CORRECTION_SOURCE_SHADEMAP,
+                band_by_slot=None,
+            )
+            result = compute_forecast(
+                self._site, weather, dt_util.utcnow(), tz=tz, hooks=hooks
+            )
+            return _filter_hourly_to_local_day(result.hourly_wh, iso)
+        except Exception:  # pragma: no cover - never fail the nightly snapshot
+            _LOGGER.debug(
+                "Slow-only hourly compute failed for %s", iso, exc_info=True
+            )
+            return {}
 
     def _due_for_fetch(self, now: datetime) -> bool:
         # Scheduling keys on the last ATTEMPT, not the payload age: the
