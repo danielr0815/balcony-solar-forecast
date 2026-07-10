@@ -418,7 +418,9 @@ def test_classify_overcast():
 
 
 def test_classify_mixed():
-    assert classify_cloud(cloud_low=50, cloud_mid=50, cloud_high=50,
+    # A single 50% deck -> total cover 50 -> mixed. (Three stacked 50% decks are
+    # 87.5% total and now overcast, so the canonical mixed case is one half-deck.)
+    assert classify_cloud(cloud_low=50, cloud_mid=0, cloud_high=0,
                           visibility_m=20000, month=6) == CLOUD_CLASS_MIXED
 
 
@@ -435,10 +437,12 @@ def test_classify_fog_by_winter_low_cloud():
 
 
 def test_classify_no_fog_high_low_cloud_summer():
-    # Same high low-cloud but a summer month is NOT the fog rule -> falls to
-    # cover split (mean = 30 -> mixed).
+    # Same high low-cloud but a summer month is NOT the fog rule -> falls to the
+    # cover split. Under random-overlap total cover a 90% low deck is 90 ->
+    # overcast (a single opaque deck overcasts the sky; the old mean-of-three
+    # would have mislabelled it "mixed").
     assert classify_cloud(cloud_low=90, cloud_mid=0, cloud_high=0,
-                          visibility_m=20000, month=6) == CLOUD_CLASS_MIXED
+                          visibility_m=20000, month=6) == CLOUD_CLASS_OVERCAST
 
 
 def test_classify_fog_precedence_over_overcast():
@@ -470,6 +474,41 @@ def test_classify_returns_known_class():
         assert classify_cloud(**args) in (
             CLOUD_CLASS_CLEAR, CLOUD_CLASS_MIXED, CLOUD_CLASS_OVERCAST, CLOUD_CLASS_FOG
         )
+
+
+def test_classify_single_full_low_deck_is_overcast():
+    # THE defect (audit #16): one opaque low deck (100/0/0) fully overcasts the
+    # sky. The old arithmetic mean was 33 -> "mixed"; total cover is 100.
+    assert classify_cloud(cloud_low=100, cloud_mid=0, cloud_high=0,
+                          visibility_m=20000, month=6) == CLOUD_CLASS_OVERCAST
+
+
+def test_classify_single_half_deck_is_mixed():
+    # A lone 50% deck (any layer) -> total cover 50 -> mixed (below the 75 floor).
+    assert classify_cloud(cloud_low=0, cloud_mid=50, cloud_high=0,
+                          visibility_m=20000, month=6) == CLOUD_CLASS_MIXED
+
+
+def test_classify_thin_scattered_layers_stay_clear():
+    # 10/5/5 -> total 100*(1 - 0.9*0.95*0.95) ~= 18.6 (< 25) -> clear. (A 20/10/0
+    # pair would already reach 28 -> mixed, so the inputs are chosen to genuinely
+    # land clear under the random-overlap rule.)
+    assert classify_cloud(cloud_low=10, cloud_mid=5, cloud_high=5,
+                          visibility_m=20000, month=6) == CLOUD_CLASS_CLEAR
+
+
+def test_classify_three_stacked_half_decks_are_overcast():
+    # Three 40% decks stack to 100*(1 - 0.6^3) = 78.4% total cover -> overcast
+    # (defensible: stacked partial decks leave little clear sky).
+    assert classify_cloud(cloud_low=40, cloud_mid=40, cloud_high=40,
+                          visibility_m=20000, month=6) == CLOUD_CLASS_OVERCAST
+
+
+def test_classify_fog_still_overrides_single_full_deck():
+    # Fog is tested FIRST: a 100% low deck (now overcast on cover) still
+    # classifies fog when visibility collapses.
+    assert classify_cloud(cloud_low=100, cloud_mid=0, cloud_high=0,
+                          visibility_m=500, month=6) == CLOUD_CLASS_FOG
 
 
 # ===========================================================================

@@ -183,6 +183,8 @@ bewusst NICHT das Gesamtverhältnis gemessen/modelliert: im Schatten
 enthält die Messung weiter den Diffus-Sockel; ein Gesamt-Ratio auf den
 Beam angewandt würde verschattete Bins systematisch überschätzen und
 diffus-unabhängige Verluste (Soiling, η-Fehler) dem Beam zuschreiben.
+Warm-up der EMA mit adaptivem α = max(α, 1/(n+1)): junge Bins sind so das
+arithmetische Mittel ihrer Samples statt vom Seed dominiert.
 Nur **quasi-klare Samples** (k_c-Gate **elevationsabhängig** — Haurwitz
 ist bei Tiefstand grob; plus Nachbarslot-Stabilität; plus modellierter
 Beam-Anteil > 5 % Wp). Die gelernte Karte **ersetzt** die statische

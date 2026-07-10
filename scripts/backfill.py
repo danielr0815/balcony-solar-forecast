@@ -463,9 +463,12 @@ def _shade_update(
 ) -> None:
     """EMA-update one channel/bin with a beam-referenced T (mirrors update_bin).
 
-    New tau = (1-alpha)*old + alpha*clamp(T); a fresh bin seeds at clamp(T).
-    n incremented (capped at emit time). Input untouched semantics are moot
-    here since we accumulate into the mutable accumulator.
+    New tau = (1-alpha)*old + alpha*clamp(T) with an ADAPTIVE warm-up alpha =
+    max(SHADEMAP_EMA_ALPHA, 1/(n_old+1)); a fresh bin seeds at clamp(T). n
+    incremented (capped at emit time). The alpha formula is byte-identical to
+    shademap.update_bin so the offline bootstrap and live training stay
+    sample-for-sample identical. Input untouched semantics are moot here since
+    we accumulate into the mutable accumulator.
     """
     t = _clamp(measured_t, const.SHADEMAP_TAU_MIN, const.SHADEMAP_TAU_MAX)
     chan = acc.shade.setdefault(channel, {})
@@ -474,7 +477,9 @@ def _shade_update(
         chan[bin_key] = [t, 1]
     else:
         old_tau, n = cell
-        alpha = const.SHADEMAP_EMA_ALPHA
+        # n is the stored count BEFORE this sample: young bins are the arithmetic
+        # mean of their samples until the fixed EMA alpha takes over.
+        alpha = max(const.SHADEMAP_EMA_ALPHA, 1.0 / (n + 1))
         cell[0] = (1.0 - alpha) * old_tau + alpha * t
         cell[1] = n + 1
     acc.shade_samples += 1
