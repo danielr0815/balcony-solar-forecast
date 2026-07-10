@@ -349,11 +349,12 @@ class TestSlotFactor:
             assert res.hourly_wh[k] == pytest.approx(2.0 * res.raw_hourly_wh[k])
         assert res.correction_source == CORRECTION_SOURCE_INTRADAY
 
-    def test_factor_applied_after_clamp(self, patched_physics):
-        """The slot factor is applied to the ALREADY-CLAMPED site power, so a
-        factor > 1 can push the reported corrected total above the AC limit
-        (the physical clamp is the raw curve; the learner reshapes the served
-        estimate). This documents the ordering: clamp first, then learner."""
+    def test_factor_reclamped_within_ac_limit(self, patched_physics):
+        """The slot factor is applied to the already-clamped site power and then
+        the groups are clamped AGAIN, so a factor > 1 can NEVER push the served
+        corrected total above the inverter AC limit. This documents the ordering:
+        clamp, factor, re-clamp (the physical ceiling bounds the served estimate
+        too, not only the raw curve)."""
         n_plane = PlaneConfig(name="N", azimuth_deg=180.0, tilt_deg=30.0, wp=5000.0)
         s_plane = PlaneConfig(name="S", azimuth_deg=180.0, tilt_deg=30.0, wp=5000.0)
         group = InverterGroup(name="WR", plane_names=("N", "S"), ac_limit_w=800.0)
@@ -364,9 +365,11 @@ class TestSlotFactor:
         res = engine.compute_forecast(
             site, weather, now=_TEST_DATE, hooks=LearnerHooks(slot_factor=lambda s: 1.5)
         )
-        # Raw stays clamped at 800 W; corrected is 1.5x that at the peak.
+        # Raw stays clamped at 800 W; a 1.5x up-correction on the already-clamped
+        # peak is re-clamped back to the 800 W AC limit (NOT 1200 W).
         assert max(res.raw_total_watts) == pytest.approx(800.0)
-        assert max(res.total_watts) == pytest.approx(1200.0)
+        assert max(res.total_watts) == pytest.approx(800.0)
+        assert all(w <= 800.0 + 1e-6 for w in res.total_watts)
 
     def test_intraday_linear_decay_over_horizon(self, patched_physics):
         """An intraday-style factor that starts at 1.5 at ``now`` and ramps

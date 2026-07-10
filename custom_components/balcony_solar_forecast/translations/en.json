@@ -210,7 +210,7 @@
     "step": {
       "init": {
         "title": "Balcony Solar Forecast options",
-        "description": "Runtime tunables only: the learner layers, quantile bands and comparison sensors. Structural setup (location, intervals, the full site configuration) moved to \"Reconfigure\" in the integration's three-dot menu.",
+        "description": "Runtime tunables only — to edit the location, planes, horizon or inverter groups, use 'Reconfigure' in the integration entry's three-dot menu. Runtime tunables only: the learner layers, quantile bands and comparison sensors. Structural setup (location, intervals, the full site configuration) moved to \"Reconfigure\" in the integration's three-dot menu.",
         "data": {
           "fast_learner_enabled": "Fast learner (intraday correction)",
           "slow_learner_enabled": "Shademap learner (per-channel shade map)",

@@ -29,11 +29,17 @@ v0.1 build round-trips unchanged.
   2. FAST learner (intraday scalar + day-ahead RLS bias), at the AGGREGATION
      stage, as a single per-slot multiplicative factor:
      ``hooks.slot_factor(slot_start) -> factor``
-     scales the CORRECTED (already shademap-transposed) per-slot site power.
-     The coordinator composes intraday decay + day-ahead bias into this one
-     factor so the 15-min ``total_watts`` and the hourly ``hourly_wh`` stay
-     mutually consistent (both are derived from the same factored slot power).
-     A hook that returns 1.0 is the identity.
+     scales the CORRECTED (already shademap-transposed) per-slot site power and
+     is then RE-CLAMPED to the inverter groups (``electrical.clamp_groups`` runs
+     a SECOND time, after the factor) so an up-correction (factor > 1) can never
+     push the served curve past the configured AC limit. The coordinator
+     composes intraday decay + day-ahead bias into this one factor so the 15-min
+     ``total_watts`` and the hourly ``hourly_wh`` stay mutually consistent (both
+     are derived from the same factored-then-re-clamped slot power). A hook that
+     returns 1.0 is the identity, and any factor <= 1 leaves the values already
+     within limits so the re-clamp is a mathematical no-op (bit-exact). Planes
+     in no inverter group have no configured ceiling and pass through both
+     clamps unchanged.
 
 Per-slot pipeline (values are interval means; sun position at the midpoint):
 
@@ -47,6 +53,9 @@ Per-slot pipeline (values are interval means; sun position at the midpoint):
         POA = gated beam + gated circumsolar + gated isotropic + ground
         dc_power(POA, wp, temp, efficiency)   -> beam-DC and diffuse-DC split
     clamp_groups()  --> per-plane and site-total AC-clamped watts
+    slot_factor * clamped, then clamp_groups() AGAIN --> re-clamped served watts
+                    (the factor is applied between the two clamps, so factor > 1
+                    can never lift the served curve above the AC ceiling)
 
 Attribution split: the per-plane DC power is decomposed into the part driven
 by the beam+circumsolar POA vs. the diffuse+ground POA (pre-AC-clamp), so the
@@ -138,7 +147,10 @@ class LearnerHooks:
     band == corrected, no fabricated spread — bit-exact with the pre-quantile
     path). When populated, the engine multiplies the CORRECTED per-slot site
     power by each band factor to produce the p10/p50/p90 15-min watts curves and
-    their hourly Wh roll-ups, in the SAME instantaneous frame as ``total_watts``.
+    their hourly Wh roll-ups, in the SAME instantaneous frame as ``total_watts``,
+    then caps each band curve at the slot's physical AC ceiling (sum of the group
+    AC limits + the corrected watts of any ceiling-free ungrouped planes) so a
+    P90 factor > 1 can never exceed what the inverters can deliver.
     The coordinator builds it (per-slot cloud-class classification -> bin ->
     ``quantiles.bands_for_bin``); the engine treats the bands as opaque scalars.
     """
@@ -354,8 +366,14 @@ def compute_forecast(
     ``hooks.beam_tau`` for the CORRECTED curve) and sky-view-factor on the
     isotropic diffuse, snow-aware ground albedo, Ross-derated DC power, then
     per-inverter-group AC clamp. The corrected per-slot site power is then
-    scaled by ``hooks.slot_factor`` (fast learner). Aggregates BOTH curves to
-    hourly Wh (keyed by ISO UTC hour) and daily kWh (keyed by ISO date).
+    scaled by ``hooks.slot_factor`` (fast learner) and RE-CLAMPED to the inverter
+    groups (``electrical.clamp_groups`` a second time, after the factor) so an
+    up-correction (factor > 1) can never push the served curve past the
+    configured AC limit; a factor <= 1 leaves the values within limits so the
+    re-clamp is a no-op (bit-exact common path). Planes in no inverter group
+    have no configured ceiling and pass both clamps through unchanged. Aggregates
+    BOTH curves to hourly Wh (keyed by ISO UTC hour) and daily kWh (keyed by ISO
+    date).
 
     The per-plane per-slot ``beam_watts`` / ``diffuse_watts`` / ``kc`` on each
     ``PlaneResult`` (aligned to ``slot_starts``) give the coordinator every
@@ -404,6 +422,13 @@ def compute_forecast(
         plane.name: horizon.sky_view_factor(plane) for plane in planes
     }
 
+    # Static AC ceiling ingredients for the per-slot band cap (SPEC §6/§10). The
+    # most the site can deliver in a slot is the sum of every group's AC limit
+    # plus the corrected watts of any plane in NO group (ceiling-free). The group
+    # sum is static; the ungrouped contribution is added per slot below.
+    total_group_limit = sum(g.ac_limit_w for g in groups)
+    grouped_names = {name for g in groups for name in g.plane_names}
+
     slot_starts: list[datetime] = []
     # RAW (pure-physics) per-slot site total and per-plane series.
     raw_total_watts: list[float] = []
@@ -421,6 +446,10 @@ def compute_forecast(
     beam_ref_series: dict[str, list[float]] = {p.name: [] for p in planes}
     diffuse_ref_series: dict[str, list[float]] = {p.name: [] for p in planes}
     kc_series: list[float] = []  # site-level clear-sky index per slot
+    # Physical AC ceiling per slot (aligned to slot_starts), used only to cap the
+    # quantile band curves after the main loop (a P90 factor > 1 must never
+    # exceed what the inverters can deliver).
+    slot_ceilings: list[float] = []
 
     raw_hourly_wh: dict[str, float] = {}
     raw_daily_kwh: dict[str, float] = {}
@@ -431,6 +460,10 @@ def compute_forecast(
         raw_total_watts.append(0.0)
         total_watts.append(0.0)
         kc_series.append(0.0)
+        # No production => no ungrouped contribution; the group ceiling is the
+        # slot's ceiling (band watts are zero here anyway, so this only keeps the
+        # list dense and aligned to slot_starts).
+        slot_ceilings.append(total_group_limit)
         for p in planes:
             raw_plane_series[p.name].append(0.0)
             plane_series[p.name].append(0.0)
@@ -531,6 +564,32 @@ def compute_forecast(
             except (TypeError, ValueError):
                 factor = 1.0
 
+        # RE-CLAMP after the factor: the first clamp above ran BEFORE the factor,
+        # so an up-correction (factor > 1) would otherwise lift the served curve
+        # past the physical inverter AC limit. Scale the already-clamped per-plane
+        # watts by the factor, then clamp the groups AGAIN so the corrected curve
+        # is always bounded by the configured AC ceiling. When factor <= 1 the
+        # values are already within limits and this is a mathematical no-op, so
+        # the common path stays bit-exact. Ungrouped planes have no configured
+        # ceiling and pass through both clamps (see electrical.clamp_groups).
+        cor_factored = {
+            name: watts * factor for name, watts in cor_clamped.items()
+        }
+        cor_final = electrical.clamp_groups(cor_factored, groups)
+        # Redistribute the SECOND clamp onto the beam/diffuse shares (same helper
+        # as the first clamp) so the reported attribution still sums to each
+        # plane's final watts: scale the first-clamp shares by the factor, then
+        # apply the clamped/unclamped ratio of the re-clamp.
+        beam_factored = {
+            name: watts * factor for name, watts in cor_beam_cl.items()
+        }
+        diffuse_factored = {
+            name: watts * factor for name, watts in cor_diffuse_cl.items()
+        }
+        cor_beam_final, cor_diffuse_final = _split_clamp(
+            beam_factored, diffuse_factored, cor_final, cor_factored
+        )
+
         raw_slot_total = 0.0
         cor_slot_total = 0.0
         for plane in planes:
@@ -538,17 +597,26 @@ def compute_forecast(
             raw_plane_series[plane.name].append(rw)
             raw_slot_total += rw
 
-            cw = cor_clamped.get(plane.name, 0.0) * factor
+            cw = cor_final.get(plane.name, 0.0)
             plane_series[plane.name].append(cw)
             cor_slot_total += cw
 
-            bw = cor_beam_cl.get(plane.name, 0.0) * factor
-            dw = cor_diffuse_cl.get(plane.name, 0.0) * factor
+            bw = cor_beam_final.get(plane.name, 0.0)
+            dw = cor_diffuse_final.get(plane.name, 0.0)
             beam_series[plane.name].append(bw)
             diffuse_series[plane.name].append(dw)
 
         raw_total_watts.append(raw_slot_total)
         total_watts.append(cor_slot_total)
+
+        # Physical AC ceiling for this slot's band cap: group limits + the
+        # ceiling-free (ungrouped) planes' corrected watts (SPEC §6/§10).
+        ungrouped_cor = sum(
+            cor_final.get(p.name, 0.0)
+            for p in planes
+            if p.name not in grouped_names
+        )
+        slot_ceilings.append(total_group_limit + ungrouped_cor)
 
         # --- energy roll-ups (interval-mean power * slot hours) ---
         hour_start = start.astimezone(UTC).replace(
@@ -596,6 +664,21 @@ def compute_forecast(
     if band_by_slot:
         p10_watts, p50_watts, p90_watts = quantiles.band_curve_from_corrected(
             total_watts, slot_starts, band_by_slot,
+        )
+        # Cap each band curve at the slot's physical AC ceiling BEFORE the hourly
+        # Wh roll-up: the P90 factor (> 1) at a clamped clear midday would
+        # otherwise report more site power than the inverters can deliver. p50 /
+        # p10 rarely touch it (p50 <= corrected total <= ceiling by construction);
+        # the band factors in quantiles.py stay pure — the cap lives here next to
+        # the ceiling data.
+        p10_watts = tuple(
+            min(w, slot_ceilings[i]) for i, w in enumerate(p10_watts)
+        )
+        p50_watts = tuple(
+            min(w, slot_ceilings[i]) for i, w in enumerate(p50_watts)
+        )
+        p90_watts = tuple(
+            min(w, slot_ceilings[i]) for i, w in enumerate(p90_watts)
         )
         for i, start in enumerate(slot_starts):
             hkey = (

@@ -210,7 +210,7 @@
     "step": {
       "init": {
         "title": "Balkon-Solar-Prognose – Optionen",
-        "description": "Nur Laufzeit-Stellgrößen: die Lernschichten, Quantilbänder und Vergleichssensoren. Die strukturelle Einrichtung (Standort, Intervalle, die vollständige Standort-Konfiguration) ist nach „Neu konfigurieren“ im Drei-Punkte-Menü der Integration umgezogen.",
+        "description": "Nur Laufzeit-Stellgrößen — Standort, Ebenen, Horizont und WR-Gruppen bearbeitest du über 'Neu konfigurieren' im Drei-Punkte-Menü des Eintrags. Nur Laufzeit-Stellgrößen: die Lernschichten, Quantilbänder und Vergleichssensoren. Die strukturelle Einrichtung (Standort, Intervalle, die vollständige Standort-Konfiguration) ist nach „Neu konfigurieren“ im Drei-Punkte-Menü der Integration umgezogen.",
         "data": {
           "fast_learner_enabled": "Schneller Lerner (Intraday-Korrektur)",
           "slow_learner_enabled": "Shademap-Lerner (kanalweise Verschattungskarte)",
