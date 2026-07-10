@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-10
+
 ### Changed
 - **Shade groups now pool at READ time, not by merging (supersedes the v0.12.0
   merge design).** Every module's learned shading is stored INDIVIDUALLY under
