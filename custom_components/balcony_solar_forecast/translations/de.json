@@ -169,7 +169,7 @@
     "step": {
       "user": {
         "title": "Balkon-Solar-Prognose einrichten",
-        "description": "Name, Standort und Aktualisierungsintervalle festlegen. Das Feld „Standort-Konfiguration“ enthält bereits das vollständige Betreiber-Setup (8 Module, Horizonttabellen, Wechselrichter-Gruppen) – für die Referenzanlage einfach bestätigen, ansonsten frei bearbeiten. Azimut: 0° = Nord, im Uhrzeigersinn (90° = Ost, 180° = Süd). Neigung: Grad gegen die Horizontale (90° = senkrecht). Optional je Ebene: eine „shade_group“ – Ebenen mit gleicher Verschattung (Gebäudekante, Baumreihe) teilen sich eine gemeinsam gelernte Verschattungskarte, wenn ihnen dieselbe Gruppe gegeben wird.",
+        "description": "Name, Standort und Aktualisierungsintervalle festlegen. Das Feld „Standort-Konfiguration“ enthält bereits das vollständige Betreiber-Setup (8 Module, Horizonttabellen, Wechselrichter-Gruppen) – für die Referenzanlage einfach bestätigen, ansonsten frei bearbeiten. Azimut: 0° = Nord, im Uhrzeigersinn (90° = Ost, 180° = Süd). Neigung: Grad gegen die Horizontale (90° = senkrecht). Optional je Ebene: eine „shade_group“ – Ebenen mit gleicher Verschattung (Gebäudekante, Baumreihe) teilen sich eine gemeinsam gelernte Verschattungskarte, wenn ihnen dieselbe Gruppe gegeben wird. Optional je Ebene: „ross_coeff“ überschreibt den montageabhängigen Ross-Zelltemperaturkoeffizienten (~0,02 freistehend bis ~0,056 fassadenparallel).",
         "data": {
           "name": "Name",
           "latitude": "Breitengrad",
@@ -186,7 +186,7 @@
       },
       "reconfigure": {
         "title": "Balkon-Solar-Prognose neu konfigurieren",
-        "description": "Die strukturelle Einrichtung bearbeiten: Standort, Aktualisierungsintervalle und die vollständige Standort-Konfiguration (Ebenen, Horizonttabellen, WR-Gruppen). Die Laufzeit-Stellgrößen – Lerner-Schalter, Quantilbänder und Vergleichssensoren – liegen im Optionen-Dialog („Konfigurieren“). Der Name bleibt nach der Einrichtung unveränderlich. Azimut: 0° = Nord, im Uhrzeigersinn (90° = Ost, 180° = Süd). Neigung: Grad gegen die Horizontale (90° = senkrecht). Optional je Ebene: eine „shade_group“ – Ebenen mit gleicher Verschattung (Gebäudekante, Baumreihe) teilen sich eine gemeinsam gelernte Verschattungskarte, wenn ihnen dieselbe Gruppe gegeben wird.",
+        "description": "Die strukturelle Einrichtung bearbeiten: Standort, Aktualisierungsintervalle und die vollständige Standort-Konfiguration (Ebenen, Horizonttabellen, WR-Gruppen). Die Laufzeit-Stellgrößen – Lerner-Schalter, Quantilbänder und Vergleichssensoren – liegen im Optionen-Dialog („Konfigurieren“). Der Name bleibt nach der Einrichtung unveränderlich. Azimut: 0° = Nord, im Uhrzeigersinn (90° = Ost, 180° = Süd). Neigung: Grad gegen die Horizontale (90° = senkrecht). Optional je Ebene: eine „shade_group“ – Ebenen mit gleicher Verschattung (Gebäudekante, Baumreihe) teilen sich eine gemeinsam gelernte Verschattungskarte, wenn ihnen dieselbe Gruppe gegeben wird. Optional je Ebene: „ross_coeff“ überschreibt den montageabhängigen Ross-Zelltemperaturkoeffizienten (~0,02 freistehend bis ~0,056 fassadenparallel).",
         "data": {
           "latitude": "Breitengrad",
           "longitude": "Längengrad",
@@ -211,6 +211,7 @@
       "bad_tilt": "Neigung muss zwischen 0 und 90 Grad liegen.",
       "bad_wp": "Die Modulleistung (Wp) muss größer als 0 sein.",
       "bad_efficiency": "Der Wirkungsgrad muss zwischen 0 und 1 liegen.",
+      "bad_ross_coeff": "Der Ross-Koeffizient muss eine endliche Zahl zwischen 0,005 und 0,12 sein.",
       "bad_horizon_azimuth": "Horizont-Azimut muss zwischen 0 und 360 Grad liegen.",
       "bad_horizon_elevation": "Horizont-Elevation muss zwischen 0 und 90 Grad liegen.",
       "bad_tau": "Die Transmittanz (tau) muss zwischen 0 und 1 liegen.",
@@ -258,6 +259,7 @@
       "bad_tilt": "Neigung muss zwischen 0 und 90 Grad liegen.",
       "bad_wp": "Die Modulleistung (Wp) muss größer als 0 sein.",
       "bad_efficiency": "Der Wirkungsgrad muss zwischen 0 und 1 liegen.",
+      "bad_ross_coeff": "Der Ross-Koeffizient muss eine endliche Zahl zwischen 0,005 und 0,12 sein.",
       "bad_horizon_azimuth": "Horizont-Azimut muss zwischen 0 und 360 Grad liegen.",
       "bad_horizon_elevation": "Horizont-Elevation muss zwischen 0 und 90 Grad liegen.",
       "bad_tau": "Die Transmittanz (tau) muss zwischen 0 und 1 liegen.",

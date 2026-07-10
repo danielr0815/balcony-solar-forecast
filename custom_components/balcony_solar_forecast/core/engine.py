@@ -237,6 +237,7 @@ def _plane_poa_split(
         plane_az=plane.azimuth_deg,
         plane_tilt=plane.tilt_deg,
         albedo=albedo,
+        doy=doy,
     )
 
     beam = comps.get("beam", 0.0)
@@ -318,7 +319,10 @@ def _dc_split(
     is a faithful decomposition of the plane's unclamped DC power.
     """
     total_poa = split.beam_poa + split.diffuse_poa
-    total_dc = electrical.dc_power(total_poa, plane.wp, temp_c, plane.efficiency)
+    total_dc = electrical.dc_power(
+        total_poa, plane.wp, temp_c, plane.efficiency,
+        ross_coeff=plane.ross_coeff,
+    )
     if total_poa <= 0.0 or total_dc <= 0.0:
         return 0.0, 0.0
     beam_frac = split.beam_poa / total_poa
@@ -416,11 +420,19 @@ def compute_forecast(
     planes = site.planes
     groups = site.groups
 
-    # Sky-view factor is a static per-plane property of geometry + horizon;
-    # compute it once, not per slot.
-    svf_by_plane: dict[str, float] = {
-        plane.name: horizon.sky_view_factor(plane) for plane in planes
-    }
+    # Sky-view factor is a per-plane, per-day-of-year property: the horizon is
+    # semi-transparent to the diffuse, so a seasonal (foliage) row makes the SVF
+    # ramp with the day. The forecast window spans only 2-3 distinct days, so a
+    # tiny {(plane, doy): svf} memo keeps it to one quadrature per plane per day.
+    svf_cache: dict[tuple[str, int], float] = {}
+
+    def _svf(plane: PlaneConfig, doy: int) -> float:
+        key = (plane.name, doy)
+        svf = svf_cache.get(key)
+        if svf is None:
+            svf = horizon.sky_view_factor(plane, doy=doy)
+            svf_cache[key] = svf
+        return svf
 
     # Static AC ceiling ingredients for the per-slot band cap (SPEC §6/§10). The
     # most the site can deliver in a slot is the sum of every group's AC limit
@@ -507,7 +519,7 @@ def compute_forecast(
         cor_diffuse_dc: dict[str, float] = {}
 
         for plane in planes:
-            svf = svf_by_plane[plane.name]
+            svf = _svf(plane, doy)
 
             # RAW: static horizon tau gates the beam.
             raw_split = _plane_poa_split(

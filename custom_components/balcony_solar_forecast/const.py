@@ -71,6 +71,7 @@ CONF_EFFICIENCY = "efficiency"  # system/DC efficiency, default 0.96
 CONF_HORIZON = "horizon"  # list of horizon rows (see below)
 CONF_ACTUAL_ENTITY = "actual_entity"  # HA entity id for measured DC power
 CONF_SHADE_GROUP = "shade_group"  # optional: planes sharing this learn ONE shademap channel
+CONF_ROSS_COEFF = "ross_coeff"  # optional: per-plane Ross cell-temp coefficient (mounting-dependent)
 # horizon-row fields
 CONF_HZ_AZIMUTH = "azimuth_deg"  # 0=N clockwise
 CONF_HZ_ELEVATION = "elevation_deg"  # horizon-line elevation at this azimuth
@@ -96,6 +97,11 @@ LOW_SUN_CUTOFF_DEG = 3.0  # below this elevation: circumsolar = 0
 # facade planes the sun spends much of the day there, and without the modifier
 # the shademap absorbs the optics deficit as phantom shading.
 IAM_B0 = 0.05
+# Ross cell-temperature coefficient: Tcell = Tamb + ROSS_COEFF * POA. The value
+# is a DEFAULT — the real coefficient is set by the mounting/back-ventilation,
+# spanning ~0.02 (well-ventilated free-standing) to ~0.056 (facade-parallel,
+# poorly ventilated) in the Ross/Skoplaki literature. Overridable per plane via
+# PlaneConfig.ross_coeff for the operator's steep, wall-hugging facade modules.
 ROSS_COEFF = 0.0342  # Tcell = Tamb + ROSS_COEFF * POA
 TEMP_COEFF_PER_K = -0.0034  # power derate per K above 25 C (-0.34 %/K)
 TEMP_REF_C = 25.0

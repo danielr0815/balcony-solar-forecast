@@ -26,7 +26,13 @@ Scope / deliberate deviations:
 
 Tolerances:
   * solar position: 0.5 deg (elevation and azimuth).
-  * Hay-Davies total POA: max(2 W/m2, 1.5%) of the pvlib value.
+  * Hay-Davies total POA: max(2 W/m2, 0.5%) of the pvlib value. This was
+    max(2 W/m2, 1.5%) until the anisotropy index gained the Earth-Sun
+    eccentricity correction (``doy``): pvlib's ``get_extra_radiation`` carries
+    that eccentricity, so our old fixed-solar-constant AI drifted up to ~1.9 %
+    from pvlib and the 1.5 % pad absorbed exactly that gap. With ``doy`` passed
+    (as the engine runs) the worst deviation drops to ~0.28 %, so the pad is
+    tightened to a true 0.5 % guard (see ``_poa_total``).
 """
 
 from __future__ import annotations
@@ -112,7 +118,10 @@ _LON = _META["lon"]
 # Tolerances (SPEC / task).
 _SOLPOS_TOL_DEG = 0.5
 _POA_ABS_TOL = 2.0  # W/m2
-_POA_REL_TOL = 0.015  # 1.5%
+# Tightened 1.5% -> 0.5% now that the anisotropy index carries the Earth-Sun
+# eccentricity (doy), matching pvlib's get_extra_radiation: worst deviation
+# fell from ~1.9% to ~0.28%, so 0.5% is a true guard, not eccentricity padding.
+_POA_REL_TOL = 0.005  # 0.5%
 
 # Above this elevation pvlib and our model must agree; at/below it we only
 # require no-explosion (Rb cap / circumsolar gate intentionally deviate). Use
@@ -126,7 +135,9 @@ def _poa_total(vec: dict) -> float:
     Uses OUR solar position (not the vector's) so the test also exercises the
     solpos->transpose handoff end to end, matching how the engine runs. The
     az/el agree with pvlib to < 0.5 deg (asserted separately), so this does
-    not smuggle in a second error source at the tolerances we use.
+    not smuggle in a second error source at the tolerances we use. The vector's
+    ``doy`` is passed so the anisotropy index carries the Earth-Sun eccentricity
+    (matching pvlib's ``get_extra_radiation`` and the live engine).
     """
     dt = datetime.fromisoformat(vec["timestamp"])
     sun_az, sun_el = sun_position(dt, _LAT, _LON)
@@ -139,6 +150,7 @@ def _poa_total(vec: dict) -> float:
         plane_az=vec["plane_az"],
         plane_tilt=vec["plane_tilt"],
         albedo=vec["albedo"],
+        doy=dt.timetuple().tm_yday,
     )
     return comps["beam"] + comps["circumsolar"] + comps["isotropic"] + comps["ground"]
 

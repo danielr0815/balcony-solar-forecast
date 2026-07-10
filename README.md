@@ -79,7 +79,9 @@ Ergänzende Anleitungen:
   statt isotroper Server-GTI, die auf steilen Ebenen 6–12 % daneben liegt.
 - **Horizont richtig:** je Ebene ein Profil (Azimut, Elevation,
   Transmittanz) — Fernfeld aus PVGIS, Nahfeld vom Betreiber; Direktstrahl
-  UND Diffusanteil (Sky-View-Faktor) werden korrigiert.
+  UND Diffusanteil (Sky-View-Faktor) werden korrigiert — der Himmel unter
+  der Horizontlinie ist auch fürs Diffus halbtransparent (saisonal), eine
+  Baumreihe verdunkelt es also nicht wie eine Wand.
 - **Selbstlernend:** zwei Zeitskalen — ein geometrisches
   Transmissionsfeld je Messkanal × Sonnenstand (lernt Hang, Bäume,
   Gebäudekante) und ein Intraday-Bias-Korrektor (rettet Nebelmorgen).

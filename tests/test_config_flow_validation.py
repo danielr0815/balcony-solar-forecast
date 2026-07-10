@@ -33,6 +33,7 @@ from balcony_solar_forecast.const import (
     CONF_HZ_TAU_LEAFED,
     CONF_PLANE_NAME,
     CONF_PLANES,
+    CONF_ROSS_COEFF,
     CONF_SHADE_GROUP,
     CONF_TILT,
     CONF_WP,
@@ -152,6 +153,32 @@ def test_efficiency_out_of_range(eff) -> None:
     with pytest.raises(SiteValidationError) as exc:
         validate_site(site)
     assert exc.value.code == "bad_efficiency"
+
+
+@pytest.mark.parametrize("rc", [0.0, 0.004, 0.13, 1.0, -0.02, float("nan"), float("inf")])
+def test_ross_coeff_out_of_range(rc) -> None:
+    # The per-plane Ross override must land in the generous physical band
+    # [0.005, 0.12] and be finite; anything else is a fat-finger (audit #29).
+    site = _site()
+    site[CONF_PLANES][0][CONF_ROSS_COEFF] = rc
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "bad_ross_coeff"
+
+
+@pytest.mark.parametrize("rc", [0.005, 0.02, 0.0342, 0.056, 0.12])
+def test_ross_coeff_in_band_ok(rc) -> None:
+    site = _site()
+    site[CONF_PLANES][0][CONF_ROSS_COEFF] = rc
+    result = validate_site(site)
+    assert result.planes[0].ross_coeff == pytest.approx(rc)
+
+
+def test_ross_coeff_absent_is_none_and_round_trips() -> None:
+    # Ungrouped default plane carries no override and does not emit the key.
+    result = validate_site(_site())
+    assert all(p.ross_coeff is None for p in result.planes)
+    assert CONF_ROSS_COEFF not in result.planes[0].to_dict()
 
 
 def test_plane_no_name() -> None:
@@ -384,6 +411,7 @@ _ALL_ERROR_CODES = {
     "bad_tilt",
     "bad_wp",
     "bad_efficiency",
+    "bad_ross_coeff",
     "bad_horizon_azimuth",
     "bad_horizon_elevation",
     "bad_tau",

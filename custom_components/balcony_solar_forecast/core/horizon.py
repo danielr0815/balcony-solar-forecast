@@ -7,13 +7,16 @@ Owner: horizon. Pure, HA-free. Encodes SPEC §4 step 5 / §13:
   - ``transmittance_at``: transmittance at a sun azimuth, with seasonal
     foliage handled via a cosine ramp keyed on day-of-year (leaf-out in
     April, leaf-fall in November, tau_bare <-> tau_leafed).
-  - ``sky_view_factor``: per-plane static scale for the isotropic diffuse,
-    derived from the horizon table (fixes E4 -- diffuse was never reduced).
+  - ``sky_view_factor``: per-plane scale for the isotropic diffuse, derived
+    from the horizon table (fixes E4 -- diffuse was never reduced). The sky
+    below the horizon line is semi-transparent: it contributes the row's
+    (seasonally-resolved) transmittance of its unobstructed value, so the SVF is
+    doy-dependent wherever a seasonal row lives.
 
 Application rule (in the engine): when the sun sits below the interpolated
 horizon line, beam + circumsolar are multiplied by ``transmittance_at``; the
 raw isotropic diffuse from ``hay_davies_poa`` is always multiplied by
-``sky_view_factor``.
+``sky_view_factor`` (computed for the slot's day-of-year).
 
 Azimuth convention here is INTERNAL throughout: 0 = North, clockwise
 (90 = East, 180 = South, 270 = West).
@@ -224,11 +227,14 @@ def transmittance_at(plane: PlaneConfig, sun_az: float, doy: int) -> float:
 #   s = (sin(az) cos(el), cos(az) cos(el), sin(el)), so
 #       cos(theta_i) = n . s
 #                    = sin(beta) cos(el) cos(az - az_p) + cos(beta) sin(el).
-#   We integrate over az in [0, 360) and el in [h(az), 90], where h(az) is the
-#   horizon-line elevation for that azimuth. Only the sky ABOVE the horizon
-#   line contributes, and only where cos(theta_i) > 0 (the plane cannot see
-#   sky behind itself). We take the SVF as the ratio of this integral with the
-#   real horizon to the SAME integral over a flat 0-deg horizon:
+#   We integrate over az in [0, 360) and el in [0, 90], where the sky ABOVE the
+#   horizon line h(az) contributes fully and the wedge BELOW it contributes the
+#   row's (seasonally-resolved) transmittance tau(az) of its value -- the diffuse
+#   is semi-transparent through a tree line exactly as the beam is (a tau=0 wall
+#   still fully blocks, a tau=1 line is invisible to the diffuse). Only sky where
+#   cos(theta_i) > 0 counts (the plane cannot see sky behind itself). We take the
+#   SVF as the ratio of this integral with the real horizon to the SAME integral
+#   over a flat 0-deg horizon:
 #       SVF = F(horizon) / F(flat)           (bounded to (0, 1]).
 #   Normalising by F(flat) rather than the analytic F0 = (1 + cos beta)/2
 #   cancels the small error of the constant-elevation self-shadow cut used
@@ -280,29 +286,79 @@ def _inner_elevation_integral(h_deg: float, az_rad: float,
     return g if g > 0.0 else 0.0
 
 
-def _diffuse_view_integral(plane: PlaneConfig, use_horizon: bool) -> float:
+def _interp_diffuse_tau(rows, az_deg: float, doy: int | None) -> float:  # noqa: ANN001
+    """Interpolated diffuse transmittance (0..1) at ``az_deg``, doy-aware.
+
+    Same effective-tau interpolation as :func:`transmittance_at` (seasonal rows
+    resolved for ``doy`` BEFORE interpolation via the foliage ramp), but accepts
+    ``doy=None`` to interpolate each row's STATIC ``tau`` — the sky-view factor's
+    pure-caller default. Returns 1.0 (fully transparent) for an empty table.
+    """
+    if doy is None:
+        val = _interp_rows(rows, az_deg, lambda r: r.tau)
+    else:
+        val = _interp_rows(rows, az_deg, lambda r: _row_tau(r, doy))
+    if val is None:
+        return 1.0
+    return 0.0 if val < 0.0 else 1.0 if val > 1.0 else val
+
+
+def _semi_transparent_column(h_deg: float, tau: float, az_rad: float,
+                             az_p_rad: float, beta_rad: float) -> float:
+    """Per-azimuth visible-sky contribution with a semi-transparent horizon.
+
+    The sky ABOVE the horizon elevation ``h_deg`` contributes fully; the wedge
+    BELOW it contributes ``tau`` of its unobstructed value (the diffuse now uses
+    the row transmittance exactly as the beam does). Written as a tau-blend of
+    the fully-open column (``_inner_elevation_integral(0)``) and the fully-opaque
+    one (``_inner_elevation_integral(h)``) — algebraically ``above + tau*below``
+    — which keeps the two physical extremes BIT-EXACT: ``tau <= 0`` returns the
+    opaque column unchanged (old behaviour) and ``tau >= 1`` returns the
+    fully-open column, identical to the flat-horizon normaliser (so a fully
+    transmissive line yields SVF == 1 exactly).
+    """
+    above = _inner_elevation_integral(h_deg, az_rad, az_p_rad, beta_rad)
+    if tau <= 0.0:
+        return above
+    full = _inner_elevation_integral(0.0, az_rad, az_p_rad, beta_rad)
+    if tau >= 1.0:
+        return full
+    return tau * full + (1.0 - tau) * above
+
+
+def _diffuse_view_integral(
+    plane: PlaneConfig, use_horizon: bool, doy: int | None = None
+) -> float:
     """Cosine-weighted visible-sky integral F for this plane.
 
-    ``use_horizon=True`` integrates above the plane's horizon table;
+    ``use_horizon=True`` integrates above the plane's horizon table, with the
+    sky below the horizon line contributing the row's (seasonally-resolved)
+    transmittance of its value (:func:`_semi_transparent_column`);
     ``use_horizon=False`` integrates above a flat 0-deg horizon (the same
     quadrature, so it serves as the exact self-consistent normaliser for the
-    unobstructed case). Midpoint azimuth quadrature; the horizon is piecewise
-    linear so 1-deg steps are ample.
+    unobstructed case). ``doy`` resolves seasonal rows via the foliage ramp;
+    None uses each row's static tau. Midpoint azimuth quadrature; the horizon is
+    piecewise linear so 1-deg steps are ample.
     """
     beta = math.radians(plane.tilt_deg)
     az_p = math.radians(plane.azimuth_deg)
+    rows = _sorted_rows(plane.horizon)
     daz = 2.0 * math.pi / _SVF_AZ_SAMPLES
     acc = 0.0
     for i in range(_SVF_AZ_SAMPLES):
         az_deg = (i + 0.5) * (360.0 / _SVF_AZ_SAMPLES)
         az_rad = math.radians(az_deg)
-        h = interp_elevation(plane, az_deg) if use_horizon else 0.0
-        acc += _inner_elevation_integral(h, az_rad, az_p, beta)
+        if use_horizon:
+            h = interp_elevation(plane, az_deg)
+            tau = _interp_diffuse_tau(rows, az_deg, doy)
+            acc += _semi_transparent_column(h, tau, az_rad, az_p, beta)
+        else:
+            acc += _inner_elevation_integral(0.0, az_rad, az_p, beta)
     return acc * daz / math.pi
 
 
-def sky_view_factor(plane: PlaneConfig) -> float:
-    """Static isotropic-diffuse sky-view factor in (0, 1] for this plane.
+def sky_view_factor(plane: PlaneConfig, doy: int | None = None) -> float:
+    """Isotropic-diffuse sky-view factor in (0, 1] for this plane.
 
     The fraction of the plane's *unobstructed* tilted-sky view that survives
     its horizon table: SVF = F(horizon) / F(flat), where F is the
@@ -312,9 +368,17 @@ def sky_view_factor(plane: PlaneConfig) -> float:
     1.0 and any obstruction returns a true *relative* reduction. Multiply the
     raw isotropic diffuse from ``hay_davies_poa`` by this value.
 
-    Building-wall sectors (horizon 90 deg) contribute nothing, so a plane with
-    a wall over part of its dome gets a proportionally smaller SVF. Result is
-    bounded to (0, 1]; a fully walled dome floors at a tiny positive epsilon
+    The horizon is SEMI-TRANSPARENT to the diffuse: the sky below the horizon
+    line at each azimuth contributes the row's transmittance of its value, so a
+    tree line with tau 0.5 halves that wedge instead of blocking it like a wall.
+    ``doy`` resolves the seasonal foliage ramp (a leafed-summer line blocks more
+    diffuse than a bare-winter one, so the summer SVF is lower); ``doy=None``
+    uses each row's static tau (the pure-caller default). A tau=1 line yields
+    exactly 1.0; a tau=0 line reproduces the old fully-opaque reduction.
+
+    Building-wall sectors (horizon 90 deg, tau 0) contribute nothing, so a plane
+    with a wall over part of its dome gets a proportionally smaller SVF. Result
+    is bounded to (0, 1]; a fully walled dome floors at a tiny positive epsilon
     rather than exactly zero.
     """
     if not plane.horizon:
@@ -324,7 +388,7 @@ def sky_view_factor(plane: PlaneConfig) -> float:
     if f_flat <= 0.0:
         # Degenerate geometry (e.g. tilt >= 180); nothing sensible to scale.
         return 1.0
-    f_obs = _diffuse_view_integral(plane, use_horizon=True)
+    f_obs = _diffuse_view_integral(plane, use_horizon=True, doy=doy)
 
     svf = f_obs / f_flat
     if svf >= 1.0:

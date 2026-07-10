@@ -169,7 +169,7 @@
     "step": {
       "user": {
         "title": "Set up Balcony Solar Forecast",
-        "description": "Set the name, location and update intervals. The \"Site configuration\" field is pre-filled with the full operator setup (8 modules, horizon tables, inverter groups) — just confirm it for the reference site, or edit it freely. Azimuth: 0° = North, clockwise (90° = East, 180° = South). Tilt: degrees from horizontal (90° = vertical). Optional per plane: a \"shade_group\" — planes that share the same obstruction (building edge, tree line) learn one shared shade map when given the same group.",
+        "description": "Set the name, location and update intervals. The \"Site configuration\" field is pre-filled with the full operator setup (8 modules, horizon tables, inverter groups) — just confirm it for the reference site, or edit it freely. Azimuth: 0° = North, clockwise (90° = East, 180° = South). Tilt: degrees from horizontal (90° = vertical). Optional per plane: a \"shade_group\" — planes that share the same obstruction (building edge, tree line) learn one shared shade map when given the same group. A plane may also set a \"ross_coeff\" to override the mounting-dependent Ross cell-temperature coefficient (~0.02 free-standing to ~0.056 facade-parallel).",
         "data": {
           "name": "Name",
           "latitude": "Latitude",
@@ -186,7 +186,7 @@
       },
       "reconfigure": {
         "title": "Reconfigure Balcony Solar Forecast",
-        "description": "Edit the structural setup: location, update intervals and the full site configuration (planes, horizon tables, inverter groups). The runtime tunables — learner switches, quantile bands and comparison sensors — live in the options dialog (\"Configure\"). The name is immutable after setup. Azimuth: 0° = North, clockwise (90° = East, 180° = South). Tilt: degrees from horizontal (90° = vertical). Optional per plane: a \"shade_group\" — planes that share the same obstruction (building edge, tree line) learn one shared shade map when given the same group.",
+        "description": "Edit the structural setup: location, update intervals and the full site configuration (planes, horizon tables, inverter groups). The runtime tunables — learner switches, quantile bands and comparison sensors — live in the options dialog (\"Configure\"). The name is immutable after setup. Azimuth: 0° = North, clockwise (90° = East, 180° = South). Tilt: degrees from horizontal (90° = vertical). Optional per plane: a \"shade_group\" — planes that share the same obstruction (building edge, tree line) learn one shared shade map when given the same group. A plane may also set a \"ross_coeff\" to override the mounting-dependent Ross cell-temperature coefficient (~0.02 free-standing to ~0.056 facade-parallel).",
         "data": {
           "latitude": "Latitude",
           "longitude": "Longitude",
@@ -211,6 +211,7 @@
       "bad_tilt": "Tilt must be between 0 and 90 degrees.",
       "bad_wp": "Module power (Wp) must be greater than 0.",
       "bad_efficiency": "Efficiency must be between 0 and 1.",
+      "bad_ross_coeff": "The Ross coefficient must be a finite number between 0.005 and 0.12.",
       "bad_horizon_azimuth": "Horizon azimuth must be between 0 and 360 degrees.",
       "bad_horizon_elevation": "Horizon elevation must be between 0 and 90 degrees.",
       "bad_tau": "Transmittance (tau) must be between 0 and 1.",
@@ -258,6 +259,7 @@
       "bad_tilt": "Tilt must be between 0 and 90 degrees.",
       "bad_wp": "Module power (Wp) must be greater than 0.",
       "bad_efficiency": "Efficiency must be between 0 and 1.",
+      "bad_ross_coeff": "The Ross coefficient must be a finite number between 0.005 and 0.12.",
       "bad_horizon_azimuth": "Horizon azimuth must be between 0 and 360 degrees.",
       "bad_horizon_elevation": "Horizon elevation must be between 0 and 90 degrees.",
       "bad_tau": "Transmittance (tau) must be between 0 and 1.",

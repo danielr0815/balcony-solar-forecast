@@ -21,6 +21,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`channel_similarity` / `suggest_shade_groups`). See SPEC §5.
 
 ### Changed
+- **Three physics refinements (forecast numbers shift slightly).** (1) The
+  Hay-Davies anisotropy index now divides DNI by the *eccentricity-corrected*
+  extraterrestrial normal irradiance `E0n = 1361·(1 + 0.033·cos(2π·doy/365))`
+  (Spencer/Duffie-Beckman) instead of the fixed solar constant, so the
+  circumsolar weight tracks the ±3.3 % Earth-Sun distance over the year — this
+  moves our transposition toward pvlib (worst golden-vector deviation ~1.9 % →
+  ~0.28 %, tolerance tightened 1.5 % → 0.5 %). (2) The Ross cell-temperature
+  coefficient is now overridable per plane (`ross_coeff`, ~0.02 free-standing …
+  ~0.056 facade-parallel; validated to a finite `[0.005, 0.12]`), defaulting to
+  the global `ROSS_COEFF`. (3) The sky-view factor treats the horizon as
+  *semi-transparent to the diffuse*: sky below the horizon line contributes the
+  row's (seasonally-resolved) transmittance of its value instead of being fully
+  blocked, so a tree line no longer darkens the diffuse like a wall — the SVF is
+  now day-of-year-dependent (foliage ramp), memoized per (plane, doy). The beam
+  path is unchanged except for the anisotropy weighting, so no shademap
+  re-convergence is needed. Live and backfill share the identical refined
+  physics.
 - **Quality-scale housekeeping (no behaviour change).** Entity icons moved out
   of hardcoded `_attr_icon` into the central `icons.json`, keyed by
   translation_key (plus icons for the five services); the one dynamic

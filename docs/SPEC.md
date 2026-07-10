@@ -141,6 +141,14 @@ Pipeline (reine Funktionen über 15-min-Slots × N Ebenen, <50 ms/Lauf):
    Schneedecke**, gedeckelt). Pflicht-Fixes: R_b-Deckel (≤10) bzw.
    Zirkumsolar = 0 unter 3° Sonnenhöhe; Intervallmittel-vs.-Instant-
    Semantik empirisch verifizieren (klarer Morgen als Unit-Test).
+   **Sonnendistanz-Exzentrizität (v0.5.x, audit #30):** Der Anisotropie-Index
+   `Ai = DNI / E0n` teilt durch die extraterrestrische Normalstrahlung
+   `E0n = 1361·(1 + 0,033·cos(2π·doy/365))` (Spencer/Duffie-Beckman) statt der
+   festen Solarkonstante — der Erd-Sonne-Abstand schwankt ±3,3 % übers Jahr
+   (Perihel Anfang Januar), sonst wird die saisonale Zirkumsolar-Gewichtung
+   verzerrt (bis ~1,9 % vs. pvlib). Die Engine reicht den Slot-`doy` durch
+   (Live/Backfill-Parität); `doy=None` bleibt die alte feste Konstante
+   (rückwärtskompatibel für reine Aufrufer).
    **Einfallswinkel-Modifikator (v0.5.x):** ASHRAE-IAM
    `f = 1 − b₀·(1/cos θ − 1)`, b₀ = 0,05 (`IAM_B0`), auf Beam+Zirkumsolar —
    angewandt in der **Engine** (pvlib-analog nach der reinen Transposition,
@@ -154,12 +162,22 @@ Pipeline (reine Funktionen über 15-min-Slots × N Ebenen, <50 ms/Lauf):
    az ≈ 212° für S-Ebenen, Baumsektor az ~135–175° auf P3/P6 mit
    **saisonaler Transmittanz** ≈ 0,8 kahl / ≈ 0,45 belaubt, Kosinus-Rampe
    April/November — **alle Startwerte messdatenbasiert, §13**). Unter Horizontlinie:
-   Beam+zirkumsolar × Transmittanz; Iso-Diffus statisch × ebenen-eigenem
-   SVF (behebt E4). Tabellen liegen **versioniert im Repo/Config-Export**,
-   nicht nur in `.storage`.
+   Beam+zirkumsolar × Transmittanz; Iso-Diffus × ebenen-eigenem SVF (behebt
+   E4). **Halbtransparenter Horizont fürs Diffus (v0.5.x, audit #11):** der
+   Himmel UNTER der Horizontlinie geht mit der (saisonal per `doy` aufgelösten)
+   Transmittanz τ statt als Wand in den SVF ein — eine Baumreihe (τ 0,45/0,8)
+   verdunkelt das Diffus nicht mehr wie eine Hauswand; τ=1 ⇒ SVF unverändert,
+   τ=0 ⇒ alte opake Reduktion. Der SVF ist damit `doy`-abhängig (Foliage-Rampe);
+   die Engine memoisiert ihn je (Ebene, `doy`). Tabellen liegen **versioniert im
+   Repo/Config-Export**, nicht nur in `.storage`.
 6. **shademap.py** — langsamer Lerner (§5).
-7. **electrical.py** — Ross-Zelltemperatur, −0,34 %/K, η konfigurierbar
-   (Default 0,96), AC-Clamp je konfigurierter WR-Gruppe.
+7. **electrical.py** — Ross-Zelltemperatur `Tcell = Tamb + k·POA`, −0,34 %/K,
+   η konfigurierbar (Default 0,96), AC-Clamp je konfigurierter WR-Gruppe. Der
+   Ross-Koeffizient `k` ist **je Ebene überschreibbar** (`ross_coeff`, audit
+   #29): die Montage bestimmt ihn (~0,02 freistehend/gut hinterlüftet …
+   ~0,056 fassadenparallel/schlecht hinterlüftet, Ross/Skoplaki-Literatur;
+   Default `ROSS_COEFF` = 0,0342). Site-Validierung: endlicher Wert in
+   [0,005, 0,12], sonst `bad_ross_coeff`.
 8. **bias.py / quantiles.py** — schneller Lerner + P10/P50/P90 (§5/§6).
 
 HA-Glue: `DataUpdateCoordinator` (Fetch 30 min, Rechnen 15 min,
@@ -465,6 +483,11 @@ Zeilen, 2024-07 … 2026-07) → **P90 je (Monat × Stunde)** ≈ Klartag-Profil
    - P1/P4 (Front): az >205° irrelevant (Geometrie-Limit); keine
      Zusatzeinträge nötig.
    - P2/P5 (N): az >115° irrelevant; Fernfeld Ost besonders wichtig.
+   Seit v0.5.x (audit #11) wirken diese τ auch auf das **Diffus**: der Himmel
+   unter der Horizontlinie geht τ-gewichtet (saisonal per `doy`) in den SVF ein.
+   Eine belaubte Baumreihe (τ 0,45) verdunkelt das Diffus im Sommer stärker als
+   kahl (τ 0,8), also ist der Sommer-SVF der S-Module kleiner als im Winter;
+   die harte Hauswand (τ0) dunkelt Beam UND Diffus weiterhin voll ab.
 5. **Verschattungsgruppen:** Weil Hang, Baumsektor und Hauswandkante
    Standort-Geometrie sind (Befunde 1–3, nicht modulspezifisch), können
    gleich verschattete Ebenen desselben Balkons über eine gemeinsame
