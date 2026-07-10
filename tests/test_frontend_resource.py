@@ -306,6 +306,11 @@ def test_js_card_file_sanity():
     for color in ("#2ecc71", "#e67e22", "#c0392b"):
         assert color in text, f"missing τ colour {color}"
 
+    # The group/single τ-view toggle labels (SPEC §5 read-time pooling), both
+    # locales — the operator compares each module's individual map vs the pool.
+    for label in ("Gruppe", "Einzeln", "Group", "Single"):
+        assert f'"{label}"' in text, f"card JS is missing toggle label {label!r}"
+
     # The hover crosshair wires a mousemove handler over the plot overlay.
     assert "mousemove" in text, "card JS has no hover crosshair (mousemove)"
 

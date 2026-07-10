@@ -738,7 +738,12 @@ SHADE_PROFILE_EL_SCAN_DEG = 1.0    # elevation scan step locating the shade hori
 # via recorder.exclude_attributes + the sensor's _unrecorded_attributes).
 ATTR_SP_AZIMUTH = "azimuth"                 # [deg] sun azimuth per sun-path sample
 ATTR_SP_SUN_ELEVATION = "sun_elevation"     # [deg] sun elevation per sample
-ATTR_SP_TRANSMITTANCE = "transmittance"     # [0..1] effective beam tau per sample
+ATTR_SP_TRANSMITTANCE = "transmittance"     # [0..1] effective beam tau per sample (pooled)
+# Per-sample effective tau of the MODULE'S OWN channel only (SPEC §5 read-time
+# pooling): the operator can compare each module's individual learned shading
+# against the pooled group view to decide groupings. Empty list when the module
+# is ungrouped (== the pooled view), so the attribute stays shape-stable.
+ATTR_SP_TRANSMITTANCE_INDIVIDUAL = "transmittance_individual"
 ATTR_SP_TIME = "time"                       # [local ISO] time per sample
 ATTR_SP_HORIZON_AZIMUTH = "horizon_azimuth"  # [deg] azimuth grid for the horizon lines
 ATTR_SP_SHADE_HORIZON = "shade_horizon"     # [deg] learned shade horizon per grid azimuth

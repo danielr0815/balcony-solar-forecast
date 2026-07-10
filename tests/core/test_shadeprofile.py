@@ -23,6 +23,7 @@ import pytest
 from balcony_solar_forecast.const import (
     ATTR_SP_AXIS_AZ_MAX,
     ATTR_SP_AXIS_AZ_MIN,
+    ATTR_SP_TRANSMITTANCE_INDIVIDUAL,
     SHADE_PROFILE_TAU_THRESHOLD,
 )
 from balcony_solar_forecast.core import horizon as horizon_mod
@@ -296,6 +297,90 @@ def test_unknown_channel_falls_back_to_static_prior():
     assert p["has_learned_data"] is False
     # No horizon + no learned bin for this channel => pure static prior (1.0).
     assert all(t == 1.0 for t in p["transmittance"])
+
+
+# ---------------------------------------------------------------------------
+# Read-time pooling: group (pooled) main curve + individual comparison curve
+# ---------------------------------------------------------------------------
+
+
+def _pooled_profile(plane, state, pool, *, day=SUMMER):
+    return shadeprofile.compute_shade_profile(
+        plane=plane,
+        shademap=state,
+        channel=plane.name,
+        pool=pool,
+        latitude=LAT,
+        longitude=LON,
+        day=day,
+        tz=TZ,
+    )
+
+
+def test_pool_main_is_pooled_and_individual_is_own_channel():
+    plane = _south_wall_plane()
+    clear = _profile(plane)
+    idx = clear["sun_elevation"].index(clear["max_elevation"])
+    noon_az = clear["azimuth"][idx]
+    noon_el = clear["sun_elevation"][idx]
+    doy = clear["doy"]
+
+    # This plane's OWN channel is partially shaded (τ~0.6); a group sibling is
+    # fully dark (τ~0.0). Pooling the two must darken the MAIN curve below the
+    # plane's own (individual) curve.
+    state = ShademapState()
+    for _ in range(200):
+        state = shademap_mod.update_bin(
+            state, channel=plane.name, sun_az=noon_az, sun_el=noon_el, doy=doy,
+            measured_t=0.6,
+        )
+    for _ in range(200):
+        state = shademap_mod.update_bin(
+            state, channel="sibling", sun_az=noon_az, sun_el=noon_el, doy=doy,
+            measured_t=0.0,
+        )
+    p = _pooled_profile(plane, state, (plane.name, "sibling"))
+
+    n = p["sample_count"]
+    # Both arrays present and parallel to the sun path.
+    assert len(p["transmittance"]) == n
+    assert len(p[ATTR_SP_TRANSMITTANCE_INDIVIDUAL]) == n
+    # At noon: individual (own channel only) is brighter than the pooled main.
+    assert p[ATTR_SP_TRANSMITTANCE_INDIVIDUAL][idx] > p["transmittance"][idx]
+    # The MAIN curve matches an independent pooled effective_tau at that sample.
+    expected_main = shadeprofile.effective_tau_at(
+        plane, state, channel=plane.name, sun_az=noon_az, sun_el=noon_el,
+        doy=doy, pool=(plane.name, "sibling"),
+    )
+    assert p["transmittance"][idx] == pytest.approx(round(expected_main, 3))
+    # learned_bins counts across the whole read pool (both channels contribute).
+    assert p["has_learned_data"] is True
+
+
+def test_ungrouped_individual_array_is_empty():
+    plane = _south_wall_plane()
+    # No pool (default) -> individual stays [] (shape-stable).
+    assert _profile(plane)[ATTR_SP_TRANSMITTANCE_INDIVIDUAL] == []
+    # A pool equal to (channel,) is treated as ungrouped too (no distinct view).
+    p = _pooled_profile(plane, ShademapState(), (plane.name,))
+    assert p[ATTR_SP_TRANSMITTANCE_INDIVIDUAL] == []
+
+
+def test_empty_profile_carries_individual_key():
+    # Polar night -> empty profile, but the individual key stays present as [].
+    plane = PlaneConfig(name="P", azimuth_deg=180.0, tilt_deg=90.0, wp=400.0)
+    p = shadeprofile.compute_shade_profile(
+        plane=plane,
+        shademap=ShademapState(),
+        channel="P",
+        pool=("P", "Q"),
+        latitude=80.0,
+        longitude=0.0,
+        day=WINTER,
+        tz=UTC,
+    )
+    assert p["sample_count"] == 0
+    assert p[ATTR_SP_TRANSMITTANCE_INDIVIDUAL] == []
 
 
 # ---------------------------------------------------------------------------

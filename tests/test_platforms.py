@@ -514,6 +514,7 @@ def test_recorder_excludes_curve_attributes():
         "azimuth",
         "sun_elevation",
         "transmittance",
+        "transmittance_individual",
         "horizon_azimuth",
         "static_horizon",
         "shade_horizon",

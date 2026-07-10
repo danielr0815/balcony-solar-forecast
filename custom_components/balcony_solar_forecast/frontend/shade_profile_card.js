@@ -46,6 +46,9 @@ const COLOR_STATIC_HORIZON = "#95a5a6"; // static config horizon (dashed)
 const A_AZIMUTH = "azimuth";
 const A_SUN_ELEVATION = "sun_elevation";
 const A_TRANSMITTANCE = "transmittance";
+// The module's OWN-channel τ (read-time pooling, SPEC §5). Non-empty only when
+// the plane is grouped; drives the "Single" view of the group/single toggle.
+const A_TRANSMITTANCE_INDIVIDUAL = "transmittance_individual";
 const A_TIME = "time";
 const A_HORIZON_AZIMUTH = "horizon_azimuth";
 const A_SHADE_HORIZON = "shade_horizon";
@@ -67,6 +70,9 @@ const I18N = {
   en: {
     module: "Module",
     date: "Date",
+    view: "View",
+    viewGroup: "Group",
+    viewSingle: "Single",
     shaded: "shaded",
     noEntities:
       "No shade-profile entities found — is the Balcony Solar Forecast integration set up?",
@@ -79,6 +85,9 @@ const I18N = {
   de: {
     module: "Modul",
     date: "Datum",
+    view: "Ansicht",
+    viewGroup: "Gruppe",
+    viewSingle: "Einzeln",
     shaded: "verschattet",
     noEntities:
       "Keine Verschattungsprofil-Entitäten gefunden — ist die Integration „Balcony Solar Forecast“ eingerichtet?",
@@ -130,6 +139,12 @@ class BalconyShadeProfileCard extends HTMLElement {
     this._config = {};
     this._hass = null;
     this._rendered = false;
+    // Active τ view for the group/single toggle: "group" = pooled (what the
+    // forecast applies, the default) or "single" = this module's own channel.
+    // Only meaningful when the sensor exposes a non-empty individual τ array.
+    this._view = "group";
+    // Last render inputs, so the toggle can force a re-render without a hass push.
+    this._renderArgs = null;
     // Last-seen state objects (HA state objects are immutable, so identity
     // comparison detects a real change and gates re-render).
     this._lastSensor = undefined;
@@ -212,7 +227,15 @@ class BalconyShadeProfileCard extends HTMLElement {
 
   // --- rendering ----------------------------------------------------------
 
+  /** Re-render from the last inputs (used by the group/single toggle). */
+  _rerender() {
+    const a = this._renderArgs;
+    if (a) this._render(a.hass, a.ids, a.s, a.sel, a.d);
+  }
+
   _render(hass, ids, s, sel, d) {
+    // Remember the inputs so the toggle can force a re-render without a hass push.
+    this._renderArgs = { hass, ids, s, sel, d };
     const t = this._t();
     const root = this.shadowRoot;
     root.textContent = "";
@@ -266,6 +289,20 @@ class BalconyShadeProfileCard extends HTMLElement {
         background: var(--card-background-color, #fff);
         border: 1px solid var(--divider-color, #e0e0e0);
         border-radius: 6px; padding: 6px 8px; min-height: 34px;
+      }
+      .toggle {
+        display: inline-flex; border: 1px solid var(--divider-color, #e0e0e0);
+        border-radius: 6px; overflow: hidden; min-height: 34px;
+      }
+      .toggle-btn {
+        font: inherit; color: var(--primary-text-color); cursor: pointer;
+        background: var(--card-background-color, #fff); border: 0;
+        padding: 6px 12px;
+      }
+      .toggle-btn + .toggle-btn { border-left: 1px solid var(--divider-color, #e0e0e0); }
+      .toggle-btn.active {
+        background: var(--primary-color, #03a9f4);
+        color: var(--text-primary-color, #fff); font-weight: 600;
       }
       .badge {
         margin-left: auto; padding: 6px 12px; border-radius: 16px;
@@ -350,6 +387,37 @@ class BalconyShadeProfileCard extends HTMLElement {
       wrap.appendChild(field);
     }
 
+    // Group/Single τ view toggle — only when the sensor exposes a non-empty
+    // individual (own-channel) τ array, i.e. this module is grouped (SPEC §5).
+    const indiv = s.attributes[A_TRANSMITTANCE_INDIVIDUAL];
+    if (isArray(indiv) && indiv.length > 0) {
+      const field = document.createElement("div");
+      field.className = "field";
+      const label = document.createElement("label");
+      label.textContent = t.view;
+      const group = document.createElement("div");
+      group.className = "toggle";
+      group.setAttribute("role", "group");
+      for (const [key, text] of [
+        ["group", t.viewGroup],
+        ["single", t.viewSingle],
+      ]) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = text;
+        btn.className = "toggle-btn" + (this._view === key ? " active" : "");
+        btn.addEventListener("click", () => {
+          if (this._view === key) return;
+          this._view = key;
+          this._rerender();
+        });
+        group.appendChild(btn);
+      }
+      field.appendChild(label);
+      field.appendChild(group);
+      wrap.appendChild(field);
+    }
+
     // Shaded-fraction badge from the sensor state.
     const badge = document.createElement("div");
     badge.className = "badge";
@@ -367,6 +435,7 @@ class BalconyShadeProfileCard extends HTMLElement {
     const sunAz = a[A_AZIMUTH];
     const sunEl = a[A_SUN_ELEVATION];
     const tau = a[A_TRANSMITTANCE];
+    const indiv = a[A_TRANSMITTANCE_INDIVIDUAL];
     const time = a[A_TIME];
     const horAz = a[A_HORIZON_AZIMUTH];
     const shadeH = a[A_SHADE_HORIZON];
@@ -399,6 +468,17 @@ class BalconyShadeProfileCard extends HTMLElement {
     if (!nSun && !nHor) {
       return this._message(t.noSamples);
     }
+
+    // Group/single toggle: colour the dots + drive the hover shading % by the
+    // ACTIVE view's τ. The individual (own-channel) array is present only for a
+    // grouped plane and runs parallel to the sun-path samples; otherwise the
+    // pooled τ is the only view and no suffix is shown (SPEC §5).
+    const hasIndiv = isArray(indiv) && indiv.length === nSun && nSun > 0;
+    const activeSingle = this._view === "single" && hasIndiv;
+    const activeTau = activeSingle ? indiv : tau;
+    const viewSuffix = hasIndiv
+      ? `(${activeSingle ? t.viewSingle : t.viewGroup})`
+      : "";
 
     // --- domains ---------------------------------------------------------
     const azValues = [];
@@ -501,18 +581,19 @@ class BalconyShadeProfileCard extends HTMLElement {
         }),
       );
 
-      // (4) one dot per sample, coloured by τ, with a native hover tooltip.
+      // (4) one dot per sample, coloured by the ACTIVE view's τ, with a native
+      // hover tooltip.
       for (let i = 0; i < nSun; i++) {
         const dot = svg("circle", {
           cx: X(sunAz[i]),
           cy: Y(sunEl[i]),
           r: "3",
-          fill: tauColor(tau[i]),
+          fill: tauColor(activeTau[i]),
         });
         const title = document.createElementNS(SVGNS, "title");
         title.textContent = `${hhmm(time[i])} · el ${Number(sunEl[i]).toFixed(
           1,
-        )}° · τ ${Number(tau[i]).toFixed(2)}`;
+        )}° · τ ${Number(activeTau[i]).toFixed(2)}`;
         dot.appendChild(title);
         el.appendChild(dot);
       }
@@ -542,7 +623,8 @@ class BalconyShadeProfileCard extends HTMLElement {
         t,
         sunAz,
         sunEl,
-        tau,
+        tau: activeTau,
+        viewSuffix,
         time,
         n: nSun,
         X,
@@ -653,10 +735,12 @@ class BalconyShadeProfileCard extends HTMLElement {
     const sector = ((Math.round(az / 45) % 8) + 8) % 8;
     const compass = (t.compass && t.compass[sector]) || "";
     const shadingPct = Math.round((1 - tau) * 100);
+    // Group/single view tag, only when a distinct individual view exists.
+    const suffix = ctx.viewSuffix ? ` · ${ctx.viewSuffix}` : "";
     return (
       `${ctx.time[i]} · ${Math.round(az)}° ${compass} · ` +
       `${t.hoverShading} ${shadingPct} % (τ ${tau.toFixed(2)}) · ` +
-      `${t.hoverElevation} ${Math.round(el)}°`
+      `${t.hoverElevation} ${Math.round(el)}°${suffix}`
     );
   }
 

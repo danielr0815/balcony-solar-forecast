@@ -21,12 +21,19 @@ so the diagram tracks what the served forecast actually applies.
 
     compute_shade_profile(*, plane, shademap, channel, latitude, longitude,
                           day, tz, step_minutes=..., az_step_deg=...,
-                          tau_threshold=..., el_scan_deg=...) -> dict
+                          tau_threshold=..., el_scan_deg=..., pool=None) -> dict
 
 Returns a plain, JSON-serialisable dict (parallel arrays + scalar summary) the
 HA sensor drops straight into its attributes for an ApexCharts card to plot.
 Never raises on a degenerate input (empty horizon, unknown channel, polar
 night): it returns empty arrays and a zeroed summary instead.
+
+READ-TIME pooling (SPEC §5): shade learning is stored per plane; grouped planes
+are pooled only at read time. When a ``pool`` of channels wider than the plane's
+own ``channel`` is supplied, the MAIN ``transmittance`` curve (and the shade
+horizon) is the n-weighted POOLED tau the forecast actually applies, and a
+second parallel ``transmittance_individual`` array carries the plane's OWN
+channel alone so the operator can compare the two and decide groupings.
 """
 
 from __future__ import annotations
@@ -45,6 +52,7 @@ from ..const import (
     ATTR_SP_SUN_ELEVATION,
     ATTR_SP_TIME,
     ATTR_SP_TRANSMITTANCE,
+    ATTR_SP_TRANSMITTANCE_INDIVIDUAL,
     SHADE_PROFILE_AZ_STEP_DEG,
     SHADE_PROFILE_EL_SCAN_DEG,
     SHADE_PROFILE_STEP_MINUTES,
@@ -96,6 +104,7 @@ def effective_tau_at(
     sun_az: float,
     sun_el: float,
     doy: int,
+    pool: tuple[str, ...] | None = None,
 ) -> float:
     """Effective beam transmittance at one sun position (engine-exact gate).
 
@@ -109,12 +118,27 @@ def effective_tau_at(
     coordinator passes an empty :class:`ShademapState` when it is off /
     drift-disabled / collapse-frozen (see ``coordinator.build_shade_profile``);
     then the result is the static-only shading the forecast applies.
+
+    READ-TIME pooling (SPEC §5): when ``pool`` names channels beyond the plane's
+    own ``channel``, the learned tau is the n-weighted POOL over those channels
+    (:func:`shademap.effective_tau_pooled`) — exactly what the served forecast
+    applies for a grouped plane. ``pool`` None or equal to ``(channel,)`` reads
+    the single channel, bit-identical to the pre-pooling behaviour.
     """
     horizon_elev = horizon_mod.interp_elevation(plane, sun_az)
     if sun_el <= horizon_elev:
         static_prior = horizon_mod.transmittance_at(plane, sun_az, doy)
     else:
         static_prior = 1.0
+    if pool is not None and tuple(pool) != (channel,):
+        return shademap_mod.effective_tau_pooled(
+            state,
+            channels=tuple(pool),
+            sun_az=sun_az,
+            sun_el=sun_el,
+            doy=doy,
+            static_prior=static_prior,
+        )
     return shademap_mod.effective_tau(
         state,
         channel=channel,
@@ -134,6 +158,7 @@ def shade_horizon_at(
     doy: int,
     tau_threshold: float,
     el_scan_deg: float,
+    pool: tuple[str, ...] | None = None,
 ) -> float:
     """Learned shade-horizon elevation (deg) at one azimuth.
 
@@ -145,23 +170,37 @@ def shade_horizon_at(
     not the first crossover).
 
     The elevation-independent lookups (horizon line + static transmittance) are
-    hoisted out of the elevation loop so the whole azimuth grid stays cheap.
+    hoisted out of the elevation loop so the whole azimuth grid stays cheap. The
+    effective tau uses the READ-TIME POOL (SPEC §5) when ``pool`` is wider than
+    ``(channel,)``, so the drawn shade horizon matches the pooled sun-path curve.
     """
     horizon_elev = horizon_mod.interp_elevation(plane, sun_az)
     tau_below = horizon_mod.transmittance_at(plane, sun_az, doy)
     step = el_scan_deg if el_scan_deg > 0.0 else SHADE_PROFILE_EL_SCAN_DEG
+    pooled = pool is not None and tuple(pool) != (channel,)
+    channels = tuple(pool) if pooled else ()
     shade_top = 0.0
     el = 0.0
     while el <= _EL_SCAN_MAX_DEG + 1e-9:
         static_prior = tau_below if el <= horizon_elev else 1.0
-        tau = shademap_mod.effective_tau(
-            state,
-            channel=channel,
-            sun_az=sun_az,
-            sun_el=el,
-            doy=doy,
-            static_prior=static_prior,
-        )
+        if pooled:
+            tau = shademap_mod.effective_tau_pooled(
+                state,
+                channels=channels,
+                sun_az=sun_az,
+                sun_el=el,
+                doy=doy,
+                static_prior=static_prior,
+            )
+        else:
+            tau = shademap_mod.effective_tau(
+                state,
+                channel=channel,
+                sun_az=sun_az,
+                sun_el=el,
+                doy=doy,
+                static_prior=static_prior,
+            )
         if tau < tau_threshold:
             shade_top = el
         el += step
@@ -252,6 +291,7 @@ def _empty_profile(
         ATTR_SP_AZIMUTH: [],
         ATTR_SP_SUN_ELEVATION: [],
         ATTR_SP_TRANSMITTANCE: [],
+        ATTR_SP_TRANSMITTANCE_INDIVIDUAL: [],
         ATTR_SP_HORIZON_AZIMUTH: [],
         ATTR_SP_STATIC_HORIZON: [],
         ATTR_SP_SHADE_HORIZON: [],
@@ -273,6 +313,7 @@ def compute_shade_profile(
     az_step_deg: float = SHADE_PROFILE_AZ_STEP_DEG,
     tau_threshold: float = SHADE_PROFILE_TAU_THRESHOLD,
     el_scan_deg: float = SHADE_PROFILE_EL_SCAN_DEG,
+    pool: tuple[str, ...] | None = None,
 ) -> dict:
     """Build the sun-path + learned-shade profile for ``plane`` on ``day``.
 
@@ -287,11 +328,22 @@ def compute_shade_profile(
     how "today" is bucketed elsewhere); the day-of-year fed to the seasonal
     foliage ramp and the shademap half-year split is that local date's doy.
 
+    READ-TIME pooling (SPEC §5): when ``pool`` names channels wider than the
+    plane's own ``channel``, the MAIN ``transmittance`` array + the shade horizon
+    are the n-weighted POOL (what the forecast applies), and a parallel
+    ``transmittance_individual`` array carries the plane's OWN channel alone for
+    the group-vs-single comparison. ``pool`` None or ``(channel,)`` leaves
+    ``transmittance_individual`` an empty list (shape-stable) and the main curve
+    single-channel, bit-identical to the pre-pooling behaviour.
+
     Returns a JSON-serialisable dict of parallel arrays + a scalar summary
     (see :func:`_empty_profile` for the key set). Never raises.
     """
     doy = day.timetuple().tm_yday
     step = max(1, int(step_minutes))
+    # Whether a distinct pooled (group) view exists over the plane's own channel.
+    pooled = pool is not None and tuple(pool) != (channel,)
+    read_pool = tuple(pool) if pooled else (channel,)
 
     midnight = _local_midnight(day, tz)
 
@@ -307,6 +359,9 @@ def compute_shade_profile(
     azimuths: list[float] = []
     elevations: list[float] = []
     taus: list[float] = []
+    # The plane's OWN-channel curve, only when a wider pool is in play (else it
+    # stays [] so the attribute is shape-stable — the group view IS the single).
+    taus_individual: list[float] = []
 
     # Sample the whole local day (inclusive of the final midnight boundary so a
     # late sunset slot is not clipped); keep only sun-above-horizon samples.
@@ -319,13 +374,21 @@ def compute_shade_profile(
         az, el = solpos.sun_position(utc_dt, latitude, longitude)
         if el <= 0.0:
             continue
+        # MAIN curve = the pooled tau the forecast actually applies.
         tau = effective_tau_at(
-            plane, shademap, channel=channel, sun_az=az, sun_el=el, doy=doy
+            plane, shademap, channel=channel, sun_az=az, sun_el=el, doy=doy,
+            pool=read_pool,
         )
         times.append(local_dt.strftime("%H:%M"))
         azimuths.append(round(az, 2))
         elevations.append(round(el, 2))
         taus.append(round(tau, 3))
+        if pooled:
+            # Comparison curve = this plane's own channel only (single-channel).
+            tau_own = effective_tau_at(
+                plane, shademap, channel=channel, sun_az=az, sun_el=el, doy=doy
+            )
+            taus_individual.append(round(tau_own, 3))
 
     if not azimuths:
         return _empty_profile(
@@ -359,6 +422,7 @@ def compute_shade_profile(
                     doy=doy,
                     tau_threshold=tau_threshold,
                     el_scan_deg=el_scan_deg,
+                    pool=read_pool,
                 ),
                 2,
             )
@@ -373,9 +437,14 @@ def compute_shade_profile(
     # looked up in the visualised date's half-year, so bins in the other half
     # never touch the shown transmittance. Reporting the channel-wide bin count
     # would flag "learned data present" while the whole curve is the static prior.
+    # Count bins that CAN influence the MAIN (pooled) curve for this half-year,
+    # summed over every read-pool channel — for an ungrouped plane that is just
+    # its own channel, unchanged from before.
     half_suffix = f":{shademap_mod.half_year_index(doy)}"
-    bins = shademap.channels.get(channel) or {}
-    date_bins = sum(1 for k in bins if k.endswith(half_suffix))
+    date_bins = 0
+    for ch in read_pool:
+        bins = shademap.channels.get(ch) or {}
+        date_bins += sum(1 for k in bins if k.endswith(half_suffix))
 
     return {
         "module": channel,
@@ -394,6 +463,7 @@ def compute_shade_profile(
         ATTR_SP_AZIMUTH: azimuths,
         ATTR_SP_SUN_ELEVATION: elevations,
         ATTR_SP_TRANSMITTANCE: taus,
+        ATTR_SP_TRANSMITTANCE_INDIVIDUAL: taus_individual,
         ATTR_SP_HORIZON_AZIMUTH: horizon_az,
         ATTR_SP_STATIC_HORIZON: static_horizon,
         ATTR_SP_SHADE_HORIZON: shade_horizon,
