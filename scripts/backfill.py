@@ -679,11 +679,12 @@ def _process_day_impl(
             shademap_day_ok = False
     for plane in (planes if shademap_day_ok else ()):
         chan = plane.name
-        # Measured/modeled lookups stay per PLANE (keyed by plane name), but the
-        # learned samples are STORED under the plane's shade channel so grouped
-        # planes pool into one channel — mirrors the live nightly trainer and the
-        # coordinator's plane->shade_channel mapping (SPEC §5). Ungrouped: == chan.
-        store_chan = plane.shade_channel
+        # Storage is ALWAYS per plane (SPEC §5): the learned samples are stored
+        # under the plane's OWN channel (its name), mirroring the live nightly
+        # trainer. Grouping is applied only at READ time in the coordinator
+        # (effective_tau_pooled), so the bootstrap stays group-agnostic and any
+        # later grouping/dissolution is fully reversible.
+        store_chan = chan
         measured_hourly = _resolve_hourly_measured(
             chan,
             actuals_daily=actuals_daily,

@@ -34,6 +34,7 @@ Frozen public contract (7 implementers depend on these exact signatures):
     is_quasi_clear(*, kc, sun_el, beam_share, stability_ratio, neighbour_ratio) -> bool
     update_bin(state, *, channel, sun_az, sun_el, doy, measured_t) -> ShademapState
     effective_tau(state, *, channel, sun_az, sun_el, doy, static_prior) -> float
+    effective_tau_pooled(state, *, channels, sun_az, sun_el, doy, static_prior) -> float
 
 Extra pure helpers the engine / store / diagnostics call (all owned here):
 
@@ -41,7 +42,6 @@ Extra pure helpers the engine / store / diagnostics call (all owned here):
     apply_shademap_to_beam(beam_w, *, tau) -> float
     dump_polar_table(state) -> list[dict]
     ingest_bootstrap_shademap(raw, *, max_bin_n) -> ShademapState
-    merge_channels(state, mapping) -> ShademapState
 
 All tunables come from const. Every load/apply path is validate-and-clamp;
 a corrupt/absent state degrades to the static prior, never an exception.
@@ -74,11 +74,11 @@ __all__ = [
     "is_quasi_clear",
     "update_bin",
     "effective_tau",
+    "effective_tau_pooled",
     "beam_referenced_t",
     "apply_shademap_to_beam",
     "dump_polar_table",
     "ingest_bootstrap_shademap",
-    "merge_channels",
 ]
 
 
@@ -417,6 +417,72 @@ def effective_tau(
     return _clamp_tau(blended)
 
 
+def effective_tau_pooled(
+    state: ShademapState,
+    *,
+    channels: tuple[str, ...],
+    sun_az: float,
+    sun_el: float,
+    doy: int,
+    static_prior: float,
+) -> float:
+    """READ-TIME pooled transmittance over several channels/one bin (SPEC §5).
+
+    Storage stays per plane (one channel each); GROUPING happens only here, at
+    read time, and is therefore fully reversible. The SAME bin key is looked up
+    in every listed channel; over the bins actually found the pooled learned tau
+    is the n-weighted mean
+
+        tau_pool = sum(n_i * tau_i) / sum(n_i),   n_pool = sum(n_i)
+
+    and the SAME cold-start shrinkage blend as :func:`effective_tau` is then
+    applied against the static prior with the POOLED count:
+
+        tau = w * tau_pool + (1 - w) * static_prior,   w = n_pool / (n_pool + K)
+
+    No bins found (empty pool, all channels missing/unvisited) -> exactly the
+    static prior. With a single element in ``channels`` this is BIT-IDENTICAL to
+    :func:`effective_tau` for that channel (the single found bin contributes its
+    own tau verbatim, so no multiply/divide rounding creeps in). Validate-and-
+    clamp ethos: a malformed bin (missing / non-numeric / non-finite tau or n) is
+    skipped, never raised; a corrupt state degrades to the static prior.
+    """
+    prior = _clamp_tau(static_prior)
+    key = shademap_bin_key(sun_az, sun_el, doy)
+    contributions: list[tuple[int, float]] = []
+    for channel in channels:
+        bins = state.channels.get(channel)
+        if not bins:
+            continue
+        binv = bins.get(key)
+        if binv is None:
+            continue
+        try:
+            n = int(binv.n)
+            tau = float(binv.tau)
+        except (AttributeError, TypeError, ValueError):
+            continue  # malformed bin: skip, never raise
+        if n <= 0 or not math.isfinite(tau):
+            continue
+        contributions.append((n, tau))
+    if not contributions:
+        return prior
+    n_pool = sum(n for n, _ in contributions)
+    if n_pool <= 0:
+        return prior
+    if len(contributions) == 1:
+        # Single found bin: use its tau verbatim so the one-channel case is
+        # bit-identical to effective_tau (no (n*tau)/n rounding).
+        tau_pool = contributions[0][1]
+    else:
+        tau_pool = sum(n * tau for n, tau in contributions) / n_pool
+    w = _shrinkage_weight(n_pool)
+    if w <= 0.0:
+        return prior
+    blended = w * tau_pool + (1.0 - w) * prior
+    return _clamp_tau(blended)
+
+
 def apply_shademap_to_beam(beam_w: float, *, tau: float) -> float:
     """Attenuate a modeled beam+circumsolar power by the effective tau.
 
@@ -502,60 +568,3 @@ def ingest_bootstrap_shademap(raw: object, *, max_bin_n: int) -> ShademapState:
             capped_bins[bin_key] = ShademapBin(tau=binv.tau, n=min(binv.n, cap))
         channels[channel] = capped_bins
     return ShademapState(channels=channels, version=base.version)
-
-
-# ---------------------------------------------------------------------------
-# Channel migration: pool per-plane channels into shared shade groups (SPEC §5)
-# ---------------------------------------------------------------------------
-
-
-def merge_channels(state: ShademapState, mapping: dict[str, str]) -> ShademapState:
-    """Merge shademap channels according to a source→target ``mapping``.
-
-    ``mapping`` is ``{plane.name: plane.shade_channel}`` (owner: PlaneConfig).
-    For each source channel ``c`` with target ``g = mapping.get(c, c)``:
-
-      * ``c == g`` — kept untouched (an ungrouped plane, or a channel not in the
-        mapping such as an orphan from a since-removed plane);
-      * otherwise every bin of ``c`` is folded into ``g`` — a bin missing in the
-        target is copied across; a bin present in both is combined by the
-        n-weighted mean ``tau = (n1*tau1 + n2*tau2) / (n1 + n2)`` with
-        ``n = n1 + n2`` (clamped to the shademap band), so pooling two histories
-        preserves each bin's evidence weight — then ``c`` is DROPPED.
-
-    Used once at coordinator setup when the operator groups existing planes: the
-    persisted per-plane channels are pooled into the group channel. Idempotent
-    (after the merge the source channels are gone, so a re-run maps only
-    ``c == g``). Dissolving a group is NOT reversed here — those planes restart
-    from the static prior and the group channel lingers as a harmless orphan
-    (``effective_tau`` never reads it; ``dump_polar_table`` still shows it),
-    recoverable via ``rollback_learners``.
-
-    Pure: never mutates ``state`` and never raises; returns a NEW ShademapState.
-    """
-    # Shallow-copy every channel's bin dict so the input state stays untouched.
-    channels: dict[str, dict[str, ShademapBin]] = {
-        ch: dict(bins) for ch, bins in state.channels.items()
-    }
-    # Deterministic order so a chain of sources folding into one target is stable.
-    for c in sorted(channels):
-        g = mapping.get(c, c)
-        if c == g:
-            continue
-        src = channels.pop(c, None)
-        if not src:
-            continue
-        tgt = channels.setdefault(g, {})
-        for bin_key, sbin in src.items():
-            existing = tgt.get(bin_key)
-            if existing is None:
-                tgt[bin_key] = sbin
-                continue
-            n = existing.n + sbin.n
-            if n > 0:
-                tau = (existing.n * existing.tau + sbin.n * sbin.tau) / n
-            else:
-                # Both bins carry no evidence (n == 0): plain mean, never /0.
-                tau = 0.5 * (existing.tau + sbin.tau)
-            tgt[bin_key] = ShademapBin(tau=_clamp_tau(tau), n=n)
-    return ShademapState(channels=channels, version=state.version)

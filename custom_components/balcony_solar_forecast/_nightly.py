@@ -701,11 +701,12 @@ def train_channel(
     plane = coord._site.plane_by_name(channel)
     if plane is None:
         return state, False
-    # The measurement + gating stay per PLANE (beam-referenced T, quasi-clear
-    # gates on this plane's own modeled/measured), but samples are STORED under
-    # the plane's shade channel — grouped planes pool into one channel so a bin
-    # proved by one member informs the others (SPEC §5). Ungrouped: == channel.
-    store_channel = plane.shade_channel
+    # Storage is ALWAYS per plane (SPEC §5): each plane's learning is stored under
+    # its OWN measurement channel (the plane name) forever. Grouping is applied
+    # only at READ time (coordinator._build_shade_pool_map + effective_tau_pooled),
+    # so it stays fully reversible — a dissolved group instantly reads each plane's
+    # own channel again, with no data lost.
+    store_channel = channel
     changed = False
     hkeys = sorted(modeled.beam_wh)
     # Precompute the measured/modeled-gated ratio per hour for the neighbour-

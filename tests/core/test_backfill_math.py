@@ -420,13 +420,14 @@ def test_process_day_populates_shademap_and_bias(site: SiteConfig):
     assert all(0.7 <= t <= 1.1 for t in taus)
 
 
-def test_backfill_group_members_pool_into_one_channel():
-    """Two grouped planes accumulate into ONE shade channel (SPEC §5, Phase 5).
+def test_backfill_accumulates_per_plane_even_when_grouped():
+    """The backfill stores learning PER PLANE, even for grouped planes (SPEC §5).
 
-    The backfill mirrors the live plane->shade_channel routing: measurement stays
-    per plane (keyed by plane name), but the learned samples are stored under the
-    plane's shade_channel. Two members hitting the same bin the same day are two
-    EMA samples via the SAME ``_shade_update`` as before (parity preserved).
+    Storage is always per plane (keyed by plane name); the group pooling happens
+    later at READ time in the coordinator, so grouping stays fully reversible.
+    Grouping M2/M3 must therefore NOT fold them into a shared 'front' channel —
+    each keeps its own per-plane channel (accumulated via the SAME
+    ``_shade_update`` as the ungrouped planes, so live parity is preserved).
     """
     import copy
 
@@ -445,14 +446,11 @@ def test_backfill_group_members_pool_into_one_channel():
         acc, grouped, weather, hourly_actuals, svf_by_plane=svf
     )
     assert used is True
-    # M2 and M3 pool into the shared "front" channel, never their own names.
-    assert "front" in acc.shade
-    assert "M2" not in acc.shade
-    assert "M3" not in acc.shade
-    # Both members share the az-115 geometry -> identical bins -> >=2 samples in
-    # at least one pooled bin (the pooling win).
-    assert any(cell[1] >= 2 for cell in acc.shade["front"].values())
-    # An ungrouped plane (M1) keeps its own per-plane channel.
+    # Grouped M2/M3 accumulate under their OWN names — never a 'front' channel.
+    assert "M2" in acc.shade
+    assert "M3" in acc.shade
+    assert "front" not in acc.shade
+    # An ungrouped plane (M1) keeps its own per-plane channel too (unchanged).
     assert "M1" in acc.shade
 
 

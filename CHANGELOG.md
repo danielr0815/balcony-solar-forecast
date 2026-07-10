@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Shade groups now pool at READ time, not by merging (supersedes the v0.12.0
+  merge design).** Every module's learned shading is stored INDIVIDUALLY under
+  its own channel forever; grouped planes are pooled only when the forecast /
+  diagram reads the map — the n-weighted mean of each pool channel's matching
+  bin (`tau_pool = Σ nᵢ·τᵢ / Σ nᵢ`) blended once against the static prior with
+  the shared shrinkage weight (`w = n_pool/(n_pool+K)`). Grouping and dissolving
+  a group are therefore **fully reversible and lossless**: a dissolved group
+  instantly reads each plane's own channel again, with no data lost. The
+  nightly trainer and `scripts/backfill.py` write per-plane again; the
+  coordinator's `beam_tau` hook and the shade-profile diagram do the pooling via
+  the new pure `shademap.effective_tau_pooled`. Group channels left behind by
+  the earlier v0.12.0 merge migration are read as a **legacy evidence source**
+  (folded into their members' pool until diluted by live per-plane data), so
+  already-merged installs keep their learning. The one-way
+  `shademap.merge_channels` migration and its setup call are removed. The
+  shade-profile sensor now exposes a second `transmittance_individual` curve
+  (the module's own channel) and the bundled card gains a **Group/Single
+  toggle** so the operator can compare each module's individual shading against
+  the pooled view and decide groupings. See SPEC §5.
+
 ## [0.12.0] - 2026-07-10
 
 ### Added

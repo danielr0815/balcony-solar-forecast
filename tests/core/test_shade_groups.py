@@ -1,17 +1,19 @@
-"""Pure-core tests for shade groups (SPEC §5, Phase 5) — HA-free.
+"""Pure-core tests for shade groups (SPEC §5) — HA-free.
 
-Covers the two pure pieces of the shared-shademap-channel feature:
+Covers the two pure pieces of the READ-TIME shade-pooling feature:
 
   * ``PlaneConfig`` — the ``shade_group`` field round-trip (present / absent /
     blank -> None) and the ``shade_channel`` property (group vs. plane-name
-    fallback), which is THE single definition of the plane -> channel mapping;
-  * ``shademap.merge_channels`` — the migration merge that pools per-plane
-    channels into a group channel: disjoint bins copied, overlapping bins
-    combined by the n-weighted mean (exact arithmetic), sources dropped,
-    unmapped channels untouched, empty state, and idempotence on re-run.
+    fallback), which is THE single definition of the plane -> group mapping;
+  * ``shademap.effective_tau_pooled`` — the read-time pool: single channel is
+    bit-identical to ``effective_tau``, several channels are n-weighted (exact
+    arithmetic), missing-bin channels are skipped, an all-missing pool returns
+    the static prior exactly, and a malformed bin is skipped (never raised).
 """
 
 from __future__ import annotations
+
+import math
 
 import pytest
 from balcony_solar_forecast.const import (
@@ -20,7 +22,7 @@ from balcony_solar_forecast.const import (
     CONF_SHADE_GROUP,
     CONF_TILT,
     CONF_WP,
-    SHADEMAP_TAU_MAX,
+    SHADEMAP_SHRINKAGE_K,
 )
 from balcony_solar_forecast.core import shademap as S
 from balcony_solar_forecast.core.types import (
@@ -78,87 +80,86 @@ def test_shade_channel_property_group_vs_fallback():
 
 
 # ---------------------------------------------------------------------------
-# shademap.merge_channels
+# shademap.effective_tau_pooled (read-time pooling)
 # ---------------------------------------------------------------------------
 
+# A concrete sun position + its canonical bin key (shared across the tests).
+_AZ, _EL, _DOY = 200.0, 40.0, 172
+_KEY = S.shademap_bin_key(_AZ, _EL, _DOY)
 
-def test_merge_disjoint_bins_are_copied():
+
+def _pooled(state, channels, prior):
+    return S.effective_tau_pooled(
+        state, channels=channels, sun_az=_AZ, sun_el=_EL, doy=_DOY,
+        static_prior=prior,
+    )
+
+
+def _single(state, channel, prior):
+    return S.effective_tau(
+        state, channel=channel, sun_az=_AZ, sun_el=_EL, doy=_DOY,
+        static_prior=prior,
+    )
+
+
+@pytest.mark.parametrize("prior", [0.0, 0.5, 0.73, 1.0])
+def test_pooled_single_channel_is_bit_identical_to_effective_tau(prior):
+    # A learned bin under one channel; the one-element pool must reproduce
+    # effective_tau BIT-for-BIT (no (n*tau)/n rounding), for any static prior.
+    state = ShademapState()
+    for _ in range(37):
+        state = S.update_bin(
+            state, channel="M1", sun_az=_AZ, sun_el=_EL, doy=_DOY, measured_t=0.3
+        )
+    assert _pooled(state, ("M1",), prior) == _single(state, "M1", prior)
+
+
+def test_pooled_single_empty_bin_returns_prior_like_effective_tau():
+    # Unvisited bin -> both return exactly the prior.
+    empty = ShademapState()
+    assert _pooled(empty, ("M1",), 0.42) == _single(empty, "M1", 0.42) == 0.42
+
+
+def test_pooled_two_channels_are_n_weighted_exact():
+    # A(tau=0.2,n=2) + B(tau=0.8,n=6): tau_pool = (2*0.2+6*0.8)/8 = 0.65, n=8.
+    # Blend vs prior 1.0 with K=20: (8*0.65 + 20*1.0)/28 = 25.2/28 = 0.9 exact.
     state = ShademapState(channels={
-        "M1": {"a": ShademapBin(tau=0.4, n=3)},
-        "M2": {"b": ShademapBin(tau=0.6, n=5)},
+        "A": {_KEY: ShademapBin(tau=0.2, n=2)},
+        "B": {_KEY: ShademapBin(tau=0.8, n=6)},
     })
-    merged = S.merge_channels(state, {"M1": "south", "M2": "south"})
-    assert set(merged.channels) == {"south"}
-    south = merged.channels["south"]
-    # Disjoint keys land side by side, unchanged.
-    assert south["a"] == ShademapBin(tau=0.4, n=3)
-    assert south["b"] == ShademapBin(tau=0.6, n=5)
+    assert SHADEMAP_SHRINKAGE_K == 20.0
+    assert _pooled(state, ("A", "B"), 1.0) == pytest.approx(0.9)
+    # n-weighting, NOT a simple mean: the simple mean 0.5 would give 24/28≈0.857.
+    assert _pooled(state, ("A", "B"), 1.0) != pytest.approx(24.0 / 28.0)
 
 
-def test_merge_overlapping_bin_is_n_weighted():
+def test_pooled_skips_channels_without_the_bin():
+    # Only A carries the bin; B is present but empty, C is entirely absent.
+    # The pool must equal the single-A read (missing bins contribute nothing).
     state = ShademapState(channels={
-        "M1": {"k": ShademapBin(tau=0.2, n=2)},
-        "M2": {"k": ShademapBin(tau=0.8, n=6)},
+        "A": {_KEY: ShademapBin(tau=0.2, n=5)},
+        "B": {},
     })
-    merged = S.merge_channels(state, {"M1": "south", "M2": "south"})
-    binv = merged.channels["south"]["k"]
-    # n-weighted mean: (2*0.2 + 6*0.8) / (2+6) = (0.4 + 4.8) / 8 = 0.65; n = 8.
-    assert binv.n == 8
-    assert binv.tau == pytest.approx(0.65)
+    assert _pooled(state, ("A", "B", "C"), 0.9) == _single(state, "A", 0.9)
 
 
-def test_merge_drops_source_keeps_targets_other_bins():
+def test_pooled_all_missing_returns_prior_exactly():
+    state = ShademapState(channels={"A": {_KEY: ShademapBin(tau=0.2, n=5)}})
+    # None of the pooled channels holds this bin -> exactly the static prior.
+    other_key_state = ShademapState(channels={"Z": {"0:0:0": ShademapBin(tau=0.1, n=9)}})
+    assert _pooled(other_key_state, ("Z",), 0.66) == 0.66
+    assert _pooled(state, ("B", "C"), 0.31) == 0.31
+
+
+def test_pooled_skips_malformed_bin():
+    # A malformed bin (non-finite tau) is skipped, never raised; the valid
+    # channel alone drives the pooled result.
+    good = ShademapBin(tau=0.2, n=4)
     state = ShademapState(channels={
-        "M1": {"k": ShademapBin(tau=0.3, n=4)},
-        "south": {"other": ShademapBin(tau=0.9, n=10)},
+        "A": {_KEY: good},
+        "B": {_KEY: ShademapBin(tau=float("nan"), n=8)},
     })
-    merged = S.merge_channels(state, {"M1": "south"})
-    assert "M1" not in merged.channels
-    south = merged.channels["south"]
-    assert south["k"] == ShademapBin(tau=0.3, n=4)          # merged in
-    assert south["other"] == ShademapBin(tau=0.9, n=10)     # untouched
-
-
-def test_merge_leaves_unmapped_channels_untouched():
-    state = ShademapState(channels={
-        "M1": {"k": ShademapBin(tau=0.3, n=4)},
-        "orphan": {"z": ShademapBin(tau=0.5, n=2)},
-    })
-    # Only M1 is in the mapping; "orphan" is not -> stays as-is.
-    merged = S.merge_channels(state, {"M1": "M1"})
-    assert merged.channels["M1"]["k"] == ShademapBin(tau=0.3, n=4)
-    assert merged.channels["orphan"]["z"] == ShademapBin(tau=0.5, n=2)
-
-
-def test_merge_empty_state_is_empty():
-    merged = S.merge_channels(ShademapState(), {"M1": "south"})
-    assert merged.channels == {}
-
-
-def test_merge_is_pure_and_idempotent():
-    state = ShademapState(channels={
-        "M1": {"k": ShademapBin(tau=0.2, n=2)},
-        "M2": {"k": ShademapBin(tau=0.8, n=6)},
-    })
-    mapping = {"M1": "south", "M2": "south"}
-    merged = S.merge_channels(state, mapping)
-    # Input untouched (pure).
-    assert set(state.channels) == {"M1", "M2"}
-    # Re-running the merge on the already-merged state (source channels gone,
-    # "south" not in the mapping) is a no-op.
-    again = S.merge_channels(merged, mapping)
-    assert again.channels["south"]["k"] == merged.channels["south"]["k"]
-    assert set(again.channels) == {"south"}
-
-
-def test_merge_clamps_and_defaults_bin_from_dict_n_zero():
-    # A directly-built n==0 bin (tau at the ceiling) must not divide-by-zero and
-    # must stay clamped after the plain-mean fallback.
-    state = ShademapState(channels={
-        "M1": {"k": ShademapBin(tau=SHADEMAP_TAU_MAX, n=0)},
-        "M2": {"k": ShademapBin(tau=SHADEMAP_TAU_MAX, n=0)},
-    })
-    merged = S.merge_channels(state, {"M1": "south", "M2": "south"})
-    binv = merged.channels["south"]["k"]
-    assert binv.n == 0
-    assert binv.tau == pytest.approx(SHADEMAP_TAU_MAX)
+    result = _pooled(state, ("A", "B"), 0.9)
+    assert math.isfinite(result)
+    # Identical to pooling A alone: the NaN bin contributed no weight.
+    assert result == _pooled(state, ("A",), 0.9)

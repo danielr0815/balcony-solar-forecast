@@ -42,6 +42,7 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     ATTR_SP_SUN_ELEVATION,
     ATTR_SP_TIME,
     ATTR_SP_TRANSMITTANCE,
+    ATTR_SP_TRANSMITTANCE_INDIVIDUAL,
 )
 
 # The real-coordinator integration block reuses the learning-test builder.
@@ -340,14 +341,16 @@ def test_sensor_available_even_when_update_failed():
 
 
 def test_sensor_unrecorded_attributes_are_exactly_the_curve_and_axis_attrs():
-    # The seven per-selection curve arrays PLUS the two year-stable axis bounds
-    # (constant site geometry — recorder history is noise) are excluded.
+    # The eight per-selection curve arrays (incl. the pooled/individual τ pair)
+    # PLUS the two year-stable axis bounds (constant site geometry — recorder
+    # history is noise) are excluded.
     assert sensor_mod.ShadeProfileSensor._unrecorded_attributes == frozenset(
         {
             ATTR_SP_TIME,
             ATTR_SP_AZIMUTH,
             ATTR_SP_SUN_ELEVATION,
             ATTR_SP_TRANSMITTANCE,
+            ATTR_SP_TRANSMITTANCE_INDIVIDUAL,
             ATTR_SP_HORIZON_AZIMUTH,
             ATTR_SP_STATIC_HORIZON,
             ATTR_SP_SHADE_HORIZON,

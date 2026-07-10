@@ -20,6 +20,7 @@ from .const import (
     ATTR_SP_SUN_ELEVATION,
     ATTR_SP_TIME,
     ATTR_SP_TRANSMITTANCE,
+    ATTR_SP_TRANSMITTANCE_INDIVIDUAL,
     ATTR_WATTS,
     ATTR_WH_PERIOD,
 )
@@ -40,6 +41,7 @@ def exclude_attributes(hass: HomeAssistant) -> set[str]:
         ATTR_SP_AZIMUTH,
         ATTR_SP_SUN_ELEVATION,
         ATTR_SP_TRANSMITTANCE,
+        ATTR_SP_TRANSMITTANCE_INDIVIDUAL,
         ATTR_SP_HORIZON_AZIMUTH,
         ATTR_SP_STATIC_HORIZON,
         ATTR_SP_SHADE_HORIZON,

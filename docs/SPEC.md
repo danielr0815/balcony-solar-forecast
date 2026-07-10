@@ -203,25 +203,33 @@ dieselbe Himmelsokklusion; nur der **Impact** unterscheidet sich je
 Ausrichtung, und den behandelt der Motor bereits pro Ebene über den
 Beam-Anteil. Die Schattenkarte je **Messkanal** zu lernen verschwendet
 Samples 8-fach und lässt das Nordmodul ignorant über das, was das Südmodul
-bewiesen hat. Ebenen mit gleicher `shade_group` teilen sich daher **einen**
-Schattenkarten-Kanal (`PlaneConfig.shade_channel = shade_group or name` — die
-einzige Definition der Zuordnung; Default: kanalweise, rückwärtskompatibel).
-Die **Messung und alle Gates bleiben pro Ebene** (beam-referenziertes T,
-Quasi-klar-Gates); nur der **Speicher-/Lesekanal** ist geteilt. Zwei
-Gruppenmitglieder, die am selben Tag denselben Bin aktualisieren, ergeben
-**zwei EMA-Samples** — genau der Pooling-Gewinn. Weil verschiedene
+bewiesen hat. Ebenen mit gleicher `shade_group` gehören daher demselben
+**Verschattungs-Pool** an (`PlaneConfig.shade_channel = shade_group or name` —
+die einzige Definition der Zuordnung; Default: kanalweise,
+rückwärtskompatibel). Die **Messung und alle Gates bleiben pro Ebene**
+(beam-referenziertes T, Quasi-klar-Gates). **Die Speicherung ist immer je
+Modul-Kanal** (Ebenenname) — jede Ebene lernt ihre Schattenkarte einzeln und
+für immer. Das **Pooling geschieht ausschließlich beim Lesen** (im
+`beam_tau`-Hook des Motors und im Schattenprofil-Diagramm): der gelernte τ eines
+Bins ist der **n-gewichtete Mittel** über alle Pool-Kanäle
+(`tau_pool = Σ nᵢ·τᵢ / Σ nᵢ`, `n_pool = Σ nᵢ`), auf den dann dasselbe
+gemeinsame Shrinkage gegen den statischen Prior wirkt (`w = n_pool/(n_pool+K)`).
+So kommt ein Sample eines Moduls allen Pool-Mitgliedern zugute — **ohne** die
+Einzel-Historien zu verschmelzen. Damit ist **Gruppieren und Auflösen jederzeit
+verlustfrei reversibel**: eine aufgelöste Gruppe liest sofort wieder nur den
+eigenen Kanal jeder Ebene, ohne dass Daten verloren gehen. Weil verschiedene
 Balkonpositionen unterschiedlich verschattet sein können, ist die Gruppe
 **konfigurierbar** statt einer globalen Karte. Validierung: eine `shade_group`
 darf nicht dem **Namen** einer Ebene entsprechen, die nicht selbst diese Gruppe
 trägt (Alias-Schutz — sonst kollidiert der Eigen-Kanal eines Nichtmitglieds
 mit dem Pool); eine nach einem eigenen Mitglied benannte Gruppe ist erlaubt.
-**Migration:** gruppiert der Betreiber bestehende Ebenen, verschmilzt beim
-Setup ein reiner Helfer (`shademap.merge_channels`) die alten kanalweisen
-Karten **n-gewichtet** (`tau = (n₁·τ₁ + n₂·τ₂)/(n₁+n₂)`, `n = n₁+n₂`) in den
-Gruppenkanal und persistiert einmalig (idempotent). **Grenze (dokumentiert):**
-das Auflösen einer Gruppe teilt die gelernte Karte **nicht** zurück — die
-Ebenen starten wieder vom statischen Prior, der Gruppenkanal bleibt als
-harmloser Orphan (per `rollback_learners` wiederherstellbar).
+**Alt-Gruppenkanäle** aus der früheren (v0.12.0) Merge-Migration werden als
+**Legacy-Quelle mitgelesen** — ein vorhandener Gruppenkanal fließt zusätzlich in
+den Pool seiner Mitglieder ein, sodass seine bereits gepoolte Evidenz
+weiterzählt, bis sie von den kanalweisen Live-Daten verdünnt ist. Das
+**Schattenprofil-Diagramm zeigt beide Sichten** (Gruppen- und Einzelsicht per
+Umschalter), damit der Betreiber die individuelle Karte jedes Moduls gegen die
+gepoolte vergleichen und über Gruppierungen entscheiden kann.
 
 **Schneller Lerner — Wetterfehler intraday:** exponentiell abklingendes
 Verhältnis (τ ≈ 90 min) gemessen/prognostiziert der letzten 2–4 h,
@@ -444,8 +452,8 @@ Zeilen, 2024-07 … 2026-07) → **P90 je (Monat × Stunde)** ≈ Klartag-Profil
 5. **Verschattungsgruppen:** Weil Hang, Baumsektor und Hauswandkante
    Standort-Geometrie sind (Befunde 1–3, nicht modulspezifisch), können
    gleich verschattete Ebenen desselben Balkons über eine gemeinsame
-   `shade_group` **einen** gelernten Schattenkarten-Kanal teilen (§5) —
-   ein Sample eines Moduls kommt so allen Gruppenmitgliedern zugute.
+   `shade_group` einem **Verschattungs-Pool** angehören (§5, Pooling beim
+   Lesen) — ein Sample eines Moduls kommt so allen Gruppenmitgliedern zugute.
 
 ## Anhang A: Konventionen & Kommissionierungs-Checkliste
 

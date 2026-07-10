@@ -209,11 +209,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             seconds=int(cfg.get(CONF_FETCH_INTERVAL, FETCH_INTERVAL_SECONDS))
         )
         self._site = SiteConfig.from_dict(cfg[CONF_SITE])
-        # Plane → shademap-channel mapping (SPEC §5 shade groups): grouped planes
-        # pool their shade learning into one channel. Rebuilt on every reload
-        # (site is immutable within a coordinator lifetime); the single source of
-        # truth is PlaneConfig.shade_channel.
-        self._shade_channel_map = self._build_shade_channel_map()
+        # Shade pooling is READ-TIME (SPEC §5): every plane's learning is stored
+        # under its OWN channel forever; grouped planes are pooled only when the
+        # forecast/diagram reads the map, so grouping stays fully reversible. The
+        # pool membership is derived on demand from PlaneConfig.shade_channel +
+        # the live ShademapState (see _build_shade_pool_map), never cached.
 
         # Resolved kill switches (options-flow). Rebuilt on every reload.
         self._learner_config = LearnerConfig.from_dict(cfg)
@@ -332,9 +332,6 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # real OFF->ON option transition inside rebuild_learner_config (a plain
         # restart with the option untouched keeps the flag, SPEC §5).
         self.rebuild_learner_config()
-        # If the operator just grouped existing planes, pool their stale per-plane
-        # shademap channels into the group channel once (idempotent, SPEC §5).
-        self._migrate_shademap_channels()
 
         last = self._store.get_last_payload()
         if not last:
@@ -397,9 +394,6 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """
         cfg = {**self.entry.data, **self.entry.options}
         self._learner_config = LearnerConfig.from_dict(cfg)
-        # Refresh the plane → shade-channel mapping on rebuild (single source of
-        # truth: PlaneConfig.shade_channel).
-        self._shade_channel_map = self._build_shade_channel_map()
         drift = self._drift_state
         changed = False
 
@@ -466,58 +460,45 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return self._shademap_state
 
     # ------------------------------------------------------------------
-    # Shade groups: plane -> shademap-channel mapping + migration (SPEC §5)
+    # Shade groups: read-time pool membership (SPEC §5)
     # ------------------------------------------------------------------
 
-    def _build_shade_channel_map(self) -> dict[str, str]:
-        """Build ``{plane.name: plane.shade_channel}`` from the current site."""
-        return {p.name: p.shade_channel for p in self._site.planes}
+    def _build_shade_pool_map(
+        self, state: ShademapState
+    ) -> dict[str, tuple[str, ...]]:
+        """Build ``{plane.name: pool}`` for READ-TIME shade pooling (SPEC §5).
 
-    def _shade_channel_mapping(self) -> dict[str, str]:
-        """The plane → shademap-channel mapping (grouped planes share a channel).
+        Storage is always per plane (one channel per plane, keyed by name);
+        pooling happens only here, at read time, so grouping stays reversible.
+        For a plane ``p`` with group ``g = p.shade_channel`` the pool is:
 
-        Returns the cached map built on construction / rebuild, falling back to
-        building it from the current site so a bare coordinator (tests using
-        ``__new__``) that never ran ``__init__`` still resolves the mapping. The
-        single source of truth is ``PlaneConfig.shade_channel``.
+          * the OWN channels of every plane sharing that group (their per-plane
+            names — for an ungrouped plane that is just ``(p.name,)``), PLUS
+          * the group channel ``g`` itself as a LEGACY evidence source, but ONLY
+            when ``g`` is actually present in ``state`` AND ``g`` is not one of
+            the member plane names. That branch catches a group channel produced
+            by the earlier v0.12.0 merge migration: its already-pooled evidence
+            must keep counting until it is diluted away by live per-plane data.
+
+        Depends on the LIVE state (the legacy source is added only when the group
+        channel exists), so it is rebuilt at read/bind time, never cached.
         """
-        mapping = getattr(self, "_shade_channel_map", None)
-        if mapping is None:
-            return self._build_shade_channel_map()
-        return mapping
-
-    def _migrate_shademap_channels(self) -> None:
-        """Pool stale per-plane shademap channels into their group ONCE (SPEC §5).
-
-        When the operator groups existing planes (sets a ``shade_group``), the
-        persisted shademap still carries the old per-plane channels. If a loaded
-        channel IS a current plane name whose ``shade_channel`` now differs (the
-        plane was just grouped), the n-weighted ``shademap.merge_channels`` folds
-        every such channel into its group channel and the result is persisted
-        through the normal store path. Idempotent: after the merge those source
-        channels are gone, so a re-run finds nothing to migrate.
-
-        DOCUMENTED LIMITATION (SPEC §5): dissolving a group does NOT split the
-        learned map back — those planes restart from the static prior and the
-        group channel lingers as a harmless orphan (recoverable via
-        ``rollback_learners``).
-        """
-        self._load_learner_states()
-        state = self._shademap_state
-        needs_merge = any(
-            p.name in state.channels and p.shade_channel != p.name
-            for p in self._site.planes
-        )
-        if not needs_merge:
-            return
-        self._shademap_state = shademap_mod.merge_channels(
-            state, self._shade_channel_mapping()
-        )
-        self._persist_shademap_state()
-        # A merged shademap changes what the next served curve applies; drop the
-        # shade-profile memo so the diagram reflects the pooled channel.
-        self._shade_profile_cache = None
-        _LOGGER.info("Migrated per-plane shademap channels into shade groups")
+        planes = self._site.planes
+        channels = getattr(state, "channels", None) or {}
+        members: dict[str, list[str]] = {}
+        for p in planes:
+            members.setdefault(p.shade_channel, []).append(p.name)
+        pool_map: dict[str, tuple[str, ...]] = {}
+        for p in planes:
+            g = p.shade_channel
+            names = members[g]
+            pool = list(names)
+            # Legacy merged group channel: keep counting its evidence, but never
+            # when g is already one of the member plane names (no double count).
+            if g in channels and g not in names:
+                pool.append(g)
+            pool_map[p.name] = tuple(pool)
+        return pool_map
 
     # ------------------------------------------------------------------
     # Shade-profile diagram (sun path vs learned shade) — SPEC §15
@@ -600,15 +581,18 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if cache is not None and cache[0] == key:
             return cache[1]
         shademap = self._shademap_state if slow_active else ShademapState()
-        # Grouped planes share a shade channel: the diagram for either member
-        # renders THAT channel's learned shading for this module's own geometry,
-        # which is exactly the semantics the served forecast applies (SPEC §5).
-        channel = self._shade_channel_mapping().get(module, module)
+        # Storage is per plane: the module's OWN channel is its name; the read
+        # POOL adds its group siblings (+ any legacy group channel). The diagram
+        # renders the pooled tau as the main curve (what the forecast applies) and
+        # the module's individual channel as a comparison view (SPEC §5).
+        channel = module
+        pool = self._build_shade_pool_map(shademap).get(module, (module,))
         tz = dt_util.get_time_zone(self.hass.config.time_zone) or UTC
         result = shadeprofile_mod.compute_shade_profile(
             plane=plane,
             shademap=shademap,
             channel=channel,
+            pool=pool,
             latitude=self._site.latitude,
             longitude=self._site.longitude,
             day=day,
@@ -814,25 +798,29 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                             correction_source=source, band_by_slot=band_by_slot)
 
     def _bind_beam_tau(self):
-        """Bind ``shademap.effective_tau`` over the current ShademapState into
-        the engine's ``beam_tau`` hook.
+        """Bind ``shademap.effective_tau_pooled`` over the current ShademapState
+        into the engine's ``beam_tau`` hook.
 
         Factored out so BOTH the served-curve pass (:meth:`_build_learner_hooks`)
         and the nightly slow-only attribution pass (:meth:`_slow_only_hourly`)
         build the closure identically — the binding can never diverge.
 
-        The engine calls the hook per PLANE (channel == plane name); the mapping
-        redirects grouped planes to their shared shade channel (SPEC §5), so the
-        north module reads the shading the south module proved. Ungrouped planes
-        map to their own name — bit-identical to the pre-groups behaviour.
+        The engine calls the hook per PLANE (channel == plane name). Storage is
+        per plane, so pooling happens HERE at read time (SPEC §5): each plane
+        reads the n-weighted pool of its group siblings (+ any legacy group
+        channel), so the north module reads the shading the south module proved.
+        An ungrouped plane's pool is just its own channel — bit-identical to the
+        pre-groups single-channel behaviour. The pool membership depends on the
+        live state (the legacy source is only added when present), so it is built
+        against ``shd`` at bind time.
         """
         shd = self._shademap_state
-        mapping = self._shade_channel_mapping()
+        pool_map = self._build_shade_pool_map(shd)
 
         def beam_tau(channel, sun_az, sun_el, doy, static_prior):
-            channel = mapping.get(channel, channel)
-            return shademap_mod.effective_tau(
-                shd, channel=channel, sun_az=sun_az, sun_el=sun_el,
+            pool = pool_map.get(channel, (channel,))
+            return shademap_mod.effective_tau_pooled(
+                shd, channels=pool, sun_az=sun_az, sun_el=sun_el,
                 doy=doy, static_prior=static_prior,
             )
 
