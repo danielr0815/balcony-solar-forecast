@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-10
+
 ### Added
 - **Configurable shade groups (shared shademap learning).** An optional
   `shade_group` per plane lets modules that see the same sky occlusion (a
