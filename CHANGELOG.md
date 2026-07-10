@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Shademap warm-up:** a fresh bin's first sample no longer dominates the EMA
+  for weeks — young bins use an adaptive alpha (`max(α, 1/(n+1))`), i.e. the
+  exact arithmetic mean of their first ~6 samples, then the standard EMA. The
+  offline backfill mirrors the formula sample-for-sample.
+- **Cloud classification uses cumulative (random-overlap) total cover** instead
+  of the arithmetic layer mean: a single opaque deck now correctly classifies
+  *overcast* instead of *mixed*, cleaning the taxonomy shared by the day-ahead
+  bias, the quantile bins and the scoreboard strata.
+- **Quantile ring is date-windowed** (`QUANTILE_RING_DAYS` relative to the
+  trained day; samples stored as dated pairs, legacy bare floats grandfathered)
+  and bands additionally require evidence from `QUANTILE_MIN_DAYS` (5)
+  **distinct days** — a burst of correlated hours on a single day can no longer
+  un-collapse a band.
+
+### Fixed
+- **Drift monitor blames the guilty layer only.** The nightly snapshot
+  additionally records the shademap-only curve; a losing day is attributed per
+  layer (slow: shademap-only vs physics; day-ahead: corrected vs shademap-only)
+  with independent streaks, so a drifting layer no longer drags the innocent
+  one into auto-disable + rollback. Legacy snapshots keep the old shared
+  signal.
+
+### Added
+- 34 tests closing the last audit gaps: the shade-profile UI entities
+  (select/date/sensor platform behaviour) and the nightly orchestration
+  (catch-up date math incl. month/year boundaries, failure isolation,
+  idempotent re-runs). CI now prints a report-only coverage summary (no gate).
+
 ## [0.6.0] - 2026-07-10
 
 ### Added
