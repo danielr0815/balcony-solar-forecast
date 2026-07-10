@@ -78,7 +78,8 @@ def test_build_full_inventory_matches_shipped_yaml():
     # 12 cards: the shipped YAML's built-in-card inventory MINUS the redundant
     # "Shade profile (per date & module)" entities card (its module/date/fraction
     # controls are embedded in the bundled diagram card) — apexcharts markdown ->
-    # bundled card.
+    # bundled shade card, and the measured-DC-power history-graph -> bundled
+    # power-history card (one card either way, so the count is unchanged).
     cards = views[0]["cards"]
     assert len(cards) == 12
     types = _card_types(config)
@@ -102,14 +103,18 @@ def test_build_full_inventory_matches_shipped_yaml():
     # The gauge binds the vs-best-baseline entity.
     gauge = next(c for c in cards if c["type"] == "gauge")
     assert gauge["entity"] == "sensor.real_vs_best_baseline_pct"
-    # Measured DC-power rows carry the plane-name label (not the sensors' own).
-    measured = next(
-        c for c in cards if c.get("title", "").startswith("Measured DC power")
+    # The measured-DC-power history-graph is replaced by the bundled
+    # power-history card, wired to the measured-total + forecast-today ids.
+    power_hist = next(
+        c for c in cards if c["type"] == "custom:balcony-power-history-card"
     )
-    assert [(r["entity"], r["name"]) for r in measured["entities"]] == [
-        ("sensor.m1", "M1"),
-        ("sensor.m2", "M2"),
-    ]
+    assert power_hist["total_sensor"] == "sensor.real_measured_dc_power_total"
+    assert power_hist["forecast_sensor"] == "sensor.real_energy_production_today"
+    assert power_hist["title"] == "Hourly production per module"
+    # No leftover per-module measured history-graph (its data is in the card).
+    assert not any(
+        c.get("title", "").startswith("Measured DC power") for c in cards
+    )
     # The pointless today-vs-tomorrow juxtaposition is gone: tomorrow's kWh is
     # referenced nowhere in the built config, and the card is retitled.
     assert SENSOR_ENERGY_TOMORROW not in json.dumps(config)
@@ -214,18 +219,50 @@ def test_build_measured_cards_use_measured_entities():
         version="0.0.0",
     )
     cards = config["views"][0]["cards"]
+    # With the measured-total sensor present, the per-module view is the bundled
+    # power-history card (it reads its own module list + hourly LTS), not a
+    # per-module history-graph.
+    power_hist = next(
+        c for c in cards if c["type"] == "custom:balcony-power-history-card"
+    )
+    assert power_hist["total_sensor"] == "sensor.real_measured_dc_power_total"
+    assert power_hist["forecast_sensor"] == "sensor.real_energy_production_today"
+    assert not any(
+        c.get("title", "").startswith("Measured DC power") for c in cards
+    )
+    # The LTS statistics-graph still takes bare entity ids (no per-row names).
+    stats = next(c for c in cards if c["type"] == "statistics-graph")
+    assert stats["entities"] == ["sensor.a", "sensor.b", "sensor.c"]
+
+
+def test_build_measured_power_falls_back_to_history_graph():
+    """No measured-total sensor in the map (registered-but-disabled) but the site
+    still has actual_entity planes -> keep the OLD per-module history-graph so a
+    partial install still renders a measured view."""
+    entity_map = _full_entity_map()
+    entity_map.pop("measured_dc_power_total")
+    config = d.build_dashboard_config(
+        entity_map=entity_map,
+        comparison_slugs=[],
+        measured_entities=[("M1", "sensor.a"), ("M2", "sensor.b")],
+        version="0.0.0",
+    )
+    cards = config["views"][0]["cards"]
+    # The bundled power-history card is gated on the measured-total id: absent.
+    assert not any(
+        c["type"] == "custom:balcony-power-history-card" for c in cards
+    )
+    # The fallback per-module history-graph carries plane-name labels.
     hist = next(
         c for c in cards if c.get("title", "").startswith("Measured DC power")
     )
-    # The history-graph carries plane-name labels on each row.
     assert [(r["entity"], r["name"]) for r in hist["entities"]] == [
         ("sensor.a", "M1"),
         ("sensor.b", "M2"),
-        ("sensor.c", "M3"),
     ]
-    # The LTS statistics-graph takes bare entity ids (no per-row name support).
+    # The LTS statistics-graph is unaffected by the fallback.
     stats = next(c for c in cards if c["type"] == "statistics-graph")
-    assert stats["entities"] == ["sensor.a", "sensor.b", "sensor.c"]
+    assert stats["entities"] == ["sensor.a", "sensor.b"]
 
 
 def test_forecast_card_survives_without_measured_row():

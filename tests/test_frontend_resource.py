@@ -121,17 +121,22 @@ def _storage_hass(items=None, *, is_running=True, raise_on=None):
 
 
 async def test_static_path_registered_points_at_existing_file():
-    hass = _FakeHass()  # no lovelace -> only the static path is registered
+    hass = _FakeHass()  # no lovelace -> only the static paths are registered
     await _frontend.async_register_frontend(hass)
 
-    assert len(hass.http.registered) == 1
-    cfg = hass.http.registered[0]
-    assert isinstance(cfg, StaticPathConfig)
-    assert cfg.url_path == _frontend.FRONTEND_URL
-    assert cfg.path == str(_frontend._FRONTEND_FILE)
-    assert cfg.cache_headers is True
-    # The served file must actually exist on disk.
-    assert Path(cfg.path).is_file()
+    # Both bundled cards are served in one call, each under the shared prefix.
+    assert len(hass.http.registered) == len(_frontend._CARDS)
+    by_url = {cfg.url_path: cfg for cfg in hass.http.registered}
+    for url, path in _frontend._CARDS:
+        cfg = by_url[url]
+        assert isinstance(cfg, StaticPathConfig)
+        assert cfg.path == str(path)
+        assert cfg.cache_headers is True
+        # The served file must actually exist on disk.
+        assert Path(cfg.path).is_file()
+    # The single-card aliases still point at card 0 (the shade-profile card).
+    assert _frontend.FRONTEND_URL in by_url
+    assert by_url[_frontend.FRONTEND_URL].path == str(_frontend._FRONTEND_FILE)
     assert hass.data.get(_frontend._DATA_STATIC_DONE) is True
 
 
@@ -139,7 +144,7 @@ async def test_static_path_registered_only_once():
     hass = _FakeHass()
     await _frontend.async_register_frontend(hass)
     await _frontend.async_register_frontend(hass)
-    assert len(hass.http.registered) == 1
+    assert len(hass.http.registered) == len(_frontend._CARDS)
 
 
 # ---------------------------------------------------------------------------
@@ -152,31 +157,43 @@ async def test_storage_empty_collection_creates_versioned_resource():
     await _frontend.async_register_frontend(hass)
 
     assert res.load_called is True  # unloaded collection is loaded first
+    # One versioned resource created per bundled card, in _CARDS order.
     assert res.created == [
-        {"res_type": "module", "url": _frontend._versioned_url()}
+        {"res_type": "module", "url": _frontend._versioned_url(url)}
+        for url, _path in _frontend._CARDS
     ]
     assert res.updated == []
     assert hass.data.get(_frontend._DATA_RESOURCE_DONE) is True
 
 
 async def test_storage_old_version_updates_that_item():
+    shade_url = _frontend._CARDS[0][0]
+    power_url = _frontend._CARDS[1][0]
+    # Only the shade card has a stale resource on disk; the power card is new.
     old = {
         "id": "abc",
         "type": "module",
-        "url": f"{_frontend.FRONTEND_URL}?v=0.0.1",
+        "url": f"{shade_url}?v=0.0.1",
     }
     hass, res = _storage_hass(items=[old])
     await _frontend.async_register_frontend(hass)
 
-    assert res.created == []
+    # Shade card (matched by url prefix) version-updated in place; power card
+    # (no existing resource) created fresh.
     assert res.updated == [
-        ("abc", {"res_type": "module", "url": _frontend._versioned_url()})
+        ("abc", {"res_type": "module", "url": _frontend._versioned_url(shade_url)})
+    ]
+    assert res.created == [
+        {"res_type": "module", "url": _frontend._versioned_url(power_url)}
     ]
 
 
 async def test_storage_identical_resource_is_noop():
-    same = {"id": "abc", "type": "module", "url": _frontend._versioned_url()}
-    hass, res = _storage_hass(items=[same])
+    same = [
+        {"id": f"id{i}", "type": "module", "url": _frontend._versioned_url(url)}
+        for i, (url, _path) in enumerate(_frontend._CARDS)
+    ]
+    hass, res = _storage_hass(items=same)
     await _frontend.async_register_frontend(hass)
 
     assert res.created == []
@@ -196,14 +213,14 @@ async def test_yaml_mode_does_not_touch_resources():
 
     assert res.created == []
     assert res.updated == []
-    # Static path is still served in yaml mode.
-    assert len(hass.http.registered) == 1
+    # Static paths are still served in yaml mode.
+    assert len(hass.http.registered) == len(_frontend._CARDS)
 
 
 async def test_lovelace_absent_does_not_raise():
     hass = _FakeHass(lovelace=None)
     await _frontend.async_register_frontend(hass)  # must not raise
-    assert len(hass.http.registered) == 1
+    assert len(hass.http.registered) == len(_frontend._CARDS)
 
 
 # ---------------------------------------------------------------------------
@@ -215,13 +232,13 @@ async def test_raising_resources_items_is_swallowed():
     hass, res = _storage_hass(items=[], raise_on="items")
     await _frontend.async_register_frontend(hass)  # must not raise
     assert res.created == []
-    assert len(hass.http.registered) == 1
+    assert len(hass.http.registered) == len(_frontend._CARDS)
 
 
 async def test_raising_resources_create_is_swallowed():
     hass, res = _storage_hass(items=[], raise_on="create")
     await _frontend.async_register_frontend(hass)  # must not raise
-    assert len(hass.http.registered) == 1
+    assert len(hass.http.registered) == len(_frontend._CARDS)
 
 
 # ---------------------------------------------------------------------------
@@ -233,15 +250,16 @@ async def test_registration_deferred_until_started():
     hass, res = _storage_hass(items=[], is_running=False)
     await _frontend.async_register_frontend(hass)
 
-    # Static path is registered immediately; the resource is NOT yet created.
-    assert len(hass.http.registered) == 1
+    # Static paths are registered immediately; the resources are NOT yet created.
+    assert len(hass.http.registered) == len(_frontend._CARDS)
     assert res.created == []
     assert EVENT_HOMEASSISTANT_STARTED in hass.bus.listeners
 
     # Firing the one-shot listener performs the deferred registration.
     await hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
     assert res.created == [
-        {"res_type": "module", "url": _frontend._versioned_url()}
+        {"res_type": "module", "url": _frontend._versioned_url(url)}
+        for url, _path in _frontend._CARDS
     ]
 
 
@@ -293,3 +311,30 @@ def test_js_card_file_sanity():
 
     # No external-URL ES imports (self-contained module).
     assert re.search(r'from\s+["\']https?:', text) is None
+
+
+def test_power_history_js_card_sanity():
+    # The power-history card is card 1 in the _CARDS list.
+    power_file = _frontend._CARDS[1][1]
+    assert power_file.name == "power_history_card.js"
+    text = power_file.read_text(encoding="utf-8")
+    assert text.strip(), "power-history card JS is empty"
+
+    # Registers the custom element + advertises itself to the picker.
+    assert 'customElements.define("balcony-power-history-card"' in text
+    assert "window.customCards" in text
+
+    # Reads hourly LTS via the recorder websocket command, the forecast curve
+    # attribute, and the module-name attribute the Python contract now exposes.
+    assert "recorder/statistics_during_period" in text
+    assert "statistics_during_period" in text
+    assert "wh_period" in text
+    assert "source_names" in text
+
+    # The hover crosshair wires a mousemove handler over the plot overlay.
+    assert "mousemove" in text, "power-history card JS has no mousemove hover"
+
+    # Self-contained module: no external-URL ES imports, and it must NOT pull in
+    # the sibling shade-profile card (each card stays independent).
+    assert re.search(r'from\s+["\']https?:', text) is None
+    assert "shade_profile_card" not in text

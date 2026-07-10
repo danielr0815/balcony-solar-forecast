@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Bundled power-history card (energy-dashboard style).** A second self-contained
+  Lovelace card, `custom:balcony-power-history-card` ("Balcony Power History"),
+  served and auto-registered by the integration (no HACS install). It replaces
+  the messy 8-line *Measured DC power per module* history-graph with a
+  Home-Assistant-Energy-dashboard-style chart: **stacked hourly production bars
+  per module** (M1…M8, one coloured segment each) overlaid with a **dashed
+  forecast line**, and a hover crosshair whose floating readout lists every
+  module's Wh **and the total** for the hovered hour. The bars come from the
+  recorder's hourly long-term statistics (pulled via
+  `recorder/statistics_during_period`, refreshed every 5 minutes and on day
+  roll-over); the forecast line aggregates the forecast sensor's 15-min
+  `wh_period` to local hours. To support it, the measured-total sensor now also
+  exposes a `source_names` attribute (plane names M1…M8 aligned with `sources`),
+  and the generated dashboard embeds the new card (falling back to the old
+  per-module history-graph when the measured-total sensor is absent). See
+  docs/DASHBOARD.md §4c.
+
 ## [0.10.0] - 2026-07-10
 
 ### Added

@@ -65,6 +65,10 @@ MANAGED_MARKER = "bsf_managed"
 # The bundled shade-profile card (served + auto-registered by _frontend.py). It
 # REPLACES the opt-in HACS apexcharts snippet in the generated dashboard.
 _SHADE_PROFILE_CARD = "custom:balcony-shade-profile-card"
+# The bundled power-history card (served + auto-registered by _frontend.py). It
+# REPLACES the messy per-module "Measured DC power" history-graph with stacked
+# hourly production bars per module + a dashed forecast line.
+_POWER_HISTORY_CARD = "custom:balcony-power-history-card"
 
 # Every INTEGRATION-OWNED entity key the dashboard can reference (the comparison
 # MAE rows + the measured-power ids are dynamic and handled separately). A key
@@ -187,7 +191,7 @@ def build_dashboard_config(
     _add_vs_best_gauge(cards, entity_map)
     _add_scoreboard(cards, entity_map, comparison_slugs)
     _add_forecast_history(cards, entity_map)
-    _add_measured_power(cards, measured_entities)
+    _add_measured_power(cards, entity_map, measured_entities)
     _add_measured_lts(cards, measured_entities)
     _add_forecast_band(cards, entity_map)
     _add_learners(cards, entity_map)
@@ -328,13 +332,36 @@ def _add_forecast_history(
 
 
 def _add_measured_power(
-    cards: list[dict[str, Any]], measured_entities: list[tuple[str, str]]
+    cards: list[dict[str, Any]],
+    entity_map: dict[str, str],
+    measured_entities: list[tuple[str, str]],
 ) -> None:
-    """Measured DC power per module (ground truth) history-graph (SPEC §14.3).
+    """Measured production per module (ground truth) — the bundled power card.
 
-    Each row carries the plane NAME (M1…M8) so the graph is legible instead of
-    showing the per-port sensors' own ambiguous friendly names.
+    When the measured-total sensor exists (at least one plane has an
+    ``actual_entity``), use the bundled ``balcony-power-history-card``: stacked
+    hourly production bars per module (M1…M8) + a dashed forecast line, reading
+    the module list + hourly LTS itself. It REPLACES the messy 8-line
+    per-module history-graph.
+
+    Fallback: when the measured-total sensor is ABSENT from the map (e.g. the
+    entity is registered-but-disabled while the site still has ``actual_entity``
+    planes), keep the OLD per-module ``history-graph`` (labelled M1…M8) so a
+    partial install still renders a measured view.
     """
+    total = entity_map.get(SENSOR_MEASURED_DC_TOTAL)
+    if total is not None:
+        card: dict[str, Any] = {
+            "type": _POWER_HISTORY_CARD,
+            "total_sensor": total,
+            "title": "Hourly production per module",
+        }
+        forecast = entity_map.get(SENSOR_ENERGY_TODAY)
+        if forecast is not None:
+            card["forecast_sensor"] = forecast
+        cards.append(card)
+        return
+
     if not measured_entities:
         return
     cards.append(
