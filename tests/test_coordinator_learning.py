@@ -1286,3 +1286,187 @@ def test_per_plane_modeled_trims_night_hours_and_rounds():
     assert modeled.beam_wh[day.isoformat()] == round(80.123456789 * 0.25, 2)
     # And the vestigial ghi dict no longer serializes at all.
     assert "ghi" not in modeled.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Shade groups (SPEC §5, Phase 5): grouped planes pool one shademap channel.
+# The measurement stays per plane; only the storage/read channel is shared.
+# ---------------------------------------------------------------------------
+
+
+def _grouped_site() -> SiteConfig:
+    """M1 (N) + M2 (S) sharing shade group 'south'."""
+    return SiteConfig(
+        latitude=48.5,
+        longitude=12.2,
+        planes=(
+            PlaneConfig(name="M1", azimuth_deg=115.0, tilt_deg=70.0, wp=370.0,
+                        actual_entity="sensor.m1", shade_group="south"),
+            PlaneConfig(name="M2", azimuth_deg=205.0, tilt_deg=70.0, wp=430.0,
+                        actual_entity="sensor.m2", shade_group="south"),
+        ),
+        groups=(),
+    )
+
+
+def test_bind_beam_tau_reads_group_channel_for_both_planes():
+    """A bin seeded under 'south' is read by BOTH grouped planes' hooks."""
+    from custom_components.balcony_solar_forecast.core import shademap as sm
+
+    c = _make_coordinator()
+    c._site = _grouped_site()
+    # Seed a strongly-occluded bin under the GROUP channel only (never "M1"/"M2").
+    az, el, doy = 200.0, 40.0, 172
+    state = ShademapState()
+    for _ in range(400):  # large n -> shrinkage weight ~1, learned tau dominates
+        state = sm.update_bin(
+            state, channel="south", sun_az=az, sun_el=el, doy=doy, measured_t=0.0
+        )
+    c._shademap_state = state
+
+    beam_tau = c._bind_beam_tau()
+    prior = 1.0
+    tau_m1 = beam_tau("M1", az, el, doy, prior)
+    tau_m2 = beam_tau("M2", az, el, doy, prior)
+    # Both planes resolve to the SAME learned (shrinkage-blended) value, well
+    # below the static prior — proof the hook read "south", not the empty
+    # per-plane channels (which would return the prior 1.0 unchanged).
+    assert tau_m1 < 0.2
+    assert tau_m1 == pytest.approx(tau_m2)
+
+
+def test_bind_beam_tau_ungrouped_is_bit_identical():
+    """With no groups the hook still reads each plane's own channel (default)."""
+    from custom_components.balcony_solar_forecast.core import shademap as sm
+
+    c = _make_coordinator()  # default _site: M1, M2, ungrouped
+    az, el, doy = 200.0, 40.0, 172
+    state = ShademapState()
+    for _ in range(400):
+        state = sm.update_bin(
+            state, channel="M1", sun_az=az, sun_el=el, doy=doy, measured_t=0.0
+        )
+    c._shademap_state = state
+    beam_tau = c._bind_beam_tau()
+    # M1 sees its learned bin; M2 has no channel -> exact prior pass-through.
+    assert beam_tau("M1", az, el, doy, 1.0) < 0.2
+    assert beam_tau("M2", az, el, doy, 1.0) == pytest.approx(1.0)
+
+
+def test_train_channel_writes_to_group_channel(monkeypatch):
+    """Nightly training of plane M1 stores under 'south', not 'M1'."""
+    from custom_components.balcony_solar_forecast.core.types import PlaneHourlyModeled
+
+    c = _make_coordinator()
+    c._site = _grouped_site()
+    hkey = "2026-07-01T11:00:00+00:00"
+    modeled = PlaneHourlyModeled(
+        beam_wh={hkey: 100.0}, diffuse_wh={hkey: 20.0}, kc={hkey: 0.9}
+    )
+    measured_by_hour = {hkey: 65.0}
+    monkeypatch.setattr(coord_mod.shademap_mod, "is_quasi_clear", lambda **k: True)
+    monkeypatch.setattr(coord_mod.solpos, "sun_position", lambda *a: (200.0, 40.0))
+    state, changed = c._train_channel(
+        ShademapState(), "M1", modeled, measured_by_hour
+    )
+    assert changed is True
+    assert set(state.channels) == {"south"}
+
+
+def test_train_shademap_two_group_members_pool_into_one_channel(monkeypatch):
+    """Both M1 and M2 training the same night land in the single group channel."""
+    from custom_components.balcony_solar_forecast.core.types import PlaneHourlyModeled
+
+    c = _make_coordinator()
+    c._site = _grouped_site()
+    iso = "2026-07-01"
+    hkey = "2026-07-01T11:00:00+00:00"
+    modeled = PlaneHourlyModeled(
+        beam_wh={hkey: 100.0}, diffuse_wh={hkey: 20.0}, kc={hkey: 0.9}
+    )
+    snap = IssuedSnapshot(
+        issued_at="x", status="fresh",
+        raw_hourly_wh={hkey: 1000.0},
+        per_plane={"M1": modeled, "M2": modeled},
+    ).to_dict()
+    c._store.issued[iso] = snap
+    # Measured >= 0.8 * modeled site total so the day-clear gate passes; each
+    # module measures its own hour.
+    c._store.hourly_actuals[iso] = {"M1": {hkey: 900.0}, "M2": {hkey: 900.0}}
+    monkeypatch.setattr(coord_mod.shademap_mod, "is_quasi_clear", lambda **k: True)
+    monkeypatch.setattr(coord_mod.solpos, "sun_position", lambda *a: (200.0, 40.0))
+
+    c._train_shademap(iso, snap, c._store.actuals.get(iso))
+    # One pooled channel; both members' bins EMA into it (two samples/day).
+    assert set(c._shademap_state.channels) == {"south"}
+    binv = next(iter(c._shademap_state.channels["south"].values()))
+    assert binv.n == 2
+
+
+def test_build_shade_profile_uses_group_channel(monkeypatch):
+    """build_shade_profile renders the module's geometry against 'south'."""
+    from custom_components.balcony_solar_forecast.core import shademap as sm
+
+    c = _make_coordinator()
+    c._site = _grouped_site()
+    # Non-empty shademap so the slow layer is active (mapping applies regardless).
+    c._shademap_state = sm.update_bin(
+        ShademapState(), channel="south", sun_az=200.0, sun_el=40.0, doy=172,
+        measured_t=0.0,
+    )
+    c._shade_profile_module = "M1"
+    c._shade_profile_date = datetime(2026, 6, 21).date()
+    captured = {}
+
+    def _spy(**kw):
+        captured["channel"] = kw["channel"]
+        return {}
+
+    monkeypatch.setattr(coord_mod.shadeprofile_mod, "compute_shade_profile", _spy)
+    c.build_shade_profile()
+    assert captured["channel"] == "south"
+
+
+def test_migrate_shademap_channels_pools_and_persists():
+    """A per-plane store + grouped site -> merged on migrate and persisted."""
+    c = _make_coordinator()
+    c._site = _grouped_site()
+    # Persisted state carries the OLD per-plane channels (pre-grouping).
+    old = ShademapState(channels={
+        "M1": {"5:5:1": ShademapBin(tau=0.2, n=4)},
+        "M2": {"5:5:1": ShademapBin(tau=0.8, n=4)},
+    })
+    c._store.shademap = old.to_dict()
+    c._learner_states_loaded = False  # force a real load from the store
+
+    c._migrate_shademap_channels()
+
+    # In-memory + persisted state both show the pooled channel only.
+    assert set(c._shademap_state.channels) == {"south"}
+    persisted = ShademapState.from_dict(c._store.shademap)
+    assert set(persisted.channels) == {"south"}
+    binv = persisted.channels["south"]["5:5:1"]
+    # n-weighted mean of the two equal-n bins: (0.2 + 0.8) / 2 = 0.5; n = 8.
+    assert binv.n == 8
+    assert binv.tau == pytest.approx(0.5)
+
+
+def test_migrate_shademap_channels_noop_when_ungrouped():
+    """Default (ungrouped) site: migration never rewrites the store."""
+    c = _make_coordinator()  # ungrouped M1, M2
+    c._shademap_state = ShademapState(channels={
+        "M1": {"5:5:1": ShademapBin(tau=0.2, n=4)},
+    })
+    before = dict(c._store.shademap)
+    saved = {"n": 0}
+    real_set = c._store.set_shademap_state
+
+    def _count(state):
+        saved["n"] += 1
+        real_set(state)
+
+    c._store.set_shademap_state = _count
+    c._migrate_shademap_channels()
+    assert saved["n"] == 0  # no persist
+    assert c._store.shademap == before
+    assert set(c._shademap_state.channels) == {"M1"}

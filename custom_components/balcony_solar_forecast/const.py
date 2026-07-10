@@ -70,6 +70,7 @@ CONF_WP = "wp"  # module STC peak power, watts
 CONF_EFFICIENCY = "efficiency"  # system/DC efficiency, default 0.96
 CONF_HORIZON = "horizon"  # list of horizon rows (see below)
 CONF_ACTUAL_ENTITY = "actual_entity"  # HA entity id for measured DC power
+CONF_SHADE_GROUP = "shade_group"  # optional: planes sharing this learn ONE shademap channel
 # horizon-row fields
 CONF_HZ_AZIMUTH = "azimuth_deg"  # 0=N clockwise
 CONF_HZ_ELEVATION = "elevation_deg"  # horizon-line elevation at this azimuth

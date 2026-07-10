@@ -196,6 +196,33 @@ Gebäudekante, Geländer — und korrigiert das handgemachte Horizontprofil
 über eine Saison. Diagnose: Service, der die Karte als **Polartabelle**
 ausgibt (visuell gegen bekannte Hindernisse prüfbar).
 
+**Verschattungsgruppen (`shade_group` je Ebene, optional):** Die
+Verdeckungsgeometrie (Gebäudekante bei 210°, Baumreihe) ist eine Eigenschaft
+des **Standorts**, nicht eines Moduls — alle Ebenen desselben Balkons sehen
+dieselbe Himmelsokklusion; nur der **Impact** unterscheidet sich je
+Ausrichtung, und den behandelt der Motor bereits pro Ebene über den
+Beam-Anteil. Die Schattenkarte je **Messkanal** zu lernen verschwendet
+Samples 8-fach und lässt das Nordmodul ignorant über das, was das Südmodul
+bewiesen hat. Ebenen mit gleicher `shade_group` teilen sich daher **einen**
+Schattenkarten-Kanal (`PlaneConfig.shade_channel = shade_group or name` — die
+einzige Definition der Zuordnung; Default: kanalweise, rückwärtskompatibel).
+Die **Messung und alle Gates bleiben pro Ebene** (beam-referenziertes T,
+Quasi-klar-Gates); nur der **Speicher-/Lesekanal** ist geteilt. Zwei
+Gruppenmitglieder, die am selben Tag denselben Bin aktualisieren, ergeben
+**zwei EMA-Samples** — genau der Pooling-Gewinn. Weil verschiedene
+Balkonpositionen unterschiedlich verschattet sein können, ist die Gruppe
+**konfigurierbar** statt einer globalen Karte. Validierung: eine `shade_group`
+darf nicht dem **Namen** einer Ebene entsprechen, die nicht selbst diese Gruppe
+trägt (Alias-Schutz — sonst kollidiert der Eigen-Kanal eines Nichtmitglieds
+mit dem Pool); eine nach einem eigenen Mitglied benannte Gruppe ist erlaubt.
+**Migration:** gruppiert der Betreiber bestehende Ebenen, verschmilzt beim
+Setup ein reiner Helfer (`shademap.merge_channels`) die alten kanalweisen
+Karten **n-gewichtet** (`tau = (n₁·τ₁ + n₂·τ₂)/(n₁+n₂)`, `n = n₁+n₂`) in den
+Gruppenkanal und persistiert einmalig (idempotent). **Grenze (dokumentiert):**
+das Auflösen einer Gruppe teilt die gelernte Karte **nicht** zurück — die
+Ebenen starten wieder vom statischen Prior, der Gruppenkanal bleibt als
+harmloser Orphan (per `rollback_learners` wiederherstellbar).
+
 **Schneller Lerner — Wetterfehler intraday:** exponentiell abklingendes
 Verhältnis (τ ≈ 90 min) gemessen/prognostiziert der letzten 2–4 h,
 **im k_c-Raum konditioniert** (Geometrie/Saison herausnormiert), auf die
@@ -414,6 +441,11 @@ Zeilen, 2024-07 … 2026-07) → **P90 je (Monat × Stunde)** ≈ Klartag-Profil
    - P1/P4 (Front): az >205° irrelevant (Geometrie-Limit); keine
      Zusatzeinträge nötig.
    - P2/P5 (N): az >115° irrelevant; Fernfeld Ost besonders wichtig.
+5. **Verschattungsgruppen:** Weil Hang, Baumsektor und Hauswandkante
+   Standort-Geometrie sind (Befunde 1–3, nicht modulspezifisch), können
+   gleich verschattete Ebenen desselben Balkons über eine gemeinsame
+   `shade_group` **einen** gelernten Schattenkarten-Kanal teilen (§5) —
+   ein Sample eines Moduls kommt so allen Gruppenmitgliedern zugute.
 
 ## Anhang A: Konventionen & Kommissionierungs-Checkliste
 

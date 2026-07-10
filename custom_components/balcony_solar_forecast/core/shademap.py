@@ -41,6 +41,7 @@ Extra pure helpers the engine / store / diagnostics call (all owned here):
     apply_shademap_to_beam(beam_w, *, tau) -> float
     dump_polar_table(state) -> list[dict]
     ingest_bootstrap_shademap(raw, *, max_bin_n) -> ShademapState
+    merge_channels(state, mapping) -> ShademapState
 
 All tunables come from const. Every load/apply path is validate-and-clamp;
 a corrupt/absent state degrades to the static prior, never an exception.
@@ -77,6 +78,7 @@ __all__ = [
     "apply_shademap_to_beam",
     "dump_polar_table",
     "ingest_bootstrap_shademap",
+    "merge_channels",
 ]
 
 
@@ -500,3 +502,60 @@ def ingest_bootstrap_shademap(raw: object, *, max_bin_n: int) -> ShademapState:
             capped_bins[bin_key] = ShademapBin(tau=binv.tau, n=min(binv.n, cap))
         channels[channel] = capped_bins
     return ShademapState(channels=channels, version=base.version)
+
+
+# ---------------------------------------------------------------------------
+# Channel migration: pool per-plane channels into shared shade groups (SPEC §5)
+# ---------------------------------------------------------------------------
+
+
+def merge_channels(state: ShademapState, mapping: dict[str, str]) -> ShademapState:
+    """Merge shademap channels according to a source→target ``mapping``.
+
+    ``mapping`` is ``{plane.name: plane.shade_channel}`` (owner: PlaneConfig).
+    For each source channel ``c`` with target ``g = mapping.get(c, c)``:
+
+      * ``c == g`` — kept untouched (an ungrouped plane, or a channel not in the
+        mapping such as an orphan from a since-removed plane);
+      * otherwise every bin of ``c`` is folded into ``g`` — a bin missing in the
+        target is copied across; a bin present in both is combined by the
+        n-weighted mean ``tau = (n1*tau1 + n2*tau2) / (n1 + n2)`` with
+        ``n = n1 + n2`` (clamped to the shademap band), so pooling two histories
+        preserves each bin's evidence weight — then ``c`` is DROPPED.
+
+    Used once at coordinator setup when the operator groups existing planes: the
+    persisted per-plane channels are pooled into the group channel. Idempotent
+    (after the merge the source channels are gone, so a re-run maps only
+    ``c == g``). Dissolving a group is NOT reversed here — those planes restart
+    from the static prior and the group channel lingers as a harmless orphan
+    (``effective_tau`` never reads it; ``dump_polar_table`` still shows it),
+    recoverable via ``rollback_learners``.
+
+    Pure: never mutates ``state`` and never raises; returns a NEW ShademapState.
+    """
+    # Shallow-copy every channel's bin dict so the input state stays untouched.
+    channels: dict[str, dict[str, ShademapBin]] = {
+        ch: dict(bins) for ch, bins in state.channels.items()
+    }
+    # Deterministic order so a chain of sources folding into one target is stable.
+    for c in sorted(channels):
+        g = mapping.get(c, c)
+        if c == g:
+            continue
+        src = channels.pop(c, None)
+        if not src:
+            continue
+        tgt = channels.setdefault(g, {})
+        for bin_key, sbin in src.items():
+            existing = tgt.get(bin_key)
+            if existing is None:
+                tgt[bin_key] = sbin
+                continue
+            n = existing.n + sbin.n
+            if n > 0:
+                tau = (existing.n * existing.tau + sbin.n * sbin.tau) / n
+            else:
+                # Both bins carry no evidence (n == 0): plain mean, never /0.
+                tau = 0.5 * (existing.tau + sbin.tau)
+            tgt[bin_key] = ShademapBin(tau=_clamp_tau(tau), n=n)
+    return ShademapState(channels=channels, version=state.version)

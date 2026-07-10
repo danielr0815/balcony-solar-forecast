@@ -151,7 +151,7 @@
     "step": {
       "user": {
         "title": "Set up Balcony Solar Forecast",
-        "description": "Set the name, location and update intervals. The \"Site configuration\" field is pre-filled with the full operator setup (8 modules, horizon tables, inverter groups) — just confirm it for the reference site, or edit it freely. Azimuth: 0° = North, clockwise (90° = East, 180° = South). Tilt: degrees from horizontal (90° = vertical).",
+        "description": "Set the name, location and update intervals. The \"Site configuration\" field is pre-filled with the full operator setup (8 modules, horizon tables, inverter groups) — just confirm it for the reference site, or edit it freely. Azimuth: 0° = North, clockwise (90° = East, 180° = South). Tilt: degrees from horizontal (90° = vertical). Optional per plane: a \"shade_group\" — planes that share the same obstruction (building edge, tree line) learn one shared shade map when given the same group.",
         "data": {
           "name": "Name",
           "latitude": "Latitude",
@@ -168,7 +168,7 @@
       },
       "reconfigure": {
         "title": "Reconfigure Balcony Solar Forecast",
-        "description": "Edit the structural setup: location, update intervals and the full site configuration (planes, horizon tables, inverter groups). The runtime tunables — learner switches, quantile bands and comparison sensors — live in the options dialog (\"Configure\"). The name is immutable after setup. Azimuth: 0° = North, clockwise (90° = East, 180° = South). Tilt: degrees from horizontal (90° = vertical).",
+        "description": "Edit the structural setup: location, update intervals and the full site configuration (planes, horizon tables, inverter groups). The runtime tunables — learner switches, quantile bands and comparison sensors — live in the options dialog (\"Configure\"). The name is immutable after setup. Azimuth: 0° = North, clockwise (90° = East, 180° = South). Tilt: degrees from horizontal (90° = vertical). Optional per plane: a \"shade_group\" — planes that share the same obstruction (building edge, tree line) learn one shared shade map when given the same group.",
         "data": {
           "latitude": "Latitude",
           "longitude": "Longitude",
@@ -201,7 +201,9 @@
       "group_dup_name": "Group names must be unique.",
       "group_no_planes": "Every group must contain at least one plane.",
       "group_unknown_plane": "A group references an unknown plane.",
-      "bad_ac_limit": "The AC limit must be greater than 0."
+      "bad_ac_limit": "The AC limit must be greater than 0.",
+      "shade_group_empty": "A shade group must be a non-empty name.",
+      "shade_group_collision": "A shade group must not equal the name of a plane that is not itself in that group."
     },
     "abort": {
       "already_configured": "An installation with this name already exists."
@@ -246,7 +248,9 @@
       "group_dup_name": "Group names must be unique.",
       "group_no_planes": "Every group must contain at least one plane.",
       "group_unknown_plane": "A group references an unknown plane.",
-      "bad_ac_limit": "The AC limit must be greater than 0."
+      "bad_ac_limit": "The AC limit must be greater than 0.",
+      "shade_group_empty": "A shade group must be a non-empty name.",
+      "shade_group_collision": "A shade group must not equal the name of a plane that is not itself in that group."
     }
   }
 }

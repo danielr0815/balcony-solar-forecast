@@ -43,6 +43,10 @@ Hinzufügen der Integration werden abgefragt:
   Mess-Entitäten. Das mitgelieferte Referenz-Setup ist als **editierbarer
   Default** vorbelegt — Vorlage und Testfall, kein Zwang.
 
+Optional lässt sich je Ebene beim Anlegen eine **`shade_group`** setzen — Module
+mit gleicher Verschattung (Gebäudekante, Baumreihe) teilen sich so das gelernte
+Verschattungsfeld statt es je Messkanal einzeln zu lernen.
+
 Nachträglich lassen sich über **Konfigurieren** (Optionen) anpassen:
 
 - die **Lernschalter** (schneller Bias-Lerner, langsamer Shademap-Lerner,
