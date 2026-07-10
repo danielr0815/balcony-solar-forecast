@@ -178,22 +178,29 @@ def test_shademap_bin_key_format_and_bins():
 
 
 def test_quasi_clear_gate_conditions():
-    # Passes at high sun, clear, ample beam, stable neighbour.
-    assert bf.is_quasi_clear(kc=1.0, sun_el=40.0, beam_share=0.5, neighbour_kc=1.0)
+    # Passes at high sun, clear, ample beam, stable measured/modeled ratio.
+    assert bf.is_quasi_clear(
+        kc=1.0, sun_el=40.0, beam_share=0.5,
+        stability_ratio=1.0, neighbour_ratio=1.0,
+    )
     # Rejected: beam share too low.
     assert not bf.is_quasi_clear(
         kc=1.0, sun_el=40.0,
-        beam_share=const.SHADEMAP_MIN_BEAM_SHARE, neighbour_kc=1.0,
+        beam_share=const.SHADEMAP_MIN_BEAM_SHARE,
+        stability_ratio=1.0, neighbour_ratio=1.0,
     )
     # Rejected: kc above the thin-cloud-enhancement guard.
     assert not bf.is_quasi_clear(
-        kc=const.SHADEMAP_KC_HI + 0.1, sun_el=40.0, beam_share=0.5, neighbour_kc=None
+        kc=const.SHADEMAP_KC_HI + 0.1, sun_el=40.0, beam_share=0.5
     )
-    # Rejected: unstable neighbour (big relative kc jump).
-    assert not bf.is_quasi_clear(kc=1.0, sun_el=40.0, beam_share=0.5, neighbour_kc=0.5)
+    # Rejected: unstable neighbour (big relative RATIO jump).
+    assert not bf.is_quasi_clear(
+        kc=1.0, sun_el=40.0, beam_share=0.5,
+        stability_ratio=1.0, neighbour_ratio=0.5,
+    )
     # Low-sun lower bound is RELAXED: kc 0.7 passes at el 0 but fails high.
-    assert bf.is_quasi_clear(kc=0.70, sun_el=0.0, beam_share=0.5, neighbour_kc=None)
-    assert not bf.is_quasi_clear(kc=0.70, sun_el=40.0, beam_share=0.5, neighbour_kc=None)
+    assert bf.is_quasi_clear(kc=0.70, sun_el=0.0, beam_share=0.5)
+    assert not bf.is_quasi_clear(kc=0.70, sun_el=40.0, beam_share=0.5)
 
 
 # ---------------------------------------------------------------------------

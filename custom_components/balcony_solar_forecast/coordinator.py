@@ -103,7 +103,6 @@ from .const import (
     RECOMPUTE_INTERVAL_SECONDS,
     SCOREBOARD_COMPARISON_UNIT_KWH,
     SHADEMAP_MEASURED_CLEAR_MIN_FRAC,
-    SHADEMAP_NEIGHBOUR_STABILITY,
     STATUS_CACHED,
     STATUS_FRESH,
     STATUS_PHYSICS_FALLBACK,
@@ -2188,29 +2187,22 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             sun_az, sun_el = solpos.sun_position(
                 mid, self._site.latitude, self._site.longitude
             )
-            # Neighbour stability on the MEASURED/modeled ratio (coordinator:1015).
-            neighbour_kc = None
+            # Neighbour-slot stability on the MEASURED/modeled ratio: the smooth
+            # forecast k_c cannot see a real cloud fluctuation, so the gate keys
+            # on this slot's ratio vs the previous slot's (shared with backfill).
             this_ratio = ratio_by_hour.get(hkey)
-            if this_ratio is not None and idx > 0:
-                nb = ratio_by_hour.get(hkeys[idx - 1])
-                if nb is not None:
-                    neighbour_kc = nb
+            neighbour_ratio = (
+                ratio_by_hour.get(hkeys[idx - 1]) if idx > 0 else None
+            )
             try:
                 if not shademap_mod.is_quasi_clear(
                     kc=modeled.kc.get(hkey, 0.0),
                     sun_el=sun_el,
                     beam_share=beam_share,
-                    neighbour_kc=None,
+                    stability_ratio=this_ratio,
+                    neighbour_ratio=neighbour_ratio,
                 ):
                     continue
-                # Separate neighbour-stability check on the measured/modeled ratio.
-                if neighbour_kc is not None and this_ratio is not None:
-                    denom = max(this_ratio, neighbour_kc)
-                    if denom > 0.0 and (
-                        abs(this_ratio - neighbour_kc) / denom
-                        >= SHADEMAP_NEIGHBOUR_STABILITY
-                    ):
-                        continue
                 measured_t = shademap_mod.beam_referenced_t(
                     float(measured_wh), diffuse_wh, beam_wh
                 )

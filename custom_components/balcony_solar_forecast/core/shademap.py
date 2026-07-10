@@ -16,8 +16,10 @@ beam (SPEC §5).
 Quasi-clear samples ONLY: an elevation-dependent clear-sky-index gate
 (Haurwitz is crude at low sun, so the lower k_c bound relaxes toward
 SHADEMAP_KC_LO_LOW_SUN below SHADEMAP_KC_PIVOT_ELEV_DEG), neighbour-slot
-stability (relative k_c change < SHADEMAP_NEIGHBOUR_STABILITY), and a modeled
-beam share > SHADEMAP_MIN_BEAM_SHARE of Wp.
+stability (relative change of the MEASURED/modeled energy ratio between adjacent
+slots < SHADEMAP_NEIGHBOUR_STABILITY — the measured ratio, not the smooth
+forecast k_c, catches a real cloud fluctuation), and a modeled beam share >
+SHADEMAP_MIN_BEAM_SHARE of Wp.
 
 The learned map REPLACES the static horizon transmittance of the bin; clamp
 [SHADEMAP_TAU_MIN, SHADEMAP_TAU_MAX] (full occlusion representable — building
@@ -29,7 +31,7 @@ Frozen public contract (7 implementers depend on these exact signatures):
 
     shademap_bin_key(sun_az, sun_el, doy) -> str
     half_year_index(doy) -> int
-    is_quasi_clear(*, kc, sun_el, beam_share, neighbour_kc) -> bool
+    is_quasi_clear(*, kc, sun_el, beam_share, stability_ratio, neighbour_ratio) -> bool
     update_bin(state, *, channel, sun_az, sun_el, doy, measured_t) -> ShademapState
     effective_tau(state, *, channel, sun_az, sun_el, doy, static_prior) -> float
 
@@ -211,7 +213,8 @@ def is_quasi_clear(
     kc: float,
     sun_el: float,
     beam_share: float,
-    neighbour_kc: float | None,
+    stability_ratio: float | None = None,
+    neighbour_ratio: float | None = None,
 ) -> bool:
     """Quasi-clear sample gate for training a bin (SPEC §5).
 
@@ -221,12 +224,19 @@ def is_quasi_clear(
         or above SHADEMAP_KC_PIVOT_ELEV_DEG (Haurwitz is crude at low sun);
       * modeled ``beam_share`` > SHADEMAP_MIN_BEAM_SHARE (a bin with almost no
         modeled beam cannot inform a *beam*-referenced transmittance);
-      * neighbour-slot stability: if ``neighbour_kc`` is not None, the relative
-        change ``abs(kc - neighbour_kc) / max(kc, neighbour_kc)`` <
-        SHADEMAP_NEIGHBOUR_STABILITY (a lone bright slot between cloudy ones is
-        rejected — it is a fluctuation, not a clear-sky reference).
+      * neighbour-slot stability: when BOTH ``stability_ratio`` (this slot's
+        measured/modeled energy ratio) and ``neighbour_ratio`` (the adjacent
+        slot's) are given, the relative change
+        ``abs(stability_ratio - neighbour_ratio) / max(...)`` <
+        SHADEMAP_NEIGHBOUR_STABILITY must hold. Gating on the MEASURED ratio
+        sequence — not the smooth forecast k_c — is what rejects a lone bright
+        measured slot between shaded ones (a real cloud fluctuation, not a
+        clear-sky reference). Either value None (e.g. no usable neighbour) skips
+        the leg.
 
-    Non-finite inputs fail the gate (never train on garbage).
+    Non-finite inputs fail the gate (never train on garbage). Both the live
+    nightly trainer and the offline backfill pass the same ratio pair, so the
+    two training paths accept identical samples.
     """
     kc_f = _finite(kc, -1.0)
     if kc_f < 0.0:
@@ -238,14 +248,15 @@ def is_quasi_clear(
     if beam_f <= SHADEMAP_MIN_BEAM_SHARE:
         return False
 
-    if neighbour_kc is not None:
-        nb = _finite(neighbour_kc, -1.0)
-        if nb < 0.0:
+    if stability_ratio is not None and neighbour_ratio is not None:
+        cur = _finite(stability_ratio, -1.0)
+        nb = _finite(neighbour_ratio, -1.0)
+        if cur < 0.0 or nb < 0.0:
             return False
-        denom = max(kc_f, nb)
+        denom = max(cur, nb)
         if denom <= 0.0:
             return False
-        if abs(kc_f - nb) / denom >= SHADEMAP_NEIGHBOUR_STABILITY:
+        if abs(cur - nb) / denom >= SHADEMAP_NEIGHBOUR_STABILITY:
             return False
 
     return True
