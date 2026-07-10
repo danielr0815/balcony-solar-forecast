@@ -170,8 +170,13 @@ comparison_sensors:
   band card + scoreboard). The measured-total sensor exists only when at least
   one plane has an `actual_entity`; with none configured the graph shows the
   forecast row alone.
-- **Measured DC power per module** (history-graph) — the 8 per-module measured
-  DC-power sensors (ground truth, labelled by plane M1…M8).
+- **Hourly production per module** (bundled card — no HACS install) — an
+  energy-dashboard-style chart: one **stacked hourly production bar per module**
+  (M1…M8, coloured segments) with a **dashed forecast line**; hovering (or
+  touching) shows a crosshair with every module's Wh **and the total** for that
+  hour (§4c). It replaces the old messy 8-line measured-power history-graph. On a
+  partial install where the measured-total sensor is absent it falls back to that
+  per-module `history-graph` so a measured view still renders.
 - **Measured daily energy per module** (statistics-graph) — daily LTS sums per
   representative module (bar), a best-effort per-plane view.
 - **Today's forecast band** (entities) — P10 / P50 / P90 for today (SPEC §6).
@@ -306,6 +311,62 @@ snippet, if you prefer it over the bundled card:
 
 The snippet reads only the three entity ids above; adjust them if your entity
 ids differ. It changes no state.
+
+---
+
+## 4c. Power history (hourly production per module)
+
+The messy 8-line *Measured DC power per module* history-graph is replaced by a
+second bundled card, modelled on the Home Assistant **Energy dashboard** chart:
+one **stacked hourly production bar per local hour**, split into a coloured
+segment per module (M1…M8, in config order), overlaid with a **dashed forecast
+line** (today's forecast Wh per hour). Hovering (or touching) the chart snaps a
+crosshair to the hovered hour column and shows a floating readout panel listing
+each module's Wh for that hour, the **Total** (bold), and the **Forecast** Wh —
+so you can read the exact per-module contribution and the site total at a glance.
+
+It reads two integration-owned entities (device **Balcony Solar Forecast**),
+auto-discovered from `hass.states` when not configured:
+
+| Entity | Purpose |
+|---|---|
+| `sensor.balcony_solar_forecast_measured_dc_power_total` | the module list (its `sources` + `source_names` attributes) and the statistic ids to chart |
+| `sensor.balcony_solar_forecast_energy_production_today` | the 15-min forecast `wh_period` attribute, aggregated to local hours for the dashed line |
+
+The bars come from the recorder's **hourly long-term statistics** (the mean DC
+power of each module sensor over the hour × 1 h = Wh), pulled directly via the
+`recorder/statistics_during_period` websocket command from local midnight to now
+— refetched on load, every 5 minutes, and when the local day rolls over. Modules
+therefore need `state_class` for LTS to exist (they do — LTS since 2024-07);
+until the recorder has written hourly statistics the card shows a *No hourly
+statistics yet* hint. If the forecast sensor is missing its `wh_period` attribute
+the bars still render, just without the dashed line.
+
+If you installed the dashboard via the one-click `install_dashboard` action
+(§1a), this card is **already embedded** (wired to your two entity ids). To add
+it to another dashboard by hand, the integration serves the card's JavaScript
+and (storage-mode Lovelace) auto-registers it, so it appears in the card picker:
+
+1. Open your dashboard → **Edit dashboard** → **＋ Add card**.
+2. Pick **"Balcony Power History"** from the card list (type *power* to filter),
+   then add it. A live preview renders straight away.
+
+The default YAML is simply `type: custom:balcony-power-history-card` (both
+entities auto-discovered). Optional keys — `total_sensor`, `forecast_sensor`,
+`title`, and `hours_forecast` (set `false` to hide the dashed forecast line) —
+set them only to pin a specific device's entities (e.g. multiple installs) or
+tweak the look. It changes no state.
+
+> **YAML-mode Lovelace only.** Auto-registration needs storage-mode Lovelace
+> (the default). If your dashboards are configured in YAML, the integration logs
+> the resource URL on start; add it once yourself:
+>
+> ```yaml
+> lovelace:
+>   resources:
+>     - url: /balcony_solar_forecast/frontend/power_history_card.js?v=0.10.0
+>       type: module
+> ```
 
 ---
 

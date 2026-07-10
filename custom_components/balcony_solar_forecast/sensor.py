@@ -208,9 +208,15 @@ async def async_setup_entry(
     # actual_entity sensors. Added ONLY when at least one plane has an
     # actual_entity — with none configured there is nothing to sum, so the
     # sensor is omitted rather than published permanently unavailable.
-    measured_ids = _measured_source_ids(coordinator)
-    if measured_ids:
-        entities.append(MeasuredDcTotalSensor(coordinator, measured_ids))
+    measured = _measured_sources(coordinator)
+    if measured:
+        entities.append(
+            MeasuredDcTotalSensor(
+                coordinator,
+                [eid for eid, _name in measured],
+                [name for _eid, name in measured],
+            )
+        )
 
     # One MAE sensor per configured comparison forecast (SPEC §9/§10). The list
     # is read from the merged entry config (data + options); it ships EMPTY, so
@@ -553,9 +559,22 @@ class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:solar-power"
 
-    def __init__(self, coordinator: Any, source_ids: list[str]) -> None:
+    def __init__(
+        self,
+        coordinator: Any,
+        source_ids: list[str],
+        source_names: list[str] | None = None,
+    ) -> None:
         super().__init__(coordinator, SENSOR_MEASURED_DC_TOTAL)
         self._source_ids = list(source_ids)
+        # Configured plane names aligned index-for-index with the (de-duplicated)
+        # source ids, so a consumer (the bundled power-history card) can label
+        # each channel M1…M8 instead of the per-port sensors' ambiguous own
+        # names. Falls back to the entity ids when names are not supplied
+        # (defensive; the platform always passes them).
+        self._source_names = (
+            list(source_names) if source_names is not None else list(source_ids)
+        )
         self._value: float | None = None
         self._reporting = 0
 
@@ -608,6 +627,11 @@ class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
             "channels_total": len(self._source_ids),
             "channels_reporting": self._reporting,
             "sources": list(self._source_ids),
+            # Plane names aligned index-for-index with ``sources`` (a source used
+            # by multiple planes keeps the FIRST plane's name — the same dedupe
+            # order as ``sources``), so the power-history card can auto-discover
+            # the module labels without re-reading the site config.
+            "source_names": list(self._source_names),
         }
 
 
@@ -1091,22 +1115,27 @@ def _numeric_state(state: Any) -> float | None:
         return None
 
 
-def _measured_source_ids(coordinator: Any) -> list[str]:
-    """Ordered, de-duplicated measured DC-power entity ids from the site planes.
+def _measured_sources(coordinator: Any) -> list[tuple[str, str]]:
+    """Ordered, de-duplicated ``(measured entity id, plane name)`` from the site.
 
     Each plane's ``actual_entity`` (the HA sensor of that module's measured DC
-    power); planes without one are skipped and duplicates dropped while plane
-    order is preserved. Empty when no plane has an ``actual_entity`` — the
-    platform then omits the summing sensor entirely (nothing to sum).
+    power) paired with the plane's NAME (M1…M8); planes without an
+    ``actual_entity`` are skipped and duplicate ids dropped while plane order is
+    preserved — a source shared by several planes keeps the FIRST plane's name.
+    Empty when no plane has an ``actual_entity`` — the platform then omits the
+    summing sensor entirely (nothing to sum).
     """
     site = getattr(coordinator, "_site", None)
     if site is None:
         return []
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for plane in getattr(site, "planes", ()):
         entity_id = getattr(plane, "actual_entity", None)
         if isinstance(entity_id, str) and entity_id and entity_id not in seen:
             seen.add(entity_id)
-            out.append(entity_id)
+            name = getattr(plane, "name", None)
+            out.append(
+                (entity_id, name if isinstance(name, str) and name else entity_id)
+            )
     return out

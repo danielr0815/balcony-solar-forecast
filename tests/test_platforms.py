@@ -207,8 +207,9 @@ class _StatesHass:
 
 
 class _MeasuredPlane:
-    def __init__(self, actual_entity):
+    def __init__(self, actual_entity, name=None):
         self.actual_entity = actual_entity
+        self.name = name
 
 
 class _MeasuredSite:
@@ -229,7 +230,11 @@ class _MeasuredCoordinator:
 
     def __init__(self, actual_entities):
         self.entry = _MeasuredEntry()
-        self._site = _MeasuredSite([_MeasuredPlane(a) for a in actual_entities])
+        # Plane names M1, M2, … aligned with the given actual_entity ids so the
+        # measured-total sensor can expose ``source_names`` alongside ``sources``.
+        self._site = _MeasuredSite(
+            [_MeasuredPlane(a, f"M{i + 1}") for i, a in enumerate(actual_entities)]
+        )
         self.data = None
         self.last_update_success = True
 
@@ -246,6 +251,7 @@ def test_measured_total_sums_numeric_sources():
         _FakeCoordinator(None),
         hass=hass,
         _source_ids=["sensor.a", "sensor.b"],
+        _source_names=["M1", "M2"],
         _value=None,
         _reporting=0,
     )
@@ -257,6 +263,8 @@ def test_measured_total_sums_numeric_sources():
         "channels_total": 2,
         "channels_reporting": 2,
         "sources": ["sensor.a", "sensor.b"],
+        # Plane names aligned index-for-index with ``sources``.
+        "source_names": ["M1", "M2"],
     }
 
 
@@ -275,6 +283,7 @@ def test_measured_total_skips_unavailable_and_non_numeric():
         _FakeCoordinator(None),
         hass=hass,
         _source_ids=["sensor.a", "sensor.b", "sensor.c", "sensor.d", "sensor.e"],
+        _source_names=["M1", "M2", "M3", "M4", "M5"],
         _value=None,
         _reporting=0,
     )
@@ -294,6 +303,7 @@ def test_measured_total_all_dead_is_unavailable():
         _FakeCoordinator(None),
         hass=hass,
         _source_ids=["sensor.a", "sensor.b"],
+        _source_names=["M1", "M2"],
         _value=None,
         _reporting=0,
     )
@@ -313,6 +323,7 @@ def test_measured_total_available_independent_of_coordinator():
         coord,
         hass=hass,
         _source_ids=["sensor.a"],
+        _source_names=["M1"],
         _value=None,
         _reporting=0,
     )
@@ -348,6 +359,7 @@ async def test_measured_total_state_change_event_recomputes(monkeypatch):
         _FakeCoordinator(None),
         hass=hass,
         _source_ids=["sensor.a", "sensor.b"],
+        _source_names=["M1", "M2"],
         _value=None,
         _reporting=0,
         async_on_remove=lambda f: None,
@@ -381,6 +393,9 @@ async def test_measured_total_added_only_when_sources_configured():
     measured = [e for e in added if isinstance(e, MeasuredDcTotalSensor)]
     assert len(measured) == 1
     assert measured[0]._source_ids == ["sensor.a", "sensor.b"]
+    # Plane names align with the de-duplicated ids; the duplicate "sensor.a"
+    # (plane M3) keeps M1's name (first-plane-wins, same order as the ids).
+    assert measured[0]._source_names == ["M1", "M2"]
 
 
 async def test_measured_total_omitted_when_no_sources():
@@ -393,7 +408,8 @@ async def test_measured_total_omitted_when_no_sources():
 
 def test_measured_total_entity_contract_pinned():
     coord = _FakeCoordinator(None)
-    s = MeasuredDcTotalSensor(coord, ["sensor.a", "sensor.b"])
+    s = MeasuredDcTotalSensor(coord, ["sensor.a", "sensor.b"], ["M1", "M2"])
+    assert s.extra_state_attributes["source_names"] == ["M1", "M2"]
     assert s.unique_id == "abc123_measured_dc_power_total"
     assert s.translation_key == "measured_dc_power_total"
     assert s.device_class == SensorDeviceClass.POWER
