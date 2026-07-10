@@ -7,7 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **ASHRAE incidence-angle modifier on beam + circumsolar** (`IAM_B0` = 0.05,
+  SPEC §4). Glass reflection costs 5–15 % of the direct share at AOI > 60° —
+  a large part of the day on 70–80° facade planes — and without the modifier
+  the shademap absorbed the optics deficit as AOI-shaped **phantom shading**
+  (visible in the shade-profile diagram as learned shade no obstacle explains).
+  Applied at the engine stage (pvlib-style, after the pure transposition, so
+  the pvlib golden vectors stay comparable) and before the ungated trainer
+  reference; the backfill applies it byte-identically. Expect slightly lower
+  raw forecasts at high AOI and cleaner learned bins over time.
+- **SPEC §15** documents the v0.5.0 shade-profile diagram (entities, defaults,
+  slow-active gating, tunables); the code's stale "§5" citations now point at
+  it, and §4 records the IAM.
+
+### Changed
+- **One shared hourly-kc reduction for both training paths**
+  (`clearsky.hourly_kc`, the clear-sky-energy-weighted mean). The live nightly
+  trainer previously collapsed each hour to its final slot's kc — the highest-
+  elevation slot of a morning hour but the lowest of an evening hour, an
+  azimuth-asymmetric quasi-clear gate — while the backfill used the hour-mean
+  GHI. A bootstrapped shademap now gates identically to live training.
+- **Backfill gained the live trainer's day-level hygiene gates**: the
+  measured-clear day gate (a snow-covered or overcast day passes every
+  per-hour check and would seed τ≈0 into every traversed winter bin), a
+  per-hour snow gate, and the frozen-channel module-day drop.
+- **Store trims:** night hours (all-zero) are dropped from the issued ring's
+  per-plane curves, values are rounded (0.01 Wh / 6-decimal kc), and the
+  never-populated `ghi` dict is no longer serialized — old blobs round-trip
+  unchanged.
+- **Services are registered in `async_setup`** (quality-scale `action-setup`):
+  all four services exist independent of config-entry load state, so
+  automations get a clear error instead of "Service not found" during startup
+  outages.
+
 ### Fixed
+- **Comparison-MAE sensor object-id pinning actually works now.** The formerly
+  used `_attr_suggested_object_id` does not exist in HA 2026 and was silently
+  ignored; the id is now pinned via a pre-set `entity_id` (the supported
+  integration-suggested path), and `ComparisonConfig.slug` is strictly ASCII so
+  a non-ASCII label ("Süd") can no longer produce an invalid unique_id/entity
+  id that diverges from the documented dashboard id.
 - **Drift monitor no longer auto-disables a learner on rounding-scale noise.**
   A "losing" day now requires the corrected daily-kWh MAE to exceed physics by
   both the relative margin AND an absolute floor (`DRIFT_LOSS_MIN_ABS_WH`, 50
