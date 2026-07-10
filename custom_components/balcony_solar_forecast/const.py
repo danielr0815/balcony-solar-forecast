@@ -510,7 +510,7 @@ DATA_KEY_RAW_HOURLY_WH = "raw_hourly_wh"          # {iso_hour: Wh} pure physics
 DATA_KEY_CORRECTED_HOURLY_WH = "corrected_hourly_wh"  # {iso_hour: Wh} served curve
 DATA_KEY_INTRADAY_SCALAR = "intraday_scalar"      # current applied scalar
 DATA_KEY_LEARNER_STATUS = "learner_status"        # dict: enabled/frozen/disabled per layer
-DATA_KEY_DRIFT_MAE = "drift_mae"                  # dict: {raw, corrected, baseline} rolling MAE
+DATA_KEY_DRIFT_MAE = "drift_mae"                  # dict: {raw, corrected, baseline, +slow when attributed} rolling MAE
 DATA_KEY_CORRECTION_SOURCE = "correction_source"  # one of CORRECTION_SOURCE_*
 
 # --- New diagnostic entities (SPEC §8) -------------------------------------
@@ -628,8 +628,11 @@ QUANTILE_RING_DAYS = 90
 # QUANTILE_RING_DAYS x this, not QUANTILE_RING_DAYS itself — otherwise a
 # frequently-hit summer bin (~6 samples/day) would hold only ~2-3 weeks of
 # history and the bands would snap shut after any calm stretch (SPEC §6 90-day
-# climatology). NOTE: samples are un-timestamped, so this caps by COUNT, not age;
-# a true date-windowed ring is a follow-up (see the deferred note in the review).
+# climatology). Samples now carry the trained day's ISO date, so the ring is
+# date-windowed to QUANTILE_RING_DAYS (relative to the training day); this COUNT
+# cap is the hard backstop after the date trim. It also bounds the per-day
+# contribution to one bin, which underwrites the effective-days lower bound the
+# day-diversity collapse gate uses for legacy un-dated samples (QUANTILE_MIN_DAYS).
 QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN = 8
 # The three band percentiles (SPEC §6: P10/P50/P90 -> 80% central band).
 QUANTILE_P_LOW = 10.0
@@ -640,6 +643,15 @@ QUANTILE_P_HIGH = 90.0
 # bin never fabricates an interval. A bin at/above the floor emits the empirical
 # spread. P50 itself, when the bin is empty, defaults to the neutral 1.0.
 QUANTILE_MIN_SAMPLES = 20
+# A band additionally needs evidence from at least this many DISTINCT days: the
+# hourly samples within one day are strongly correlated (same sky, same forecast
+# error), so 3 bursty days of ~8 hours each are ~3 independent observations, not
+# 24 — the sample-count floor alone would let a handful of days un-collapse a
+# band. effective_days = (# distinct sample dates) + ceil(# undated / the per-day
+# cap); the undated term is a PROVABLE lower bound on the days a legacy (pre-fix,
+# un-dated) ring spans, since the trainer never adds more than
+# QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN to one bin on one day (SPEC §6).
+QUANTILE_MIN_DAYS = 5
 QUANTILE_NEUTRAL_MULT = 1.0
 # The per-hour relative error = measured_wh / corrected_forecast_wh, clamped to a
 # sane band so a divide-by-near-zero dawn/dusk hour cannot inject a 100x

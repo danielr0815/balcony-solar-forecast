@@ -395,12 +395,20 @@ def classify_cloud(
 
     Fog test FIRST (it overrides cover): fog when ``visibility_m`` <
     FOG_VISIBILITY_M OR (``cloud_low`` > FOG_CLOUD_LOW_PCT AND ``month`` in
-    FOG_MONTHS). Otherwise split by mean total cover: < CLOUD_CLEAR_MAX_PCT =>
-    clear, > CLOUD_OVERCAST_MIN_PCT => overcast, else mixed. Returns one of the
-    const CLOUD_CLASS_* strings.
+    FOG_MONTHS). Otherwise split by the random-overlap TOTAL cover
+    ``total = 100*(1 - (1-low/100)*(1-mid/100)*(1-high/100))`` (each layer
+    clamped to [0, 100]): < CLOUD_CLEAR_MAX_PCT => clear,
+    > CLOUD_OVERCAST_MIN_PCT => overcast, else mixed. Returns one of the const
+    CLOUD_CLASS_* strings.
+
+    The TOTAL cover — not the arithmetic mean of the three layers — is used
+    because cloud decks occlude cumulatively: a single opaque low deck (100/0/0)
+    fully overcasts the sky, yet its mean is only 33 and would misfile as mixed.
+    That misclassification would smear the shared taxonomy across the RLS bias,
+    the quantile bins and the scoreboard strata.
 
     Non-finite inputs degrade gracefully: an unusable visibility does not fire
-    the fog rule, and unusable cover components are treated as 0 for the mean.
+    the fog rule, and unusable cover components are treated as 0.
     """
     vis = float(visibility_m) if _is_finite(visibility_m) else float("inf")
     low = float(cloud_low) if _is_finite(cloud_low) else 0.0
@@ -415,10 +423,15 @@ def classify_cloud(
     if vis < FOG_VISIBILITY_M or (low > FOG_CLOUD_LOW_PCT and m in FOG_MONTHS):
         return CLOUD_CLASS_FOG
 
-    mean_cover = (low + mid + high) / 3.0
-    if mean_cover < CLOUD_CLEAR_MAX_PCT:
+    # Random-overlap total cover: layers occlude cumulatively (a single full
+    # deck must classify overcast). Clamp each layer to [0, 100] first.
+    lc = _clamp(low, 0.0, 100.0)
+    mc = _clamp(mid, 0.0, 100.0)
+    hc = _clamp(high, 0.0, 100.0)
+    total = 100.0 * (1.0 - (1.0 - lc / 100.0) * (1.0 - mc / 100.0) * (1.0 - hc / 100.0))
+    if total < CLOUD_CLEAR_MAX_PCT:
         return CLOUD_CLASS_CLEAR
-    if mean_cover > CLOUD_OVERCAST_MIN_PCT:
+    if total > CLOUD_OVERCAST_MIN_PCT:
         return CLOUD_CLASS_OVERCAST
     return CLOUD_CLASS_MIXED
 

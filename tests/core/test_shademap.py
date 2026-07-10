@@ -269,9 +269,50 @@ def test_update_blends_existing_bin():
     )
     key = S.shademap_bin_key(150.0, 40.0, DOY_SPRING)
     binv = st.channels["M4"][key]
-    expected = (1 - SHADEMAP_EMA_ALPHA) * 0.4 + SHADEMAP_EMA_ALPHA * 0.8
+    # Warm-up: the second sample (n_old == 1) uses alpha = max(0.15, 1/2) = 0.5,
+    # i.e. the arithmetic mean of the two samples, NOT the fixed-EMA blend.
+    a = max(SHADEMAP_EMA_ALPHA, 1.0 / 2.0)
+    expected = (1 - a) * 0.4 + a * 0.8
     assert binv.tau == pytest.approx(expected)
+    assert binv.tau == pytest.approx(0.6)  # exact mean of 0.4 and 0.8
     assert binv.n == 2
+
+
+@pytest.mark.parametrize("k", [1, 2, 3, 4, 5, 6])
+def test_update_warmup_is_arithmetic_mean(k):
+    """The first floor(1/alpha) samples produce the EXACT arithmetic mean.
+
+    The adaptive warm-up alpha = max(alpha, 1/(n_old+1)) equals 1/(n_old+1) while
+    that exceeds the fixed alpha, so the running EMA collapses to the plain mean
+    for the first floor(1/SHADEMAP_EMA_ALPHA) == 6 samples (0.15 -> 6).
+    """
+    samples = [0.1, 0.9, 0.3, 0.7, 0.5, 0.2][:k]
+    st = ShademapState()
+    for s in samples:
+        st = S.update_bin(
+            st, channel="M4", sun_az=150.0, sun_el=40.0,
+            doy=DOY_SPRING, measured_t=s,
+        )
+    key = S.shademap_bin_key(150.0, 40.0, DOY_SPRING)
+    binv = st.channels["M4"][key]
+    assert binv.tau == pytest.approx(sum(samples) / len(samples))
+    assert binv.n == k
+
+
+def test_update_warmup_beats_seed_domination():
+    """A noisy seed does not dominate a young bin: [0, 1, 1, 1] -> mean 0.75.
+
+    Under the OLD fixed-alpha EMA the same sequence gives 1-(0.85)^3 ~ 0.386
+    (the seed 0.0 lingers); the warm-up returns the arithmetic mean 0.75.
+    """
+    st = ShademapState()
+    for s in (0.0, 1.0, 1.0, 1.0):
+        st = S.update_bin(
+            st, channel="M4", sun_az=150.0, sun_el=40.0,
+            doy=DOY_SPRING, measured_t=s,
+        )
+    key = S.shademap_bin_key(150.0, 40.0, DOY_SPRING)
+    assert st.channels["M4"][key].tau == pytest.approx(0.75)
 
 
 def test_update_clamps_measured_into_band():

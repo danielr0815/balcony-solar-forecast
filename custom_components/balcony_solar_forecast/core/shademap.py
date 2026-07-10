@@ -324,8 +324,13 @@ def update_bin(
     quasi-clear sample (caller gates via :func:`is_quasi_clear` and computes T
     via :func:`beam_referenced_t`). A fresh bin seeds at the clamped
     ``measured_t``; an existing bin blends
-    ``tau_new = (1 - alpha)*tau_old + alpha*clamp(measured_t)`` with
-    alpha = SHADEMAP_EMA_ALPHA. tau is clamped to
+    ``tau_new = (1 - alpha)*tau_old + alpha*clamp(measured_t)`` with an ADAPTIVE
+    warm-up ``alpha = max(SHADEMAP_EMA_ALPHA, 1/(n_old + 1))``, where ``n_old``
+    is the bin's stored count BEFORE this sample. While ``1/(n_old+1)`` exceeds
+    the fixed alpha — the first ``floor(1/SHADEMAP_EMA_ALPHA)`` samples — the bin
+    tau is the EXACT arithmetic mean of its clamped samples (the test invariant),
+    so one noisy seed no longer dominates a young bin for weeks; the update then
+    transitions seamlessly to the standard fixed-alpha EMA. tau is clamped to
     [SHADEMAP_TAU_MIN, SHADEMAP_TAU_MAX] and ``n`` incremented (n drives the
     cold-start shrinkage in :func:`effective_tau`).
 
@@ -347,7 +352,9 @@ def update_bin(
         new_tau = sample
         new_n = 1
     else:
-        a = SHADEMAP_EMA_ALPHA
+        # Adaptive warm-up alpha: 1/(n_old+1) while it exceeds the fixed EMA
+        # alpha (young bins -> exact arithmetic mean), then the fixed alpha.
+        a = max(SHADEMAP_EMA_ALPHA, 1.0 / (old.n + 1))
         new_tau = _clamp_tau((1.0 - a) * old.tau + a * sample)
         new_n = old.n + 1
     bins[key] = ShademapBin(tau=new_tau, n=new_n)

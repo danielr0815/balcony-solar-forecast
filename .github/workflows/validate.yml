@@ -90,7 +90,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install homeassistant pytest pytest-homeassistant-custom-component
+          pip install homeassistant pytest pytest-homeassistant-custom-component pytest-cov
 
       # Disable the pytest-homeassistant-custom-component plugin (`-p
       # no:homeassistant`). The suite is unit-style: every HA-layer test runs
@@ -100,5 +100,12 @@ jobs:
       # Python 3.12+ for the sync tests -- so the plugin only breaks a suite that
       # never uses its fixtures. Disabling it runs the full meaningful suite
       # (pytest-asyncio, installed via PHACC, still drives the async tests).
+      # Coverage is REPORT-ONLY, never a gate: `--cov-report=term-missing`
+      # prints a visible per-file terminal summary (skip-covered trims the
+      # fully-covered files) but there is deliberately NO `--cov-fail-under`,
+      # so coverage never fails the build — it informs, it does not block.
       - name: Run test suite
-        run: python -m pytest tests -q -p no:homeassistant
+        run: >-
+          python -m pytest tests -q -p no:homeassistant
+          --cov=custom_components/balcony_solar_forecast
+          --cov-report=term-missing:skip-covered

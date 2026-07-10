@@ -183,6 +183,8 @@ bewusst NICHT das Gesamtverhältnis gemessen/modelliert: im Schatten
 enthält die Messung weiter den Diffus-Sockel; ein Gesamt-Ratio auf den
 Beam angewandt würde verschattete Bins systematisch überschätzen und
 diffus-unabhängige Verluste (Soiling, η-Fehler) dem Beam zuschreiben.
+Warm-up der EMA mit adaptivem α = max(α, 1/(n+1)): junge Bins sind so das
+arithmetische Mittel ihrer Samples statt vom Seed dominiert.
 Nur **quasi-klare Samples** (k_c-Gate **elevationsabhängig** — Haurwitz
 ist bei Tiefstand grob; plus Nachbarslot-Stabilität; plus modellierter
 Beam-Anteil > 5 % Wp). Die gelernte Karte **ersetzt** die statische
@@ -210,7 +212,14 @@ falsche Geometrie. Optional später: 1 RLS-Bias-Skalar je
 - **Drift-Monitor**: rollierende 7-Tage-MAE korrigiert vs. reine Physik;
   verliert der Lerner 7 Tage in Folge → Auto-Abschaltung + HA-Repair-
   Issue; letzte 3 Lernstände für Rollback; Store validate-and-clamp beim
-  Laden (korrupt ⇒ Faktoren 1,0, nie Setup-Crash).
+  Laden (korrupt ⇒ Faktoren 1,0, nie Setup-Crash). Der nächtliche
+  Snapshot hält zusätzlich die reine Schattenkarten-Kurve fest
+  (Slow ∘ Physik, ohne Day-ahead-Faktor); ein Verlusttag wird der
+  schuldigen Schicht zugeordnet — Slow: Schattenkarte vs. Physik,
+  Day-ahead/Fast: korrigiert vs. Schattenkarten-Kurve — mit
+  unabhängigen Streaks, sodass eine unschuldige Schicht nicht
+  mitabgeschaltet wird. Alt-Snapshots ohne Schattenkarten-Kurve fallen
+  auf das gemeinsame korrigiert-vs-Physik-Signal zurück.
 - **Kollaps-Detektor**: alle Kanäle ≈ 0 bei hoher Prognose (Schnee auf
   Modulen, Total-Dropout) ⇒ beide Lerner für den Tag einfrieren, nur der
   geclampte Intraday-Skalar reagiert.
@@ -221,7 +230,12 @@ falsche Geometrie. Optional später: 1 RLS-Bias-Skalar je
 Nichtparametrische historische Simulation: empirische P10/P50/P90 aus dem
 90-Tage-Fehlerringpuffer, konditioniert auf (Wolken-/**Nebelklasse** ×
 Tagesabschnitt); Nebelklasse = Sicht < 1000 m ∨ (cloud_cover_low > 85 %
-∧ Okt–Feb), nach erster Saison auf gemessene Abdeckung geprüft. Adaptive
+∧ Okt–Feb), nach erster Saison auf gemessene Abdeckung geprüft. Der Ring ist
+**datumsfensterbasiert** (jedes Sample trägt das ISO-Datum seines Trainingstags,
+Fenster = QUANTILE_RING_DAYS relativ zum Trainingstag) und ein Band verlangt
+zusätzlich Evidenz aus mindestens QUANTILE_MIN_DAYS **verschiedenen Tagen** —
+korrelierte Stundensamples eines Tages sind keine unabhängigen Beobachtungen;
+alt-ungestempelte Samples zählen über die Per-Tag-Cap-Untergrenze mit. Adaptive
 konforme Nachführung für 80-%-Abdeckung. Nutzung durch Konsumenten:
 P50 = Planung; P10 für konservative Reserven; P90 fürs Load-Timing
 (Überschusslasten so spät wie möglich, ohne Export).

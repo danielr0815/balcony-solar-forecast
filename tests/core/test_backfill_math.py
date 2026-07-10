@@ -34,6 +34,7 @@ if str(_SCRIPTS) not in sys.path:
 
 import backfill as bf  # noqa: E402
 from balcony_solar_forecast import const  # noqa: E402
+from balcony_solar_forecast.core import shademap as shademap_mod  # noqa: E402
 from balcony_solar_forecast.core.types import (  # noqa: E402
     BiasCell,
     BiasState,
@@ -459,6 +460,35 @@ def test_process_day_channel_dropout_skips_module(site: SiteConfig):
     # safe and only ever touch channel M2.
     assert set(acc.shade.keys()) <= {"M2"}
     assert isinstance(used, bool)
+
+
+# ---------------------------------------------------------------------------
+# Shademap EMA warm-up parity: bootstrap _shade_update vs. live update_bin
+# ---------------------------------------------------------------------------
+
+
+def test_shade_update_matches_live_update_bin_sample_for_sample():
+    """backfill._shade_update and shademap.update_bin must stay identical.
+
+    Both apply the adaptive warm-up alpha = max(SHADEMAP_EMA_ALPHA, 1/(n_old+1)),
+    so feeding the SAME sample sequence through each must yield the same tau at
+    EVERY step — the 12 samples here cross the mean->EMA transition (n_old >= 6).
+    """
+    samples = [0.0, 1.0, 0.5, 0.8, 0.2, 0.9, 0.3, 0.7, 0.4, 0.6, 0.95, 0.05]
+    sun_az, sun_el, doy = 150.0, 40.0, 220
+    bin_key = shademap_mod.shademap_bin_key(sun_az, sun_el, doy)
+
+    st = ShademapState()
+    acc = bf.BootstrapAccumulator()
+    for s in samples:
+        st = shademap_mod.update_bin(
+            st, channel="M4", sun_az=sun_az, sun_el=sun_el, doy=doy, measured_t=s,
+        )
+        bf._shade_update(acc, "M4", bin_key, s)
+        tau_live = st.channels["M4"][bin_key].tau
+        tau_boot = acc.shade["M4"][bin_key][0]
+        assert tau_boot == pytest.approx(tau_live, abs=1e-12)
+    assert acc.shade["M4"][bin_key][1] == len(samples)
 
 
 # ---------------------------------------------------------------------------

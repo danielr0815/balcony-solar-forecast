@@ -439,6 +439,30 @@ def _safe_float(v: object, default: float = 0.0, *, minimum: float | None = None
     return f
 
 
+def _quantile_entries_to_pairs(entries: object) -> list:
+    """Normalise a QuantileState bin's entries to ``[iso_date, relerr]`` pairs.
+
+    Tolerant, no-clamp companion to ``QuantileState.from_dict``: a bare number
+    (legacy un-dated sample) becomes ``["", number]``, a well-formed pair is
+    copied through (a non-str date coerced to ``""``), and anything else is
+    dropped. Used by ``to_dict`` so a directly-constructed state carrying bare
+    floats still serialises to the canonical pair shape. Values are NOT re-clamped
+    here (that is the load-time contract); this only fixes the container shape.
+    """
+    out: list = []
+    if not isinstance(entries, (list, tuple)):
+        return out
+    for x in entries:
+        if isinstance(x, (list, tuple)):
+            if len(x) != 2 or not isinstance(x[1], (int, float)):
+                continue
+            iso = x[0] if isinstance(x[0], str) else ""
+            out.append([iso, x[1]])
+        elif isinstance(x, (int, float)):
+            out.append(["", x])
+    return out
+
+
 @dataclass(frozen=True, slots=True)
 class LearnerConfig:
     """Resolved per-entry learner enable flags (options-flow kill switches).
@@ -690,12 +714,14 @@ class DriftState:
 
     ``daily_mae`` holds recent per-day daylight MAE triples keyed by ISO date:
     ``{iso_date: {"raw": mae, "corrected": mae, "baseline": mae}}`` (trimmed to
-    DRIFT_WINDOW_DAYS). ``fast_loss_streak`` / ``slow_loss_streak`` count
-    consecutive days the corrected curve lost to physics for each layer; at
-    DRIFT_LOSS_STREAK_DAYS the coordinator auto-disables that layer and raises
-    a repair issue, setting ``fast_disabled`` / ``slow_disabled``. Disabled
-    layers stay off until the user re-enables via the options flow (which
-    clears the flag).
+    DRIFT_WINDOW_DAYS), plus an optional ``"slow"`` key on days whose snapshot
+    carried a slow-only curve (per-layer attribution, audit #13b).
+    ``fast_loss_streak`` / ``slow_loss_streak`` count consecutive days each
+    layer lost — the fast (day-ahead) layer on corrected-vs-slow-only, the slow
+    (shademap) layer on slow-only-vs-physics; at DRIFT_LOSS_STREAK_DAYS the
+    coordinator auto-disables that layer and raises a repair issue, setting
+    ``fast_disabled`` / ``slow_disabled``. Disabled layers stay off until the
+    user re-enables via the options flow (which clears the flag).
     """
 
     daily_mae: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -860,6 +886,13 @@ class IssuedSnapshot:
     store. ``version`` == 2 distinguishes it from the v1 issued dict (which had
     only ``hourly_wh`` / ``daily_kwh`` / ``status``); the store carries v1
     entries forward untouched and writes v2 going forward.
+
+    ``slow_only_hourly_wh`` (audit #13b) is the hourly Wh curve with ONLY the
+    SLOW layer (shademap beam_tau) applied — no day-ahead factor — so the drift
+    monitor can decompose ``corrected = slow ∘ fast`` and attribute a losing day
+    to the guilty layer. It is written only when the slow layer was active (else
+    it equals raw and is omitted); an empty value means the monitor falls back
+    to the legacy shared corrected-vs-raw signal.
     """
 
     issued_at: str  # iso utc
@@ -873,6 +906,11 @@ class IssuedSnapshot:
     # the nightly RLS trainer can key the (cloud class x day part) cell on the
     # ACTUAL forecast weather, not a fixed "clear" label. Empty on legacy/v0.1.
     cloud_class_by_hour: dict[str, str] = field(default_factory=dict)
+    # Slow-only (shademap ∘ physics, NO day-ahead factor) hourly Wh curve for the
+    # drift monitor's per-layer attribution (audit #13b). Empty on legacy/v0.1 or
+    # a slow-inactive day (slow-only == raw); the monitor then uses the legacy
+    # shared signal.
+    slow_only_hourly_wh: dict[str, float] = field(default_factory=dict)
     version: int = 2
 
     @classmethod
@@ -911,11 +949,12 @@ class IssuedSnapshot:
             corrected_daily_kwh=_fd("corrected_daily_kwh"),
             per_plane=per_plane,
             cloud_class_by_hour=cloud_class_by_hour,
+            slow_only_hourly_wh=_fd("slow_only_hourly_wh"),
             version=_safe_int(d.get("version", 2), 2),
         )
 
     def to_dict(self) -> dict:
-        return {
+        out: dict = {
             "version": self.version,
             "issued_at": self.issued_at,
             "status": self.status,
@@ -926,6 +965,14 @@ class IssuedSnapshot:
             "per_plane": {k: v.to_dict() for k, v in self.per_plane.items()},
             "cloud_class_by_hour": dict(self.cloud_class_by_hour),
         }
+        # Store trim: write the slow-only curve ONLY when non-empty (slow layer
+        # was active). Empty == slow-only == raw, and ``from_dict`` reads a
+        # missing key as {}, so omitting it keeps the round-trip exact while
+        # avoiding a second full copy of the raw curve in every snapshot of the
+        # 90-day issued ring.
+        if self.slow_only_hourly_wh:
+            out["slow_only_hourly_wh"] = dict(self.slow_only_hourly_wh)
+        return out
 
 
 # ===========================================================================
@@ -1167,21 +1214,31 @@ class QuantileBands:
 class QuantileState:
     """90-day ring of hourly relative errors keyed by (weather class x day part).
 
-    ``bins`` maps ``{bin_key: [relerr, ...]}`` where ``bin_key`` is exactly
-    ``f"{cloud_class}|{day_part}"`` (the SAME cell key as BiasState — const
-    CLOUD_CLASS_* / DAY_PART_* — so the scoreboard, day-ahead bias and quantiles
-    all share one bin taxonomy) and each ``relerr`` = measured_wh /
-    corrected_forecast_wh for one sampled daylight hour, clamped to
-    [QUANTILE_REL_ERR_MIN, QUANTILE_REL_ERR_MAX]. The list is a bounded ring
-    trimmed to QUANTILE_RING_DAYS worth of samples (owner: quantiles /
-    store). ``bands(bin_key)`` computes the empirical QuantileBands with the
-    cold-start collapse rule (SPEC §6).
+    ``bins`` maps ``{bin_key: [[iso_date, relerr], ...]}`` where ``bin_key`` is
+    exactly ``f"{cloud_class}|{day_part}"`` (the SAME cell key as BiasState —
+    const CLOUD_CLASS_* / DAY_PART_* — so the scoreboard, day-ahead bias and
+    quantiles all share one bin taxonomy). Each entry is a ``[iso_date, relerr]``
+    pair: ``relerr`` = measured_wh / corrected_forecast_wh for one sampled
+    daylight hour (clamped to [QUANTILE_REL_ERR_MIN, QUANTILE_REL_ERR_MAX]) and
+    ``iso_date`` is the trained day's ISO date, so the ring can be DATE-WINDOWED
+    to QUANTILE_RING_DAYS and the collapse gate can count distinct days, not just
+    correlated hours (owner: quantiles / store). ``bands(bin_key)`` (in
+    quantiles.py) computes the empirical QuantileBands with the cold-start
+    collapse rule (SPEC §6).
+
+    LEGACY tolerance: ``from_dict`` accepts a bare number per entry (a pre-fix,
+    un-dated sample) and normalises it to ``["", relerr]`` (empty date == unknown
+    age: never date-trimmed, and it feeds the day gate only via a per-day-cap
+    lower bound). Malformed entries are dropped. ``to_dict`` always writes the
+    pair form. Readers (quantiles.bands_for_bin / train_quantiles) additionally
+    tolerate a bare number at read time, so a directly-constructed QuantileState
+    (bare floats, e.g. in tests) keeps working without going through from_dict.
 
     Persisted in the store (STORE_KEY_QUANTILE_STATE). Validate-and-clamp on
     load: a corrupt blob yields empty bins (no bands -> band collapses to P50).
     """
 
-    bins: dict[str, list[float]] = field(default_factory=dict)
+    bins: dict[str, list] = field(default_factory=dict)
     version: int = 1
 
     @staticmethod
@@ -1196,22 +1253,34 @@ class QuantileState:
         if not isinstance(d, dict):
             return cls()
         bins_raw = d.get("bins", {})
-        bins: dict[str, list[float]] = {}
+        bins: dict[str, list] = {}
         if isinstance(bins_raw, dict):
             for k, v in bins_raw.items():
                 if not isinstance(k, str) or not isinstance(v, list):
                     continue
-                vals = [
-                    _clamp(x, QUANTILE_REL_ERR_MIN, QUANTILE_REL_ERR_MAX)
-                    for x in v
-                    if isinstance(x, (int, float))
-                ]
-                if vals:
-                    bins[k] = vals
+                entries: list = []
+                for x in v:
+                    if isinstance(x, (list, tuple)):
+                        # Dated pair [iso_date, relerr]; a non-str date (or any
+                        # 2-tuple whose first element isn't a date) is undated.
+                        if len(x) != 2 or not isinstance(x[1], (int, float)):
+                            continue
+                        iso = x[0] if isinstance(x[0], str) else ""
+                        entries.append(
+                            [iso, _clamp(x[1], QUANTILE_REL_ERR_MIN, QUANTILE_REL_ERR_MAX)]
+                        )
+                    elif isinstance(x, (int, float)):
+                        # LEGACY bare number -> undated pair.
+                        entries.append(
+                            ["", _clamp(x, QUANTILE_REL_ERR_MIN, QUANTILE_REL_ERR_MAX)]
+                        )
+                    # else: malformed entry -> dropped
+                if entries:
+                    bins[k] = entries
         return cls(bins=bins, version=_safe_int(d.get("version", 1), 1))
 
     def to_dict(self) -> dict:
         return {
             "version": self.version,
-            "bins": {k: list(v) for k, v in self.bins.items()},
+            "bins": {k: _quantile_entries_to_pairs(v) for k, v in self.bins.items()},
         }
