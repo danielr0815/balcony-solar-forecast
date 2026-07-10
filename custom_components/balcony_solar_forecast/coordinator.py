@@ -76,6 +76,7 @@ from .const import (
     DEFAULT_SCOREBOARD_WINDOW_DAYS,
     DOMAIN,
     DRIFT_LOSS_MARGIN,
+    DRIFT_LOSS_MIN_ABS_WH,
     DRIFT_LOSS_STREAK_DAYS,
     DRIFT_WINDOW_DAYS,
     FETCH_INTERVAL_SECONDS,
@@ -2290,8 +2291,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         Compares the corrected served curve against pure physics against the
         measured day. A "losing" day is one where the corrected daylight MAE is
-        worse than the physics MAE by more than DRIFT_LOSS_MARGIN (relative).
-        DRIFT_LOSS_STREAK_DAYS consecutive losing days auto-disables the layer,
+        worse than the physics MAE by more than DRIFT_LOSS_MARGIN (relative) AND
+        by more than DRIFT_LOSS_MIN_ABS_WH (absolute) — the absolute floor keeps
+        a rounding-scale delta on a well-trained/clear day from counting as a
+        loss. DRIFT_LOSS_STREAK_DAYS consecutive losing days auto-disables the
+        layer,
         raises a repair issue and keeps the disable flag until the user
         re-enables in the options flow. The window is trimmed to
         DRIFT_WINDOW_DAYS.
@@ -2335,7 +2339,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         for stale in sorted(daily)[:-DRIFT_WINDOW_DAYS]:
             daily.pop(stale, None)
 
-        losing = corrected_mae > raw_mae * (1.0 + DRIFT_LOSS_MARGIN)
+        losing = (
+            corrected_mae > raw_mae * (1.0 + DRIFT_LOSS_MARGIN)
+            and (corrected_mae - raw_mae) > DRIFT_LOSS_MIN_ABS_WH
+        )
         # The correction here is the fast (intraday) + slow blend on the served
         # curve; attribute a losing day to whichever geometric layer is active,
         # and to the fast layer (it always shapes the served curve when on).
