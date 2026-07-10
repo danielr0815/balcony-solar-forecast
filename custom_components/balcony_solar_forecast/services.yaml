@@ -99,3 +99,41 @@ dump_shademap:
       required: false
       selector:
         text:
+
+install_dashboard:
+  name: Install observability dashboard
+  description: >-
+    Write the full observability dashboard — wired to this install's real
+    entity ids — into a dashboard you created empty in the UI (Settings →
+    Dashboards → Add dashboard, URL "balcony-solar"). Re-run any time to refresh
+    it after an integration update. Refuses to overwrite a dashboard it did not
+    create unless "overwrite" is set.
+  fields:
+    entry_id:
+      name: Config entry
+      description: >-
+        Target config entry. Omit only if a single site is configured.
+      example: "1234567890abcdef"
+      required: false
+      selector:
+        text:
+    dashboard:
+      name: Dashboard URL
+      description: >-
+        The URL path of the (empty) storage-mode dashboard to write into — the
+        value in the dashboard's URL field, which must contain a hyphen.
+      required: false
+      default: balcony-solar
+      example: balcony-solar
+      selector:
+        text:
+    overwrite:
+      name: Overwrite existing content
+      description: >-
+        Replace a dashboard that already has content this integration did not
+        create. Leave off to protect a hand-authored dashboard; a dashboard this
+        action previously wrote is always refreshed without it.
+      required: false
+      default: false
+      selector:
+        boolean:

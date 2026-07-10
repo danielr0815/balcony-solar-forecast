@@ -50,6 +50,11 @@ Nachträglich lassen sich über **Konfigurieren** (Optionen) anpassen:
 - die **Quantilbänder** (P10/P50/P90) an- oder abschalten,
 - die **Vergleichssensoren** für das Skill-Scoreboard.
 
+Das Observability-Dashboard lässt sich mit einem Aufruf einrichten: ein leeres
+Dashboard über **Einstellungen → Dashboards** anlegen (URL `balcony-solar`) und
+danach die Aktion `balcony_solar_forecast.install_dashboard` ausführen — siehe
+[docs/DASHBOARD.md](docs/DASHBOARD.md).
+
 Ergänzende Anleitungen:
 
 - **[docs/DASHBOARD.md](docs/DASHBOARD.md)** — fertiges Observability-Dashboard
@@ -72,9 +77,10 @@ Ergänzende Anleitungen:
   Alles geclamped, driftüberwacht, abschaltbar.
 - **Verschattung sichtbar:** für ein wählbares Modul und Datum zeigt ein
   Diagramm die Sonnenbahn (Elevation über Azimut) mit der aktuell gelernten
-  Verschattung (Transmission τ, eingefärbt) und den Horizontlinien —
-  Bedienelemente (Modul/Datum) und Rohdaten als Entitäten der Integration,
-  das Diagramm selbst als optionale ApexCharts-Karte
+  Verschattung (Transmission τ, eingefärbt) und den Horizontlinien — die
+  **Karte bringt die Integration selbst mit** (im Kartenwähler als „Balcony
+  Shade Profile", keine HACS-/Zusatzinstallation, die Lovelace-Ressource wird
+  automatisch registriert); alternativ weiterhin als ApexCharts-Karte
   (siehe [docs/DASHBOARD.md](docs/DASHBOARD.md)).
 - **Keine schweren Abhängigkeiten:** stdlib-only zur Laufzeit
   (kein numpy/pandas/pvlib), HA-freier Kern mit Golden-Tests.

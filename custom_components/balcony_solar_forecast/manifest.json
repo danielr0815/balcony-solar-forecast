@@ -4,7 +4,7 @@
   "after_dependencies": ["recorder"],
   "codeowners": ["@danielr0815"],
   "config_flow": true,
-  "dependencies": [],
+  "dependencies": ["http", "lovelace"],
   "documentation": "https://github.com/danielr0815/balcony-solar-forecast",
   "integration_type": "service",
   "iot_class": "cloud_polling",

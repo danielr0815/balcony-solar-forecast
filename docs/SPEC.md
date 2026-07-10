@@ -579,3 +579,44 @@ HACS-Artefakt (`dashboards/shade_profile_apexcharts.yaml`,
 `custom:apexcharts-card`): x = Sonnen-Azimut, y = Grad, Sonnenbahn nach τ
 eingefärbt (Schwellen an `SHADE_PROFILE_TAU_THRESHOLD` ausgerichtet), beide
 Horizontlinien überlagert. Details in `docs/DASHBOARD.md` §4b.
+
+Seit v0.7 liefert die Integration zusätzlich eine **eigene, abhängigkeitsfreie
+Lovelace-Karte** mit (`custom:balcony-shade-profile-card`, vanilla
+`HTMLElement` + programmatisches SVG, keine HACS-Frontend-Installation nötig):
+das Frontend-JS wird unter `FRONTEND_URL`
+(`/balcony_solar_forecast/frontend/shade_profile_card.js`) als statischer Pfad
+ausgeliefert und — im Lovelace-Storage-Modus — beim Start automatisch als
+Dashboard-Ressource registriert (Modul-Typ), sodass die Karte direkt im
+Kartenwähler erscheint. Die Ressourcen-URL ist per `?v=<INTEGRATION_VERSION>`
+cache-gebustet (einziger Cache-Busting-Mechanismus); im YAML-Lovelace-Modus wird
+statt der Registrierung ein INFO-Hinweis mit der manuell einzutragenden
+Ressourcen-Zeile geloggt. Die Registrierung ist ein Zusatznutzen, nie ein
+Setup-Blocker: jeder Fehler wird geschluckt und protokolliert.
+
+### 15.5 Dashboard-Installation per Aktion (Ein-Klick)
+
+Statt das Referenz-YAML zu kopieren und die Objekt-IDs von Hand anzupassen,
+richtet die Aktion `balcony_solar_forecast.install_dashboard` (SPEC §14.3) das
+Observability-Dashboard mit den **echten Entity-IDs dieser Installation** ein.
+Ablauf: der Operator legt EINMAL über die UI ein leeres Dashboard an
+(Einstellungen → Dashboards → Hinzufügen, URL `balcony-solar`, mit Bindestrich)
+und ruft dann die Aktion auf. Die reine Konfig-Erzeugung (`_dashboard.py`,
+HA-frei, bare unit-getestet) spiegelt die Karten des mitgelieferten YAML,
+ersetzt das opt-in-ApexCharts-Snippet durch die gebündelte
+`custom:balcony-shade-profile-card` und lässt Karten/Zeilen mit fehlenden
+Entitäten weg (Teilinstallation rendert weiterhin). Die IDs stammen aus der
+Entity-Registry (`{entry_id}_{key}` → reale entity_id), die Vergleichs-MAE-Zeilen
+und die gemessenen Modul-Sensoren aus Coordinator/Site-Config.
+
+Geschrieben wird ausschließlich über die vorhandene
+`LovelaceStorage.async_save(config)` des jeweiligen `url_path` aus
+`hass.data[LOVELACE_DATA].dashboards` — NIE über einen neuen
+Dashboard-Registry-Eintrag oder eine zweite `DashboardsCollection` (die beim
+späteren UI-Bearbeiten Einträge löschen könnte). Jede geschriebene Konfig trägt
+oben den Marker `bsf_managed: <version>`. Der **Safety-Gate**: ist das Ziel-
+Dashboard nicht im Storage-Modus, wird abgelehnt (YAML nicht schreibbar); trägt
+eine bereits vorhandene, nicht-leere Konfig den Marker NICHT und wird `overwrite`
+nicht gesetzt, wird abgelehnt (kein Überschreiben fremd erstellter Dashboards);
+eine leere oder marker-tragende Konfig wird frei überschrieben — das ist der
+idempotente Refresh (z. B. nach einem Integrations-Update). Die Antwort meldet
+`dashboard`, `views`, `cards` und die weggelassenen `missing_entities`.

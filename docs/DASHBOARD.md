@@ -10,7 +10,47 @@ The dashboard file is [`dashboards/balcony_solar_forecast.yaml`](../dashboards/b
 
 ---
 
-## 1. Install (copy-paste, ~1 minute)
+## 1. Install
+
+### 1a. One-click: the `install_dashboard` action (recommended)
+
+The integration can build the whole dashboard for you, wired to **your**
+install's real entity ids — no copy-paste, no hand-editing object-ids. You only
+create the (empty) dashboard shell once:
+
+1. In Home Assistant go to **Settings → Dashboards → ＋ Add dashboard → New
+   dashboard from scratch**. Give it a title (e.g. *Balcony Solar*), an icon
+   (`mdi:solar-power`), and — important — set the **URL** to `balcony-solar`
+   (the URL field must contain a hyphen). **Create**, then leave it empty.
+2. Go to **Developer Tools → Actions**, pick
+   `balcony_solar_forecast.install_dashboard`, and **Perform action**. That's
+   it — open the dashboard and it is fully populated.
+
+**Re-run it any time** (e.g. after an integration update) to refresh the layout:
+the action stamps a `bsf_managed` marker on the config it writes, so a re-run
+overwrites its own previous output silently. It **will not** clobber a dashboard
+you authored yourself — if the target already has content without that marker it
+refuses unless you pass `overwrite: true`.
+
+Optional fields:
+
+- **dashboard** — the target dashboard's URL path (default `balcony-solar`); set
+  it if you created the shell under a different URL.
+- **entry_id** — only needed if you run multiple sites; omit for a single one.
+- **overwrite** — set `true` to replace a hand-authored (non-managed) dashboard.
+
+The response reports the target `dashboard`, the number of `views` and `cards`
+written, and `missing_entities` — the keys of any entities not present yet (e.g.
+comparison sensors you have not configured), whose cards/rows were omitted so a
+partial install still renders. The generated dashboard already embeds the
+bundled shade-profile card (§4b) — no extra step.
+
+> Needs storage-mode Lovelace (the default). A YAML-mode dashboard cannot be
+> written by the action; use the manual copy-paste below instead.
+
+### 1b. Manual alternative: raw-configuration copy-paste
+
+If you prefer to paste the YAML yourself (or run YAML-mode Lovelace):
 
 1. In Home Assistant go to **Settings → Dashboards**.
 2. Click **＋ Add dashboard → New dashboard from scratch**. Give it a title
@@ -26,10 +66,10 @@ The dashboard file is [`dashboards/balcony_solar_forecast.yaml`](../dashboards/b
 > inside an existing dashboard, paste only the item under `views:` into that
 > dashboard's `views:` list instead of the whole file.
 
-### Entity-id assumptions
+#### Entity-id assumptions (manual paste only)
 
-The cards reference the reference install's entity ids (device **Balcony Solar
-Forecast**), e.g.:
+The pasted YAML references the reference install's entity ids (device **Balcony
+Solar Forecast**), e.g.:
 
 | Purpose | Entity id |
 |---|---|
@@ -43,8 +83,9 @@ Forecast**), e.g.:
 | Measured module power | `sensor.inverter_port_{1,2}_dc_power[_2.._4]` |
 
 If your entity ids differ (multiple installs, renamed entities), fix the
-`entity:` lines in the raw editor after pasting. Any entity that does not exist
-yet simply renders as *unknown* — the dashboard never errors on a missing one.
+`entity:` lines in the raw editor after pasting — or just use the one-click
+action above, which resolves them for you. Any entity that does not exist yet
+simply renders as *unknown* — the dashboard never errors on a missing one.
 
 The scoreboard sensors (`engine_daily_kwh_mae`, `engine_vs_best_baseline_pct`,
 the per-comparison MAE sensors, `kill_gate_passed`) only appear after v0.4 is
@@ -195,11 +236,47 @@ excluded from the recorder like the energy-curve dicts:
   the learned shade horizon (elevation below which the beam is mostly blocked)
   on an azimuth grid over the day's daylight span.
 
-### The chart (needs the HACS `apexcharts-card`)
+### The chart (bundled card — no HACS install)
 
-The diagram itself is the one thing a built-in Lovelace card cannot draw (a
-parametric elevation-over-azimuth curve for a specific date), so it lives as an
-opt-in snippet:
+The diagram now ships **with the integration** as a self-contained custom card
+— no HACS frontend install and no YAML snippet. If you installed the dashboard
+via the one-click `install_dashboard` action (§1a), this card is **already
+embedded** (wired to your three shade-profile entity ids) — nothing more to do.
+To add it to another dashboard by hand: the integration serves the card's
+JavaScript and, in storage-mode Lovelace, auto-registers it as a dashboard
+resource, so it appears directly in the card picker:
+
+1. Open your dashboard → **Edit dashboard** → **＋ Add card**.
+2. Pick **"Balcony Shade Profile"** from the card list (type *shade* to filter),
+   then add it. A live preview renders straight away.
+3. Pick a module + date in the card's own header controls; the chart redraws.
+   Reading it: the yellow line is the sun's elevation, the dots recolour green →
+   amber → red as the learned τ falls (free → partial → shaded), the grey area
+   is the learned shade horizon and the thin dashed grey line the static
+   configured horizon. The x-axis is the sun azimuth (90° = East, 180° = South,
+   270° = West).
+
+The card auto-discovers the three shade-profile entities above, so the default
+YAML is simply `type: custom:balcony-shade-profile-card`. It has four optional
+keys — `sensor`, `module_select`, `date_entity`, `title` — set them only to pin
+a specific device's entities (e.g. multiple installs). It changes no state
+except through the module/date controls.
+
+> **YAML-mode Lovelace only.** Auto-registration needs storage-mode Lovelace
+> (the default). If your dashboards are configured in YAML, the integration logs
+> the resource URL on start; add it once yourself:
+>
+> ```yaml
+> lovelace:
+>   resources:
+>     - url: /balcony_solar_forecast/frontend/shade_profile_card.js?v=0.7.0
+>       type: module
+> ```
+
+### Alternative: the ApexCharts card (HACS)
+
+The same picture can also be drawn by the HACS `apexcharts-card` from an opt-in
+snippet, if you prefer it over the bundled card:
 
 1. Install **`apexcharts-card`** via HACS → Frontend.
 2. Add a **Manual** card and paste

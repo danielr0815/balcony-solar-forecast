@@ -1,5 +1,17 @@
 """Integration-wide services: ``get_forecast``, ``import_bootstrap``,
-``dump_shademap`` and ``rollback_learners``.
+``dump_shademap``, ``rollback_learners`` and ``install_dashboard``.
+
+  * ``install_dashboard`` (SPEC §14.3, ``SupportsResponse.OPTIONAL``): write the
+    observability dashboard config — with THIS install's real entity ids — into
+    a UI-created (empty) storage-mode dashboard, so the operator no longer
+    copy-pastes the reference YAML and hand-edits object_ids. Idempotent: a
+    re-run refreshes the config (e.g. after an integration update). The config
+    shaping is pure and lives in :mod:`._dashboard` (unit-tested bare); this
+    layer resolves the entity registry + the live lovelace collection and guards
+    against clobbering a dashboard the operator authored. It NEVER creates a
+    dashboard registry entry nor a second ``DashboardsCollection`` (which could
+    wipe entries on later UI edits) — it only writes via the existing
+    ``LovelaceStorage.async_save``.
 
 Owner: platforms. ALL services are registered once from ``async_setup``
 (quality-scale ``action-setup``) and stay registered for the lifetime of HA —
@@ -39,14 +51,24 @@ from homeassistant.core import (
     SupportsResponse,
     callback,
 )
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
+from ._dashboard import (
+    build_dashboard_config,
+    collect_entity_map,
+    config_has_cards,
+    is_managed,
+    missing_entity_keys,
+)
 from .const import (
     DOMAIN,
+    INTEGRATION_VERSION,
     LEARNER_SNAPSHOT_RING,
+    SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX,
     SERVICE_DUMP_SHADEMAP,
     SERVICE_GET_FORECAST,
     SERVICE_IMPORT_BOOTSTRAP,
+    SERVICE_INSTALL_DASHBOARD,
     SERVICE_ROLLBACK_LEARNERS,
     SHADEMAP_AZ_BIN_DEG,
     SHADEMAP_EL_BIN_DEG,
@@ -57,6 +79,12 @@ ATTR_ENTRY_ID = "entry_id"
 ATTR_PAYLOAD = "payload"
 ATTR_PATH = "path"
 ATTR_SNAPSHOTS_BACK = "snapshots_back"
+ATTR_DASHBOARD = "dashboard"
+ATTR_OVERWRITE = "overwrite"
+
+# The default UI dashboard URL the operator is told to create (must contain a
+# hyphen — Home Assistant rejects single-word storage-dashboard url_paths).
+DEFAULT_DASHBOARD_URL = "balcony-solar"
 
 IMPORT_BOOTSTRAP_SCHEMA = vol.Schema(
     {
@@ -77,6 +105,14 @@ ROLLBACK_LEARNERS_SCHEMA = vol.Schema(
         vol.Optional(ATTR_SNAPSHOTS_BACK, default=1): vol.All(
             vol.Coerce(int), vol.Range(min=1, max=LEARNER_SNAPSHOT_RING)
         ),
+    }
+)
+
+INSTALL_DASHBOARD_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_ENTRY_ID): str,
+        vol.Optional(ATTR_DASHBOARD, default=DEFAULT_DASHBOARD_URL): str,
+        vol.Optional(ATTR_OVERWRITE, default=False): bool,
     }
 )
 
@@ -147,6 +183,19 @@ def async_register_services(hass: HomeAssistant) -> None:
             SERVICE_ROLLBACK_LEARNERS,
             _rollback_learners,
             schema=ROLLBACK_LEARNERS_SCHEMA,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_INSTALL_DASHBOARD):
+
+        async def _install_dashboard(call: ServiceCall) -> ServiceResponse:
+            return await _handle_install_dashboard(hass, call)
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_INSTALL_DASHBOARD,
+            _install_dashboard,
+            schema=INSTALL_DASHBOARD_SCHEMA,
             supports_response=SupportsResponse.OPTIONAL,
         )
 
@@ -277,6 +326,159 @@ async def _handle_rollback_learners(
         # Empty ring etc. — a user-visible condition, not a traceback.
         raise ServiceValidationError(f"Rollback rejected: {err}") from err
     return {"result": result} if isinstance(result, dict) else {"result": {}}
+
+
+# ---------------------------------------------------------------------------
+# install_dashboard
+# ---------------------------------------------------------------------------
+
+
+async def _handle_install_dashboard(
+    hass: HomeAssistant, call: ServiceCall
+) -> ServiceResponse:
+    """Write the observability dashboard into a UI-created empty dashboard.
+
+    The operator creates an EMPTY dashboard once (Settings → Dashboards → Add,
+    URL ``balcony-solar``); this action fills it with the full observability
+    config wired to THIS install's real entity ids, and refreshes it on every
+    re-run. It only ever writes through the existing ``LovelaceStorage`` for that
+    url_path (``hass.data[LOVELACE_DATA].dashboards``); it never touches the
+    dashboard registry / collection.
+    """
+    from homeassistant.components.lovelace.const import (
+        LOVELACE_DATA,
+        ConfigNotFound,
+    )
+    from homeassistant.helpers import entity_registry as er
+
+    coordinator = _resolve_single_coordinator(hass, call.data.get(ATTR_ENTRY_ID))
+    entry = getattr(coordinator, "entry", None)
+    if entry is None:
+        raise ServiceValidationError(
+            "The selected site has no config entry; cannot resolve its entities."
+        )
+    entry_id = entry.entry_id
+
+    url_path = call.data.get(ATTR_DASHBOARD, DEFAULT_DASHBOARD_URL)
+    overwrite = bool(call.data.get(ATTR_OVERWRITE, False))
+
+    dash = _resolve_storage_dashboard(hass, LOVELACE_DATA, url_path)
+
+    # SAFETY GATE: never clobber a dashboard the operator authored. A config we
+    # generated (carries the marker) or an empty one is overwritten freely — the
+    # idempotent refresh; anything else needs an explicit ``overwrite: true``.
+    try:
+        existing = await dash.async_load(False)
+    except ConfigNotFound:
+        existing = None
+    if (
+        config_has_cards(existing)
+        and not is_managed(existing)
+        and not overwrite
+    ):
+        raise ServiceValidationError(
+            f"Dashboard '{url_path}' already contains cards this integration did "
+            "not create; refusing to overwrite it. Pass 'overwrite: true' to "
+            "replace it, or target a freshly created empty dashboard."
+        )
+
+    registry = er.async_get(hass)
+    entries = er.async_entries_for_config_entry(registry, entry_id)
+    entity_map = collect_entity_map(entries, entry_id)
+    comparison_slugs = _comparison_slugs(coordinator, entity_map)
+    measured_entities = _measured_entities(coordinator)
+
+    config = build_dashboard_config(
+        entity_map=entity_map,
+        comparison_slugs=comparison_slugs,
+        measured_entities=measured_entities,
+        version=INTEGRATION_VERSION,
+    )
+    try:
+        await dash.async_save(config)
+    except HomeAssistantError as err:
+        # Recovery mode (async_save raises) — surface as a user error.
+        raise ServiceValidationError(
+            f"Could not write dashboard '{url_path}': {err}"
+        ) from err
+
+    views = config.get("views", [])
+    return {
+        "result": {
+            "dashboard": url_path,
+            "views": len(views),
+            "cards": sum(len(v.get("cards", [])) for v in views),
+            "missing_entities": missing_entity_keys(entity_map),
+        }
+    }
+
+
+def _resolve_storage_dashboard(
+    hass: HomeAssistant, lovelace_data_key: Any, url_path: str
+) -> Any:
+    """Return the storage-mode ``LovelaceConfig`` for ``url_path`` or raise.
+
+    Raises a clear ServiceValidationError when lovelace is not set up, the
+    url_path does not exist (listing the available storage dashboards + the
+    creation hint), or the dashboard is YAML-managed (not writable).
+    """
+    lovelace = hass.data.get(lovelace_data_key)
+    if lovelace is None:
+        raise ServiceValidationError(
+            "Lovelace is not set up yet; open the dashboards UI once and retry."
+        )
+    dashboards = getattr(lovelace, "dashboards", None) or {}
+    dash = dashboards.get(url_path)
+    if dash is None:
+        available = sorted(k for k in dashboards if isinstance(k, str))
+        raise ServiceValidationError(
+            f"No dashboard with URL '{url_path}' exists. First create an empty "
+            "one: Settings → Dashboards → Add dashboard (the URL field must "
+            f"contain a hyphen, e.g. '{DEFAULT_DASHBOARD_URL}'), then run this "
+            f"action again. Available storage dashboards: {available or '(none)'}."
+        )
+    if getattr(dash, "mode", None) != "storage":
+        raise ServiceValidationError(
+            f"Dashboard '{url_path}' is YAML-managed and cannot be written by "
+            "this action; create a new UI (storage-mode) dashboard and target it."
+        )
+    return dash
+
+
+def _comparison_slugs(
+    coordinator: Any, entity_map: dict[str, str]
+) -> list[tuple[str, str]]:
+    """``[(name, entity_id)]`` for the configured comparison MAE sensors.
+
+    Reuses ``sensor._configured_comparisons`` (lazy import — it lives on the
+    HA-importing sensor platform) and resolves each comparison's real entity_id
+    from ``entity_map`` via its slug-keyed unique_id suffix. A comparison with no
+    registered MAE sensor (not yet materialised) is skipped.
+    """
+    from .sensor import _configured_comparisons
+
+    out: list[tuple[str, str]] = []
+    for comparison in _configured_comparisons(coordinator):
+        key = f"{SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX}_{comparison.slug}"
+        entity_id = entity_map.get(key)
+        if entity_id:
+            out.append((comparison.name, entity_id))
+    return out
+
+
+def _measured_entities(coordinator: Any) -> list[str]:
+    """The planes' measured DC-power entity ids (order-preserving, deduped)."""
+    site = getattr(coordinator, "_site", None)
+    if site is None:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for plane in getattr(site, "planes", ()):
+        entity_id = getattr(plane, "actual_entity", None)
+        if isinstance(entity_id, str) and entity_id and entity_id not in seen:
+            seen.add(entity_id)
+            out.append(entity_id)
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **One-click dashboard install.** New action `balcony_solar_forecast.install_dashboard`
+  writes the full observability dashboard — wired to *this* install's real entity
+  ids (resolved from the entity registry) and embedding the bundled shade-profile
+  card — into a dashboard you created empty in the UI (URL `balcony-solar`). It is
+  idempotent (re-run to refresh after an update, via a `bsf_managed` marker) and
+  refuses to overwrite a dashboard it did not create unless `overwrite: true` is
+  passed. The raw-YAML copy-paste remains as the manual alternative.
+- **Bundled shade-profile card.** The sun-path-vs-learned-shading diagram
+  (SPEC §15) now ships as a self-contained, dependency-free custom Lovelace card
+  (`custom:balcony-shade-profile-card`): the integration serves the JavaScript
+  under `/balcony_solar_forecast/frontend/shade_profile_card.js` and, in
+  storage-mode Lovelace, auto-registers it as a version-busted dashboard
+  resource, so it appears in the card picker with zero HACS installs and zero
+  YAML. The HACS `apexcharts-card` snippet remains as an alternative.
+
 ## [0.7.0] - 2026-07-10
 
 ### Changed
