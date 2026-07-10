@@ -26,6 +26,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DATE_SHADE_PROFILE_DATE, DOMAIN
 from .sensor import BalconyForecastEntity
 
+# Coordinator-centralised I/O — entity updates are local, no throttling needed.
+PARALLEL_UPDATES = 0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -41,7 +44,6 @@ class ShadeProfileDate(BalconyForecastEntity, DateEntity):
     """Pick which local date the shade-profile diagram renders (defaults today)."""
 
     _attr_entity_category = EntityCategory.CONFIG
-    _attr_icon = "mdi:calendar"
 
     def __init__(self, coordinator: Any) -> None:
         super().__init__(coordinator, DATE_SHADE_PROFILE_DATE)

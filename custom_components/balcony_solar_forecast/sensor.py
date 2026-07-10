@@ -164,6 +164,9 @@ _Q_P10 = FORECAST_RESP_KEY_P10
 _Q_P50 = FORECAST_RESP_KEY_P50
 _Q_P90 = FORECAST_RESP_KEY_P90
 
+# Coordinator-centralised I/O — entity updates are local, no throttling needed.
+PARALLEL_UPDATES = 0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -441,7 +444,6 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
 
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-    _attr_icon = "mdi:solar-power"
     # The bulky curve dicts (served + the three quantile bands) are all excluded
     # from the recorder (SPEC §8) via _unrecorded_attributes + recorder.py.
     _unrecorded_attributes = frozenset(
@@ -513,7 +515,6 @@ class PowerNowSensor(BalconyForecastEntity, SensorEntity):
     _attr_device_class = SensorDeviceClass.POWER
     _attr_native_unit_of_measurement = UnitOfPower.WATT
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:solar-power-variant"
 
     def __init__(self, coordinator: Any) -> None:
         super().__init__(coordinator, SENSOR_POWER_NOW)
@@ -558,7 +559,6 @@ class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
     _attr_device_class = SensorDeviceClass.POWER
     _attr_native_unit_of_measurement = UnitOfPower.WATT
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:solar-power"
 
     def __init__(
         self,
@@ -654,7 +654,6 @@ class LastFetchAgeSensor(_DiagnosticSensor):
 
     _attr_native_unit_of_measurement = UnitOfTime.MINUTES
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:timer-sand"
 
     def __init__(self, coordinator: Any) -> None:
         super().__init__(coordinator, SENSOR_LAST_FETCH_AGE)
@@ -676,7 +675,6 @@ class SourceStatusSensor(_DiagnosticSensor):
     """Current rung of the degradation ladder (fresh/cached/physics/unavail)."""
 
     _attr_device_class = SensorDeviceClass.ENUM
-    _attr_icon = "mdi:stairs"
     _attr_options = [
         STATUS_FRESH,
         STATUS_CACHED,
@@ -712,7 +710,6 @@ class IntradayScalarSensor(_DiagnosticSensor):
     """
 
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:tune-variant"
 
     def __init__(self, coordinator: Any) -> None:
         super().__init__(coordinator, SENSOR_INTRADAY_SCALAR)
@@ -741,7 +738,6 @@ class DriftMaeCorrectedSensor(_DiagnosticSensor):
     # state class like the other error-metric sensors (sensor:427).
     _attr_native_unit_of_measurement = UnitOfEnergy.WATT_HOUR
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:chart-bell-curve-cumulative"
 
     def __init__(self, coordinator: Any) -> None:
         super().__init__(coordinator, SENSOR_DRIFT_MAE_CORRECTED)
@@ -783,7 +779,6 @@ class LearnerStatusSensor(_DiagnosticSensor):
     """
 
     _attr_device_class = SensorDeviceClass.ENUM
-    _attr_icon = "mdi:brain"
     _attr_options = list(LEARNER_STATUS_VALUES)
 
     def __init__(self, coordinator: Any, key: str, layer: str) -> None:
@@ -836,7 +831,6 @@ class EngineDailyKwhMaeSensor(_ScoreboardSensor):
 
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:chart-line"
 
     def __init__(self, coordinator: Any) -> None:
         super().__init__(coordinator, SENSOR_FORECAST_DAILY_KWH_MAE)
@@ -864,7 +858,6 @@ class EngineHourlyMaeSensor(_ScoreboardSensor):
 
     _attr_native_unit_of_measurement = UnitOfEnergy.WATT_HOUR
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:chart-bell-curve"
 
     def __init__(self, coordinator: Any) -> None:
         super().__init__(coordinator, SENSOR_FORECAST_HOURLY_MAE)
@@ -885,7 +878,6 @@ class EngineVsBestBaselinePctSensor(_ScoreboardSensor):
 
     _attr_native_unit_of_measurement = "%"
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:trophy-outline"
 
     def __init__(self, coordinator: Any) -> None:
         super().__init__(coordinator, SENSOR_FORECAST_VS_BEST_BASELINE_PCT)
@@ -911,6 +903,9 @@ class ComparisonDailyKwhMaeSensor(_ScoreboardSensor):
 
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_state_class = SensorStateClass.MEASUREMENT
+    # Kept as _attr_icon (not migrated to icons.json): these dynamic per-
+    # comparison sensors set translation_key = None (see __init__), so there is
+    # no stable translation_key for icons.json to key an entity icon by.
     _attr_icon = "mdi:chart-line-variant"
 
     def __init__(self, coordinator: Any, comparison: ComparisonConfig) -> None:
@@ -973,7 +968,6 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
 
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-    _attr_icon = "mdi:solar-power"
 
     def __init__(self, coordinator: Any, key: str, band: str) -> None:
         super().__init__(coordinator, key)
@@ -1023,7 +1017,6 @@ class ShadeProfileSensor(BalconyForecastEntity, SensorEntity):
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_native_unit_of_measurement = PERCENTAGE
-    _attr_icon = "mdi:sun-angle"
     # The bulky curve arrays are kept out of the recorder (mirrors the energy
     # sensors' curve dicts) via _unrecorded_attributes + recorder.py. The two
     # year-stable axis bounds ride along: constant site geometry, so their

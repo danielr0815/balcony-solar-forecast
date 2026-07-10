@@ -46,6 +46,9 @@ from .sensor import (
     BalconyForecastEntity,
 )
 
+# Coordinator-centralised I/O — entity updates are local, no throttling needed.
+PARALLEL_UPDATES = 0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -73,7 +76,6 @@ class DegradedSensor(BalconyForecastEntity, BinarySensorEntity):
 
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_icon = "mdi:alert-decagram-outline"
 
     def __init__(self, coordinator: Any) -> None:
         super().__init__(coordinator, BINARY_SENSOR_DEGRADED)
@@ -131,7 +133,6 @@ class LearnerActiveSensor(BalconyForecastEntity, BinarySensorEntity):
 
     _attr_device_class = BinarySensorDeviceClass.RUNNING
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_icon = "mdi:brain"
 
     def __init__(self, coordinator: Any, key: str, layer: str) -> None:
         super().__init__(coordinator, key)
@@ -177,7 +178,6 @@ class KillGatePassedSensor(BalconyForecastEntity, BinarySensorEntity):
     """
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_icon = "mdi:gate"
 
     def __init__(self, coordinator: Any) -> None:
         super().__init__(coordinator, BINARY_SENSOR_KILL_GATE_PASSED)

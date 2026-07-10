@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Quality-scale housekeeping (no behaviour change).** Entity icons moved out
+  of hardcoded `_attr_icon` into the central `icons.json`, keyed by
+  translation_key (plus icons for the five services); the one dynamic
+  per-comparison MAE sensor keeps its icon inline because it has no stable
+  translation_key. Every entity platform module (`sensor`, `binary_sensor`,
+  `select`, `date`) also declares `PARALLEL_UPDATES = 0`, since all I/O is
+  centralised in the coordinator and entity updates are local.
+
 ## [0.13.0] - 2026-07-10
 
 ### Changed
