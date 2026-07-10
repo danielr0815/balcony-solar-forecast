@@ -214,6 +214,10 @@ def _make_coordinator(store: _FakeStore | None = None) -> BalconySolarCoordinato
     c._correction_source = CORRECTION_SOURCE_NONE
     c._last_result = None
     c._last_error = None
+    # Fetch provenance for the degradation ladder (normally set in __init__).
+    c._last_fetched_at = None
+    c._last_attempt_at = None
+    c._last_fetch_ok = False
     # Shade-profile diagram selection + memo (normally set in __init__).
     c._shade_profile_module = None
     c._shade_profile_date = None
@@ -878,6 +882,129 @@ def test_learner_status_reflects_collapse_freeze():
 # ---------------------------------------------------------------------------
 # Frozen-channel gate (nightly LTS label gate)
 # ---------------------------------------------------------------------------
+
+
+def _lts_rows(day_hours: list[tuple[int, float]]) -> list[dict]:
+    """Synthetic LTS rows: (utc_hour, mean_w) pairs on 2026-06-20."""
+    return [
+        {"mean": w, "start": datetime(2026, 6, 20, h, 0, tzinfo=UTC)}
+        for h, w in day_hours
+    ]
+
+
+def test_actuals_from_stats_happy_path():
+    from custom_components.balcony_solar_forecast.coordinator import (
+        _actuals_from_stats,
+    )
+
+    hours = [(h, 100.0 + 10.0 * h) for h in range(6, 18)]  # 12 daylight hours
+    stats = {"sensor.m1": _lts_rows(hours), "sensor.m2": _lts_rows(hours)}
+    daily, hourly = _actuals_from_stats(
+        stats,
+        {"M1": "sensor.m1", "M2": "sensor.m2"},
+        expected_daylight_hours=12,
+        day=datetime(2026, 6, 20).date(),
+    )
+    assert set(daily) == {"M1", "M2"}
+    assert daily["M1"] == pytest.approx(sum(w for _h, w in hours), abs=0.1)
+    assert len(hourly["M1"]) == 12
+
+
+def test_actuals_from_stats_zero_row_module_discards_day():
+    """A configured module with NO LTS rows is a channel dropout: the whole day
+    is discarded — a partial-site measurement must never train against the
+    full-site model (SPEC §5: Messkanal-Dropout => ganzen Tag verwerfen)."""
+    from custom_components.balcony_solar_forecast.coordinator import (
+        _actuals_from_stats,
+    )
+
+    hours = [(h, 150.0 + h) for h in range(6, 18)]
+    stats = {"sensor.m1": _lts_rows(hours)}  # sensor.m2 absent entirely
+    daily, hourly = _actuals_from_stats(
+        stats,
+        {"M1": "sensor.m1", "M2": "sensor.m2"},
+        expected_daylight_hours=12,
+        day=datetime(2026, 6, 20).date(),
+    )
+    assert daily == {} and hourly == {}
+
+
+def test_actuals_from_stats_meanless_rows_discard_day():
+    from custom_components.balcony_solar_forecast.coordinator import (
+        _actuals_from_stats,
+    )
+
+    hours = [(h, 150.0 + h) for h in range(6, 18)]
+    stats = {
+        "sensor.m1": _lts_rows(hours),
+        # Rows exist but carry no usable mean (unavailable sensor).
+        "sensor.m2": [
+            {"mean": None, "start": datetime(2026, 6, 20, h, 0, tzinfo=UTC)}
+            for h in range(6, 18)
+        ],
+    }
+    daily, hourly = _actuals_from_stats(
+        stats,
+        {"M1": "sensor.m1", "M2": "sensor.m2"},
+        expected_daylight_hours=12,
+        day=datetime(2026, 6, 20).date(),
+    )
+    assert daily == {} and hourly == {}
+
+
+def test_actuals_from_stats_frozen_channel_discards_day():
+    from custom_components.balcony_solar_forecast.const import (
+        LABEL_FROZEN_MIN_REPEATS,
+    )
+    from custom_components.balcony_solar_forecast.coordinator import (
+        _actuals_from_stats,
+    )
+
+    good = [(h, 100.0 + h) for h in range(6, 18)]
+    frozen = [(h, 180.0) for h in range(6, 6 + LABEL_FROZEN_MIN_REPEATS + 1)]
+    stats = {"sensor.m1": _lts_rows(good), "sensor.m2": _lts_rows(frozen)}
+    daily, hourly = _actuals_from_stats(
+        stats,
+        {"M1": "sensor.m1", "M2": "sensor.m2"},
+        expected_daylight_hours=12,
+        day=datetime(2026, 6, 20).date(),
+    )
+    assert daily == {} and hourly == {}
+
+
+def test_actuals_from_stats_partial_module_discards_day():
+    """A module dying MID-DAY (few covered hours) must discard the day even when
+    a healthy sibling covers everything — max-coverage masking was the bug."""
+    from custom_components.balcony_solar_forecast.coordinator import (
+        _actuals_from_stats,
+    )
+
+    full = [(h, 100.0 + h) for h in range(6, 18)]   # 12 hours
+    partial = [(h, 100.0 + h) for h in range(6, 9)]  # 3 of 12 hours (< 75%)
+    stats = {"sensor.m1": _lts_rows(full), "sensor.m2": _lts_rows(partial)}
+    daily, hourly = _actuals_from_stats(
+        stats,
+        {"M1": "sensor.m1", "M2": "sensor.m2"},
+        expected_daylight_hours=12,
+        day=datetime(2026, 6, 20).date(),
+    )
+    assert daily == {} and hourly == {}
+
+
+def test_actuals_from_stats_unknown_daylight_skips_coverage_gate():
+    from custom_components.balcony_solar_forecast.coordinator import (
+        _actuals_from_stats,
+    )
+
+    short = [(h, 100.0 + h) for h in range(6, 9)]
+    stats = {"sensor.m1": _lts_rows(short)}
+    daily, _hourly = _actuals_from_stats(
+        stats,
+        {"M1": "sensor.m1"},
+        expected_daylight_hours=0,  # unknown span -> coverage gate skipped
+        day=datetime(2026, 6, 20).date(),
+    )
+    assert daily["M1"] == pytest.approx(sum(w for _h, w in short), abs=0.1)
 
 
 def test_is_frozen_channel_detects_held_value():

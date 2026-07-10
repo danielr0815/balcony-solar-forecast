@@ -265,7 +265,17 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
 
         # Cached weather image + provenance for the degradation ladder.
+        # _last_fetched_at is the PAYLOAD's age anchor: it advances ONLY when the
+        # stored payload is actually replaced (it mirrors the store's
+        # fetched_at), and every age/status consumer keys on it. _last_attempt_at
+        # is the fetch SCHEDULER's anchor: it advances on every successful HTTP
+        # round-trip — including the keep-richer branch that retains the old
+        # payload — so a sustained partial Open-Meteo degradation is not
+        # re-fetched every tick yet still ages the served payload honestly
+        # through the cached/physics_fallback/unavailable ladder (SPEC §7:
+        # never degrade silently).
         self._last_fetched_at: datetime | None = None
+        self._last_attempt_at: datetime | None = None
         self._last_fetch_ok: bool = False
         self._last_error: str | None = None
 
@@ -769,9 +779,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                             correction_source=source, band_by_slot=band_by_slot)
 
     def _due_for_fetch(self, now: datetime) -> bool:
-        if self._last_fetched_at is None or not self._last_fetch_ok:
+        # Scheduling keys on the last ATTEMPT, not the payload age: the
+        # keep-richer branch retains the old payload but must still count as a
+        # completed round-trip, else a degraded provider would be hammered every
+        # recompute tick.
+        if self._last_attempt_at is None or not self._last_fetch_ok:
             return True
-        return now - self._last_fetched_at >= self._fetch_interval
+        return now - self._last_attempt_at >= self._fetch_interval
 
     async def _async_try_fetch(self, now: datetime) -> None:
         """Fetch once; on success cache + persist, on failure degrade quietly."""
@@ -792,7 +806,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             and isinstance(prior.get("payload"), dict)
             and radiation_coverage(payload) < radiation_coverage(prior["payload"])
         ):
-            self._last_fetched_at = now
+            # Keep the richer stored payload. The round-trip succeeded, so the
+            # SCHEDULER anchor advances — but the PAYLOAD age anchor must NOT:
+            # the served weather is still the old image and has to keep aging
+            # through cached/physics_fallback/unavailable. Stamping it "fresh"
+            # here would let a sustained partial-degradation serve arbitrarily
+            # old weather at age ~0 forever (SPEC §7: never degrade silently).
+            self._last_attempt_at = now
             self._last_fetch_ok = True
             self._last_error = None
             _LOGGER.warning(
@@ -803,6 +823,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
             return
         self._last_fetched_at = now
+        self._last_attempt_at = now
         self._last_fetch_ok = True
         self._last_error = None
         self._store.set_last_payload(payload, now.isoformat())
@@ -2533,13 +2554,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         Wh totals AND the per-module ``{iso_hour: wh}`` buckets (the shademap
         trainer needs hourly resolution).
 
-        Label gates (SPEC §5): a channel whose daylight hourly means are byte-
-        identical across ``LABEL_FROZEN_MIN_REPEATS`` or more consecutive hours
-        (a frozen Hoymiles/DTU sensor holding a midday value — the operator's
-        known failure mode) is a DROPOUT: the WHOLE day is discarded for BOTH
-        learners so a frozen-high over-read never poisons the write-once ring.
-        The window follows the LOCAL calendar day exactly so DST (23/25-h) days
-        are bounded correctly (coordinator:1256).
+        Label gates (SPEC §5, all delegated to :func:`_actuals_from_stats`):
+        a frozen channel, a configured channel with NO usable rows (dead DTU
+        port), or ANY channel covering too little of the daylight span is a
+        DROPOUT — the WHOLE day is discarded for BOTH learners so a partial-site
+        measurement never poisons the write-once ring ("Messkanal-Dropout ⇒
+        ganzen Tag verwerfen"). The window follows the LOCAL calendar day
+        exactly so DST (23/25-h) days are bounded correctly (coordinator:1256).
         """
         entity_by_module = {
             p.name: p.actual_entity
@@ -2575,64 +2596,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 None,
                 {"mean", "state"},
             )
-            daily: dict[str, float] = {}
-            hourly: dict[str, dict[str, float]] = {}
-            dropped = False
-            best_covered_hours = 0
-            for module, entity_id in entity_by_module.items():
-                rows = stats.get(entity_id)
-                if not rows:
-                    continue
-                means: list[float] = []
-                hkeys: list[str] = []
-                for row in rows:
-                    mean = row.get("mean")
-                    if mean is None:
-                        continue
-                    hkey = _stat_row_hour_key(row.get("start"))
-                    if hkey is None:
-                        continue
-                    means.append(float(mean))
-                    hkeys.append(hkey)
-                if not means:
-                    continue
-                if _is_frozen_channel(means):
-                    _LOGGER.warning(
-                        "Channel %s (%s) looks frozen on %s (byte-identical "
-                        "hourly means during daylight); discarding the whole day "
-                        "for both learners (SPEC §5)",
-                        module, entity_id, day,
-                    )
-                    dropped = True
-                    break
-                per_hour: dict[str, float] = {}
-                wh = 0.0
-                for hkey, m in zip(hkeys, means, strict=False):
-                    per_hour[hkey] = per_hour.get(hkey, 0.0) + m  # W*1h = Wh
-                    wh += m
-                daily[module] = round(wh, 1)
-                hourly[module] = per_hour
-                best_covered_hours = max(best_covered_hours, len(set(hkeys)))
-            if dropped:
-                return {}, {}
-            # Day-completeness gate: a mid-day recorder/LTS gap yields a
-            # partial-hour sum that must NOT become the day's ground truth. Drop
-            # the whole day when even the best-covered module misses too many of
-            # the day's daylight hours (a later catch-up refills it once LTS is
-            # complete). Skipped when the daylight span is unknown (0).
             expected = _daylight_hours_in_local_day(self._site, start, end)
-            if expected > 0:
-                need = int(math.ceil(expected * DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE))
-                if best_covered_hours < need:
-                    _LOGGER.warning(
-                        "Actuals for %s cover only %d of ~%d daylight hours "
-                        "(< %.0f%%); discarding the day as incomplete (recorder "
-                        "gap). A later catch-up will refill it.",
-                        day, best_covered_hours, expected,
-                        DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE * 100.0,
-                    )
-                    return {}, {}
-            return daily, hourly
+            return _actuals_from_stats(
+                stats,
+                entity_by_module,
+                expected_daylight_hours=expected,
+                day=day,
+            )
 
         return await get_instance(self.hass).async_add_executor_job(_read)
 
@@ -2672,6 +2642,98 @@ def _daylight_hours_in_local_day(
             count += 1
         cur += step
     return count
+
+
+def _actuals_from_stats(
+    stats: dict[str, list[dict]],
+    entity_by_module: dict[str, str],
+    *,
+    expected_daylight_hours: int,
+    day: date,
+) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    """Pure post-processing of LTS rows into per-module (daily, hourly) actuals.
+
+    Applies the SPEC §5 label gates, each of which discards the WHOLE day
+    ("Messkanal-Dropout ⇒ ganzen Tag verwerfen") so a partial-site measurement
+    never becomes the training/scoreboard ground truth against the FULL-site
+    modeled energy (which would read as a production deficit — the same failure
+    mode the intraday scalar guards against with its usable-planes subset):
+
+      * frozen channel — byte-identical non-zero hourly means held for
+        LABEL_FROZEN_MIN_REPEATS+ consecutive hours (:func:`_is_frozen_channel`);
+      * MISSING channel — a configured module with no LTS rows at all, or rows
+        without a single usable mean (a DTU port that went unavailable);
+      * per-module day-completeness — EVERY configured module must cover at
+        least DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE of the day's daylight hours; a
+        healthy sibling must never mask a module that died mid-day. Skipped when
+        the daylight span is unknown (``expected_daylight_hours`` <= 0).
+
+    A discarded day returns ``({}, {})`` and is NOT recorded, so a later nightly
+    catch-up re-reads it once LTS is complete. A permanently dead (but still
+    configured) sensor therefore blocks training until the operator removes it —
+    the warnings name the module + entity id to make that actionable.
+    """
+    daily: dict[str, float] = {}
+    hourly: dict[str, dict[str, float]] = {}
+    covered_hours: dict[str, int] = {}
+    for module, entity_id in entity_by_module.items():
+        rows = stats.get(entity_id)
+        means: list[float] = []
+        hkeys: list[str] = []
+        for row in rows or ():
+            mean = row.get("mean")
+            if mean is None:
+                continue
+            hkey = _stat_row_hour_key(row.get("start"))
+            if hkey is None:
+                continue
+            means.append(float(mean))
+            hkeys.append(hkey)
+        if not means:
+            _LOGGER.warning(
+                "Channel %s (%s) has no usable LTS rows on %s (dead/unavailable "
+                "DTU port?); discarding the whole day for both learners "
+                "(channel dropout, SPEC §5)",
+                module, entity_id, day,
+            )
+            return {}, {}
+        if _is_frozen_channel(means):
+            _LOGGER.warning(
+                "Channel %s (%s) looks frozen on %s (byte-identical "
+                "hourly means during daylight); discarding the whole day "
+                "for both learners (SPEC §5)",
+                module, entity_id, day,
+            )
+            return {}, {}
+        per_hour: dict[str, float] = {}
+        wh = 0.0
+        for hkey, m in zip(hkeys, means, strict=False):
+            per_hour[hkey] = per_hour.get(hkey, 0.0) + m  # W*1h = Wh
+            wh += m
+        daily[module] = round(wh, 1)
+        hourly[module] = per_hour
+        covered_hours[module] = len(set(hkeys))
+    # Per-module day-completeness gate: a mid-day recorder/LTS gap OR a module
+    # dying mid-day yields a partial-hour sum that must NOT become the day's
+    # ground truth. EVERY configured module has to clear the bar — using the
+    # best-covered module here would let one healthy sibling mask a partial one.
+    if expected_daylight_hours > 0 and covered_hours:
+        need = int(
+            math.ceil(expected_daylight_hours * DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE)
+        )
+        worst = min(covered_hours, key=lambda m: covered_hours[m])
+        if covered_hours[worst] < need:
+            _LOGGER.warning(
+                "Actuals for %s: module %s (%s) covers only %d of ~%d daylight "
+                "hours (< %.0f%%); discarding the day as incomplete (recorder "
+                "gap or mid-day channel dropout). A later catch-up will refill "
+                "it.",
+                day, worst, entity_by_module.get(worst),
+                covered_hours[worst], expected_daylight_hours,
+                DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE * 100.0,
+            )
+            return {}, {}
+    return daily, hourly
 
 
 def _is_frozen_channel(means: list[float]) -> bool:

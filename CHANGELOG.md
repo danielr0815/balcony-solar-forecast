@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Channel dropout now discards the whole training day (SPEC §5).** A
+  configured module with no usable LTS rows (dead/unavailable DTU port), or one
+  covering too little of the daylight span (died mid-day), previously slipped
+  through: the day trained every nightly consumer (day-ahead RLS, quantile
+  ring, drift monitor, scoreboard kill-gate) with FULL-site modeled vs
+  PARTIAL-site measured energy — a persistent phantom production deficit in
+  write-once rings. The per-module completeness gate now applies to every
+  configured module (previously the best-covered module masked a partial
+  sibling), matching the SPEC's "Messkanal-Dropout ⇒ ganzen Tag verwerfen".
+- **The keep-richer fetch branch no longer stamps stale weather as fresh
+  (SPEC §7).** When a new Open-Meteo payload had less radiation coverage than
+  the stored one, the coordinator kept the old payload but reset its age — a
+  sustained partial degradation would serve arbitrarily old weather at status
+  "fresh"/age ~0 forever, and the cached/physics_fallback/unavailable ladder
+  could never trigger. Fetch scheduling and payload age now use separate
+  anchors; the served payload ages honestly through the ladder.
+- **Release workflow can no longer ship the wrong version.** The post-publish
+  version-bump job (whose commit never landed in the released tag that HACS
+  installs) is replaced by a guard that fails the release when the tag does not
+  match the tagged commit's manifest/pyproject/const version strings. Also
+  removes the unpinned third-party push action.
+
+### Added
+- Tests for the previously uncovered SPEC §7 degradation ladder (status rungs,
+  fetch failure/success/coverage-refusal, end-to-end cached/unavailable paths,
+  learner-hook composition) and for the initial config-flow submit path
+  (including the lat/lon-into-site merge that prevents forecasting for the
+  wrong location), plus the channel-dropout gates.
+
 ## [0.5.0] - 2026-07-09
 
 ### Added

@@ -21,33 +21,35 @@ jobs:
       - name: Hassfest validation
         uses: "home-assistant/actions/hassfest@master"
 
-  release:
-    runs-on: "ubuntu-latest"
-    needs: validate
-    name: Update release info
-    steps:
-      - name: Checkout
-        uses: "actions/checkout@v4"
-
-      - name: Update version strings
-        # Three static version strings are kept equal (enforced by the CI
-        # consistency check): the manifest, pyproject, and const.INTEGRATION_VERSION
-        # (the device sw_version). Sync all three to the tag.
+      # HACS installs the TAG's zipball (zip_release: false), so the version
+      # strings must already be correct IN the tagged commit — bump manifest /
+      # pyproject / const.INTEGRATION_VERSION and CHANGELOG.md FIRST, then tag.
+      # A post-publish bump commit would only land on main, never in the
+      # release, silently shipping the previous version to every installer.
+      # This guard fails the release instead.
+      - name: Version guard (tag == manifest == pyproject == const)
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" custom_components/balcony_solar_forecast/manifest.json
-          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
-          sed -i "s/^INTEGRATION_VERSION = \".*\"/INTEGRATION_VERSION = \"$VERSION\"/" custom_components/balcony_solar_forecast/const.py
-
-      - name: Commit changes
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add custom_components/balcony_solar_forecast/manifest.json pyproject.toml custom_components/balcony_solar_forecast/const.py
-          git diff --staged --quiet || git commit -m "Update version to ${GITHUB_REF#refs/tags/v}"
-
-      - name: Push changes
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: main
+          python - <<'PY'
+          import json, os, re, pathlib, sys
+          tag = os.environ["GITHUB_REF"].removeprefix("refs/tags/").removeprefix("v")
+          mf = json.loads(pathlib.Path(
+              "custom_components/balcony_solar_forecast/manifest.json"
+          ).read_text())["version"]
+          pp = re.search(
+              r'^version\s*=\s*"([^"]+)"',
+              pathlib.Path("pyproject.toml").read_text(), re.M
+          ).group(1)
+          const = re.search(
+              r'^INTEGRATION_VERSION\s*=\s*"([^"]+)"',
+              pathlib.Path(
+                  "custom_components/balcony_solar_forecast/const.py"
+              ).read_text(), re.M
+          ).group(1)
+          if not (tag == mf == pp == const):
+              sys.exit(
+                  f"Release tag v{tag} does not match the tagged commit's "
+                  f"version strings (manifest {mf} / pyproject {pp} / const "
+                  f"{const}). Bump the versions + CHANGELOG first, then tag."
+              )
+          print("version OK:", tag)
+          PY
