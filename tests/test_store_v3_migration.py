@@ -490,12 +490,13 @@ def test_corrupt_quantile_bins_clamped_not_dropped():
     qs = QuantileState.from_dict(state[STORE_KEY_QUANTILE_STATE])
     assert set(qs.bins) == {"clear|midday"}
     vals = qs.bins["clear|midday"]
-    # 99 -> MAX, -5 -> MIN, "junk" dropped, others kept in order.
+    # 99 -> MAX, -5 -> MIN, "junk" dropped, others kept in order. Legacy bare
+    # floats normalise to un-dated ["", relerr] pairs (audit #15 date-windowing).
     assert vals == [
-        0.8,
-        QUANTILE_REL_ERR_MAX,
-        QUANTILE_REL_ERR_MIN,
-        1.1,
+        ["", 0.8],
+        ["", QUANTILE_REL_ERR_MAX],
+        ["", QUANTILE_REL_ERR_MIN],
+        ["", 1.1],
     ]
 
 

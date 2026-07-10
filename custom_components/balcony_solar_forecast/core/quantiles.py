@@ -12,14 +12,20 @@ Maintain a 90-day ring (QUANTILE_RING_DAYS) of hourly RELATIVE errors
     relerr = measured_wh / corrected_forecast_wh
 
 keyed by (weather class x day part) — the SAME (cloud_class, day_part) taxonomy
-as the day-ahead RLS bias (``QuantileState.bin_key``). At FORECAST time, for
-each hour, look up the matching bin's empirical P10/P50/P90 multipliers and
-apply them to that hour's corrected forecast Wh to produce the band curves.
+as the day-ahead RLS bias (``QuantileState.bin_key``). Each sample carries the
+trained day's ISO date (``[iso_date, relerr]``), so the ring is DATE-WINDOWED:
+on training, samples older than QUANTILE_RING_DAYS relative to the training day
+are evicted (a sparse bin no longer keeps years-old samples), with the COUNT cap
+as a hard backstop. At FORECAST time, for each hour, look up the matching bin's
+empirical P10/P50/P90 multipliers and apply them to that hour's corrected
+forecast Wh to produce the band curves.
 
-COLD START (SPEC §6/§10, "no fake spread"): a bin with fewer than
-QUANTILE_MIN_SAMPLES samples collapses its band to P50 (p10 == p50 == p90);
-an empty bin is the neutral identity (1.0). A band is therefore NEVER wider than
-the data supports.
+COLD START (SPEC §6/§10, "no fake spread"): a bin collapses its band to P50
+(p10 == p50 == p90) unless it has BOTH >= QUANTILE_MIN_SAMPLES samples AND
+evidence from >= QUANTILE_MIN_DAYS distinct days — hourly samples within one day
+are strongly correlated, so a few bursty days are not enough independent
+observations to justify a spread. An empty bin is the neutral identity (1.0). A
+band is therefore NEVER wider than the data supports.
 
 TRAINING (nightly, reuses the existing rings): from issued(corrected) hourly vs
 the measured hourly actuals, one relerr sample per daylight hour whose corrected
@@ -34,10 +40,11 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Sequence
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from ..const import (
     QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN,
+    QUANTILE_MIN_DAYS,
     QUANTILE_MIN_FORECAST_WH,
     QUANTILE_MIN_SAMPLES,
     QUANTILE_NEUTRAL_MULT,
@@ -65,8 +72,8 @@ __all__ = [
 # whole day-part's worth per day (~8 daylight hours in summer), so the cap is
 # QUANTILE_RING_DAYS x QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN — sizing the FIFO to
 # ~90 days of a frequently-hit bin rather than ~2 weeks (SPEC §6 "90-day ring").
-# Caps by COUNT (samples are un-timestamped in this pure layer); a true
-# date-windowed ring is a follow-up.
+# Samples are now date-stamped, so the primary trim is the DATE window; this
+# COUNT cap is a hard backstop applied AFTER it (oldest-first, un-dated first).
 _BIN_RING_CAP = QUANTILE_RING_DAYS * QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN
 
 
@@ -79,6 +86,83 @@ def _finite(x: object) -> float | None:
     if not math.isfinite(f):
         return None
     return f
+
+
+def _entry_date_relerr(entry: object) -> tuple[str, float] | None:
+    """Normalise one ring entry to ``(iso_date, relerr)`` or None on garbage.
+
+    Read-time tolerance (validate-and-clamp ethos, mirrors
+    ``QuantileState.from_dict``): a ``[iso_date, relerr]`` pair yields
+    ``(iso_date, relerr)`` (a non-str date coerced to ``""``); a bare number is
+    a LEGACY un-dated sample -> ``("", value)``; a non-finite value, a wrong-length
+    sequence or non-numeric junk -> None. Relerr is NOT re-clamped here (the load
+    path already clamped it; a directly-constructed state is read as-is, matching
+    the historical bands_for_bin behaviour).
+    """
+    if isinstance(entry, (list, tuple)):
+        if len(entry) != 2:
+            return None
+        rv = _finite(entry[1])
+        if rv is None:
+            return None
+        iso = entry[0] if isinstance(entry[0], str) else ""
+        return (iso, rv)
+    rv = _finite(entry)
+    if rv is None:
+        return None
+    return ("", rv)
+
+
+def _window_cutoff(training_date: str) -> str:
+    """Exclusive lower-bound ISO date of the ring window, or "" if no date.
+
+    A DATED sample strictly older than ``training_date - QUANTILE_RING_DAYS`` is
+    outside the window. Returns "" (disable the date trim) when the training date
+    is absent or unparseable, so a caller without a date can still append without
+    accidentally evicting the ring.
+    """
+    if not training_date:
+        return ""
+    try:
+        d = date.fromisoformat(training_date)
+    except (TypeError, ValueError):
+        return ""
+    return (d - timedelta(days=QUANTILE_RING_DAYS)).isoformat()
+
+
+def _trim_ring(ring: list, *, cutoff: str) -> list:
+    """Trim a normalised (all-pairs) bin ring: date window, then count cap.
+
+    1. DATE window: drop DATED samples whose date < ``cutoff`` (ISO strings sort
+       chronologically). Un-dated ("") samples have unknown age and are NEVER
+       date-trimmed — they leave only via the count cap.
+    2. COUNT cap (hard backstop, _BIN_RING_CAP): if still over, evict oldest-first
+       with UN-DATED samples evicted before dated ones (an un-dated sample is the
+       least trustworthy — unknown age — so it goes first; among dated, the
+       oldest date goes first). Original ring order is preserved for the kept
+       samples so an all-un-dated ring degrades to a plain FIFO.
+    """
+    if cutoff:
+        ring = [
+            e for e in ring
+            if not (isinstance(e, (list, tuple)) and len(e) == 2
+                    and isinstance(e[0], str) and e[0] != "" and e[0] < cutoff)
+        ]
+    overflow = len(ring) - _BIN_RING_CAP
+    if overflow > 0:
+        # Eviction priority: un-dated first (key 0), then oldest date, then FIFO
+        # position as a stable tiebreak. The first ``overflow`` in this order go.
+        order = sorted(
+            range(len(ring)),
+            key=lambda i: (
+                0 if (isinstance(ring[i], (list, tuple)) and ring[i][0] == "") else 1,
+                ring[i][0] if isinstance(ring[i], (list, tuple)) else "",
+                i,
+            ),
+        )
+        evict = set(order[:overflow])
+        ring = [e for i, e in enumerate(ring) if i not in evict]
+    return ring
 
 
 # ---------------------------------------------------------------------------
@@ -177,12 +261,17 @@ def bands_for_bin(
     QuantileBands with p10 / p50 / p90 = empirical_percentile at
     QUANTILE_P_LOW / QUANTILE_P_MID / QUANTILE_P_HIGH and ``n`` = ring length.
 
-    COLD START (SPEC §6/§10, "no fake spread AND no fake shift"): a ring with
-    fewer than QUANTILE_MIN_SAMPLES samples returns ``QuantileBands.neutral()``
-    (1.0/1.0/1.0) — a single clamped outlier must not scale the served curve, so
-    a thin bin gets the neutral identity band, NOT its unshrunk empirical median.
-    An empty / missing bin is likewise neutral. Never raises (validate-and-clamp):
-    a corrupt ring degrades to the neutral band.
+    COLD START (SPEC §6/§10, "no fake spread AND no fake shift"): a bin returns
+    ``QuantileBands.neutral()`` (1.0/1.0/1.0) unless it has BOTH
+    >= QUANTILE_MIN_SAMPLES samples AND >= QUANTILE_MIN_DAYS effective days. A
+    single clamped outlier — or a handful of correlated hours from a few bursty
+    days — must not scale the served curve, so a thin OR day-starved bin gets the
+    neutral identity band, NOT its unshrunk empirical median. ``effective_days``
+    counts distinct sample dates plus a per-day-cap lower bound on the days the
+    LEGACY un-dated samples span (see below). An empty / missing bin is likewise
+    neutral. Never raises (validate-and-clamp): a corrupt ring degrades to the
+    neutral band, and both dated pairs and bare-number (legacy / directly
+    constructed) entries are tolerated at read time.
     """
     if state is None or not isinstance(getattr(state, "bins", None), dict):
         return QuantileBands.neutral()
@@ -192,21 +281,45 @@ def bands_for_bin(
     if not ring:
         return QuantileBands.neutral()
 
-    # Defensive finite filter (the state loader already clamps, but a directly
-    # constructed QuantileState may carry raw values).
-    vals = [f for f in (_finite(v) for v in ring) if f is not None]
+    # Extract relerr VALUES + day evidence, tolerating both the dated-pair and
+    # the legacy bare-number entry shapes (the loader normalises, but a directly
+    # constructed QuantileState may carry either). Junk entries are dropped.
+    vals: list[float] = []
+    distinct_dates: set[str] = set()
+    undated = 0
+    for entry in ring:
+        parsed = _entry_date_relerr(entry)
+        if parsed is None:
+            continue
+        iso, relerr = parsed
+        vals.append(relerr)
+        if iso:
+            distinct_dates.add(iso)
+        else:
+            undated += 1
     n = len(vals)
     if n == 0:
         return QuantileBands.neutral()
 
-    if n < QUANTILE_MIN_SAMPLES:
+    # Effective days: distinct dated days + a PROVABLE lower bound on the days the
+    # un-dated (legacy / grandfathered) samples span. The trainer never adds more
+    # than QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN to one bin on one day, so
+    # ceil(undated / cap) days is the fewest that many samples could have come
+    # from — this keeps a live install's pre-upgrade 90-day ring active across
+    # the upgrade instead of collapsing every band to P50 on the first restart.
+    effective_days = len(distinct_dates) + math.ceil(
+        undated / QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN
+    )
+
+    if n < QUANTILE_MIN_SAMPLES or effective_days < QUANTILE_MIN_DAYS:
         # Cold start: no fabricated spread AND no fabricated SHIFT. A thin bin's
         # empirical median is dominated by a single clamped outlier (relerr up to
-        # QUANTILE_REL_ERR_MAX), which would scale all three band curves off the
-        # served corrected curve with no statistical backing — so we return the
+        # QUANTILE_REL_ERR_MAX), and a day-starved bin's spread is just a few
+        # correlated skies — either would scale all three band curves off the
+        # served corrected curve with no statistical backing. So we return the
         # neutral identity band (== the corrected curve, the engine's
-        # missing-band pass-through), reserving any deviation for a bin with
-        # >= QUANTILE_MIN_SAMPLES samples.
+        # missing-band pass-through), reserving any deviation for a bin with both
+        # enough samples AND enough distinct days.
         return QuantileBands.neutral()
 
     ordered = sorted(vals)
@@ -230,28 +343,46 @@ def bands_for_bin(
 def train_quantiles(
     state: QuantileState,
     samples: Iterable[QuantileSample],
+    *,
+    training_date: str = "",
 ) -> QuantileState:
     """Append hourly relative-error samples into their bins' rings (SPEC §6).
 
     For each sample with ``corrected_wh`` > QUANTILE_MIN_FORECAST_WH, form
     ``relerr = measured_wh / corrected_wh`` clamped to
     [QUANTILE_REL_ERR_MIN, QUANTILE_REL_ERR_MAX] and append it to the
-    ``bin_key(cloud_class, day_part)`` ring. Each bin's ring is trimmed so the
-    whole state holds at most QUANTILE_RING_DAYS worth of samples (a simple
-    per-bin FIFO cap keeps the eMMC-friendly store small). Returns a NEW
-    QuantileState (input untouched). Samples with an unknown class/part, a
-    non-finite value or a below-threshold forecast are silently skipped so junk
-    never enters the ring. Idempotence over a night is the coordinator's
-    responsibility (date-keyed guard); this is a pure state->state map.
+    ``bin_key(cloud_class, day_part)`` ring as a ``[training_date, relerr]`` pair.
+    ``training_date`` is the trained day's ISO date (the coordinator supplies it);
+    it left absent ("") the samples are stored un-dated (the ring then behaves
+    like the pre-date-window count-capped ring for that call). Each TOUCHED bin
+    is then trimmed: DATED samples older than QUANTILE_RING_DAYS relative to the
+    training day are dropped, and the count cap (_BIN_RING_CAP) is enforced as a
+    hard backstop (oldest-first, un-dated first). Returns a NEW QuantileState
+    (input untouched); the returned rings are normalised to the ``[date, relerr]``
+    pair shape (any legacy bare-number entries in ``state`` become ``["", relerr]``
+    without being date-trimmed — their age is unknown). Samples with an unknown
+    class/part, a non-finite value or a below-threshold forecast are silently
+    skipped so junk never enters the ring. Idempotence over a night is the
+    coordinator's responsibility (date-keyed guard); this is a pure state->state
+    map.
     """
-    # Deep-copy the existing rings so the input state is untouched.
+    # Deep-copy the existing rings so the input state is untouched, NORMALISING
+    # each entry to the canonical [date, relerr] pair (legacy bare -> ["", v]).
     if state is not None and isinstance(getattr(state, "bins", None), dict):
-        bins: dict[str, list[float]] = {k: list(v) for k, v in state.bins.items()}
+        bins: dict[str, list] = {}
+        for k, v in state.bins.items():
+            ring: list = []
+            for e in v if isinstance(v, (list, tuple)) else ():
+                parsed = _entry_date_relerr(e)
+                if parsed is not None:
+                    ring.append([parsed[0], parsed[1]])
+            bins[k] = ring
         version = state.version
     else:
         bins = {}
         version = 1
 
+    touched: set[str] = set()
     for s in samples or ():
         cloud_class = getattr(s, "cloud_class", None)
         day_part = getattr(s, "day_part", None)
@@ -280,10 +411,15 @@ def train_quantiles(
         if ring is None:
             ring = []
             bins[key] = ring
-        ring.append(relerr)
-        # Per-bin FIFO cap (drop oldest).
-        if len(ring) > _BIN_RING_CAP:
-            del ring[: len(ring) - _BIN_RING_CAP]
+        ring.append([training_date, relerr])
+        touched.add(key)
+
+    # Trim only the bins we touched (date window + count-cap backstop). Untouched
+    # bins are left exactly as normalised — a bin only grows when it is touched,
+    # and it is date-windowed on that same call.
+    cutoff = _window_cutoff(training_date)
+    for key in touched:
+        bins[key] = _trim_ring(bins[key], cutoff=cutoff)
 
     return QuantileState(bins=bins, version=version)
 

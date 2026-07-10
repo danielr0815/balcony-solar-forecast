@@ -230,7 +230,12 @@ falsche Geometrie. Optional später: 1 RLS-Bias-Skalar je
 Nichtparametrische historische Simulation: empirische P10/P50/P90 aus dem
 90-Tage-Fehlerringpuffer, konditioniert auf (Wolken-/**Nebelklasse** ×
 Tagesabschnitt); Nebelklasse = Sicht < 1000 m ∨ (cloud_cover_low > 85 %
-∧ Okt–Feb), nach erster Saison auf gemessene Abdeckung geprüft. Adaptive
+∧ Okt–Feb), nach erster Saison auf gemessene Abdeckung geprüft. Der Ring ist
+**datumsfensterbasiert** (jedes Sample trägt das ISO-Datum seines Trainingstags,
+Fenster = QUANTILE_RING_DAYS relativ zum Trainingstag) und ein Band verlangt
+zusätzlich Evidenz aus mindestens QUANTILE_MIN_DAYS **verschiedenen Tagen** —
+korrelierte Stundensamples eines Tages sind keine unabhängigen Beobachtungen;
+alt-ungestempelte Samples zählen über die Per-Tag-Cap-Untergrenze mit. Adaptive
 konforme Nachführung für 80-%-Abdeckung. Nutzung durch Konsumenten:
 P50 = Planung; P10 für konservative Reserven; P90 fürs Load-Timing
 (Überschusslasten so spät wie möglich, ohne Export).

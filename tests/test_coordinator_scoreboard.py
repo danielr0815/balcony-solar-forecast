@@ -495,11 +495,15 @@ def test_train_quantiles_day_populates_ring_and_yields_spread():
     store.hourly_actuals[iso] = {"M1": {hkey: 1300.0}}  # relerr 1.3
 
     c = _make_coordinator(store, ())
-    # Seed the same bin one sample short of the spread threshold with a spread
-    # of distinct values, so the day's new sample crosses QUANTILE_MIN_SAMPLES
-    # and the band becomes non-collapsed (P10 != P90).
+    # Seed the same bin one sample short of the spread threshold with a spread of
+    # distinct values on distinct PRIOR days, so the day's new sample crosses BOTH
+    # QUANTILE_MIN_SAMPLES and the day-diversity gate (QUANTILE_MIN_DAYS) and the
+    # band becomes non-collapsed (P10 != P90). Dates are inside the ring window.
     dp = q.QuantileState.bin_key(CLOUD_CLASS_CLEAR, "midday")
-    seed = [0.6 + 0.02 * i for i in range(QUANTILE_MIN_SAMPLES - 1)]
+    seed = [
+        [f"2026-06-{i + 1:02d}", 0.6 + 0.02 * i]
+        for i in range(QUANTILE_MIN_SAMPLES - 1)
+    ]
     c._quantile_state = QuantileState(bins={dp: list(seed)})
 
     c._train_quantiles_day(day)

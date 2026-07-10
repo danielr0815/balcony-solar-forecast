@@ -441,8 +441,10 @@ def train_quantiles_day(coord, day: date) -> None:
         )
     if not samples:
         return
+    # Date-stamp every sample with the trained day's ISO date so the ring is
+    # date-windowed and the collapse gate can count distinct days (SPEC §6).
     coord._quantile_state = quantiles_mod.train_quantiles(
-        coord._quantile_state, samples
+        coord._quantile_state, samples, training_date=iso
     )
     coord._persist_quantile_state()
 
