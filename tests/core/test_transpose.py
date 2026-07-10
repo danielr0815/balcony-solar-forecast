@@ -25,6 +25,7 @@ from balcony_solar_forecast.const import (
 )
 from balcony_solar_forecast.core.transpose import (
     _cos_incidence,
+    ashrae_iam,
     hay_davies_poa,
 )
 
@@ -92,7 +93,9 @@ def test_all_components_nonnegative(sun_el, plane_az, plane_tilt):
         plane_tilt=plane_tilt,
         albedo=ALBEDO_DEFAULT,
     )
-    assert set(c) == set(COMPONENTS)
+    # The four irradiance components plus the cos_theta passthrough the engine
+    # feeds into the ASHRAE IAM (see transpose.ashrae_iam).
+    assert set(c) == {*COMPONENTS, "cos_theta"}
     for k in COMPONENTS:
         assert c[k] >= 0.0, f"{k} negative"
         assert math.isfinite(c[k])
@@ -316,10 +319,16 @@ def test_total_poa_within_closed_form_envelope():
     ghi, dni, dhi, alb = 700.0, 850.0, 160.0, ALBEDO_SNOW
     ai = dni / 1361.0
     cap = dni + dhi * ai * RB_CAP + dhi + alb * ghi
+
+    def _poa(c: dict) -> float:
+        # Sum the four irradiance components only (the dict also carries the
+        # cos_theta passthrough for the engine's IAM, which is not a W/m^2).
+        return c["beam"] + c["circumsolar"] + c["isotropic"] + c["ground"]
+
     for tilt in [70.0, 80.0, 90.0]:
         for el in [5.0, 20.0, 45.0, 70.0]:
             c = hay_davies_poa(ghi, dni, dhi, 180.0, el, 180.0, tilt, alb)
-            total = sum(c.values())
+            total = _poa(c)
             assert math.isfinite(total)
             assert 0.0 <= total <= cap + 1e-6
 
@@ -327,4 +336,43 @@ def test_total_poa_within_closed_form_envelope():
     # stays physically reasonable on a steep snow-lit plane. The steep-tilt +
     # snow-albedo (0.5) gain legitimately pushes POA above GHI; bound at 1.6x.
     c = hay_davies_poa(ghi, dni, dhi, 180.0, 45.0, 180.0, 70.0, alb)
-    assert sum(c.values()) < 1.6 * ghi
+    assert _poa(c) < 1.6 * ghi
+
+
+# ---------------------------------------------------------------------------
+# ASHRAE incidence-angle modifier (applied by the ENGINE, not in-model here)
+# ---------------------------------------------------------------------------
+
+
+def test_ashrae_iam_normal_incidence_is_unity():
+    assert ashrae_iam(1.0) == pytest.approx(1.0)
+
+
+def test_ashrae_iam_typical_high_aoi_values():
+    # b0 = 0.05: AOI 60 deg -> 1 - 0.05*(2-1) = 0.95; AOI 75 deg -> ~0.856.
+    assert ashrae_iam(math.cos(math.radians(60.0))) == pytest.approx(0.95)
+    assert ashrae_iam(math.cos(math.radians(75.0))) == pytest.approx(
+        1.0 - 0.05 * (1.0 / math.cos(math.radians(75.0)) - 1.0)
+    )
+
+
+def test_ashrae_iam_clamps_at_grazing_and_behind():
+    # Grazing incidence: the linear model dives below 0 -> clamped to 0.
+    assert ashrae_iam(0.01) == 0.0
+    # Behind the plane (cos_theta <= 0): no beam anyway -> 0.
+    assert ashrae_iam(0.0) == 0.0
+    assert ashrae_iam(-0.4) == 0.0
+
+
+def test_ashrae_iam_b0_zero_is_identity():
+    for ct in (0.05, 0.3, 0.7, 1.0):
+        assert ashrae_iam(ct, b0=0.0) == pytest.approx(1.0)
+
+
+def test_hay_davies_exports_cos_theta_passthrough():
+    # Sun up, plane facing the sun: cos_theta present and in (0, 1].
+    c = hay_davies_poa(600.0, 700.0, 120.0, 180.0, 45.0, 180.0, 70.0, 0.2)
+    assert 0.0 < c["cos_theta"] <= 1.0
+    # Below the horizon: passthrough present but zero (no beam either).
+    c = hay_davies_poa(0.0, 0.0, 10.0, 180.0, -5.0, 180.0, 70.0, 0.2)
+    assert c["cos_theta"] == 0.0 and c["beam"] == 0.0

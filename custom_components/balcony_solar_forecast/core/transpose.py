@@ -29,12 +29,38 @@ from __future__ import annotations
 
 import math
 
-from ..const import LOW_SUN_CUTOFF_DEG, RB_CAP
+from ..const import IAM_B0, LOW_SUN_CUTOFF_DEG, RB_CAP
 
-__all__ = ["hay_davies_poa"]
+__all__ = ["ashrae_iam", "hay_davies_poa"]
 
 # Mean extraterrestrial normal irradiance (solar constant), W/m^2.
 _SOLAR_CONSTANT = 1361.0
+
+
+def ashrae_iam(cos_theta: float, b0: float = IAM_B0) -> float:
+    """ASHRAE incidence-angle modifier for the DIRECT (beam) irradiance.
+
+    Glass reflection at the module front rises steeply with the angle of
+    incidence; the single-parameter ASHRAE model captures it as
+
+        f = 1 - b0 * (1 / cos(theta) - 1)
+
+    clamped to [0, 1] (0 at grazing incidence, 1 at normal incidence). The
+    ENGINE multiplies beam + circumsolar by this factor — deliberately NOT
+    :func:`hay_davies_poa` itself, which stays a pure sky-model transposition
+    comparable against the pvlib golden vectors (pvlib likewise applies its IAM
+    after the transposition step). Without the modifier the shademap's
+    beam-referenced T absorbs the optics deficit as AOI-shaped phantom shading
+    on the steep facade planes.
+
+    ``cos_theta <= 0`` (sun behind the plane, no beam anyway) returns 0.0.
+    """
+    if cos_theta <= 0.0:
+        return 0.0
+    f = 1.0 - b0 * (1.0 / cos_theta - 1.0)
+    if f < 0.0:
+        return 0.0
+    return f if f < 1.0 else 1.0
 
 
 def _cos_incidence(
@@ -93,9 +119,12 @@ def hay_davies_poa(
 
     Returns:
         Dict with keys ``beam``, ``circumsolar``, ``isotropic``, ``ground``
-        (each W/m^2). The plane total before horizon/SVF handling is the sum;
-        the engine scales ``isotropic`` by the sky-view factor and masks
-        ``beam``+``circumsolar`` by the horizon transmittance.
+        (each W/m^2) plus ``cos_theta`` (the clamped cosine of the angle of
+        incidence, for the engine's ASHRAE IAM — see :func:`ashrae_iam`).
+        The plane total before horizon/SVF handling is the component sum;
+        the engine applies the IAM to ``beam``+``circumsolar``, scales
+        ``isotropic`` by the sky-view factor and masks ``beam``+``circumsolar``
+        by the horizon transmittance.
     """
     # --- inputs are physical: no negative irradiance ---
     ghi = max(ghi, 0.0)
@@ -125,6 +154,7 @@ def hay_davies_poa(
             "circumsolar": 0.0,
             "isotropic": dhi * tilt_factor_sky,
             "ground": ground,
+            "cos_theta": 0.0,
         }
 
     cos_theta = _cos_incidence(sun_az, sun_el, plane_az, plane_tilt)
@@ -159,4 +189,5 @@ def hay_davies_poa(
         "circumsolar": circumsolar,
         "isotropic": isotropic,
         "ground": ground,
+        "cos_theta": cos_theta,
     }

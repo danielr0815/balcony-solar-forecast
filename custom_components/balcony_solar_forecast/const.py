@@ -88,6 +88,13 @@ ALBEDO_SNOW = 0.5  # applied when snow_depth > SNOW_DEPTH_THRESHOLD_M
 SNOW_DEPTH_THRESHOLD_M = 0.01
 RB_CAP = 10.0  # geometric beam-ratio cap (low-sun explosion guard)
 LOW_SUN_CUTOFF_DEG = 3.0  # below this elevation: circumsolar = 0
+# ASHRAE incidence-angle modifier applied to beam+circumsolar in the ENGINE
+# (not in the pure transposition, which stays pvlib-comparable for the golden
+# vectors): f = 1 - IAM_B0 * (1/cos(theta) - 1), clamped [0, 1]. Glass
+# reflection cuts the direct share 5-15% at AOI > 60 deg — on the 70-80 deg
+# facade planes the sun spends much of the day there, and without the modifier
+# the shademap absorbs the optics deficit as phantom shading.
+IAM_B0 = 0.05
 ROSS_COEFF = 0.0342  # Tcell = Tamb + ROSS_COEFF * POA
 TEMP_COEFF_PER_K = -0.0034  # power derate per K above 25 C (-0.34 %/K)
 TEMP_REF_C = 25.0
