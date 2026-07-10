@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-10
+
 ### Added
 - **Reconfigure flow.** Structural setup (location, update cadences, the full
   site object) is now edited via the integration's "Reconfigure" action
