@@ -42,17 +42,18 @@ type BalconySolarConfigEntry = ConfigEntry[BalconySolarCoordinator]
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register the integration services (quality-scale ``action-setup``).
 
-    All five services (get_forecast / import_bootstrap / dump_shademap /
-    rollback_learners / install_dashboard) are registered here — once,
-    independent of any config entry — and stay registered, so an automation
-    firing while no entry is loaded gets a clear ServiceValidationError instead
-    of "Service not found". The handlers resolve their coordinators dynamically
-    from ``hass.data``.
+    All six services (get_forecast / import_bootstrap / dump_shademap /
+    rollback_learners / install_dashboard / suggest_shade_groups) are registered
+    here — once, independent of any config entry — and stay registered, so an
+    automation firing while no entry is loaded gets a clear
+    ServiceValidationError instead of "Service not found". The handlers resolve
+    their coordinators dynamically from ``hass.data``.
 
-    Also serves + auto-registers the bundled shade-profile Lovelace card
-    (SPEC §15) so it appears in the card picker with no HACS install: static
-    path now, the storage-mode resource once HA is running. This step never
-    raises into setup — the card is an enhancement, not a dependency.
+    Also serves + auto-registers the two bundled Lovelace cards (the
+    shade-profile diagram, SPEC §15, and the power-history card) so they appear
+    in the card picker with no HACS install: static paths now, the storage-mode
+    resources once HA is running. This step never raises into setup — the cards
+    are an enhancement, not a dependency.
     """
     async_register_services(hass)
     await async_register_frontend(hass)

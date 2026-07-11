@@ -201,6 +201,69 @@ class TestUngroupedPlaneNoCeiling:
 # ---------------------------------------------------------------------------
 
 
+class TestCorrectedUnclampedWatts:
+    """The pre-re-clamp corrected total exposed for the day-ahead headline strip
+    (MED-1): it exceeds the served total exactly on the slots where the second
+    AC clamp bit, and equals it everywhere the clamp cannot bite."""
+
+    def test_prereclamp_exceeds_served_when_clamp_bites(self, patched_physics):
+        """A 1.3x factor on a clamp-biting site: at noon the pre-re-clamp total is
+        the factored 1.3 * 800 == 1040 W while the served total is held at the
+        800 W ceiling — the gap is what marks the slot clamped."""
+        p1, p2 = _sun_facing_planes()
+        group = InverterGroup(name="WR", plane_names=("P1", "P2"), ac_limit_w=800.0)
+        site = SiteConfig(
+            latitude=48.5, longitude=12.2, planes=(p1, p2), groups=(group,)
+        )
+        weather = _clear_sky_series()
+        res = engine.compute_forecast(
+            site, weather, now=_TEST_DATE,
+            hooks=LearnerHooks(slot_factor=lambda s: 1.3),
+        )
+        assert len(res.corrected_unclamped_watts) == len(res.total_watts)
+        assert res.total_watts[_NOON_INDEX] == pytest.approx(800.0)
+        assert res.corrected_unclamped_watts[_NOON_INDEX] == pytest.approx(1040.0)
+        assert (
+            res.corrected_unclamped_watts[_NOON_INDEX]
+            - res.total_watts[_NOON_INDEX]
+        ) > 1e-6
+
+    def test_prereclamp_equals_served_no_groups(self, patched_physics):
+        """A site with NO inverter groups never clamps: even a 1.5x factor leaves
+        the pre-re-clamp total equal to the served total, every slot bit-exact —
+        so the day-ahead strip is bit-identical to divide-always there."""
+        p1, p2 = _sun_facing_planes()
+        site = SiteConfig(
+            latitude=48.5, longitude=12.2, planes=(p1, p2), groups=()
+        )
+        weather = _clear_sky_series()
+        res = engine.compute_forecast(
+            site, weather, now=_TEST_DATE,
+            hooks=LearnerHooks(slot_factor=lambda s: 1.5),
+        )
+        assert len(res.corrected_unclamped_watts) == len(res.total_watts)
+        for i in range(len(weather)):
+            assert res.corrected_unclamped_watts[i] == pytest.approx(
+                res.total_watts[i]
+            )
+
+    def test_prereclamp_equals_served_identity_no_hooks(self, patched_physics):
+        """With no learner hooks (factor 1.0) the pre-re-clamp total equals the
+        served total on a clamp-biting site — the field is always populated."""
+        p1, p2 = _sun_facing_planes()
+        group = InverterGroup(name="WR", plane_names=("P1", "P2"), ac_limit_w=800.0)
+        site = SiteConfig(
+            latitude=48.5, longitude=12.2, planes=(p1, p2), groups=(group,)
+        )
+        weather = _clear_sky_series()
+        res = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        assert len(res.corrected_unclamped_watts) == len(res.total_watts)
+        for i in range(len(weather)):
+            assert res.corrected_unclamped_watts[i] == pytest.approx(
+                res.total_watts[i]
+            )
+
+
 class TestBandCeilingCap:
     def _clamped_site(self):
         p1, p2 = _sun_facing_planes()

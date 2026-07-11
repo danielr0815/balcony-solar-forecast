@@ -68,6 +68,8 @@ class ShadeProfileModuleSelect(BalconyForecastEntity, SelectEntity, RestoreEntit
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
         # Restore a still-valid selection; a plane renamed/removed since falls
-        # back to the coordinator default (first plane) rather than a dead option.
+        # back to the coordinator default (the front-facing plane — the azimuth
+        # the most planes share, see coordinator.shade_profile_module ->
+        # shadeprofile.default_module) rather than a dead option.
         if last is not None and last.state in self.options:
             self.coordinator.set_shade_profile_module(last.state)

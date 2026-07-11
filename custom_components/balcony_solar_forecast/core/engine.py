@@ -480,6 +480,11 @@ def compute_forecast(
     raw_plane_series: dict[str, list[float]] = {p.name: [] for p in planes}
     # CORRECTED per-slot site total and per-plane series.
     total_watts: list[float] = []
+    # PRE-re-clamp corrected site total per slot (sum of cor_clamped * factor,
+    # BEFORE the second AC clamp). Its difference from ``total_watts`` reveals
+    # per slot whether the re-clamp bit; the coordinator's day-ahead headline
+    # strip reads it (SPEC §8). Always populated, aligned to ``slot_starts``.
+    corrected_unclamped_watts: list[float] = []
     plane_series: dict[str, list[float]] = {p.name: [] for p in planes}
     # Per-plane beam / diffuse DC watts (CORRECTED, post-clamp) + kc, aligned.
     beam_series: dict[str, list[float]] = {p.name: [] for p in planes}
@@ -504,6 +509,7 @@ def compute_forecast(
     def _append_zero_slot() -> None:
         raw_total_watts.append(0.0)
         total_watts.append(0.0)
+        corrected_unclamped_watts.append(0.0)
         kc_series.append(0.0)
         # No production => no ungrouped contribution; the group ceiling is the
         # slot's ceiling (band watts are zero here anyway, so this only keeps the
@@ -662,6 +668,11 @@ def compute_forecast(
 
         raw_total_watts.append(raw_slot_total)
         total_watts.append(cor_slot_total)
+        # Pre-re-clamp corrected total: the factored per-plane watts summed
+        # BEFORE the second clamp. On a slot where the up-corrected curve hit the
+        # AC ceiling this exceeds ``cor_slot_total`` (the served, re-clamped
+        # total); the coordinator uses the gap to detect a clamped slot (SPEC §8).
+        corrected_unclamped_watts.append(sum(cor_factored.values()))
 
         # Physical AC ceiling for this slot's band cap: group limits + the
         # ceiling-free (ungrouped) planes' corrected watts (SPEC §6/§10).
@@ -760,6 +771,7 @@ def compute_forecast(
         raw_total_watts=tuple(raw_total_watts),
         raw_hourly_wh=raw_hourly_wh,
         raw_daily_kwh=raw_daily_kwh,
+        corrected_unclamped_watts=tuple(corrected_unclamped_watts),
         correction_source=hk.correction_source,
         p10_watts=p10_watts,
         p50_watts=p50_watts,

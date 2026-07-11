@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ha-dev",
+      "runtimeExecutable": ".venv/Scripts/hass.exe",
+      "runtimeArgs": ["-c", ".ha-dev"],
+      "port": 8123
+    }
+  ]
+}

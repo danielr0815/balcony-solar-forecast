@@ -903,6 +903,91 @@ def test_build_data_carries_learner_keys():
     assert status[LEARNER_LAYER_FAST] == LEARNER_STATUS_ACTIVE
 
 
+# ---------------------------------------------------------------------------
+# MED-1: energy_today headline vs the AC re-clamp (_dayahead_today_kwh)
+# ---------------------------------------------------------------------------
+
+
+def _one_slot_result(
+    *, total_w: float, prereclamp_w: float | None, start: datetime
+) -> ForecastResult:
+    """A single-slot ForecastResult with an explicit pre-re-clamp total.
+
+    ``prereclamp_w`` is ``corrected_unclamped_watts[0]``; pass None to leave the
+    field empty (the legacy / older-cached case).
+    """
+    return ForecastResult(
+        slot_starts=(start,),
+        total_watts=(total_w,),
+        plane_results=(PlaneResult(name="M1", watts=(total_w,)),),
+        hourly_wh={start.isoformat(): total_w * 0.25},
+        corrected_unclamped_watts=() if prereclamp_w is None else (prereclamp_w,),
+    )
+
+
+def test_dayahead_today_clamped_slot_uses_ceiling_not_divided():
+    """A slot where the re-clamp bit contributes the served ceiling UNCHANGED —
+    the intraday factor never reached it, so dividing it out would understate."""
+    c = _make_coordinator()
+    c._intraday_scalar = 1.3  # fast learner active; factor at age 0 == 1.3
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    # Served 800 W (the ceiling); pre-re-clamp 1040 W == the factor really bit.
+    result = _one_slot_result(total_w=800.0, prereclamp_w=1040.0, start=start)
+    energy = c._dayahead_today_kwh(result, now=start)
+    # Contributes the ceiling: 800 W * 0.25 h / 1000 == 0.2 kWh.
+    assert energy == pytest.approx(0.2)
+    # NOT the understated divided value (800 / 1.3 * 0.25 / 1000 == 0.154).
+    assert energy != pytest.approx(0.154)
+
+
+def test_dayahead_today_unclamped_slot_divides_factor_out():
+    """An unclamped slot (no re-clamp gap) still strips the intraday factor by
+    dividing, exactly as before MED-1."""
+    c = _make_coordinator()
+    c._intraday_scalar = 1.3
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    # prereclamp == served -> the factor reached the served value -> divide it out.
+    result = _one_slot_result(total_w=800.0, prereclamp_w=800.0, start=start)
+    energy = c._dayahead_today_kwh(result, now=start)
+    assert energy == pytest.approx(round(800.0 / 1.3 * 0.25 / 1000.0, 3))
+
+
+def test_dayahead_today_down_factor_unchanged():
+    """factor <= 1 never lifts past the ceiling, so prereclamp == served every
+    slot -> the divide path applies, headline unchanged from the legacy code."""
+    c = _make_coordinator()
+    c._intraday_scalar = 0.9  # down-correction; factor at age 0 == 0.9
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    result = _one_slot_result(total_w=800.0, prereclamp_w=800.0, start=start)
+    energy = c._dayahead_today_kwh(result, now=start)
+    assert energy == pytest.approx(round(800.0 / 0.9 * 0.25 / 1000.0, 3))
+
+
+def test_dayahead_today_empty_prereclamp_falls_back_to_divide():
+    """An older cached result with no corrected_unclamped_watts cannot tell a
+    clamped slot apart, so it falls back to the legacy divide-always path."""
+    c = _make_coordinator()
+    c._intraday_scalar = 1.3
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    # total looks like a ceiling but the field is empty -> divide anyway.
+    result = _one_slot_result(total_w=800.0, prereclamp_w=None, start=start)
+    energy = c._dayahead_today_kwh(result, now=start)
+    assert energy == pytest.approx(round(800.0 / 1.3 * 0.25 / 1000.0, 3))
+
+
+def test_dayahead_today_no_groups_bit_identical_to_legacy():
+    """A site with no inverter groups never clamps (prereclamp == served), so its
+    headline equals the pre-MED-1 divide-always result bit-for-bit."""
+    c = _make_coordinator()
+    c._intraday_scalar = 1.3
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    served = 617.3
+    result = _one_slot_result(total_w=served, prereclamp_w=served, start=start)
+    energy = c._dayahead_today_kwh(result, now=start)
+    # Legacy behaviour: divide the factor out of every current-day slot.
+    assert energy == pytest.approx(round(served / 1.3 * 0.25 / 1000.0, 3))
+
+
 def test_learner_status_layer_strings():
     """_learner_status returns the layer-keyed ENUM strings (coordinator:674)."""
     c = _make_coordinator()

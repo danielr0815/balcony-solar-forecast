@@ -545,6 +545,41 @@ def test_de_and_en_entity_and_service_keys_match() -> None:
     assert set(de["services"]) == set(en["services"])
 
 
+def _translation_key_paths(obj, prefix: str = "") -> set[str]:
+    """All dotted KEY paths in a nested translation dict (keys only, no values).
+
+    Recurses into dicts; a non-dict value (a translated string) is a leaf, so the
+    comparison is purely structural — the German and English *values* differ by
+    design, only their key trees must match.
+    """
+    paths: set[str] = set()
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            path = f"{prefix}.{key}" if prefix else key
+            paths.add(path)
+            paths |= _translation_key_paths(value, path)
+    return paths
+
+
+def test_de_and_en_full_key_structure_matches() -> None:
+    """Complete recursive key-tree equality between en.json and de.json.
+
+    Supplements the section-scoped parity checks above with ONE comparison over
+    the entire nested structure, so every section is covered — including
+    ``entity.select`` / ``entity.date``, ``issues``, per-service ``fields`` and
+    the ``config`` / ``options`` step ``data`` labels. A key added to one locale
+    but not the other (an untranslated surface) fails here.
+    """
+    de = json.loads((_COMPONENT_DIR / "translations" / "de.json").read_text("utf-8"))
+    en = json.loads((_COMPONENT_DIR / "translations" / "en.json").read_text("utf-8"))
+    de_paths = _translation_key_paths(de)
+    en_paths = _translation_key_paths(en)
+    only_de = de_paths - en_paths
+    only_en = en_paths - de_paths
+    assert not only_de, f"keys only in de.json: {sorted(only_de)}"
+    assert not only_en, f"keys only in en.json: {sorted(only_en)}"
+
+
 # --------------------------------------------------------------------------
 # icons.json (quality-scale): entity icons belong in the central icons file,
 # keyed by translation_key, not hardcoded as _attr_icon. Every migrated entity

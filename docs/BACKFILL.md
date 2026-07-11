@@ -28,7 +28,8 @@ prints a loud warning that the data is *analysis, not as-issued forecast*
 
 ## Prerequisites
 
-- Python **3.14** (or any 3.11+) on the dev machine, with `aiohttp` installed:
+- **Python 3.13+** on the dev machine (matching `pyproject`'s
+  `requires-python`), with `aiohttp` installed:
 
   ```sh
   py -3.14 -m pip install aiohttp
@@ -145,7 +146,8 @@ carry a small `n` (capped at `BOOTSTRAP_MAX_BIN_N`), so the first weeks of live
 If your install is not the shipped reference site, export the site object your
 config flow stored (the `SiteConfig.from_dict` shape: `latitude`, `longitude`,
 `planes[]` with `name`/`azimuth_deg`/`tilt_deg`/`wp`/`efficiency`/`horizon`/
-`actual_entity`, and `groups[]`) to a JSON file and pass `--site site.json`.
+`actual_entity`/`shade_group`/`ross_coeff`, and `groups[]`) to a JSON file and
+pass `--site site.json`.
 Each plane needs its `actual_entity` (the LTS statistic id) for the measured
 side; planes without one are skipped.
 

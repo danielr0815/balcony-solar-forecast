@@ -121,14 +121,24 @@ battery_manager"). Konsequenzen:
 - **Generik statt Hardcoding:** Ebenen (Azimut/Neigung/Wp/η), Horizont-
   tabellen, WR-Gruppen (Ports→AC-Limit) und Ist-Mess-Entitäten sind
   Konfiguration; nichts ist an Hoymiles oder diesen Standort gebunden.
+- **Marken-Icon lokal:** die PNGs unter `custom_components/<domain>/brand/`
+  (`icon.png`/`icon@2x.png`/`logo.png`/`logo@2x.png`) werden vom **lokalen
+  Brands-Proxy** von HA ≥ 2026.3 ausgeliefert — **bewusst keine** Einreichung
+  ins `home-assistant/brands`-Repo (Betreiber-Entscheid F-L4), sodass die
+  Custom-Integration ihr Icon ohne Upstream-PR mitbringt.
 
 Pipeline (reine Funktionen über 15-min-Slots × N Ebenen, <50 ms/Lauf):
 
 1. **fetcher.py** — 1 Call/30 min: `minutely_15=shortwave_radiation,
    direct_normal_irradiance,diffuse_radiation,temperature_2m` +
    `hourly=cloud_cover_low/mid/high,visibility,snowfall,snow_depth`,
-   `models=icon_seamless`, `forecast_days=3` (ICON-D2 nativ 15-min für
-   Mitteleuropa, live verifiziert). Payload-**Schema**-Validierung (nicht
+   `models=icon_seamless`, `forecast_days=4` (ICON-D2 nativ 15-min für
+   Mitteleuropa, live verifiziert) — heute/morgen/d2 **plus ein Puffertag**,
+   weil der Fetch mit `timezone=UTC` läuft und `forecast_days` UTC-Tage ab dem
+   aktuellen UTC-Datum zählt: am lokalen Abend (UTC+2) läge der lokale d2 sonst
+   teils jenseits eines 3-UTC-Tage-Fensters (live beobachtet: d2 = 0,0 kWh um
+   01:00 lokal), der Extratag deckt den lokalen 3-Tage-Horizont immer ab.
+   Payload-**Schema**-Validierung (nicht
    nur HTTP-Status), Last-Good-Cache **im Store** (übersteht Neustart),
    Backoff mit Jitter.
 2. **solpos.py** — NOAA-Sonnenstand (geschlossene Form, <0,1°).
@@ -244,7 +254,12 @@ mit dem Pool); eine nach einem eigenen Mitglied benannte Gruppe ist erlaubt.
 **Alt-Gruppenkanäle** aus der früheren (v0.12.0) Merge-Migration werden als
 **Legacy-Quelle mitgelesen** — ein vorhandener Gruppenkanal fließt zusätzlich in
 den Pool seiner Mitglieder ein, sodass seine bereits gepoolte Evidenz
-weiterzählt, bis sie von den kanalweisen Live-Daten verdünnt ist. Das
+weiterzählt, bis sie von den kanalweisen Live-Daten verdünnt ist. **Caveat zur
+verlustfreien Reversibilität:** die kanalweise Per-Ebenen-Historie (seit v0.13)
+bleibt beim Auflösen einer Gruppe stets erhalten; nur ein **vor v0.13 gemischter
+Gruppen-Blob** (nach der Gruppe benannt, nicht nach einer Ebene) wird beim
+Auflösen verwaist und unlesbar — wiederherstellbar per `rollback_learners` oder
+durch erneutes Gruppieren unter demselben Namen. Das
 **Schattenprofil-Diagramm zeigt beide Sichten** (Gruppen- und Einzelsicht per
 Umschalter), damit der Betreiber die individuelle Karte jedes Moduls gegen die
 gepoolte vergleichen und über Gruppierungen entscheiden kann.
@@ -270,8 +285,9 @@ Verhältnis (τ ≈ 90 min) gemessen/prognostiziert der letzten 2–4 h,
 **im k_c-Raum konditioniert** (Geometrie/Saison herausnormiert), auf die
 nächsten ~6 h abklingend angewandt, Clamp [0,25 … 2,5], nach HA-Neustart
 Re-Init auf 1,0 (nie alten Zustand laden). Rettet Nebelmorgen ohne
-falsche Geometrie. Optional später: 1 RLS-Bias-Skalar je
-(Wolkenklasse × Tagesabschnitt) für Day-ahead.
+falsche Geometrie. Day-ahead-Bias (seit v0.2.0 implementiert, per Default
+aktiv): 1 RLS-Bias-Skalar je (Wolkenklasse × Tagesabschnitt), nächtlich
+trainiert und über den Options-Flow abschaltbar.
 Alle Lerner-Korrekturen (Intraday-Skalar, Day-ahead-Bias) und die
 Quantilbänder (P10/P50/P90) werden als **letzte Stufe erneut auf das
 WR-AC-Limit geclampt** (`clamp_groups` läuft nach dem Slot-Faktor ein
@@ -286,7 +302,10 @@ haben keine konfigurierte Obergrenze und passieren beide Clamps unverändert.
   doppelt laufbar).
 - **Drift-Monitor**: rollierende 7-Tage-MAE korrigiert vs. reine Physik;
   verliert der Lerner 7 Tage in Folge → Auto-Abschaltung + HA-Repair-
-  Issue; letzte 3 Lernstände für Rollback; Store validate-and-clamp beim
+  Issue; letzte 10 Lernstände für Rollback (`LEARNER_SNAPSHOT_RING`, bewusst
+  größer als der 7-Tage-Verluststreak, damit ein Rollback stets auf einen
+  Stand VOR dem Streak zugreift; `DRIFT_ROLLBACK_SNAPSHOTS = 3` ist ein
+  Legacy-Alias); Store validate-and-clamp beim
   Laden (korrupt ⇒ Faktoren 1,0, nie Setup-Crash). Der nächtliche
   Snapshot hält zusätzlich die reine Schattenkarten-Kurve fest
   (Slow ∘ Physik, ohne Day-ahead-Faktor); ein Verlusttag wird der
@@ -310,8 +329,11 @@ Tagesabschnitt); Nebelklasse = Sicht < 1000 m ∨ (cloud_cover_low > 85 %
 Fenster = QUANTILE_RING_DAYS relativ zum Trainingstag) und ein Band verlangt
 zusätzlich Evidenz aus mindestens QUANTILE_MIN_DAYS **verschiedenen Tagen** —
 korrelierte Stundensamples eines Tages sind keine unabhängigen Beobachtungen;
-alt-ungestempelte Samples zählen über die Per-Tag-Cap-Untergrenze mit. Adaptive
-konforme Nachführung für 80-%-Abdeckung. Nutzung durch Konsumenten:
+alt-ungestempelte Samples zählen über die Per-Tag-Cap-Untergrenze mit. Die
+Umsetzung ist eine **reine empirische historische Simulation** (empirische
+Multiplikatoren aus dem Ring, Cold-Start-Kollaps auf P50 statt Fake-Spreizung) —
+keine adaptive konforme Nachführung; die maßgebliche Beschreibung des
+ausgelieferten Verfahrens steht in §14.2. Nutzung durch Konsumenten:
 P50 = Planung; P10 für konservative Reserven; P90 fürs Load-Timing
 (Überschusslasten so spät wie möglich, ohne Export).
 Der **Previous-Runs-API-Backfill** (geliefert in **Phase 2**, §9):
@@ -336,7 +358,21 @@ Fossibot-Verhalten).
   bewusst kompatibel zum Muster der bestehenden Integration, sodass
   battery_manager **ohne Code-Änderung** nur seine drei Entity-Picker
   umstellt. Dazu `power_production_now` (W) und Diagnose (Baseline-MAE,
-  Degradationsstatus, Lernstatus).
+  Degradationsstatus, Lernstatus). Die Heute-Headline ist eine **stabile
+  Day-ahead-Erwartung**: der transiente Intraday-Skalar wird aus den Slots des
+  aktuellen Tages wieder herausgerechnet (die servierte `watts`/`wh_period`-Kurve
+  behält ihn). **Clamp-Interaktion:** auf einem Slot, dessen hochkorrigierte
+  Gruppenleistung die WR-AC-Obergrenze trifft (der Re-Clamp greift, servierter
+  Wert = Deckel), wird der Skalar NICHT herausdividiert, sondern der Deckelwert
+  unverändert übernommen — sonst würde eine nie angewandte Korrektur wieder
+  abgezogen und die Headline untertrieben (bis Faktor 2,5).
+- **Ist-Messung:** `measured_dc_power_total` (W, `MEASUREMENT` → Langzeit-
+  statistik) — die **ereignisgesteuerte Summe** der `actual_entity`-Sensoren
+  aller Ebenen (abonniert die Quellsensoren direkt, rechnet bei jeder Änderung
+  neu, **unabhängig vom Prognose-Zyklus**) und bleibt verfügbar, solange
+  mindestens eine Quelle meldet (Grundwahrheit muss auch bei degradierter
+  Prognose weiterlaufen). Wird **nur erzeugt, wenn** mindestens eine Ebene eine
+  `actual_entity` konfiguriert hat.
 - **Volle Kurve:** 15-min-`watts`- und `wh_period`-Attribute auf den
   Energy-Sensoren (per `exclude_attributes` vom Recorder ausgeschlossen)
   **und** Service-with-Response `balcony_solar_forecast.get_forecast`
@@ -555,11 +591,15 @@ klassifiziert diese bereits, wird wiederverwendet). Rollierendes Fenster
   heutige Wert;
 - die **Ist**-Zahl ist die Summe der 8 Modul-Ist-Werte aus dem Actuals-Ring.
 
-**Sensorik:** `engine_daily_kwh_mae`, je Vergleich `…daily_kwh_mae`,
-`engine_vs_best_baseline_pct` (positiv = Motor besser als bester Baseline),
-`binary_sensor.kill_gate_passed` (Motor ≥ `SCOREBOARD_GATE_MARGIN`, Default
-**0,10**, besser auf Tages-kWh über ein **volles** Fenster; `None`, solange das
-Fenster nicht voll ist), plus eine **Diagnose-Aufschlüsselung je Wetterstratum**.
+**Sensorik:** die ausgelieferten Objekt-IDs sind **unpräfixiert** —
+`daily_kwh_mae` und `vs_best_baseline_pct` (positiv = Motor besser als bester
+Baseline), je Vergleich `comparison_daily_kwh_mae_<slug>`: der Geräte-Slug trägt
+bereits `balcony_solar_forecast`, das Präfix-Weglassen vermeidet bewusst den
+`…_forecast_*`-Stutter (die internen DATA-Keys der Scoreboard-Summary behalten
+dagegen die `engine_*`-Form). Dazu `binary_sensor.kill_gate_passed` (Motor ≥
+`DEFAULT_SCOREBOARD_GATE_MARGIN`, Default **0,10**, besser auf Tages-kWh über ein
+**volles** Fenster; `None`, solange das Fenster nicht voll ist), plus eine
+**Diagnose-Aufschlüsselung je Wetterstratum**.
 
 **Vergleichs-Sensoren generisch + konfigurierbar** (`CONF_COMPARISON_SENSORS`:
 Liste von `{name, daily_entity}`), **leer** ausgeliefert (D-P9). Die zwei
@@ -591,7 +631,10 @@ Markdown mit dem Kill-Gate-Verdikt. Die Shademap-Polarsicht als bestmögliche
 Bordmittel-Darstellung (kompakte Transmittanz-Tabelle je Kanal via Template/
 Markdown) **plus** die rohen Polardaten über den bestehenden
 `dump_shademap`-Service (dokumentiert, dass daraus ein reicherer Polarplot
-gerendert werden kann). Installationsschritte in `docs/DASHBOARD.md`.
+gerendert werden kann). Installationsschritte in `docs/DASHBOARD.md`. Das per
+`install_dashboard` **generierte** Dashboard bettet an Stelle des
+per-Modul-History-Graphs die gebündelte `custom:balcony-power-history-card`
+(§15.4) ein; das kopierbare Referenz-YAML bleibt bewusst reine Bordmittel.
 
 ### 14.4 Store-Schema v3 (additiv über v2)
 
@@ -624,7 +667,11 @@ Shrinkage geblendet mit der gelernten Shademap), plus zwei Horizontlinien
 
 Attribute des Sensors (Recorder-ausgeschlossen wie die Energie-Kurven):
 `time`/`azimuth`/`sun_elevation`/`transmittance` (ein Eintrag je
-Tageslicht-Sample der Sonnenbahn) und
+Tageslicht-Sample der Sonnenbahn) — `transmittance` ist die **gepoolte**
+effektive τ; parallel dazu trägt `transmittance_individual` (v0.13) die τ des
+**eigenen** Kanals des Moduls allein, sodass der Betreiber die Einzel- gegen die
+Gruppensicht vergleichen kann (leere Liste bei ungruppierter Ebene, dann
+== gepoolte Sicht — formstabil) — und
 `horizon_azimuth`/`static_horizon`/`shade_horizon` (Horizontlinien auf einem
 Azimut-Raster über die Tageslicht-Spanne). Zusammenfassung:
 `shaded_fraction`, `mean_transmittance`, `has_learned_data`/`learned_bins`
@@ -665,18 +712,32 @@ HACS-Artefakt (`dashboards/shade_profile_apexcharts.yaml`,
 eingefärbt (Schwellen an `SHADE_PROFILE_TAU_THRESHOLD` ausgerichtet), beide
 Horizontlinien überlagert. Details in `docs/DASHBOARD.md` §4b.
 
-Seit v0.7 liefert die Integration zusätzlich eine **eigene, abhängigkeitsfreie
-Lovelace-Karte** mit (`custom:balcony-shade-profile-card`, vanilla
-`HTMLElement` + programmatisches SVG, keine HACS-Frontend-Installation nötig):
-das Frontend-JS wird unter `FRONTEND_URL`
-(`/balcony_solar_forecast/frontend/shade_profile_card.js`) als statischer Pfad
-ausgeliefert und — im Lovelace-Storage-Modus — beim Start automatisch als
-Dashboard-Ressource registriert (Modul-Typ), sodass die Karte direkt im
-Kartenwähler erscheint. Die Ressourcen-URL ist per `?v=<INTEGRATION_VERSION>`
-cache-gebustet (einziger Cache-Busting-Mechanismus); im YAML-Lovelace-Modus wird
-statt der Registrierung ein INFO-Hinweis mit der manuell einzutragenden
-Ressourcen-Zeile geloggt. Die Registrierung ist ein Zusatznutzen, nie ein
-Setup-Blocker: jeder Fehler wird geschluckt und protokolliert.
+Seit v0.7 liefert die Integration **zwei eigene, abhängigkeitsfreie
+Lovelace-Karten** aus (vanilla `HTMLElement` + programmatisches SVG, keine
+HACS-Frontend-Installation nötig), geführt in der `_frontend._CARDS`-Liste:
+`custom:balcony-shade-profile-card`
+(`/balcony_solar_forecast/frontend/shade_profile_card.js`) und
+`custom:balcony-power-history-card`
+(`/balcony_solar_forecast/frontend/power_history_card.js`). **Beide Karten**
+werden unter dem gemeinsamen Prefix `/balcony_solar_forecast/frontend/` als
+statische Pfade ausgeliefert und — im Lovelace-Storage-Modus — beim Start
+automatisch je als Dashboard-Ressource registriert (Modul-Typ), sodass sie
+direkt im Kartenwähler erscheinen. Jede Ressourcen-URL ist per
+`?v=<INTEGRATION_VERSION>` cache-gebustet (einziger Cache-Busting-Mechanismus);
+im YAML-Lovelace-Modus wird statt der Registrierung ein INFO-Hinweis mit den
+manuell einzutragenden Ressourcen-Zeilen geloggt. Die Registrierung ist ein
+Zusatznutzen, nie ein Setup-Blocker: jeder Fehler wird geschluckt und
+protokolliert.
+
+Die **Power-History-Karte** (`custom:balcony-power-history-card`) zeigt im Stil
+des Energie-Dashboards **gestapelte stündliche Balken der gemessenen Produktion
+je Modul** (aus den Recorder-Stundenstatistiken der `actual_entity`-Sensoren),
+überlagert von einer **gestrichelten Prognoselinie** (aus dem `wh_period`-Attribut
+des Heute-Sensors); ein **Hover-Panel** zeigt je Stunde die Werte je Modul plus
+Gesamt und Prognose. Die Modulkanäle werden über die
+`sources`/`source_names`-Attribute von `measured_dc_power_total`
+**auto-discovered** (keine YAML-Konfiguration der Kanäle nötig); die Karte
+aktualisiert sich alle **5 min**.
 
 Seit v0.9 fixiert die Karte ihre x-Achse auf die **jahresstabile**
 Tageslicht-Azimutspanne (Minimum/Maximum aus beiden Sonnenwenden, Python-seitig

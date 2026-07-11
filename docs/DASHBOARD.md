@@ -88,7 +88,7 @@ If your entity ids differ (multiple installs, renamed entities), fix the
 action above, which resolves them for you. Any entity that does not exist yet
 simply renders as *unknown* — the dashboard never errors on a missing one.
 
-The scoreboard sensors (`engine_daily_kwh_mae`, `engine_vs_best_baseline_pct`,
+The scoreboard sensors (`daily_kwh_mae`, `vs_best_baseline_pct`,
 the per-comparison MAE sensors, `kill_gate_passed`) only appear after v0.4 is
 installed **and** at least one nightly scoreboard run has completed. Until then
 they read *unknown*, and the kill-gate card shows the "window not full yet"
@@ -152,6 +152,12 @@ comparison_sensors:
 
 ## 3. What the dashboard shows
 
+This section describes the **generated** dashboard from the `install_dashboard`
+action (§1a), which embeds the bundled custom cards. The copy-paste YAML (§1b)
+deliberately stays **built-in cards only** — a per-module `history-graph` in
+place of the power-history card and no custom cards — so it renders on a bare HA
+without the bundled frontend resources.
+
 - **Kill-gate verdict** (markdown) — PASSED / not passed / window-not-full,
   derived from `binary_sensor.…_kill_gate_passed` and the engine-vs-baseline
   percent. This is the gate the whole plan hangs on (SPEC §9/§10): once it is
@@ -159,7 +165,7 @@ comparison_sensors:
   the engine sensors. **The battery_manager cutover stays deferred until then**
   (D-P11).
 - **Engine vs best baseline** (gauge) — bound to
-  `engine_vs_best_baseline_pct`; positive = engine better on daily-kWh MAE.
+  `sensor.…_vs_best_baseline_pct`; positive = engine better on daily-kWh MAE.
 - **Skill scoreboard** (entities) — engine daily-kWh MAE, engine hourly MAE,
   engine-vs-best percent, plus each configured comparison's daily-kWh MAE.
 - **Forecast vs. measured (site power)** (history-graph) — the instantaneous
@@ -291,9 +297,13 @@ except through the module/date controls.
 > ```yaml
 > lovelace:
 >   resources:
->     - url: /balcony_solar_forecast/frontend/shade_profile_card.js?v=0.7.0
+>     - url: /balcony_solar_forecast/frontend/shade_profile_card.js?v=<version>
 >       type: module
 > ```
+>
+> The logged URL already carries the current integration version as the
+> `?v=<version>` cache-buster (the integration stamps it automatically) — copy
+> the line the log prints rather than a fixed version.
 
 ### Alternative: the ApexCharts card (HACS)
 
@@ -364,9 +374,13 @@ tweak the look. It changes no state.
 > ```yaml
 > lovelace:
 >   resources:
->     - url: /balcony_solar_forecast/frontend/power_history_card.js?v=0.10.0
+>     - url: /balcony_solar_forecast/frontend/power_history_card.js?v=<version>
 >       type: module
 > ```
+>
+> The logged URL already carries the current integration version as the
+> `?v=<version>` cache-buster (the integration stamps it automatically) — copy
+> the line the log prints rather than a fixed version.
 
 ---
 
