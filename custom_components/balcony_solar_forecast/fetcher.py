@@ -30,6 +30,10 @@ import random
 from datetime import UTC, datetime, timedelta
 
 from .const import (
+    ENSEMBLE_FORECAST_DAYS,
+    ENSEMBLE_GHI_VAR,
+    ENSEMBLE_MODEL,
+    ENSEMBLE_URL,
     OPEN_METEO_HOURLY,
     OPEN_METEO_MINUTELY_15,
     OPEN_METEO_MODEL,
@@ -287,6 +291,104 @@ def parse_weather(payload: dict) -> WeatherSeries:
 
 
 # ---------------------------------------------------------------------------
+# Ensemble weather (v0.16, SPEC §6) — separate endpoint, pure URL + parse
+# ---------------------------------------------------------------------------
+
+
+def build_ensemble_params(latitude: float, longitude: float) -> dict[str, str]:
+    """Build the Open-Meteo ENSEMBLE query params (v0.16, SPEC §6).
+
+    Only ``shortwave_radiation`` is requested (the members' GHI); the beam /
+    diffuse recomposition per member is second-order and deliberately skipped —
+    the ensemble contributes a per-slot RELATIVE spread, not a full engine pass.
+    ``timezone=UTC`` matches the main fetch so stamps share one convention.
+    """
+    return {
+        "latitude": _fmt_coord(latitude),
+        "longitude": _fmt_coord(longitude),
+        "hourly": ENSEMBLE_GHI_VAR,
+        "models": ENSEMBLE_MODEL,
+        "forecast_days": str(int(ENSEMBLE_FORECAST_DAYS)),
+        "timezone": "UTC",
+    }
+
+
+def _ensemble_member_keys(hourly: dict) -> list[str]:
+    """Every ``shortwave_radiation*`` array key in the ensemble hourly block.
+
+    The live shape (recorded 2026-07-11, icon_seamless) carries the control
+    member under the bare ``shortwave_radiation`` key plus the perturbed
+    ``shortwave_radiation_member01`` .. ``_member39`` — ALL are treated as
+    ensemble members (40 total), so the control run counts as one member.
+    """
+    return [
+        k for k in hourly
+        if isinstance(k, str) and k.startswith(ENSEMBLE_GHI_VAR)
+    ]
+
+
+def validate_ensemble(payload: object) -> None:
+    """Validate the SHAPE of an Open-Meteo ENSEMBLE response (not just HTTP 200).
+
+    Requires the ``hourly`` block, a non-empty ``time`` array, at least one
+    ``shortwave_radiation*`` member array, and every member array to match the
+    ``time`` length. Raises a non-retryable ``FetchError`` on any structural
+    problem — a malformed body will not fix itself on retry. Value contents
+    (None allowed) are handled at parse time. Mirrors ``validate_payload`` so the
+    ensemble fetch degrades exactly like the main fetch.
+    """
+    if not isinstance(payload, dict):
+        raise FetchError(
+            "Open-Meteo ensemble payload is not a JSON object", retryable=False
+        )
+    hourly = _require(payload, "hourly")
+    times = _require_array(hourly, "time", None)
+    if not times:
+        raise FetchError("Open-Meteo ensemble hourly.time is empty", retryable=False)
+    n = len(times)
+    member_keys = _ensemble_member_keys(hourly)
+    if not member_keys:
+        raise FetchError(
+            "Open-Meteo ensemble carries no shortwave_radiation members",
+            retryable=False,
+        )
+    for key in member_keys:
+        _require_array(hourly, key, n)
+
+
+def parse_ensemble(payload: dict) -> dict[str, list[float]]:
+    """Parse a validated ensemble payload into ``{iso_utc_hour_start: [member GHI]}``.
+
+    Each hourly stamp marks the interval END (backward mean; verified against the
+    main /forecast API which stamps identically), so the key is shifted −1 h to
+    the interval START — matching ``WeatherSlot.start`` hour keys, so the member
+    GHI of an hour lines up with the deterministic GHI aggregated from the 15-min
+    WeatherSeries for the SAME hour. Every ``shortwave_radiation*`` array (the
+    control member under the bare key plus the perturbed ``_memberNN``) is one
+    member; a None / non-numeric member value at an hour is dropped from that
+    hour's list (so the per-hour member count can vary), and a negative GHI is
+    clamped to 0. Never trusts an unchecked body (validates first). Returns a
+    fresh dict; the caller keys the deterministic GHI the same way.
+    """
+    validate_ensemble(payload)  # defensive: parse never trusts an unchecked body
+    hourly = payload["hourly"]
+    times = hourly["time"]
+    member_keys = _ensemble_member_keys(hourly)
+    out: dict[str, list[float]] = {}
+    for i, t in enumerate(times):
+        # Stamp = interval end (backward mean); hour start = stamp − 1 h.
+        hour_start = _parse_time(t) - timedelta(hours=1)
+        members: list[float] = []
+        for key in member_keys:
+            v = _to_float(hourly[key][i])
+            if v is None:
+                continue
+            members.append(max(0.0, v))
+        out[hour_start.isoformat()] = members
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Network (aiohttp) — imported lazily so the pure parts test without it
 # ---------------------------------------------------------------------------
 
@@ -319,9 +421,16 @@ class OpenMeteoFetcher:
     ``async_get_clientsession``); the fetcher never owns or closes it.
     """
 
-    def __init__(self, session, *, url: str = OPEN_METEO_URL) -> None:
+    def __init__(
+        self,
+        session,
+        *,
+        url: str = OPEN_METEO_URL,
+        ensemble_url: str = ENSEMBLE_URL,
+    ) -> None:
         self._session = session
         self._url = url
+        self._ensemble_url = ensemble_url
 
     async def async_fetch(
         self, latitude: float, longitude: float, forecast_days: int
@@ -343,6 +452,21 @@ class OpenMeteoFetcher:
         """Fetch + validate and return the raw payload (for the last-good store)."""
         return await self._async_fetch_payload(latitude, longitude, forecast_days)
 
+    async def async_fetch_ensemble_raw(
+        self, latitude: float, longitude: float
+    ) -> dict:
+        """Fetch + SHAPE-validate one ENSEMBLE payload (v0.16, SPEC §6).
+
+        Shares the main fetch's bounded-retry / backoff / 429 machinery but
+        targets the ensemble endpoint and validates the ensemble shape. Raises
+        ``FetchError`` on failure — the coordinator catches it and degrades to the
+        learned bands, never touching the main degradation ladder.
+        """
+        params = build_ensemble_params(latitude, longitude)
+        return await self._fetch_validated(
+            params, validate_ensemble, url=self._ensemble_url
+        )
+
     async def _async_fetch_payload(
         self, latitude: float, longitude: float, forecast_days: int
     ) -> dict:
@@ -357,14 +481,30 @@ class OpenMeteoFetcher:
         cadence (SPEC §7). Non-retryable errors (other 4xx, malformed body)
         fail fast.
         """
+        params = build_params(latitude, longitude, forecast_days)
+        return await self._fetch_validated(params, validate_payload)
+
+    async def _fetch_validated(
+        self, params: dict[str, str], validate, *, url: str | None = None
+    ) -> dict:
+        """Shared bounded-retry GET+validate loop (main + ensemble endpoints).
+
+        ``url`` None targets ``self._url`` (the main /forecast endpoint) via the
+        two-arg ``_request_once`` call the retry tests drive; a non-None ``url``
+        (the ensemble endpoint) is passed through. ``validate`` is the SHAPE
+        validator to run on each success body. See ``_async_fetch_payload`` for
+        the retry / Retry-After semantics.
+        """
         import aiohttp  # lazy: only present inside Home Assistant
 
-        params = build_params(latitude, longitude, forecast_days)
         last_error: FetchError | None = None
         for attempt in range(1, MAX_TRIES + 1):
             try:
-                payload = await self._request_once(aiohttp, params)
-                validate_payload(payload)
+                if url is None:
+                    payload = await self._request_once(aiohttp, params)
+                else:
+                    payload = await self._request_once(aiohttp, params, url=url)
+                validate(payload)
                 return payload
             except FetchError as err:
                 last_error = err
@@ -388,12 +528,18 @@ class OpenMeteoFetcher:
         # Unreachable: the loop either returns or raises.
         raise last_error or FetchError("Open-Meteo fetch failed")
 
-    async def _request_once(self, aiohttp, params: dict[str, str]) -> dict:
-        """One HTTP GET; classify errors into retryable / non-retryable."""
+    async def _request_once(
+        self, aiohttp, params: dict[str, str], *, url: str | None = None
+    ) -> dict:
+        """One HTTP GET; classify errors into retryable / non-retryable.
+
+        ``url`` defaults to the main endpoint (``self._url``); the ensemble fetch
+        passes its own endpoint through.
+        """
         timeout = aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT_SECONDS)
         try:
             async with self._session.get(
-                self._url, params=params, timeout=timeout
+                url or self._url, params=params, timeout=timeout
             ) as resp:
                 status = resp.status
                 if status >= 500:

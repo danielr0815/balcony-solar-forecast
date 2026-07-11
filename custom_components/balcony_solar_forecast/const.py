@@ -779,3 +779,59 @@ ATTR_SP_STATIC_HORIZON = "static_horizon"   # [deg] config horizon per grid azim
 # geometry (a function of lat/lon/year only) — excluded from the recorder too.
 ATTR_SP_AXIS_AZ_MIN = "axis_azimuth_min"    # [deg] min daylight azimuth over the year
 ATTR_SP_AXIS_AZ_MAX = "axis_azimuth_max"    # [deg] max daylight azimuth over the year
+
+
+# ===========================================================================
+# v0.16 CONTRACT: ENSEMBLE-WEATHER UNCERTAINTY BANDS (SPEC §6)
+# ---------------------------------------------------------------------------
+# Today's learned P10/P50/P90 (core/quantiles.py) come from a residual ring per
+# (cloud class x day part): well calibrated ON AVERAGE per weather class, but
+# BLIND to TODAY's specific forecast uncertainty. Open-Meteo's ensemble API
+# serves N perturbed members whose spread IS the day's weather uncertainty. We
+# fold a per-slot RELATIVE spread (member GHI vs the deterministic GHI) into the
+# learned band by ENVELOPE-MAX — the wider band wins per slot, never multiplied,
+# so the weather share already inside the learned residuals is not double
+# counted. The ensemble is NEVER load-bearing: P50 / headline / scoreboard /
+# kill-gate are untouched, and any absence/failure degrades seamlessly to the
+# learned bands. Opt-in, default OFF. Everything below is NEW; no key above is
+# touched. Runtime stays stdlib-only; the ensemble is cached in memory only
+# (NOT persisted — no store-schema bump).
+# ===========================================================================
+
+# --- Ensemble endpoint (its own host; the deterministic fetch stays on the
+# main /forecast endpoint). Live shape recorded 2026-07-11: the hourly block
+# carries the control member under the bare ``shortwave_radiation`` key plus the
+# perturbed ``shortwave_radiation_member01`` .. ``_member39`` (40 members total
+# for icon_seamless), 72 hourly stamps for forecast_days=3, timezone=UTC. The
+# hourly radiation stamp marks the interval END (value at T = mean over
+# [T-1h, T]), so the parser shifts each stamp −1 h to key by the interval START.
+ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
+ENSEMBLE_MODEL = "icon_seamless"
+ENSEMBLE_GHI_VAR = "shortwave_radiation"  # the single hourly var + member key prefix
+ENSEMBLE_FORECAST_DAYS = 3
+# Ensembles refresh ~6-hourly; poll at half that so a fresh run is picked up
+# promptly without hammering (its own cadence, independent of the main fetch).
+ENSEMBLE_FETCH_INTERVAL_S = 3 * 3600
+# Fewer usable members than this in an hour => treat that hour as unavailable
+# (no trustworthy spread); the slot falls back to the learned band.
+ENSEMBLE_MIN_MEMBERS = 10
+# Below this deterministic GHI (W/m^2) the member/det ratios are noise (near-zero
+# denominator at dawn/dusk / deep night), so the hour is skipped -> learned band.
+ENSEMBLE_MIN_DET_GHI = 20.0
+# Clamp each member factor (member_ghi / det_ghi) into a sane band so a single
+# freak member can't blow the interval open.
+ENSEMBLE_FACTOR_MIN = 0.0
+ENSEMBLE_FACTOR_MAX = 3.0
+
+# Opt-in kill switch (options flow), default OFF (operator-approved v0.16).
+CONF_ENSEMBLE_ENABLED = "ensemble_enabled"
+DEFAULT_ENSEMBLE_ENABLED = False
+
+# Coordinator <-> platform contract addition: which source shaped TODAY's band
+# slots. "learned" = residual ring only; "ensemble" = learned collapsed
+# everywhere and the ensemble supplied the whole spread (cold-start win);
+# "envelope" = the ensemble widened at least one slot over the learned band.
+DATA_KEY_BAND_SOURCE = "band_source"
+BAND_SOURCE_LEARNED = "learned"
+BAND_SOURCE_ENSEMBLE = "ensemble"
+BAND_SOURCE_ENVELOPE = "envelope"

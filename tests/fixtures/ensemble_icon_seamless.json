@@ -1,0 +1,379 @@
+{
+  "latitude": 48.5,
+  "longitude": 12.25,
+  "utc_offset_seconds": 0,
+  "timezone": "GMT",
+  "hourly_units": {
+    "time": "iso8601",
+    "shortwave_radiation": "W/m2",
+    "shortwave_radiation_member01": "W/m2",
+    "shortwave_radiation_member02": "W/m2",
+    "shortwave_radiation_member03": "W/m2",
+    "shortwave_radiation_member04": "W/m2",
+    "shortwave_radiation_member05": "W/m2",
+    "shortwave_radiation_member06": "W/m2",
+    "shortwave_radiation_member07": "W/m2",
+    "shortwave_radiation_member08": "W/m2",
+    "shortwave_radiation_member09": "W/m2",
+    "shortwave_radiation_member10": "W/m2",
+    "shortwave_radiation_member11": "W/m2",
+    "shortwave_radiation_member12": "W/m2",
+    "shortwave_radiation_member13": "W/m2",
+    "shortwave_radiation_member14": "W/m2",
+    "shortwave_radiation_member15": "W/m2",
+    "shortwave_radiation_member16": "W/m2",
+    "shortwave_radiation_member17": "W/m2",
+    "shortwave_radiation_member18": "W/m2",
+    "shortwave_radiation_member19": "W/m2",
+    "shortwave_radiation_member20": "W/m2",
+    "shortwave_radiation_member21": "W/m2",
+    "shortwave_radiation_member22": "W/m2",
+    "shortwave_radiation_member23": "W/m2",
+    "shortwave_radiation_member24": "W/m2",
+    "shortwave_radiation_member25": "W/m2",
+    "shortwave_radiation_member26": "W/m2",
+    "shortwave_radiation_member27": "W/m2",
+    "shortwave_radiation_member28": "W/m2",
+    "shortwave_radiation_member29": "W/m2",
+    "shortwave_radiation_member30": "W/m2",
+    "shortwave_radiation_member31": "W/m2",
+    "shortwave_radiation_member32": "W/m2",
+    "shortwave_radiation_member33": "W/m2",
+    "shortwave_radiation_member34": "W/m2",
+    "shortwave_radiation_member35": "W/m2",
+    "shortwave_radiation_member36": "W/m2",
+    "shortwave_radiation_member37": "W/m2",
+    "shortwave_radiation_member38": "W/m2",
+    "shortwave_radiation_member39": "W/m2"
+  },
+  "hourly": {
+    "time": [
+      "2026-07-11T03:00",
+      "2026-07-11T04:00",
+      "2026-07-11T05:00",
+      "2026-07-11T06:00",
+      "2026-07-11T07:00",
+      "2026-07-11T08:00"
+    ],
+    "shortwave_radiation": [
+      0.0,
+      12.0,
+      99.0,
+      245.0,
+      412.0,
+      575.0
+    ],
+    "shortwave_radiation_member01": [
+      0.0,
+      11.0,
+      98.0,
+      243.0,
+      411.0,
+      574.0
+    ],
+    "shortwave_radiation_member02": [
+      0.0,
+      12.0,
+      100.0,
+      246.0,
+      414.0,
+      576.0
+    ],
+    "shortwave_radiation_member03": [
+      0.0,
+      12.0,
+      99.0,
+      246.0,
+      413.0,
+      576.0
+    ],
+    "shortwave_radiation_member04": [
+      0.0,
+      11.0,
+      97.0,
+      243.0,
+      412.0,
+      575.0
+    ],
+    "shortwave_radiation_member05": [
+      0.0,
+      11.0,
+      98.0,
+      242.0,
+      411.0,
+      574.0
+    ],
+    "shortwave_radiation_member06": [
+      0.0,
+      11.0,
+      98.0,
+      244.0,
+      411.0,
+      575.0
+    ],
+    "shortwave_radiation_member07": [
+      0.0,
+      12.0,
+      99.0,
+      245.0,
+      413.0,
+      576.0
+    ],
+    "shortwave_radiation_member08": [
+      0.0,
+      12.0,
+      99.0,
+      246.0,
+      413.0,
+      576.0
+    ],
+    "shortwave_radiation_member09": [
+      0.0,
+      12.0,
+      98.0,
+      244.0,
+      411.0,
+      574.0
+    ],
+    "shortwave_radiation_member10": [
+      0.0,
+      12.0,
+      99.0,
+      246.0,
+      413.0,
+      576.0
+    ],
+    "shortwave_radiation_member11": [
+      0.0,
+      11.0,
+      98.0,
+      243.0,
+      412.0,
+      575.0
+    ],
+    "shortwave_radiation_member12": [
+      0.0,
+      11.0,
+      98.0,
+      244.0,
+      412.0,
+      575.0
+    ],
+    "shortwave_radiation_member13": [
+      0.0,
+      12.0,
+      99.0,
+      246.0,
+      413.0,
+      575.0
+    ],
+    "shortwave_radiation_member14": [
+      0.0,
+      12.0,
+      100.0,
+      247.0,
+      415.0,
+      577.0
+    ],
+    "shortwave_radiation_member15": [
+      0.0,
+      12.0,
+      100.0,
+      247.0,
+      413.0,
+      575.0
+    ],
+    "shortwave_radiation_member16": [
+      0.0,
+      11.0,
+      97.0,
+      242.0,
+      412.0,
+      576.0
+    ],
+    "shortwave_radiation_member17": [
+      0.0,
+      12.0,
+      99.0,
+      247.0,
+      413.0,
+      575.0
+    ],
+    "shortwave_radiation_member18": [
+      0.0,
+      11.0,
+      97.0,
+      243.0,
+      411.0,
+      575.0
+    ],
+    "shortwave_radiation_member19": [
+      0.0,
+      11.0,
+      98.0,
+      244.0,
+      412.0,
+      575.0
+    ],
+    "shortwave_radiation_member20": [
+      0.0,
+      12.0,
+      99.0,
+      245.0,
+      413.0,
+      575.0
+    ],
+    "shortwave_radiation_member21": [
+      0.0,
+      11.0,
+      99.0,
+      246.0,
+      413.0,
+      576.0
+    ],
+    "shortwave_radiation_member22": [
+      0.0,
+      12.0,
+      99.0,
+      246.0,
+      413.0,
+      576.0
+    ],
+    "shortwave_radiation_member23": [
+      0.0,
+      11.0,
+      97.0,
+      243.0,
+      413.0,
+      576.0
+    ],
+    "shortwave_radiation_member24": [
+      0.0,
+      11.0,
+      98.0,
+      244.0,
+      412.0,
+      577.0
+    ],
+    "shortwave_radiation_member25": [
+      0.0,
+      11.0,
+      99.0,
+      244.0,
+      412.0,
+      576.0
+    ],
+    "shortwave_radiation_member26": [
+      0.0,
+      11.0,
+      97.0,
+      243.0,
+      411.0,
+      574.0
+    ],
+    "shortwave_radiation_member27": [
+      0.0,
+      11.0,
+      99.0,
+      244.0,
+      412.0,
+      576.0
+    ],
+    "shortwave_radiation_member28": [
+      0.0,
+      12.0,
+      100.0,
+      245.0,
+      413.0,
+      576.0
+    ],
+    "shortwave_radiation_member29": [
+      0.0,
+      11.0,
+      98.0,
+      242.0,
+      411.0,
+      573.0
+    ],
+    "shortwave_radiation_member30": [
+      0.0,
+      12.0,
+      99.0,
+      246.0,
+      412.0,
+      574.0
+    ],
+    "shortwave_radiation_member31": [
+      0.0,
+      11.0,
+      97.0,
+      243.0,
+      411.0,
+      573.0
+    ],
+    "shortwave_radiation_member32": [
+      0.0,
+      12.0,
+      99.0,
+      246.0,
+      413.0,
+      576.0
+    ],
+    "shortwave_radiation_member33": [
+      0.0,
+      11.0,
+      99.0,
+      245.0,
+      412.0,
+      575.0
+    ],
+    "shortwave_radiation_member34": [
+      0.0,
+      12.0,
+      99.0,
+      246.0,
+      413.0,
+      576.0
+    ],
+    "shortwave_radiation_member35": [
+      0.0,
+      12.0,
+      100.0,
+      247.0,
+      414.0,
+      576.0
+    ],
+    "shortwave_radiation_member36": [
+      0.0,
+      12.0,
+      101.0,
+      248.0,
+      413.0,
+      576.0
+    ],
+    "shortwave_radiation_member37": [
+      0.0,
+      11.0,
+      97.0,
+      243.0,
+      413.0,
+      576.0
+    ],
+    "shortwave_radiation_member38": [
+      0.0,
+      11.0,
+      98.0,
+      244.0,
+      413.0,
+      576.0
+    ],
+    "shortwave_radiation_member39": [
+      0.0,
+      11.0,
+      99.0,
+      245.0,
+      412.0,
+      575.0
+    ]
+  }
+}

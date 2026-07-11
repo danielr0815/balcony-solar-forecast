@@ -70,7 +70,11 @@ from ._glue_util import (
 )
 from ._nightly import _NIGHTLY_HOUR, _NIGHTLY_MINUTE
 from .const import (
+    BAND_SOURCE_ENSEMBLE,
+    BAND_SOURCE_ENVELOPE,
+    BAND_SOURCE_LEARNED,
     CONF_COMPARISON_SENSORS,
+    CONF_ENSEMBLE_ENABLED,
     CONF_FETCH_INTERVAL,
     CONF_QUANTILES_ENABLED,
     CONF_RECOMPUTE_INTERVAL,
@@ -82,6 +86,7 @@ from .const import (
     CORRECTION_SOURCE_INTRADAY,
     CORRECTION_SOURCE_NONE,
     CORRECTION_SOURCE_SHADEMAP,
+    DATA_KEY_BAND_SOURCE,
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_CORRECTION_SOURCE,
     DATA_KEY_DRIFT_MAE,
@@ -92,11 +97,17 @@ from .const import (
     DATA_KEY_RAW_HOURLY_WH,
     DATA_KEY_SCOREBOARD,
     DAY_AHEAD_BIAS_NEUTRAL,
+    DEFAULT_ENSEMBLE_ENABLED,
     DEFAULT_QUANTILES_ENABLED,
     DEFAULT_SCOREBOARD_ENABLED,
     DEFAULT_SCOREBOARD_GATE_MARGIN,
     DEFAULT_SCOREBOARD_WINDOW_DAYS,
     DOMAIN,
+    ENSEMBLE_FACTOR_MAX,
+    ENSEMBLE_FACTOR_MIN,
+    ENSEMBLE_FETCH_INTERVAL_S,
+    ENSEMBLE_MIN_DET_GHI,
+    ENSEMBLE_MIN_MEMBERS,
     FETCH_INTERVAL_SECONDS,
     FORECAST_DAYS,
     FORECAST_RESP_KEY_P10,
@@ -143,6 +154,9 @@ from .core import (
 )
 from .core import bias as bias_mod
 from .core import (
+    ensembleband as ensembleband_mod,
+)
+from .core import (
     quantiles as quantiles_mod,
 )
 from .core import (
@@ -154,6 +168,7 @@ from .core import (
 from .fetcher import (
     FetchError,
     OpenMeteoFetcher,
+    parse_ensemble,
     parse_weather,
     radiation_coverage,
 )
@@ -243,6 +258,28 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._quantiles_enabled = bool(
             cfg.get(CONF_QUANTILES_ENABLED, DEFAULT_QUANTILES_ENABLED)
         )
+
+        # --- Ensemble-weather uncertainty bands (v0.16, SPEC §6) ------------
+        # Opt-in (default OFF). When ON, an ensemble spread is folded into the
+        # learned bands by envelope-max; the ensemble is NEVER load-bearing and
+        # is cached in memory only (not persisted). All state below is transient.
+        self._ensemble_enabled = bool(
+            cfg.get(CONF_ENSEMBLE_ENABLED, DEFAULT_ENSEMBLE_ENABLED)
+        )
+        # Last-good raw ensemble payload + its own fetch-scheduler anchor (the
+        # ensemble runs on ENSEMBLE_FETCH_INTERVAL_S, independent of the main
+        # fetch cadence). Both stay None until a first successful ensemble fetch.
+        self._ensemble_raw: dict | None = None
+        self._ensemble_fetched_at: datetime | None = None
+        # Parsed ensemble cache keyed by payload OBJECT IDENTITY (mirrors
+        # _weather_cache): parsing is pure, so a stable payload is parsed once.
+        self._ensemble_cache: tuple[dict, dict[str, list[float]]] | None = None
+        # Per-hour (f10, f90) relative-spread factors, recomputed every cycle
+        # against the CURRENT deterministic weather; None when unavailable.
+        self._ensemble_factors: dict[str, tuple[float, float]] | None = None
+        # Which source shaped TODAY's band slots (const BAND_SOURCE_*), for the
+        # P10/P90 sensors' ``band_source`` attribute. Recomputed per hooks build.
+        self._band_source: str = BAND_SOURCE_LEARNED
 
         # Cached weather image + provenance for the degradation ladder.
         # _last_fetched_at is the PAYLOAD's age anchor: it advances ONLY when the
@@ -722,6 +759,17 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 f"Weather image too old ({age}); no forecast issued"
             )
 
+        # Ensemble-weather uncertainty (v0.16, SPEC §6): opt-in. Runs AFTER the
+        # main fetch/weather is confirmed, in its OWN guard — any failure/absence
+        # degrades to the learned bands and the main degradation ladder above is
+        # NEVER touched by ensemble state. OFF => factors stay None so the hooks
+        # path is bit-identical to the pre-v0.16 build. ``getattr`` keeps a bare
+        # (__new__-built) coordinator working.
+        if getattr(self, "_ensemble_enabled", False):
+            await self._async_update_ensemble(now, weather)
+        else:
+            self._ensemble_factors = None
+
         # FAST learner: refresh the intraday scalar from live actuals BEFORE the
         # engine pass; the engine applies it via hooks.slot_factor so the 15-min,
         # hourly and daily curves stay mutually consistent. Never fatal.
@@ -794,30 +842,76 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     day_factor[slot.start] = f
 
         # Per-slot quantile bands (SPEC §6/§10): keyed by the identical
-        # slot.start datetimes the engine iterates. Each slot's band is the
-        # empirical P10/P50/P90 of its (forecast cloud class x local day part)
+        # slot.start datetimes the engine iterates. Each slot's LEARNED band is
+        # the empirical P10/P50/P90 of its (forecast cloud class x local day part)
         # bin; a starved / cold-start bin collapses to the neutral band (no fake
-        # spread). Gated on the quantiles kill switch; a slot with a neutral
-        # band is omitted so the engine passes those slots through unchanged.
+        # spread). When the ensemble is ON (v0.16, SPEC §6) each slot's learned
+        # band is FUSED by envelope-max with today's ensemble spread for that
+        # slot's hour — the wider band wins, never multiplied (no double count),
+        # never narrowed. A slot whose FUSED band is still the neutral identity is
+        # omitted so the engine passes it through unchanged. Gated on the quantiles
+        # kill switch; ensemble factors are None when the ensemble is OFF, so this
+        # path is bit-identical to the pre-v0.16 build in that case.
+        # ``getattr`` defaults keep a bare (__new__-built) coordinator — and any
+        # pre-v0.16 cached state — working: the ensemble attrs only exist after
+        # __init__ / an ensemble update.
+        self._band_source = BAND_SOURCE_LEARNED
         band_by_slot: dict[datetime, QuantileBands] | None = None
-        if self._quantiles_enabled and self._quantile_state.bins:
+        ens_factors = (
+            getattr(self, "_ensemble_factors", None)
+            if getattr(self, "_ensemble_enabled", False)
+            else None
+        )
+        have_bins = self._quantiles_enabled and bool(self._quantile_state.bins)
+        if self._quantiles_enabled and (have_bins or ens_factors):
             bands: dict[datetime, QuantileBands] = {}
+            today = dt_util.as_local(now).date()
+            ens_today = False           # ensemble covered >= 1 of today's slots
+            learned_spread_today = False  # learned band had spread on a today slot
             for slot in weather.slots:
                 local = dt_util.as_local(slot.start)
-                cc = bias_mod.classify_cloud(
-                    cloud_low=slot.cloud_low, cloud_mid=slot.cloud_mid,
-                    cloud_high=slot.cloud_high,
-                    visibility_m=slot.visibility_m, month=local.month,
-                )
-                dp = bias_mod.day_part_for_hour(local.hour)
-                b = quantiles_mod.bands_for_bin(
-                    self._quantile_state, cloud_class=cc, day_part=dp
-                )
+                if have_bins:
+                    cc = bias_mod.classify_cloud(
+                        cloud_low=slot.cloud_low, cloud_mid=slot.cloud_mid,
+                        cloud_high=slot.cloud_high,
+                        visibility_m=slot.visibility_m, month=local.month,
+                    )
+                    dp = bias_mod.day_part_for_hour(local.hour)
+                    learned = quantiles_mod.bands_for_bin(
+                        self._quantile_state, cloud_class=cc, day_part=dp
+                    )
+                else:
+                    learned = QuantileBands.neutral()
+                ens = None
+                if ens_factors:
+                    hkey = (
+                        dt_util.as_utc(slot.start)
+                        .replace(minute=0, second=0, microsecond=0)
+                        .isoformat()
+                    )
+                    ens = ens_factors.get(hkey)
+                b = ensembleband_mod.fuse_bands(learned, ens)
                 # Omit a neutral (identity) band so the engine's `if band:` path
                 # short-circuits an all-1.0 multiply.
                 if not (b.p10 == 1.0 and b.p50 == 1.0 and b.p90 == 1.0):
                     bands[slot.start] = b
+                # Band-source accounting over TODAY's slots only.
+                if local.date() == today:
+                    if ens is not None:
+                        ens_today = True
+                    if not learned.collapsed:
+                        learned_spread_today = True
             band_by_slot = bands or None
+            # ensemble contributed anywhere today -> envelope, unless the learned
+            # band was collapsed on EVERY today slot (then the ensemble supplied
+            # the whole spread: the cold-start "ensemble" win). No ensemble today
+            # -> the default BAND_SOURCE_LEARNED set above stands.
+            if ens_today:
+                self._band_source = (
+                    BAND_SOURCE_ENVELOPE
+                    if learned_spread_today
+                    else BAND_SOURCE_ENSEMBLE
+                )
 
         slot_factor = None
         scalar = self._intraday_scalar
@@ -956,6 +1050,132 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._last_fetch_ok = True
         self._last_error = None
         self._store.set_last_payload(payload, now.isoformat())
+
+    # ------------------------------------------------------------------
+    # Ensemble-weather uncertainty (v0.16, SPEC §6) — NEVER load-bearing
+    # ------------------------------------------------------------------
+
+    async def _async_update_ensemble(self, now: datetime, weather) -> None:
+        """Refresh the per-hour ensemble spread factors (v0.16, SPEC §6).
+
+        Fetches a fresh ensemble payload only when the cached one is stale (its
+        OWN ENSEMBLE_FETCH_INTERVAL_S cadence), parses it (identity-cached),
+        derives the deterministic per-hour GHI from the CURRENT weather and
+        recomputes the per-hour (f10, f90) factors. Wholly guarded: ANY failure —
+        fetch error, malformed body, compute error — logs at debug, drops the
+        factors and returns; the forecast then proceeds on the learned bands. The
+        main degradation ladder is never touched here.
+        """
+        try:
+            if self._due_for_ensemble_fetch(now):
+                await self._async_try_fetch_ensemble(now)
+            raw = self._ensemble_raw
+            if raw is None:
+                self._ensemble_factors = None
+                return
+            members_by_hour = self._parse_ensemble_cached(raw)
+            det = self._det_ghi_by_hour(weather)
+            self._ensemble_factors = ensembleband_mod.ensemble_band_factors(
+                members_by_hour,
+                det,
+                min_members=ENSEMBLE_MIN_MEMBERS,
+                min_det_ghi=ENSEMBLE_MIN_DET_GHI,
+                f_min=ENSEMBLE_FACTOR_MIN,
+                f_max=ENSEMBLE_FACTOR_MAX,
+            )
+        except Exception:  # pragma: no cover - ensemble never breaks the ladder
+            _LOGGER.debug(
+                "Ensemble update failed; serving learned bands", exc_info=True
+            )
+            self._ensemble_factors = None
+
+    def _due_for_ensemble_fetch(self, now: datetime) -> bool:
+        """True when the cached ensemble payload is stale (own slow cadence)."""
+        if self._ensemble_fetched_at is None:
+            return True
+        return (
+            now - self._ensemble_fetched_at
+            >= timedelta(seconds=ENSEMBLE_FETCH_INTERVAL_S)
+        )
+
+    async def _async_try_fetch_ensemble(self, now: datetime) -> None:
+        """Fetch one ensemble payload; on success cache it, on failure stay quiet.
+
+        A fetch failure keeps the last-good raw payload (if any) so a transient
+        outage still serves the previous ensemble spread; the fetch anchor is
+        advanced only on success, so a failure retries next tick (mirrors the main
+        fetch's not-ok retry). Never persists — the ensemble is in-memory only.
+        """
+        try:
+            payload = await self._fetcher.async_fetch_ensemble_raw(
+                self._site.latitude,
+                self._site.longitude,
+            )
+        except FetchError as err:
+            _LOGGER.debug("Ensemble fetch failed: %s", err)
+            return
+        self._ensemble_raw = payload
+        self._ensemble_fetched_at = now
+
+    def _parse_ensemble_cached(self, raw: dict) -> dict[str, list[float]]:
+        """Parse the ensemble payload, reusing the parse while the body is stable.
+
+        Keyed by payload OBJECT IDENTITY (mirrors ``_cached_weather``): a new
+        ensemble fetch replaces the dict wholesale, so ``is`` misses and we
+        re-parse; otherwise the parse is shared across the 15-min recompute ticks.
+        """
+        cache = self._ensemble_cache
+        if cache is not None and cache[0] is raw:
+            return cache[1]
+        parsed = parse_ensemble(raw)
+        self._ensemble_cache = (raw, parsed)
+        return parsed
+
+    def _det_ghi_by_hour(self, weather) -> dict[str, float]:
+        """Deterministic per-hour mean GHI (W/m^2) from the current WeatherSeries.
+
+        Aggregates the 15-min slot GHI to hour means keyed by the slot start
+        floored to its UTC hour (ISO string) — the SAME key the ensemble parser
+        emits for the interval START — so a member's GHI and the deterministic GHI
+        line up per hour (all four 15-min slots of an hour share that hour's
+        factors downstream). Cheap pure aggregation; never raises.
+        """
+        sums: dict[str, float] = {}
+        counts: dict[str, int] = {}
+        for slot in weather.slots:
+            key = (
+                dt_util.as_utc(slot.start)
+                .replace(minute=0, second=0, microsecond=0)
+                .isoformat()
+            )
+            sums[key] = sums.get(key, 0.0) + slot.ghi
+            counts[key] = counts.get(key, 0) + 1
+        return {k: sums[k] / counts[k] for k in sums}
+
+    def ensemble_state_summary(self) -> dict[str, Any]:
+        """Compact ensemble diagnostics block (v0.16, SPEC §6).
+
+        Coordinate-free: the enable flag, the cached payload's age in seconds, the
+        representative member count and how many hours currently carry a usable
+        spread. Never raises; used by diagnostics.py.
+        """
+        fetched_at = getattr(self, "_ensemble_fetched_at", None)
+        age_s: float | None = None
+        if fetched_at is not None:
+            age_s = round((dt_util.utcnow() - fetched_at).total_seconds(), 1)
+        member_count = 0
+        cache = getattr(self, "_ensemble_cache", None)
+        if cache is not None:
+            counts = [len(m) for m in cache[1].values()]
+            member_count = max(counts) if counts else 0
+        return {
+            "available": True,
+            "enabled": bool(getattr(self, "_ensemble_enabled", False)),
+            "payload_age_seconds": age_s,
+            "member_count": member_count,
+            "hours_covered": len(getattr(self, "_ensemble_factors", None) or {}),
+            "band_source": getattr(self, "_band_source", BAND_SOURCE_LEARNED),
+        }
 
     def _cached_weather(self):
         last = self._store.get_last_payload()
@@ -1275,6 +1495,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         data[DATA_KEY_CORRECTED_HOURLY_WH] = dict(corrected_hourly)
         data[DATA_KEY_INTRADAY_SCALAR] = round(self._intraday_scalar, 4)
         data[DATA_KEY_CORRECTION_SOURCE] = self._correction_source
+        # v0.16 ensemble bands: which source shaped today's band slots (learned /
+        # ensemble / envelope). Always present; "learned" when the ensemble is off
+        # or contributed nothing today. ``getattr`` default keeps a bare
+        # coordinator (and _build_data called without a hooks pass) working.
+        data[DATA_KEY_BAND_SOURCE] = getattr(
+            self, "_band_source", BAND_SOURCE_LEARNED
+        )
         data[DATA_KEY_LEARNER_STATUS] = self._learner_status()
         data[DATA_KEY_DRIFT_MAE] = self._latest_drift_mae()
         # --- v0.4 additive scoreboard keys (SPEC §9/§10) ---

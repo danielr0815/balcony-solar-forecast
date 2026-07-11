@@ -90,6 +90,12 @@ async def async_get_config_entry_diagnostics(
     diagnostics["quantiles"] = async_redact_data(
         _quantile_summary(coordinator), TO_REDACT
     )
+    # v0.16 ensemble-weather bands: enable flag, cached-payload age, member count
+    # and hours covered. Coordinate-free (spread factors are per-hour ratios);
+    # still routed through the redactor as defence in depth (SPEC §6).
+    diagnostics["ensemble"] = async_redact_data(
+        _ensemble_summary(coordinator), TO_REDACT
+    )
     return diagnostics
 
 
@@ -182,6 +188,25 @@ def _quantile_summary(coordinator: Any) -> dict[str, Any]:
     geometry/weather bins, not the operator's location.
     """
     getter = getattr(coordinator, "quantile_state_summary", None)
+    if not callable(getter):
+        return {"available": False}
+    try:
+        state = getter()
+    except Exception as err:  # noqa: BLE001 -- diagnostics must not raise
+        return {"error": repr(err)}
+    return state if isinstance(state, dict) else {"available": False}
+
+
+def _ensemble_summary(coordinator: Any) -> dict[str, Any]:
+    """Compact ensemble-weather diagnostics block (SPEC §6).
+
+    Reads an optional ``ensemble_state_summary()`` accessor on the coordinator
+    (mirrors ``quantile_state_summary`` / ``store_stats``): the enable flag, the
+    cached payload's age in seconds, the representative member count, the hours
+    currently carrying a usable spread and today's band source. Never crashes
+    diagnostics if the accessor is absent or raises (contract still stabilising).
+    """
+    getter = getattr(coordinator, "ensemble_state_summary", None)
     if not callable(getter):
         return {"available": False}
     try:
