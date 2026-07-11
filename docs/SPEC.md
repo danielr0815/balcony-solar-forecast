@@ -1,6 +1,6 @@
 # Spezifikation: Balcony Solar Forecast — Mehrebenen-PV-Prognose mit Selbstlernen
 
-> Status: **v0.15.0 (2026-07-11)** — alle Phasen bis v0.4 (Scoreboard/
+> Status: **v0.16.0 (2026-07-11)** — alle Phasen bis v0.4 (Scoreboard/
 > Quantile/Dashboard, §14) plus v0.5 (Verschattungsprofil, §15) umgesetzt;
 > v0.1.0 seit 2026-07-06 live im Parallellauf. Historie in CHANGELOG.md.
 > Gründungsdokument des Projekts `balcony_solar_forecast` (eigenständige
