@@ -383,9 +383,23 @@ curve, exactly as before. For a **past day** the card instead draws the forecast
 **as it was issued** for that day — read from the integration's 90-day issued ring
 via the read-only `get_issued_forecast` action (the frozen ~01:30 day-ahead stand,
 with no hindsight), so you can compare what was actually forecast against what the
-modules measured. A day with no archived snapshot shows a small *(no archived
-forecast)* hint and no line. The **week view draws no forecast line** — mixing an
-issued past line with today's live curve across the window would mislead.
+modules measured. A small right-aligned **provenance caption** above the plot
+says which curve you are looking at: *Forecast (live)* today vs *Forecast (as
+issued 01:30)* on past days. When no line can be drawn, the note under the plot
+is explicit: a day with no archived snapshot reads *No archived forecast for
+\<date\> — the archive fills with each nightly run.* (plus *archive since
+\<date\>* once the ring holds anything), while a **failed** lookup reads
+*Forecast lookup failed* — so an empty day is never mistaken for a stalled
+forecast. Navigating clears the previous day's line first; nothing stale lingers
+while the new day loads.
+
+**Forecast in the week view.** Each day column carries a short **dashed forecast
+segment** at that day's forecast total: past days show the **issued** daily sum
+from the ring, today shows the live `wh_period` sum, and a day with no archived
+snapshot simply has a **gap** (no segment — honest, nothing fabricated). The
+hover panel gains a **Forecast** row (the day's total, or "—" on a gap day). The
+per-day lookups run concurrently and are cached per window, so paging back to an
+already-viewed week refires no service calls.
 
 If you installed the dashboard via the one-click `install_dashboard` action
 (§1a), this card is **already embedded** (wired to your two entity ids). To add

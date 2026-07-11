@@ -30,7 +30,11 @@
  *                         the card. PAST day: the ISSUED day-ahead curve archived
  *                         in the store, fetched via the read-only
  *                         `get_issued_forecast` action (frozen ~01:30 stand, no
- *                         hindsight). Week view draws no forecast line.
+ *                         hindsight). WEEK view: one dashed forecast segment per
+ *                         day — issued daily totals for past days (fetched
+ *                         concurrently, cached per window), the live wh_period
+ *                         sum for today, and an honest GAP where no snapshot is
+ *                         archived.
  *
  * NAVIGATION (card-local state, never persisted): a header ◀ [label] ▶ steps the
  * selected day (or, in week mode, the 7-day window) and a Day|Week toggle switches
@@ -81,7 +85,14 @@ const I18N = {
       "No measured-power sensor found — is the Balcony Solar Forecast integration set up?",
     noStats: "No hourly statistics yet",
     noStatsRange: "No statistics for this range",
-    noArchivedForecast: "(no archived forecast)",
+    // Provenance caption above the plot when a forecast line IS drawn.
+    forecastLive: "Forecast (live)",
+    forecastIssued: "Forecast (as issued 01:30)",
+    // Under-plot notes when NO past-day line is drawn ({d} = the date).
+    forecastError: "Forecast lookup failed",
+    forecastMissing:
+      "No archived forecast for {d} — the archive fills with each nightly run.",
+    archiveSince: " (archive since {d})",
     loading: "…",
     viewDay: "Day",
     viewWeek: "Week",
@@ -99,7 +110,14 @@ const I18N = {
       "Kein Messleistungs-Sensor gefunden — ist die Integration „Balcony Solar Forecast“ eingerichtet?",
     noStats: "Noch keine Stundenstatistik",
     noStatsRange: "Keine Statistikdaten für diesen Zeitraum",
-    noArchivedForecast: "(keine Prognose archiviert)",
+    // Provenance caption above the plot when a forecast line IS drawn.
+    forecastLive: "Prognose (live)",
+    forecastIssued: "Prognose (Stand 01:30)",
+    // Under-plot notes when NO past-day line is drawn ({d} = the date).
+    forecastError: "Prognose-Abruf fehlgeschlagen",
+    forecastMissing:
+      "Keine archivierte Prognose für {d} — der Verlauf füllt sich mit jedem Nachtlauf.",
+    archiveSince: " (Archiv seit {d})",
     loading: "…",
     viewDay: "Tag",
     viewWeek: "Woche",
@@ -214,6 +232,13 @@ function shortDateYear(d) {
   return `${d.getDate()}.${d.getMonth() + 1}.${d.getFullYear()}`;
 }
 
+/** "d.M.Y" of an ISO "YYYY-MM-DD" date key (falls back to the raw string). */
+function shortDateYearISO(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
+  if (!m) return iso || "";
+  return `${Number(m[3])}.${Number(m[2])}.${m[1]}`;
+}
+
 /** A "nice" axis: rounded max + evenly spaced ticks (~4 intervals). */
 function niceAxis(maxVal) {
   if (!(maxVal > 0)) return { max: 1, ticks: [0, 1] };
@@ -269,10 +294,18 @@ class BalconyPowerHistoryCard extends HTMLElement {
     this._dayBars = {}; // stat_id -> number[24] hourly Wh (day mode)
     this._weekBars = {}; // stat_id -> number[7] daily Wh (week mode)
     this._dayForecast = null; // number[24] hourly Wh, or null (no line)
+    this._weekForecast = null; // (number|null)[7] daily forecast Wh; null = gap
+    // Per-window issued-total cache {windowKey: {isoDate: wh|null}} so navigating
+    // back to an already-fetched week never refires its per-day service calls.
+    // Never cleared — a handful of numbers per visited window.
+    this._weekForecastCache = {};
     // Forecast provenance for the day view: "live" (today's wh_period), "issued"
     // (a past day's archived curve), "missing" (a past day with no snapshot →
-    // the "(no archived forecast)" hint), or "none" (disabled / today, no curve).
+    // the dated under-plot note), "error" (the lookup itself failed), or "none"
+    // (disabled / today without a curve / loading-neutral while navigating).
     this._forecastState = "none";
+    this._forecastError = ""; // short message behind the "error" note
+    this._oldestIssued = null; // oldest archived ISO date (service-reported)
     this._loadState = "loading"; // "loading" | "ok" | "empty" | "error"
     // Fetch bookkeeping.
     this._timer = null;
@@ -392,6 +425,13 @@ class BalconyPowerHistoryCard extends HTMLElement {
   /** A nav/toggle click refetches the new window and fully re-renders. */
   _reload() {
     this._loadState = "loading";
+    // Loading-neutral forecast state BEFORE the render: the previous selection's
+    // line (or missing/error note) must not linger while the new window loads —
+    // a stale line was read by the operator as "the forecast is not updating".
+    this._dayForecast = null;
+    this._weekForecast = null;
+    this._forecastState = "none";
+    this._forecastError = "";
     this._render();
     this._fetch();
   }
@@ -570,9 +610,103 @@ class BalconyPowerHistoryCard extends HTMLElement {
     }
     if (seq !== this._fetchSeq) return;
     this._ingestWeek(result, sources, days);
-    // Week mode intentionally draws NO forecast line: mixing an ISSUED past line
-    // with the LIVE current-day curve across a 7-day window would mislead.
+    // Bars render straight away; the per-day forecast overlay follows once the
+    // (cached / concurrent) issued lookups land.
     this._render();
+    await this._fetchWeekForecast(hass, days, seq);
+    if (seq !== this._fetchSeq) return;
+    this._render();
+  }
+
+  /**
+   * Week forecast overlay: one daily forecast total (Wh) per window day.
+   * Past days read the ISSUED archived curve — CONCURRENTLY, one
+   * get_issued_forecast call per not-yet-cached day; TODAY inside the window
+   * uses the LIVE wh_period sum from the forecast sensor (never the service).
+   * A day with no archived snapshot stays null → the overlay keeps an honest
+   * GAP there. Results are cached per window so navigating back to an
+   * already-fetched week never refires its service calls.
+   */
+  async _fetchWeekForecast(hass, days, seq) {
+    if (this._config.hours_forecast === false) {
+      this._weekForecast = null;
+      return;
+    }
+    const todayIso = isoDateOf(new Date());
+    const key = `${isoDateOf(days[0])}_${isoDateOf(days[6])}`;
+    const cached = this._weekForecastCache[key] || {};
+    const lookups = [];
+    for (const d of days) {
+      const iso = isoDateOf(d);
+      if (iso === todayIso || iso in cached) continue;
+      lookups.push(
+        this._issuedTotal(hass, iso).then((wh) => {
+          cached[iso] = wh;
+        }),
+      );
+    }
+    if (lookups.length) await Promise.all(lookups);
+    if (seq !== this._fetchSeq) return;
+    this._weekForecastCache[key] = cached;
+    const totals = new Array(7).fill(null);
+    for (let i = 0; i < 7; i++) {
+      const iso = isoDateOf(days[i]);
+      if (iso === todayIso) {
+        // Live value — recomputed on every (5-min) refresh, never cached.
+        totals[i] = this._liveForecastTotal(hass);
+      } else if (typeof cached[iso] === "number") {
+        totals[i] = cached[iso];
+      }
+    }
+    this._weekForecast = totals;
+  }
+
+  /** One issued lookup → that day's total Wh, or null (no snapshot / failed). */
+  async _issuedTotal(hass, iso) {
+    try {
+      const res = await hass.callWS({
+        type: "call_service",
+        domain: "balcony_solar_forecast",
+        service: "get_issued_forecast",
+        service_data: { date: iso },
+        return_response: true,
+      });
+      const resp = res && res.response;
+      const result = resp && resp.result;
+      if (!result || typeof result !== "object" || result.available === false) {
+        return null;
+      }
+      let total = 0;
+      const wh = result.hourly_wh;
+      if (wh && typeof wh === "object") {
+        for (const k in wh) {
+          const v = Number(wh[k]);
+          if (Number.isFinite(v)) total += v;
+        }
+      }
+      return total;
+    } catch (_e) {
+      // A failed week-day lookup degrades to a gap (never breaks the view).
+      return null;
+    }
+  }
+
+  /** Today's LIVE forecast total (Wh) from the sensor's wh_period, or null. */
+  _liveForecastTotal(hass) {
+    const ids = this._resolveIds(hass);
+    const forecast = hass.states[ids.forecast_sensor];
+    const wh =
+      forecast && forecast.attributes && forecast.attributes[A_WH_PERIOD];
+    if (!wh || typeof wh !== "object") return null;
+    let total = 0;
+    let any = false;
+    for (const iso in wh) {
+      const v = Number(wh[iso]);
+      if (!Number.isFinite(v)) continue;
+      total += v;
+      any = true;
+    }
+    return any ? total : null;
   }
 
   /** Call the read-only get_issued_forecast action → the archived day line. */
@@ -596,14 +730,27 @@ class BalconyPowerHistoryCard extends HTMLElement {
       });
       const resp = res && res.response;
       result = resp && resp.result;
-    } catch (_e) {
-      result = null;
+    } catch (err) {
+      if (seq !== this._fetchSeq) return;
+      // The LOOKUP failed (websocket/service error) — NOT the same thing as
+      // "no snapshot archived". Surface it as an explicit error note so the
+      // operator never misreads a transport hiccup as a missing forecast.
+      this._dayForecast = null;
+      this._forecastState = "error";
+      this._forecastError =
+        err && err.message ? String(err.message) : "";
+      return;
     }
     if (seq !== this._fetchSeq) return;
-    if (!result || result.available === false || typeof result !== "object") {
-      // No snapshot archived for that day → no line, small inline hint.
+    if (!result || typeof result !== "object" || result.available === false) {
+      // No snapshot archived for that day → no line, explicit dated note
+      // (plus "archive since <date>" when the service reports its oldest day).
       this._dayForecast = null;
       this._forecastState = "missing";
+      this._oldestIssued =
+        result && typeof result.oldest_available === "string"
+          ? result.oldest_available
+          : null;
       return;
     }
     const wh = result.hourly_wh;
@@ -702,16 +849,55 @@ class BalconyPowerHistoryCard extends HTMLElement {
     if (this._view === "week") {
       body.appendChild(this._weekPlot(t));
     } else {
+      // Provenance caption ABOVE the plot whenever a line is drawn: live curve
+      // vs the archived ~01:30 issued stand (the operator must never guess).
+      const caption = this._provenanceCaption(t);
+      if (caption) body.appendChild(caption);
       body.appendChild(this._dayPlot(t));
-      // A past day with no archived forecast: small inline hint under the plot.
-      if (this._offset !== 0 && this._forecastState === "missing") {
-        const hint = document.createElement("div");
-        hint.className = "note";
-        hint.textContent = t.noArchivedForecast;
-        body.appendChild(hint);
-      }
+      // Under-plot note when a past day draws NO line: missing vs failed.
+      const note = this._forecastNote(t);
+      if (note) body.appendChild(note);
     }
     body.appendChild(this._legend(t));
+  }
+
+  /** Right-aligned caption above the day plot while a forecast line is drawn. */
+  _provenanceCaption(t) {
+    if (!this._dayForecast) return null;
+    let text = null;
+    if (this._forecastState === "live") text = t.forecastLive;
+    else if (this._forecastState === "issued") text = t.forecastIssued;
+    if (!text) return null;
+    const div = document.createElement("div");
+    div.className = "provenance";
+    div.textContent = text;
+    return div;
+  }
+
+  /** The day view's under-plot forecast note (or null): missing vs error. */
+  _forecastNote(t) {
+    if (this._offset === 0) return null;
+    let text = null;
+    if (this._forecastState === "error") {
+      text = t.forecastError;
+      if (this._forecastError) text += ` (${this._forecastError})`;
+    } else if (this._forecastState === "missing") {
+      text = t.forecastMissing.replace(
+        "{d}",
+        shortDateYear(dayAt(this._offset)),
+      );
+      if (this._oldestIssued) {
+        text += t.archiveSince.replace(
+          "{d}",
+          shortDateYearISO(this._oldestIssued),
+        );
+      }
+    }
+    if (!text) return null;
+    const div = document.createElement("div");
+    div.className = "note";
+    div.textContent = text;
+    return div;
   }
 
   /** Header row: ◀ [label] ▶ day/week nav on the left, Day|Week toggle right. */
@@ -818,6 +1004,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
         color: var(--text-primary-color, #fff); font-weight: 600;
       }
       .plot { width: 100%; height: auto; display: block; }
+      .provenance {
+        text-align: right; padding: 0 2px 2px;
+        color: var(--secondary-text-color); font-size: 0.75rem;
+      }
       .note {
         margin-top: 8px; text-align: center;
         color: var(--secondary-text-color); font-size: 0.85rem;
@@ -1000,7 +1190,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     return el;
   }
 
-  /** Week view: 7 stacked day-bars of daily Wh per module. No forecast line. */
+  /** Week view: 7 stacked day-bars + a dashed forecast segment per day. */
   _weekPlot(t) {
     const COLS = 7;
     const days = [];
@@ -1015,6 +1205,8 @@ class BalconyPowerHistoryCard extends HTMLElement {
         if (v > 0) stack += v;
       }
       if (stack > dataMax) dataMax = stack;
+      const f = this._weekForecast && this._weekForecast[i];
+      if (typeof f === "number" && f > dataMax) dataMax = f;
     }
     const axis = niceAxis(dataMax > 0 ? dataMax * 1.05 : 0);
     const yMax = axis.max;
@@ -1062,6 +1254,32 @@ class BalconyPowerHistoryCard extends HTMLElement {
       }
     }
 
+    // --- forecast: one dashed segment per day (issued past / live today) --
+    if (this._weekForecast) {
+      // A horizontal dash at the day's forecast-total height, centred over its
+      // column (same width as the bar). A day without an archived snapshot has
+      // NO segment — an honest gap, mirroring the day view's missing note.
+      const segHalf = colW * 0.3;
+      for (let i = 0; i < COLS; i++) {
+        const v = this._weekForecast[i];
+        if (typeof v !== "number") continue;
+        const y = Y(v);
+        const xc = X(i) + colW / 2;
+        el.appendChild(
+          svg("line", {
+            x1: xc - segHalf,
+            y1: y,
+            x2: xc + segHalf,
+            y2: y,
+            stroke: "var(--primary-text-color)",
+            "stroke-width": "2",
+            "stroke-dasharray": "5 4",
+            opacity: "0.7",
+          }),
+        );
+      }
+    }
+
     // --- empty / loading note --------------------------------------------
     if (this._loadState !== "ok") {
       const note =
@@ -1099,7 +1317,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
       days,
       modules: this._modules,
       bars: this._weekBars,
-      forecast: null,
+      forecast: this._weekForecast,
       m,
       plotW,
       plotH,
@@ -1318,7 +1536,8 @@ class BalconyPowerHistoryCard extends HTMLElement {
       }
     }
     rows.push({ kind: "total", name: ctx.t.total, val: total });
-    // Week view intentionally carries no forecast row (ctx.forecast === null).
+    // Day view: the hourly line value. Week view: the day's forecast total —
+    // null on a gap day (no archived snapshot), rendered as "—".
     if (ctx.forecast) {
       rows.push({ kind: "forecast", name: ctx.t.forecast, val: ctx.forecast[i] });
     }
@@ -1450,7 +1669,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
         "font-weight": bold ? "700" : "400",
         "text-anchor": "end",
       });
-      val.textContent = fmtVal(row.val);
+      val.textContent = typeof row.val === "number" ? fmtVal(row.val) : "—";
       g.appendChild(val);
     });
   }

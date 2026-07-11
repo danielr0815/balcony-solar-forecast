@@ -363,6 +363,23 @@ def test_power_history_js_card_sanity():
     assert "call_service" in text, "power-history card JS does not use the WS call_service command"
     assert "return_response" in text, "power-history card JS does not request a service response"
 
+    # Week forecast overlay: per-day issued totals fetched CONCURRENTLY, kept
+    # under a dedicated name so the day/week forecast states never mix.
+    assert "_weekForecast" in text, "power-history card JS has no week forecast state"
+    assert "Promise.all" in text, "week issued lookups are not concurrent (no Promise.all)"
+
+    # Day-view provenance captions + explicit emptiness/error notes, both
+    # locales, and the service's oldest_available field wired into the note —
+    # the operator must be able to tell live vs issued vs missing vs failed.
+    for marker in (
+        "Stand 01:30",
+        "as issued",
+        "Prognose-Abruf fehlgeschlagen",
+        "Forecast lookup failed",
+        "oldest_available",
+    ):
+        assert marker in text, f"power-history card JS missing marker {marker!r}"
+
     # Self-contained module: no external-URL ES imports, and it must NOT pull in
     # the sibling shade-profile card (each card stays independent).
     assert re.search(r'from\s+["\']https?:', text) is None

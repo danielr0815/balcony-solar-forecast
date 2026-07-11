@@ -802,9 +802,14 @@ Linie im Tagesmodus die Prognose **wie ausgegeben** aus dem 90-Tage-Ausgabe-Ring
 Wichtig gegen Leakage: das ist der **eingefrorene ~01:30-Stand ohne Rückschau**
 (nie aus dem heutigen gelernten Zustand nachgerechnet), sodass ein direkter
 Vergleich „ausgegeben vs. gemessen" ehrlich bleibt; fehlt ein archivierter
-Snapshot, entfällt die Linie mit dezentem Hinweis. Die **Wochenansicht zeichnet
-bewusst keine Prognoselinie** (Mischung aus ausgegebener Vergangenheits- und
-Live-Heute-Kurve wäre irreführend).
+Snapshot, entfällt die Linie mit explizitem, datiertem Hinweis (inkl. „Archiv
+seit <Datum>" aus dem `oldest_available`-Feld der Aktion), und eine gezeichnete
+Linie trägt eine Herkunfts-Beschriftung („Prognose (live)" vs. „Prognose (Stand
+01:30)"). Die **Wochenansicht** überlagert je Tagesspalte eine gestrichelte
+Prognose-Markierung auf Höhe der Prognose-Tagessumme: vergangene Tage zeigen
+die **ausgegebene** Summe aus dem Ring, der heutige Tag die
+**Live**-`wh_period`-Summe, und Tage ohne archivierten Snapshot bleiben
+**ehrlich lückenhaft** (keine Markierung, nichts wird nachgerechnet).
 
 Seit v0.9 fixiert die Karte ihre x-Achse auf die **jahresstabile**
 Tageslicht-Azimutspanne (Minimum/Maximum aus beiden Sonnenwenden, Python-seitig
