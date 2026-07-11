@@ -276,7 +276,11 @@ class BalconyPowerHistoryCard extends HTMLElement {
     this._loadState = "loading"; // "loading" | "ok" | "empty" | "error"
     // Fetch bookkeeping.
     this._timer = null;
-    this._fetchDay = undefined; // localDayKey of the last kicked live fetch
+    // localDayKey of the last kicked live fetch. Deliberately NOT named after
+    // the `_fetchDay(...)` METHOD: assigning an instance property with a
+    // method's name shadows that method, which turned the first fetch into a
+    // TypeError and killed every statistics load in v0.15.0/v0.16.0.
+    this._liveDayKey = undefined;
     this._fetchSeq = 0; // generation token — a stale async fetch is ignored
   }
 
@@ -460,16 +464,16 @@ class BalconyPowerHistoryCard extends HTMLElement {
   /** Fetch on first hass, and — while live — once per new local day (day roll). */
   _ensureFetch() {
     if (!this._hass || !this.isConnected) return;
-    if (this._fetchDay === undefined) {
-      this._fetchDay = localDayKey();
+    if (this._liveDayKey === undefined) {
+      this._liveDayKey = localDayKey();
       this._fetch();
       return;
     }
     // Day-roll handling applies ONLY to the live window; a past view is static.
     if (this._isLive()) {
       const day = localDayKey();
-      if (this._fetchDay !== day) {
-        this._fetchDay = day;
+      if (this._liveDayKey !== day) {
+        this._liveDayKey = day;
         this._fetch();
       }
     }
@@ -490,7 +494,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     if (!hass || typeof hass.callWS !== "function") return;
     const sources = this._sources(hass);
     if (!sources.length) return;
-    if (this._isLive()) this._fetchDay = localDayKey();
+    if (this._isLive()) this._liveDayKey = localDayKey();
     const seq = ++this._fetchSeq; // any newer fetch/selection supersedes this one
     if (this._view === "week") {
       await this._fetchWeek(hass, sources, seq);

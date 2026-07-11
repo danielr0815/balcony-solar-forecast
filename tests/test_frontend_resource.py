@@ -367,3 +367,36 @@ def test_power_history_js_card_sanity():
     # the sibling shade-profile card (each card stays independent).
     assert re.search(r'from\s+["\']https?:', text) is None
     assert "shade_profile_card" not in text
+
+
+def test_js_cards_no_property_shadows_method():
+    """No instance property may share a name with a class method (both cards).
+
+    Regression guard for the v0.15.0 power-history bug: the constructor set
+    ``this._fetchDay = undefined`` while the class also defined
+    ``async _fetchDay(...)`` — the property assignment SHADOWS the method on
+    the instance, so the first ``this._fetchDay(...)`` call raised a
+    TypeError and every statistics fetch silently died (bars never loaded,
+    only the forecast line rendered). ``node --check`` cannot catch this
+    runtime-only collision, so pin it structurally: for every method defined
+    in a card class, assert the file never assigns ``this.<method> =``.
+    """
+    for fname in ("power_history_card.js", "shade_profile_card.js"):
+        fpath = next(path for _url, path in _frontend._CARDS
+                     if path.name == fname)
+        text = fpath.read_text(encoding="utf-8")
+        # Class-body method definitions: two-space indent, optional async/get/
+        # static, identifier + "(" — the shape both hand-written cards use.
+        methods = set(
+            re.findall(
+                r"^  (?:async |get |static )*([A-Za-z_$][\w$]*)\s*\(",
+                text,
+                re.M,
+            )
+        ) - {"if", "for", "while", "switch", "catch", "constructor"}
+        assigned = set(re.findall(r"this\.([A-Za-z_$][\w$]*)\s*=[^=]", text))
+        shadowed = methods & assigned
+        assert not shadowed, (
+            f"{fname}: instance properties shadow class methods: "
+            f"{sorted(shadowed)} — rename the property"
+        )
