@@ -22,6 +22,7 @@ from homeassistant.components.sensor import (  # noqa: E402
     SensorStateClass,
 )
 from homeassistant.const import UnitOfPower  # noqa: E402
+from homeassistant.helpers.entity import EntityCategory  # noqa: E402
 from homeassistant.helpers.update_coordinator import (  # noqa: E402
     CoordinatorEntity,
 )
@@ -37,9 +38,13 @@ from custom_components.balcony_solar_forecast.recorder import (  # noqa: E402
     exclude_attributes,
 )
 from custom_components.balcony_solar_forecast.sensor import (  # noqa: E402
+    EnergyBandSensor,
+    EnergyProductionDcSensor,
     EnergyProductionSensor,
     LastFetchAgeSensor,
+    MeasuredAcPowerSensor,
     MeasuredDcTotalSensor,
+    PowerNowDcSensor,
     PowerNowSensor,
     SourceStatusSensor,
     _build_forecast_response,
@@ -48,12 +53,27 @@ from custom_components.balcony_solar_forecast.sensor import (  # noqa: E402
 DOMAIN = "balcony_solar_forecast"
 
 
+# Served-AC is a distinct, smaller curve than DC (an inverter efficiency stand-in)
+# so a test that asserts the sensor reads the AC key really proves it — the AC and
+# DC values never coincide.
+_AC_FACTOR = 0.9
+
+
 def _curve_data(start: datetime, watts: list[float], *, status: str = "fresh"):
-    """Build a coordinator-shaped flat data dict for a run of 15-min slots."""
+    """Build a coordinator-shaped flat data dict for a run of 15-min slots.
+
+    Carries BOTH the DC keys (energy_today_kwh / power_now_w / watts / …) and the
+    served-AC siblings (Phase 2: energy_today_kwh_ac / power_now_w_ac / watts_ac /
+    …) at a distinct ``_AC_FACTOR`` scale, so the rewired main sensors (which read
+    the AC keys) and the DC diagnostics (which read the DC keys) can each be
+    pinned unambiguously.
+    """
     starts = [start + timedelta(minutes=15 * i) for i in range(len(watts))]
     iso = [s.isoformat() for s in starts]
     day = start.date().isoformat()
     total_wh = sum(watts) * 0.25
+    ac_watts = [w * _AC_FACTOR for w in watts]
+    ac_total_wh = sum(ac_watts) * 0.25
     return {
         "status": status,
         "degraded": status != "fresh",
@@ -67,6 +87,17 @@ def _curve_data(start: datetime, watts: list[float], *, status: str = "fresh"):
         "wh_period": {k: round(v * 0.25, 2) for k, v in zip(iso, watts, strict=False)},
         "hourly_wh": {start.isoformat(): total_wh},
         "daily_kwh": {day: total_wh / 1000.0},
+        # --- served-AC siblings (Phase 2 operator-facing standard) ---
+        "power_now_w_ac": ac_watts[0],
+        "energy_today_kwh_ac": ac_total_wh / 1000.0,
+        "energy_tomorrow_kwh_ac": None,
+        "energy_d2_kwh_ac": None,
+        "watts_ac": {k: v for k, v in zip(iso, ac_watts, strict=False)},
+        "wh_period_ac": {
+            k: round(v * 0.25, 2) for k, v in zip(iso, ac_watts, strict=False)
+        },
+        "hourly_wh_ac": {start.isoformat(): ac_total_wh},
+        "daily_kwh_ac": {day: ac_total_wh / 1000.0},
         "slot_starts": iso,
         "plane_watts": {"M1": list(watts)},
         "computed_at": start.isoformat(),
@@ -106,25 +137,31 @@ def test_energy_sensor_state_and_curve(monkeypatch):
     start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
     coord = _FakeCoordinator(_curve_data(start, [400.0, 400.0, 400.0, 400.0]))
 
+    # Phase 2: the main energy sensor's HEADLINE reads the served-AC roll-up
+    # (energy_today_kwh_ac), NOT the DC key — 0.4 kWh DC * _AC_FACTOR == 0.36.
     today = _bare(
-        EnergyProductionSensor, coord, _day_offset=0, _energy_key="energy_today_kwh"
+        EnergyProductionSensor,
+        coord,
+        _day_offset=0,
+        _energy_key="energy_today_kwh_ac",
     )
-    assert today.native_value == pytest.approx(0.4)
+    assert today.native_value == pytest.approx(0.4 * _AC_FACTOR)
     attrs = today.extra_state_attributes
-    # v0.4: the served curve plus the additive p10/p90 band curves (empty here,
-    # since this fixture has no DATA_KEY_QUANTILE_CURVES).
+    # The 15-min curve attributes stay the DC model curve (the AC bands are
+    # hourly-only, so the matching 15-min band attributes remain the DC band
+    # shape); the p10/p90 band curves are empty here (no DATA_KEY_QUANTILE_CURVES).
     assert set(attrs) == {"watts", "wh_period", "wh_period_p10", "wh_period_p90"}
     assert len(attrs["watts"]) == 4
     assert attrs["wh_period"][start.isoformat()] == pytest.approx(100.0)
     assert attrs["wh_period_p10"] == {}
     assert attrs["wh_period_p90"] == {}
 
-    # Tomorrow: coordinator roll-up is None and no slots fall on that date.
+    # Tomorrow: coordinator AC roll-up is None and no slots fall on that date.
     tomorrow = _bare(
         EnergyProductionSensor,
         coord,
         _day_offset=1,
-        _energy_key="energy_tomorrow_kwh",
+        _energy_key="energy_tomorrow_kwh_ac",
     )
     assert tomorrow.native_value is None
     assert tomorrow.extra_state_attributes == {
@@ -155,10 +192,12 @@ def test_energy_sensor_no_data():
 
 
 def test_power_now_reads_coordinator_value():
+    # Phase 2: the main power sensor reports the served-AC power (power_now_w_ac),
+    # NOT the DC value — 123.45 W DC * _AC_FACTOR == 111.1 W, rounded to 111.1.
     start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
     coord = _FakeCoordinator(_curve_data(start, [123.45, 200.0]))
     sensor = _bare(PowerNowSensor, coord)
-    assert sensor.native_value == pytest.approx(123.5)
+    assert sensor.native_value == pytest.approx(round(123.45 * _AC_FACTOR, 1))
 
 
 def test_last_fetch_age_converts_seconds_to_minutes():
@@ -176,6 +215,98 @@ def test_source_status_maps_status_and_failure():
 
     failed = _FakeCoordinator(_curve_data(start, [1.0]), last_update_success=False)
     assert _bare(SourceStatusSensor, failed).native_value == "unavailable"
+
+
+# --------------------------------------------------------------------------
+# Model-internal DC diagnostics (Phase 2): read the DC keys, diagnostic-category.
+# --------------------------------------------------------------------------
+
+
+def test_power_now_dc_reads_dc_key():
+    # The DC diagnostic reports the DC value (power_now_w), the UN-scaled watts[0],
+    # NOT the AC key the main power sensor now reads. Built via the real __init__
+    # so the resolved diagnostic entity_category can be pinned.
+    start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    coord = _FakeCoordinator(_curve_data(start, [123.45, 200.0]))
+    s = PowerNowDcSensor(coord)
+    assert s.native_value == pytest.approx(123.5)
+    assert s.entity_category == EntityCategory.DIAGNOSTIC
+    assert s.available is True  # diagnostics stay available
+    assert s.device_class == SensorDeviceClass.POWER
+    assert s.native_unit_of_measurement == UnitOfPower.WATT
+    assert s.unique_id == "abc123_power_production_now_dc"
+
+
+def test_energy_dc_diagnostic_reads_dc_key():
+    start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    coord = _FakeCoordinator(_curve_data(start, [400.0, 400.0, 400.0, 400.0]))
+    # The DC diagnostic reports the DC day roll-up (0.4 kWh), NOT the AC headline.
+    s = EnergyProductionDcSensor(coord, "energy_production_today_dc", "energy_today_kwh")
+    assert s.native_value == pytest.approx(0.4)
+    assert s.entity_category == EntityCategory.DIAGNOSTIC
+    assert s.device_class == SensorDeviceClass.ENERGY
+    assert s.available is True
+
+
+def test_power_now_exposes_inverter_efficiency():
+    """The main AC power sensor carries the per-group eta_inv summary."""
+
+    class _Group:
+        def __init__(self, name, eta):
+            self.name = name
+            self.inverter_efficiency = eta
+
+    class _Site:
+        groups = (_Group("WR1", 0.965), _Group("WR2", 0.90))
+
+    class _Coord:
+        _site = _Site()
+        data = {}
+
+    s = _bare(PowerNowSensor, _Coord())
+    assert s.extra_state_attributes == {
+        "inverter_efficiency": {"WR1": 0.965, "WR2": 0.90}
+    }
+
+
+# --------------------------------------------------------------------------
+# Quantile band sensors now report the served-AC band (Phase 2).
+# --------------------------------------------------------------------------
+
+
+def test_energy_band_sensor_reads_ac_band(monkeypatch):
+    from custom_components.balcony_solar_forecast.const import (
+        DATA_KEY_QUANTILE_CURVES_AC,
+        FORECAST_RESP_KEY_P90,
+    )
+
+    fixed = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(sensor_mod.dt_util, "now", lambda: fixed)
+    monkeypatch.setattr(sensor_mod.dt_util, "as_local", lambda d: d)
+
+    start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    # AC band curves are HOURLY Wh: two of today's hours totalling 0.5 kWh.
+    data = {
+        DATA_KEY_QUANTILE_CURVES_AC: {
+            FORECAST_RESP_KEY_P90: {
+                start.isoformat(): 300.0,
+                (start + timedelta(hours=1)).isoformat(): 200.0,
+            }
+        }
+    }
+    coord = _FakeCoordinator(data)
+    s = _bare(EnergyBandSensor, coord, _band=FORECAST_RESP_KEY_P90)
+    assert s.native_value == pytest.approx(0.5)
+
+
+def test_energy_band_sensor_none_without_ac_band():
+    # No DATA_KEY_QUANTILE_CURVES_AC (quantiles off / cold start) => unknown, not
+    # a fabricated spread.
+    from custom_components.balcony_solar_forecast.const import FORECAST_RESP_KEY_P10
+
+    coord = _FakeCoordinator({})
+    s = _bare(EnergyBandSensor, coord, _band=FORECAST_RESP_KEY_P10)
+    assert s.native_value is None
 
 
 # --------------------------------------------------------------------------
@@ -213,8 +344,10 @@ class _MeasuredPlane:
 
 
 class _MeasuredSite:
-    def __init__(self, planes):
+    def __init__(self, planes, ac_actual_entity=None):
         self.planes = tuple(planes)
+        # Site-level AC meter (Phase 2); None == not configured.
+        self.ac_actual_entity = ac_actual_entity
 
 
 class _MeasuredEntry:
@@ -228,12 +361,13 @@ class _MeasuredCoordinator:
     """Coordinator double exposing the ``_site.planes`` surface + entry that
     ``async_setup_entry`` reads to build (or omit) the measured-total sensor."""
 
-    def __init__(self, actual_entities):
+    def __init__(self, actual_entities, ac_actual_entity=None):
         self.entry = _MeasuredEntry()
         # Plane names M1, M2, … aligned with the given actual_entity ids so the
         # measured-total sensor can expose ``source_names`` alongside ``sources``.
         self._site = _MeasuredSite(
-            [_MeasuredPlane(a, f"M{i + 1}") for i, a in enumerate(actual_entities)]
+            [_MeasuredPlane(a, f"M{i + 1}") for i, a in enumerate(actual_entities)],
+            ac_actual_entity=ac_actual_entity,
         )
         self.data = None
         self.last_update_success = True
@@ -421,6 +555,79 @@ def test_measured_total_entity_contract_pinned():
 
 
 # --------------------------------------------------------------------------
+# Measured site-total AC-power sensor (Phase 2): SINGLE meter, ground truth.
+# --------------------------------------------------------------------------
+
+
+def test_measured_ac_reads_single_source():
+    hass = _StatesHass({"sensor.ac": "615.0"})
+    s = _bare(
+        MeasuredAcPowerSensor,
+        _FakeCoordinator(None),
+        hass=hass,
+        _source_id="sensor.ac",
+        _value=None,
+        _reporting=False,
+    )
+    s._recompute()
+    assert s.native_value == pytest.approx(615.0)
+    assert s.available is True
+    # Single source, no channels_total (unlike the DC total's sum).
+    assert s.extra_state_attributes == {"source": "sensor.ac"}
+
+
+def test_measured_ac_unavailable_when_dead():
+    hass = _StatesHass({"sensor.ac": "unavailable"})
+    s = _bare(
+        MeasuredAcPowerSensor,
+        _FakeCoordinator(None),
+        hass=hass,
+        _source_id="sensor.ac",
+        _value=None,
+        _reporting=False,
+    )
+    s._recompute()
+    assert s.native_value is None
+    assert s.available is False
+
+
+def test_measured_ac_available_independent_of_coordinator():
+    # The forecast coordinator's last update FAILED, but the live AC meter keeps
+    # the measured sensor available (ground truth decoupled from the forecast).
+    hass = _StatesHass({"sensor.ac": "42.0"})
+    coord = _FakeCoordinator(None, last_update_success=False)
+    s = _bare(
+        MeasuredAcPowerSensor,
+        coord,
+        hass=hass,
+        _source_id="sensor.ac",
+        _value=None,
+        _reporting=False,
+    )
+    s._recompute()
+    assert coord.last_update_success is False
+    assert s.available is True
+    assert s.native_value == pytest.approx(42.0)
+
+
+async def test_measured_ac_added_only_when_configured():
+    coord = _MeasuredCoordinator([None], ac_actual_entity="sensor.site_ac")
+    added: list = []
+    await sensor_mod.async_setup_entry(_MeasuredHass(coord), coord.entry, added.extend)
+    ac = [e for e in added if isinstance(e, MeasuredAcPowerSensor)]
+    assert len(ac) == 1
+    assert ac[0]._source_id == "sensor.site_ac"
+
+
+async def test_measured_ac_omitted_when_not_configured():
+    # No ac_actual_entity -> nothing to read -> sensor not created.
+    coord = _MeasuredCoordinator(["sensor.a"], ac_actual_entity=None)
+    added: list = []
+    await sensor_mod.async_setup_entry(_MeasuredHass(coord), coord.entry, added.extend)
+    assert not any(isinstance(e, MeasuredAcPowerSensor) for e in added)
+
+
+# --------------------------------------------------------------------------
 # Degraded binary sensor.
 # --------------------------------------------------------------------------
 
@@ -523,6 +730,8 @@ def test_recorder_excludes_curve_attributes():
 
 
 async def test_energy_hook_returns_wh_hours():
+    # Phase 2: the Energy dashboard hook returns the served-AC hourly curve
+    # (hourly_wh_ac) — 400 W * 4 slots * 0.25 h == 400 Wh DC, * _AC_FACTOR AC.
     start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
     coord = _FakeCoordinator(_curve_data(start, [400.0, 400.0, 400.0, 400.0]))
 
@@ -531,7 +740,7 @@ async def test_energy_hook_returns_wh_hours():
 
     out = await async_get_solar_forecast(_Hass(), "eid")
     assert set(out) == {"wh_hours"}
-    assert out["wh_hours"][start.isoformat()] == pytest.approx(400.0)
+    assert out["wh_hours"][start.isoformat()] == pytest.approx(400.0 * _AC_FACTOR)
 
 
 async def test_energy_hook_unknown_entry_returns_none():
@@ -542,7 +751,8 @@ async def test_energy_hook_unknown_entry_returns_none():
 
 
 async def test_energy_hook_no_forecast_returns_none():
-    coord = _FakeCoordinator({"hourly_wh": {}})
+    # No served-AC hourly curve => no overlay (Phase 2 reads hourly_wh_ac).
+    coord = _FakeCoordinator({"hourly_wh_ac": {}})
 
     class _Hass:
         data = {DOMAIN: {"eid": coord}}

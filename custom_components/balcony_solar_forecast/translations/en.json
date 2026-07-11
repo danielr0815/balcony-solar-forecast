@@ -5,7 +5,12 @@
       "energy_production_tomorrow": {"name": "Energy production tomorrow"},
       "energy_production_d2": {"name": "Energy production day after tomorrow"},
       "power_production_now": {"name": "Power production now"},
+      "energy_production_today_dc": {"name": "Energy production today (DC)"},
+      "energy_production_tomorrow_dc": {"name": "Energy production tomorrow (DC)"},
+      "energy_production_d2_dc": {"name": "Energy production day after tomorrow (DC)"},
+      "power_production_now_dc": {"name": "Power production now (DC)"},
       "measured_dc_power_total": {"name": "Measured DC power (total)"},
+      "measured_ac_power": {"name": "Measured AC power"},
       "last_fetch_age_min": {"name": "Last fetch age"},
       "source_status": {
         "name": "Source status",
@@ -208,12 +213,16 @@
           "longitude": "Longitude",
           "fetch_interval_seconds": "Weather fetch interval (seconds)",
           "recompute_interval_seconds": "Recompute interval (seconds)",
+          "ac_actual_entity": "Total-AC meter (behind the inverters)",
+          "ac_actual_invert": "Invert the AC meter sign",
           "site": "Site configuration (planes, horizon, inverter groups)"
         },
         "data_description": {
           "name": "Unique name for this installation — one instance per name.",
           "fetch_interval_seconds": "How often Open-Meteo is polled (default 1800 = 30 min).",
-          "recompute_interval_seconds": "How often the forecast is recomputed (default 900 = 15 min)."
+          "recompute_interval_seconds": "How often the forecast is recomputed (default 900 = 15 min).",
+          "ac_actual_entity": "Optional. The sensor metering total AC power behind all inverters — the target the learned inverter efficiency (η) is calibrated against, and the apples-to-apples AC-vs-AC dashboard comparison. Leave empty if you have no whole-site AC meter.",
+          "ac_actual_invert": "Enable if your AC meter reports the fed-in balcony-solar power as a negative value; the reading is negated once so measured AC reads positive."
         }
       },
       "reconfigure": {
@@ -224,11 +233,15 @@
           "longitude": "Longitude",
           "fetch_interval_seconds": "Weather fetch interval (seconds)",
           "recompute_interval_seconds": "Recompute interval (seconds)",
+          "ac_actual_entity": "Total-AC meter (behind the inverters)",
+          "ac_actual_invert": "Invert the AC meter sign",
           "site": "Site configuration (planes, horizon, inverter groups)"
         },
         "data_description": {
           "fetch_interval_seconds": "How often Open-Meteo is polled (default 1800 = 30 min).",
-          "recompute_interval_seconds": "How often the forecast is recomputed (default 900 = 15 min)."
+          "recompute_interval_seconds": "How often the forecast is recomputed (default 900 = 15 min).",
+          "ac_actual_entity": "Optional. The sensor metering total AC power behind all inverters — the target the learned inverter efficiency (η) is calibrated against, and the apples-to-apples AC-vs-AC dashboard comparison. Leave empty if you have no whole-site AC meter.",
+          "ac_actual_invert": "Enable if your AC meter reports the fed-in balcony-solar power as a negative value; the reading is negated once so measured AC reads positive."
         }
       }
     },

@@ -19,9 +19,11 @@ from balcony_solar_forecast._site_validation import (
     validate_site,
 )
 from balcony_solar_forecast.const import (
+    CONF_AC_ACTUAL_ENTITY,
     CONF_AZIMUTH,
     CONF_EFFICIENCY,
     CONF_GROUP_AC_LIMIT,
+    CONF_GROUP_INVERTER_EFFICIENCY,
     CONF_GROUP_PLANES,
     CONF_GROUPS,
     CONF_HORIZON,
@@ -37,7 +39,10 @@ from balcony_solar_forecast.const import (
     CONF_SHADE_GROUP,
     CONF_TILT,
     CONF_WP,
+    DEFAULT_INVERTER_EFFICIENCY,
     DEFAULT_SITE,
+    INVERTER_EFFICIENCY_MAX,
+    INVERTER_EFFICIENCY_MIN,
 )
 
 _COMPONENT_DIR = (
@@ -179,6 +184,70 @@ def test_ross_coeff_absent_is_none_and_round_trips() -> None:
     result = validate_site(_site())
     assert all(p.ross_coeff is None for p in result.planes)
     assert CONF_ROSS_COEFF not in result.planes[0].to_dict()
+
+
+# --------------------------------------------------------------------------
+# AC-side additive config: per-group inverter efficiency + site AC meter.
+# --------------------------------------------------------------------------
+
+
+def test_group_inverter_efficiency_default_absent_and_round_trips() -> None:
+    # A shipped default group carries the default eta and does NOT emit the key,
+    # so it round-trips to the exact pre-AC dict (backward compatible).
+    result = validate_site(_site())
+    assert all(
+        g.inverter_efficiency == DEFAULT_INVERTER_EFFICIENCY
+        for g in result.groups
+    )
+    assert CONF_GROUP_INVERTER_EFFICIENCY not in result.groups[0].to_dict()
+
+
+def test_group_inverter_efficiency_override_round_trips() -> None:
+    site = _site()
+    site[CONF_GROUPS][0][CONF_GROUP_INVERTER_EFFICIENCY] = 0.94
+    result = validate_site(site)
+    assert result.groups[0].inverter_efficiency == pytest.approx(0.94)
+    # to_dict emits the override, and the whole site round-trips losslessly.
+    d = result.groups[0].to_dict()
+    assert d[CONF_GROUP_INVERTER_EFFICIENCY] == pytest.approx(0.94)
+    assert result.to_dict() == validate_site(result.to_dict()).to_dict()
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (2.0, INVERTER_EFFICIENCY_MAX),   # above ceiling -> clamped down
+        (0.1, INVERTER_EFFICIENCY_MIN),   # below floor -> clamped up
+        ("bad", DEFAULT_INVERTER_EFFICIENCY),  # garbage -> default
+    ],
+)
+def test_group_inverter_efficiency_clamped_on_load(raw, expected) -> None:
+    site = _site()
+    site[CONF_GROUPS][0][CONF_GROUP_INVERTER_EFFICIENCY] = raw
+    result = validate_site(site)
+    assert result.groups[0].inverter_efficiency == pytest.approx(expected)
+
+
+def test_ac_actual_entity_absent_is_none_and_round_trips() -> None:
+    result = validate_site(_site())
+    assert result.ac_actual_entity is None
+    assert CONF_AC_ACTUAL_ENTITY not in result.to_dict()
+
+
+def test_ac_actual_entity_set_round_trips() -> None:
+    site = _site()
+    site[CONF_AC_ACTUAL_ENTITY] = "sensor.total_ac_power"
+    result = validate_site(site)
+    assert result.ac_actual_entity == "sensor.total_ac_power"
+    assert result.to_dict()[CONF_AC_ACTUAL_ENTITY] == "sensor.total_ac_power"
+    assert result.to_dict() == validate_site(result.to_dict()).to_dict()
+
+
+def test_ac_actual_entity_blank_normalised_to_none() -> None:
+    site = _site()
+    site[CONF_AC_ACTUAL_ENTITY] = "   "
+    result = validate_site(site)
+    assert result.ac_actual_entity is None
 
 
 def test_plane_no_name() -> None:

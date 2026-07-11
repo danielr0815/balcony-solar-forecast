@@ -54,6 +54,8 @@ from homeassistant.helpers import selector
 
 from ._site_validation import SiteValidationError, validate_site
 from .const import (
+    CONF_AC_ACTUAL_ENTITY,
+    CONF_AC_ACTUAL_INVERT,
     CONF_COMPARISON_DAILY_ENTITY,
     CONF_COMPARISON_NAME,
     CONF_COMPARISON_SENSORS,
@@ -178,6 +180,8 @@ def _user_schema(
     fetch_interval: int,
     recompute_interval: int,
     site: dict[str, Any],
+    ac_actual_entity: str = "",
+    ac_actual_invert: bool = False,
     include_name: bool = True,
 ) -> vol.Schema:
     """Schema for the user / reconfigure step: STRUCTURAL setup only.
@@ -186,6 +190,15 @@ def _user_schema(
     unique-id) is immutable after setup. The runtime tunables (learner kill
     switches, quantile bands, comparison sensors) are NOT first-setup fields and
     live in the options flow — see ``_options_schema``.
+
+    ``ac_actual_entity`` / ``ac_actual_invert`` are the site-level TOTAL-AC meter
+    picker (AC-side Phase 4): both OPTIONAL, shown just above the site object.
+    They are NOT part of the object selector — they are separate first-class
+    fields so the operator sets the AC calibration target without editing raw
+    JSON — and get merged INTO the site dict in ``_structural_data`` so they
+    round-trip through ``SiteConfig`` exactly like lat/lon. The entity uses a
+    ``suggested_value`` (not a ``default``) so a cleared field stays cleared
+    (an EntitySelector default would silently re-apply on clear).
     """
     fields: dict[Any, Any] = {}
     if include_name:
@@ -215,6 +228,16 @@ def _user_schema(
             vol.Required(
                 CONF_RECOMPUTE_INTERVAL, default=recompute_interval
             ): _interval_selector(_MIN_RECOMPUTE_SECONDS, _MAX_RECOMPUTE_SECONDS),
+            # Optional site-level AC meter (Phase 4) — above the site object.
+            vol.Optional(
+                CONF_AC_ACTUAL_ENTITY,
+                description={"suggested_value": ac_actual_entity or None},
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            ),
+            vol.Optional(
+                CONF_AC_ACTUAL_INVERT, default=bool(ac_actual_invert)
+            ): _bool_selector(),
             vol.Required(CONF_SITE, default=site): _site_selector(),
         }
     )
@@ -285,6 +308,24 @@ def _structural_data(site: SiteConfig, user_input: dict[str, Any]) -> dict[str, 
     site_dict = site.to_dict()
     site_dict[CONF_LATITUDE] = lat
     site_dict[CONF_LONGITUDE] = lon
+    # Merge the site-level AC-meter picker (Phase 4) INTO the site dict, exactly
+    # like lat/lon, so it round-trips through SiteConfig (the coordinator reads
+    # the meter only from the site-embedded config). The two visible form fields
+    # are AUTHORITATIVE: an empty/absent entity clears any value the site object
+    # carried (stored as absent → None), and the invert flag is written only when
+    # True (mirrors SiteConfig.to_dict's only-when-set convention).
+    ac_entity_raw = user_input.get(CONF_AC_ACTUAL_ENTITY)
+    ac_entity = (
+        ac_entity_raw.strip() if isinstance(ac_entity_raw, str) else ""
+    )
+    if ac_entity:
+        site_dict[CONF_AC_ACTUAL_ENTITY] = ac_entity
+    else:
+        site_dict.pop(CONF_AC_ACTUAL_ENTITY, None)
+    if bool(user_input.get(CONF_AC_ACTUAL_INVERT, False)):
+        site_dict[CONF_AC_ACTUAL_INVERT] = True
+    else:
+        site_dict.pop(CONF_AC_ACTUAL_INVERT, None)
     return {
         CONF_LATITUDE: lat,
         CONF_LONGITUDE: lon,
@@ -342,6 +383,8 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
                 fetch_interval=defaults["fetch_interval"],
                 recompute_interval=defaults["recompute_interval"],
                 site=defaults["site"],
+                ac_actual_entity=defaults["ac_actual_entity"],
+                ac_actual_invert=defaults["ac_actual_invert"],
             ),
             errors=errors,
         )
@@ -393,6 +436,8 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
                 fetch_interval=defaults["fetch_interval"],
                 recompute_interval=defaults["recompute_interval"],
                 site=defaults["site"],
+                ac_actual_entity=defaults["ac_actual_entity"],
+                ac_actual_invert=defaults["ac_actual_invert"],
                 include_name=False,
             ),
             errors=errors,
@@ -515,6 +560,17 @@ def _current_values(
         else copy.deepcopy(DEFAULT_SITE)
     )
 
+    # AC-meter picker defaults (Phase 4): the meter lives INSIDE the site dict
+    # (merged there by _structural_data), so pull the pre-fill from the resolved
+    # site — unless a just-submitted top-level value is present (error re-render
+    # keeps the operator's in-progress edit).
+    site_ac_entity = ""
+    site_ac_invert = False
+    if isinstance(default_site, dict):
+        raw_ac = default_site.get(CONF_AC_ACTUAL_ENTITY)
+        site_ac_entity = raw_ac if isinstance(raw_ac, str) else ""
+        site_ac_invert = bool(default_site.get(CONF_AC_ACTUAL_INVERT, False))
+
     def _bool_default(key: str, fallback: bool) -> bool:
         # Precedence mirrors the other fields: just-submitted edit > existing
         # option > shipped default. ``existing`` already merges data+options.
@@ -555,6 +611,10 @@ def _current_values(
             else RECOMPUTE_INTERVAL_SECONDS,
         ),
         "site": src.get(CONF_SITE, default_site),
+        "ac_actual_entity": src.get(CONF_AC_ACTUAL_ENTITY, site_ac_entity),
+        "ac_actual_invert": bool(
+            src.get(CONF_AC_ACTUAL_INVERT, site_ac_invert)
+        ),
         "fast_learner_enabled": _bool_default(
             CONF_FAST_LEARNER_ENABLED, DEFAULT_FAST_LEARNER_ENABLED
         ),

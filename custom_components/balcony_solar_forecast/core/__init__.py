@@ -9,7 +9,7 @@ and the tests depend on.
 from __future__ import annotations
 
 from .clearsky import clear_sky_index, haurwitz_ghi
-from .electrical import clamp_groups, dc_power
+from .electrical import clamp_groups, clamp_groups_ac, dc_power
 from .engine import LearnerHooks, compute_forecast
 from .horizon import interp_elevation, sky_view_factor, transmittance_at
 from .shadeprofile import compute_shade_profile
@@ -23,6 +23,7 @@ from .types import (
     DriftState,
     ForecastResult,
     HorizonRow,
+    InverterCalState,
     InverterGroup,
     IssuedSnapshot,
     LearnerConfig,
@@ -58,6 +59,7 @@ __all__ = [
     "BiasState",
     "ShademapBin",
     "ShademapState",
+    "InverterCalState",
     "DriftState",
     "LearnerSnapshot",
     "IssuedSnapshot",
@@ -84,6 +86,7 @@ __all__ = [
     # electrical
     "dc_power",
     "clamp_groups",
+    "clamp_groups_ac",
     # engine
     "compute_forecast",
     "LearnerHooks",

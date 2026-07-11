@@ -29,6 +29,8 @@ from balcony_solar_forecast.config_flow import (  # noqa: E402
     BalconySolarForecastConfigFlow,
 )
 from balcony_solar_forecast.const import (  # noqa: E402
+    CONF_AC_ACTUAL_ENTITY,
+    CONF_AC_ACTUAL_INVERT,
     CONF_FETCH_INTERVAL,
     CONF_LATITUDE,
     CONF_LONGITUDE,
@@ -38,6 +40,7 @@ from balcony_solar_forecast.const import (  # noqa: E402
     FETCH_INTERVAL_SECONDS,
     RECOMPUTE_INTERVAL_SECONDS,
 )
+from balcony_solar_forecast.core.types import SiteConfig  # noqa: E402
 
 # Submitted coordinates: DIFFERENT from both the entry's stored lat/lon AND the
 # site dict's own embedded lat/lon, so the merge is unambiguously observable.
@@ -152,6 +155,55 @@ async def test_reconfigure_merges_coordinates_and_strips_stale_options(monkeypat
         assert key not in stripped
     # ...while OTHER (tunable) option keys survive untouched.
     assert stripped["fast_learner_enabled"] is False
+
+
+async def test_reconfigure_ac_meter_merges_into_site_and_round_trips(monkeypatch):
+    """The AC-meter picker (Phase 4) merges INTO the site dict and round-trips
+    through SiteConfig — exactly like lat/lon."""
+    entry = _entry()
+    flow, captured = _flow(monkeypatch, entry)
+
+    await flow.async_step_reconfigure(
+        _submit(
+            **{
+                CONF_AC_ACTUAL_ENTITY: "sensor.house_ac_meter",
+                CONF_AC_ACTUAL_INVERT: True,
+            }
+        )
+    )
+
+    site_dict = captured["kwargs"]["data_updates"][CONF_SITE]
+    assert site_dict[CONF_AC_ACTUAL_ENTITY] == "sensor.house_ac_meter"
+    assert site_dict[CONF_AC_ACTUAL_INVERT] is True
+    # The persisted site dict reloads into a SiteConfig carrying both.
+    site = SiteConfig.from_dict(site_dict)
+    assert site.ac_actual_entity == "sensor.house_ac_meter"
+    assert site.ac_actual_invert is True
+
+
+async def test_reconfigure_empty_ac_meter_stays_none(monkeypatch):
+    """No AC entity + invert off -> absent from the site dict (None/False on
+    reload), and any value the submitted site OBJECT carried is cleared (the
+    visible fields are authoritative)."""
+    entry = _entry()
+    flow, captured = _flow(monkeypatch, entry)
+
+    # The submitted site object even carries a stale meter; the empty form field
+    # must win and clear it.
+    stale_site = copy.deepcopy(DEFAULT_SITE)
+    stale_site[CONF_AC_ACTUAL_ENTITY] = "sensor.stale"
+    stale_site[CONF_AC_ACTUAL_INVERT] = True
+
+    await flow.async_step_reconfigure(
+        _submit(**{CONF_SITE: stale_site, CONF_AC_ACTUAL_ENTITY: "  "})
+    )
+
+    site_dict = captured["kwargs"]["data_updates"][CONF_SITE]
+    assert CONF_AC_ACTUAL_ENTITY not in site_dict
+    assert CONF_AC_ACTUAL_INVERT not in site_dict
+    site = SiteConfig.from_dict(site_dict)
+    assert site.ac_actual_entity is None
+    assert site.ac_actual_invert is False
 
 
 async def test_reconfigure_with_empty_options_still_strips_cleanly(monkeypatch):

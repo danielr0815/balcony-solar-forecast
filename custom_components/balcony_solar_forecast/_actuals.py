@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 
 from homeassistant.util import dt as dt_util
 
@@ -90,6 +90,80 @@ async def async_read_actuals(
         )
 
     return await get_instance(coord.hass).async_add_executor_job(_read)
+
+
+async def async_read_ac_actuals(
+    hass,
+    ac_entity: str | None,
+    day: date,
+    tz: tzinfo,
+    *,
+    invert: bool = False,
+) -> dict[str, float]:
+    """Hourly measured TOTAL-AC energy for ``day`` from the single site meter.
+
+    Reads the whole-site AC meter (SiteConfig.ac_actual_entity) hourly ``mean``
+    long-term-statistics rows over the LOCAL calendar ``day`` and returns
+    ``{iso_utc_hour: wh}`` (a mean-W row over one hour == Wh) — the AC-side
+    calibration ground truth (AC-side Phase 3). Mirrors the per-module DC reader
+    for a SINGLE entity and keys hours by the SAME ISO-UTC hour as
+    :func:`_actuals_from_stats`, so the nightly calibration can match AC hours
+    against the summed per-module DC hourly actuals directly.
+
+    ``None`` / empty ``ac_entity`` => ``{}`` (no meter configured — the whole
+    calibration is a no-op). ``invert`` negates every hour (the operator's meter
+    can report fed-in balcony-solar AC as a negative value): the sign flip is
+    applied ONCE here at the read boundary so the calibration sees a positive AC.
+    No DC label gates are applied — the nightly calibration gates each hour
+    (min-load + unclipped) against the DC side, and the eligibility band rejects
+    an implausible (e.g. still-negative net-export) reading, so this reader stays
+    a thin, sign-correct energy read.
+    """
+    if not ac_entity:
+        return {}
+    # Local-midnight bounds built directly from ``tz`` (zoneinfo-aware, so DST
+    # 23/25-h days are bounded correctly — NOT via +24 h timedelta arithmetic).
+    start = datetime(day.year, day.month, day.day, tzinfo=tz)
+    nxt = day + timedelta(days=1)
+    end = datetime(nxt.year, nxt.month, nxt.day, tzinfo=tz)
+
+    from homeassistant.components.recorder import get_instance
+
+    def _read() -> dict[str, float]:
+        from homeassistant.components.recorder.statistics import (
+            statistics_during_period,
+        )
+
+        stats = statistics_during_period(
+            hass, start, end, {ac_entity}, "hour", None, {"mean", "state"},
+        )
+        return _ac_hourly_from_stats(stats.get(ac_entity), invert=invert)
+
+    return await get_instance(hass).async_add_executor_job(_read)
+
+
+def _ac_hourly_from_stats(
+    rows: list[dict] | None, *, invert: bool = False
+) -> dict[str, float]:
+    """Reduce one entity's hourly LTS rows to ``{iso_utc_hour: wh}`` (pure).
+
+    Each hourly ``mean`` (W) integrates to Wh over its hour; ``invert`` negates
+    the value so a sign-inverted fed-in meter reads as positive AC. A negated
+    value that is still negative (a net-export meter) is returned AS-IS — the
+    calibration's eligibility band self-rejects it, so no clamp is applied here.
+    Never raises.
+    """
+    hourly: dict[str, float] = {}
+    sign = -1.0 if invert else 1.0
+    for row in rows or ():
+        mean = row.get("mean")
+        if mean is None:
+            continue
+        hkey = _stat_row_hour_key(row.get("start"))
+        if hkey is None:
+            continue
+        hourly[hkey] = hourly.get(hkey, 0.0) + sign * float(mean)  # W*1h == Wh
+    return hourly
 
 
 def _daylight_hours_in_local_day(

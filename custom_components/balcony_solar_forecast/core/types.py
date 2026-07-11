@@ -19,10 +19,13 @@ from datetime import datetime
 
 from ..const import (
     ALBEDO_DEFAULT,
+    CONF_AC_ACTUAL_ENTITY,
+    CONF_AC_ACTUAL_INVERT,
     CONF_ACTUAL_ENTITY,
     CONF_AZIMUTH,
     CONF_EFFICIENCY,
     CONF_GROUP_AC_LIMIT,
+    CONF_GROUP_INVERTER_EFFICIENCY,
     CONF_GROUP_NAME,
     CONF_GROUP_PLANES,
     CONF_GROUPS,
@@ -47,7 +50,10 @@ from ..const import (
     DEFAULT_DAY_AHEAD_BIAS_ENABLED,
     DEFAULT_EFFICIENCY,
     DEFAULT_FAST_LEARNER_ENABLED,
+    DEFAULT_INVERTER_EFFICIENCY,
     DEFAULT_SLOW_LEARNER_ENABLED,
+    INVERTER_EFFICIENCY_MAX,
+    INVERTER_EFFICIENCY_MIN,
     RLS_INIT_COVARIANCE,
     SHADEMAP_TAU_MAX,
     SHADEMAP_TAU_MIN,
@@ -69,6 +75,7 @@ __all__ = [
     "BiasState",
     "ShademapBin",
     "ShademapState",
+    "InverterCalState",
     "DriftState",
     "LearnerSnapshot",
     "IssuedSnapshot",
@@ -228,11 +235,22 @@ class PlaneConfig:
 
 @dataclass(frozen=True, slots=True)
 class InverterGroup:
-    """One inverter with a shared AC clamp over its member planes (ports)."""
+    """One inverter with a shared AC clamp over its member planes (ports).
+
+    ``inverter_efficiency`` (optional) is this group's DC->AC micro-inverter
+    conversion efficiency eta_inv, used by ``electrical.clamp_groups_ac`` to
+    derive the served AC power (AC = min(eta_inv * sum(DC), ac_limit_w)) and the
+    corrected DC clip point (ac_limit_w / eta_inv, where the ports really clip —
+    the micro-inverter clips AC and back-drives the MPP). Default
+    ``DEFAULT_INVERTER_EFFICIENCY`` (HMS-800W-2T class); loaded values are
+    clamped to [INVERTER_EFFICIENCY_MIN, INVERTER_EFFICIENCY_MAX]. Distinct from
+    the DC-side ``PlaneConfig.efficiency``.
+    """
 
     name: str
     plane_names: tuple[str, ...]
     ac_limit_w: float
+    inverter_efficiency: float = DEFAULT_INVERTER_EFFICIENCY
 
     @classmethod
     def from_dict(cls, d: dict) -> InverterGroup:
@@ -240,14 +258,28 @@ class InverterGroup:
             name=str(d[CONF_GROUP_NAME]),
             plane_names=tuple(str(p) for p in d.get(CONF_GROUP_PLANES, [])),
             ac_limit_w=float(d[CONF_GROUP_AC_LIMIT]),
+            inverter_efficiency=_clamp(
+                _safe_float(
+                    d.get(CONF_GROUP_INVERTER_EFFICIENCY, DEFAULT_INVERTER_EFFICIENCY),
+                    DEFAULT_INVERTER_EFFICIENCY,
+                ),
+                INVERTER_EFFICIENCY_MIN,
+                INVERTER_EFFICIENCY_MAX,
+            ),
         )
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             CONF_GROUP_NAME: self.name,
             CONF_GROUP_PLANES: list(self.plane_names),
             CONF_GROUP_AC_LIMIT: self.ac_limit_w,
         }
+        # Write the efficiency only when the operator overrode the default, so a
+        # default group round-trips to the exact pre-AC dict (no new key) —
+        # backward compatible, mirroring the shade_group / ross_coeff convention.
+        if self.inverter_efficiency != DEFAULT_INVERTER_EFFICIENCY:
+            d[CONF_GROUP_INVERTER_EFFICIENCY] = self.inverter_efficiency
+        return d
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,15 +288,33 @@ class SiteConfig:
 
     Round-trips through ``from_dict``/``to_dict`` for the config-flow object
     selector. ``actual_entity`` lives on each plane (see PlaneConfig).
+
+    ``ac_actual_entity`` (optional) is the HA entity id of the TOTAL AC meter
+    behind all inverters — the whole-site AC calibration target used in a later
+    phase. It is site-level (not per-group) because only the aggregate site AC
+    is measured, never per-inverter AC. Opaque to the pure core (used only by
+    the glue); default None == not configured.
+
+    ``ac_actual_invert`` (optional) negates that meter's reading at the read
+    boundary — the operator's meter can report the fed-in balcony-solar AC as a
+    NEGATED value; default False.
     """
 
     latitude: float
     longitude: float
     planes: tuple[PlaneConfig, ...]
     groups: tuple[InverterGroup, ...]
+    ac_actual_entity: str | None = None
+    ac_actual_invert: bool = False
 
     @classmethod
     def from_dict(cls, d: dict) -> SiteConfig:
+        # Empty / whitespace-only entity id means "not configured" — normalise to
+        # None (mirrors PlaneConfig.shade_group's blank-field handling).
+        raw_ac = d.get(CONF_AC_ACTUAL_ENTITY)
+        ac_actual_entity = (
+            raw_ac.strip() or None if isinstance(raw_ac, str) else None
+        )
         return cls(
             latitude=float(d[CONF_LATITUDE]),
             longitude=float(d[CONF_LONGITUDE]),
@@ -274,15 +324,26 @@ class SiteConfig:
             groups=tuple(
                 InverterGroup.from_dict(g) for g in d.get(CONF_GROUPS, [])
             ),
+            ac_actual_entity=ac_actual_entity,
+            ac_actual_invert=bool(d.get(CONF_AC_ACTUAL_INVERT, False)),
         )
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             CONF_LATITUDE: self.latitude,
             CONF_LONGITUDE: self.longitude,
             CONF_PLANES: [p.to_dict() for p in self.planes],
             CONF_GROUPS: [g.to_dict() for g in self.groups],
         }
+        # Write the meter only when set, so a site without it round-trips to the
+        # exact pre-AC dict (no new key) — mirrors PlaneConfig.shade_group.
+        if self.ac_actual_entity:
+            d[CONF_AC_ACTUAL_ENTITY] = self.ac_actual_entity
+        # Write the invert flag only when True, so a default site round-trips
+        # without the new key (same only-when-set convention).
+        if self.ac_actual_invert:
+            d[CONF_AC_ACTUAL_INVERT] = self.ac_actual_invert
+        return d
 
     def plane_by_name(self, name: str) -> PlaneConfig | None:
         """Return the plane with ``name`` or None."""
@@ -377,9 +438,18 @@ class ForecastResult:
     """Engine output: aligned 15-min power plus hourly energy roll-ups.
 
     ``slot_starts`` are the tz-aware UTC 15-min slot starts every power list
-    is aligned to. ``total_watts`` is the AC-clamped site total. Hourly Wh
-    dicts are keyed by ISO-8601 UTC hour start (for the energy sensors and
-    the ``async_get_solar_forecast`` hook).
+    is aligned to. ``total_watts`` is the DC site total (the AC-clamped DC
+    curve that remains the learning / scoreboard truth). Hourly Wh dicts are
+    keyed by ISO-8601 UTC hour start (for the energy sensors and the
+    ``async_get_solar_forecast`` hook).
+
+    AC curve (Phase 1, additive): ``ac_watts`` / ``ac_hourly_wh`` /
+    ``ac_daily_kwh`` are the served DC curve passed through each inverter
+    group's DC->AC efficiency and AC clamp
+    (``electrical.clamp_groups_ac``) — the physically-correct AC the site
+    delivers. The DC fields above are UNCHANGED by this phase and remain the
+    self-learning / scoreboard / kill-gate truth. All AC fields default empty
+    so every existing constructor stays valid.
     """
 
     slot_starts: tuple[datetime, ...]
@@ -387,6 +457,15 @@ class ForecastResult:
     plane_results: tuple[PlaneResult, ...]
     hourly_wh: dict[str, float]  # {iso_utc_hour: Wh} site total
     daily_kwh: dict[str, float] = field(default_factory=dict)  # {iso_date: kWh}
+    # --- AC-side served curve (Phase 1, SPEC AC-side forecast) ---
+    # The served DC curve run through each inverter group's eta_inv + AC clamp
+    # (electrical.clamp_groups_ac). Additive: default empty so a DC-only build
+    # (and every direct constructor / cached result) round-trips unchanged. The
+    # DC ``total_watts`` / ``hourly_wh`` / ``daily_kwh`` above stay the learner
+    # truth; these are the physical AC the inverters put out.
+    ac_watts: tuple[float, ...] = ()  # per-slot site AC total, aligned to slot_starts
+    ac_hourly_wh: dict[str, float] = field(default_factory=dict)  # {iso_utc_hour: Wh}
+    ac_daily_kwh: dict[str, float] = field(default_factory=dict)  # {iso_date: kWh}
     # --- Dual-curve attribution (v0.2.0 + v0.3.0, SPEC §5/§9) ---
     # ``total_watts`` / ``hourly_wh`` / ``daily_kwh`` above are the CORRECTED
     # (served) curve. The additive fields below carry the pure-physics RAW
@@ -428,6 +507,25 @@ class ForecastResult:
     p10_hourly_wh: dict[str, float] = field(default_factory=dict)
     p50_hourly_wh: dict[str, float] = field(default_factory=dict)
     p90_hourly_wh: dict[str, float] = field(default_factory=dict)
+    # --- AC-side day-ahead + band analogues (Phase 2, SPEC AC-side forecast) ---
+    # PRE-AC-clamp AC total per slot: Sum_planes eta(group) * (cor_unclamped * factor)
+    # BEFORE the inverter AC clamp bites, aligned to ``slot_starts`` — the AC
+    # analogue of ``corrected_unclamped_watts``. The served ``ac_watts`` is this
+    # same series AFTER the per-group AC clamp, so a slot where
+    # ``ac_corrected_unclamped_watts[i] - ac_watts[i] > 0`` is one where the AC
+    # clamp bit; the coordinator's AC day-ahead strip reads it to tell a clamped
+    # slot (ceiling kept) from an unclamped one (factor divided out). Empty () on a
+    # v0.1 / older cached result => strip falls back to divide-always (SPEC §8).
+    ac_corrected_unclamped_watts: tuple[float, ...] = ()
+    # Hourly Wh roll-ups of the AC P10 / P90 band curves (keyed by ISO-8601 UTC
+    # hour, the SAME keys as ``ac_hourly_wh``). The AC analogue of
+    # ``p10_hourly_wh`` / ``p90_hourly_wh``: per slot ac_band_watts =
+    # min(ac_watts * band_factor, ac_ceiling), ac_ceiling = sum of group AC limits
+    # (+ any ungrouped-plane AC). Filled only when the DC bands are present
+    # (band_by_slot active); empty otherwise. P50 == ac_watts, so no separate AC
+    # p50 field is carried.
+    ac_p10_hourly_wh: dict[str, float] = field(default_factory=dict)
+    ac_p90_hourly_wh: dict[str, float] = field(default_factory=dict)
 
     def with_total(self, total_watts: tuple[float, ...]) -> ForecastResult:
         """Return a copy with a replaced total (e.g. after a learner clamp)."""
@@ -761,6 +859,47 @@ class ShademapState:
                 for chan, bins in self.channels.items()
             },
         }
+
+
+# ---------------------------------------------------------------------------
+# Inverter DC->AC efficiency site calibration (AC-side Phase 3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class InverterCalState:
+    """Site-level learned inverter DC->AC efficiency eta_inv (AC-side Phase 3).
+
+    A single scalar calibrated against the site's TOTAL-AC meter: ``eta`` is the
+    EMA of the eligible per-hour measured-AC / modeled-DC ratios and ``n`` counts
+    the folded (in-band) samples that drive BOTH the adaptive EMA warm-up and the
+    INVERTER_CAL_MIN_SAMPLES trust gate. One scalar fits every group (the site
+    has one whole-site AC meter + identical HMS-800W-2T inverters). Mirrors the
+    other learner states (frozen, plain-JSON, validate-and-clamp on load): a
+    missing / garbage blob yields the NEUTRAL state
+    (``eta = DEFAULT_INVERTER_EFFICIENCY``, ``n = 0``), never a raised exception.
+    The eligibility gates + band clamp live in ``core/inverter_cal.py``; this type
+    only carries + (de)serialises the pair.
+    """
+
+    eta: float = DEFAULT_INVERTER_EFFICIENCY
+    n: int = 0
+
+    @classmethod
+    def from_dict(cls, d: dict) -> InverterCalState:
+        if not isinstance(d, dict):
+            return cls()
+        return cls(
+            eta=_safe_float(
+                d.get("eta", DEFAULT_INVERTER_EFFICIENCY),
+                DEFAULT_INVERTER_EFFICIENCY,
+                minimum=0.0,
+            ),
+            n=_safe_int(d.get("n", 0), 0, minimum=0),
+        )
+
+    def to_dict(self) -> dict:
+        return {"eta": self.eta, "n": self.n}
 
 
 # ---------------------------------------------------------------------------

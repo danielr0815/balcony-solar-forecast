@@ -190,6 +190,20 @@ Pipeline (reine Funktionen über 15-min-Slots × N Ebenen, <50 ms/Lauf):
    [0,005, 0,12], sonst `bad_ross_coeff`.
 8. **bias.py / quantiles.py** — schneller Lerner + P10/P50/P90 (§5/§6).
 
+**DC→AC-Kette (AC-Seite, v0.17).** Die Engine rechnet und **lernt DC** (jede
+Ebene → geclampte DC-Leistung); die **ausgelieferte AC-Kurve** entsteht daraus
+je WR-Gruppe aus dem Mikro-Wechselrichter-Wirkungsgrad η_inv und dem AC-Clamp
+(`electrical.clamp_groups_ac`): `AC_Gruppe = min(η_inv · Σ_Ports DC_unclamped ·
+Slot-Faktor, ac_limit_w)`. Der **DC-Clip-Punkt** liegt entsprechend bei
+`ac_limit_w / η_inv` — dort clippen die Ports wirklich, weil der
+Mikro-Wechselrichter AC-seitig deckelt und den MPP zurückdrückt. **Trennung
+DC-intern / AC-Ausgang (bewusster Historienschritt):** die Lernschichten (§5),
+das Skill-Scoreboard und das Kill-Gate (§9/§10) bleiben auf der **DC**-Kurve
+(die Grundwahrheit, gegen die `measured_dc_power_total` gemessen wird); die
+**betreiberseitigen** Haupt-Sensoren (`energy_production_*`,
+`power_production_now`, P10/P90-Bänder) melden dagegen die **AC**-Kurve. Das
+DC-Modell bleibt als `*_dc`-Diagnose sichtbar (§8).
+
 HA-Glue: `DataUpdateCoordinator` (Fetch 30 min, Rechnen 15 min,
 Training nächtlich ~01:30 im Executor). Ein `Store` (versioniert,
 `async_delay_save`, ≤3 gebündelte Writes/Tag — eMMC-Schonung):
@@ -294,6 +308,28 @@ WR-AC-Limit geclampt** (`clamp_groups` läuft nach dem Slot-Faktor ein
 zweites Mal): eine Hochkorrektur (Faktor > 1) kann die ausgelieferte Kurve
 nie über die konfigurierte Wechselrichtergrenze heben. Ebenen ohne WR-Gruppe
 haben keine konfigurierte Obergrenze und passieren beide Clamps unverändert.
+
+**Wechselrichter-η-Kalibrierung (AC-Seite, site-level, v0.17).** Ein
+**einzelner** gelernter Skalar η_inv, kalibriert gegen den **Gesamt-AC-Zähler**
+der Anlage (`SiteConfig.ac_actual_entity`, im Config-Flow als „Gesamt-AC-Zähler
+(hinter den Wechselrichtern)" wählbar; optionales Vorzeichen-Flag
+`ac_actual_invert` für Zähler, die die Einspeisung negativ melden). Es ist eine
+EMA (α 0,10, adaptiver Warm-up) der **stündlichen** Verhältnisse
+`gemessene-AC / modellierte-DC`, aber nur über **kalibrierfähige** Stunden:
+**ungeclippt** (die Datasheet-AC = η_default · Σ DC muss unter 90 % der
+Gruppen-AC-Obergrenze liegen, auf der **unabhängigen** DC-Seite gegatet, damit
+ein Zähler-Glitch nicht zugleich das Gate passiert und das Verhältnis
+verfälscht) **und** über einer Mindestlast (Σ DC > 100 W, sonst verzerren
+WR-Eigenverbrauch / MPPT-Startschwelle das Verhältnis). Verhältnisse außerhalb
+**[0,90 … 0,99]** werden **verworfen** (kein plausibles WR-η — z. B. ein Zähler,
+der auch Hauslast sieht oder netto-verrechnet ist). Erst nach ≥ 20
+kalibrierfähigen Stunden wird das gelernte η vertraut; es ist **nie
+load-bearing** — kein AC-Zähler, zu wenige Samples oder ein out-of-band-Verhältnis
+fallen alle auf das konfigurierte/Default-η zurück, und das DC-Lernen wie das
+Scoreboard bleiben unberührt. Ein Skalar genügt: die Anlage hat genau **einen**
+Gesamt-AC-Zähler und identische HMS-800W-2T. Der State (`InverterCalState`:
+`eta`, `n`) lädt validate-and-clamp wie die übrigen Lerner (korrupt ⇒ neutral,
+nie Setup-Crash) und reitet **nicht** auf dem Rollback-Ring (selbst-gatend).
 
 **Schutzmechanismen (Jury-Auflagen, verbindlich):**
 - Label-Gates im Trainer: eingefrorene Sensoren (unverändert + altes
@@ -411,13 +447,26 @@ Degradationsgrund — die Kurve läuft unverändert auf den gelernten Bändern w
   Wert = Deckel), wird der Skalar NICHT herausdividiert, sondern der Deckelwert
   unverändert übernommen — sonst würde eine nie angewandte Korrektur wieder
   abgezogen und die Headline untertrieben (bis Faktor 2,5).
+- **AC-Standard (v0.17):** die Haupt-Sensoren (`energy_production_today /
+  _tomorrow / _d2`, `power_production_now`, P10/P90-Bänder) melden die **AC**-Kurve
+  (betreiberseitiger Standard hinter den Wechselrichtern). Das modellinterne
+  **DC** liegt auf den **Diagnose**-Sensoren `power_production_now_dc` und
+  `energy_production_today_dc / _tomorrow_dc / _d2_dc` — DC bleibt Lern- und
+  Scoreboard-Grundwahrheit (§4/§5/§9). `power_production_now` trägt das je Gruppe
+  konfigurierte η_inv sowie — sobald kalibriert — das gelernte η als
+  Attribut (`inverter_efficiency` / `inverter_efficiency_learned`).
 - **Ist-Messung:** `measured_dc_power_total` (W, `MEASUREMENT` → Langzeit-
   statistik) — die **ereignisgesteuerte Summe** der `actual_entity`-Sensoren
   aller Ebenen (abonniert die Quellsensoren direkt, rechnet bei jeder Änderung
   neu, **unabhängig vom Prognose-Zyklus**) und bleibt verfügbar, solange
   mindestens eine Quelle meldet (Grundwahrheit muss auch bei degradierter
   Prognose weiterlaufen). Wird **nur erzeugt, wenn** mindestens eine Ebene eine
-  `actual_entity` konfiguriert hat.
+  `actual_entity` konfiguriert hat. Analog `measured_ac_power` (W,
+  `MEASUREMENT`) — die Live-Lesung des **einzelnen** Gesamt-AC-Zählers
+  (`ac_actual_entity`, mit optionalem Vorzeichen-Invert), das AC-Pendant zur
+  DC-Summe und der zeittreue Partner der AC-Prognose; **nur erzeugt, wenn** ein
+  AC-Zähler konfiguriert ist, sodass das Dashboard einen gleichwertigen
+  **AC-gegen-AC**-Vergleich zeigen kann.
 - **Volle Kurve:** 15-min-`watts`- und `wh_period`-Attribute auf den
   Energy-Sensoren (per `exclude_attributes` vom Recorder ausgeschlossen)
   **und** Service-with-Response `balcony_solar_forecast.get_forecast`

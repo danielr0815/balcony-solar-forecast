@@ -75,13 +75,14 @@ def test_build_full_inventory_matches_shipped_yaml():
     views = config["views"]
     assert len(views) == 1
     assert views[0]["path"] == "forecast"
-    # 12 cards: the shipped YAML's built-in-card inventory MINUS the redundant
+    # 13 cards: the shipped YAML's built-in-card inventory MINUS the redundant
     # "Shade profile (per date & module)" entities card (its module/date/fraction
     # controls are embedded in the bundled diagram card) — apexcharts markdown ->
     # bundled shade card, and the measured-DC-power history-graph -> bundled
-    # power-history card (one card either way, so the count is unchanged).
+    # power-history card (one card either way) — PLUS the Phase-4 "DC model &
+    # inverter calibration (diagnostic)" entities card.
     cards = views[0]["cards"]
-    assert len(cards) == 12
+    assert len(cards) == 13
     types = _card_types(config)
     for required in ("markdown", "gauge", "entities", "history-graph", "statistics-graph"):
         assert required in types
@@ -110,7 +111,8 @@ def test_build_full_inventory_matches_shipped_yaml():
     )
     assert power_hist["total_sensor"] == "sensor.real_measured_dc_power_total"
     assert power_hist["forecast_sensor"] == "sensor.real_energy_production_today"
-    assert power_hist["title"] == "Hourly production per module"
+    # Title spells out the mixed units: measured DC bars vs AC forecast line.
+    assert power_hist["title"] == "Production per module (measured DC · forecast AC)"
     # No leftover per-module measured history-graph (its data is in the card).
     assert not any(
         c.get("title", "").startswith("Measured DC power") for c in cards
@@ -124,15 +126,37 @@ def test_build_full_inventory_matches_shipped_yaml():
     assert not any(
         c.get("title") == "Forecast power (time-accurate)" for c in cards
     )
-    # The forecast card is now a pure W-vs-W comparison: Forecast (power_now)
-    # vs Measured (the integration's measured-total sensor), no kWh row.
+    # The forecast card is now a pure W-vs-W comparison: Forecast AC (power_now)
+    # vs Measured. The full map carries the AC meter (measured_ac_power), so the
+    # card pairs AC-vs-AC and is retitled "(AC power)".
     fvm = next(
-        c for c in cards if c.get("title") == "Forecast vs. measured (site power)"
+        c for c in cards if c.get("title") == "Forecast vs. measured (AC power)"
     )
     assert [(r["entity"], r["name"]) for r in fvm["entities"]] == [
         ("sensor.real_power_production_now", "Forecast"),
-        ("sensor.real_measured_dc_power_total", "Measured"),
+        ("sensor.real_measured_ac_power", "Measured"),
     ]
+    # The Phase-4 DC-model diagnostic card: the two DC diagnostic rows + the
+    # learned-eta attribute row on the AC power sensor.
+    dc = next(
+        c
+        for c in cards
+        if c.get("title") == "DC model & inverter calibration (diagnostic)"
+    )
+    assert dc["type"] == "entities"
+    dc_rows = dc["entities"]
+    assert (dc_rows[0]["entity"], dc_rows[0]["name"]) == (
+        "sensor.real_power_production_now_dc",
+        "Forecast power now (DC model)",
+    )
+    assert (dc_rows[1]["entity"], dc_rows[1]["name"]) == (
+        "sensor.real_energy_production_today_dc",
+        "Forecast energy today (DC model)",
+    )
+    eta_row = dc_rows[2]
+    assert eta_row["type"] == "attribute"
+    assert eta_row["entity"] == "sensor.real_power_production_now"
+    assert eta_row["attribute"] == "inverter_efficiency_learned"
     # The shademap markdown no longer hardcodes the reference site's obstructions.
     shademap = next(
         c
@@ -266,9 +290,11 @@ def test_build_measured_power_falls_back_to_history_graph():
 
 
 def test_forecast_card_survives_without_measured_row():
-    """No measured-total sensor (no actual_entity configured) -> the forecast
-    card keeps its single Forecast row rather than being dropped."""
+    """No measured sensor at all (no AC meter, no actual_entity) -> the forecast
+    card keeps its single Forecast row rather than being dropped, retitled to the
+    DC-fallback title."""
     entity_map = _full_entity_map()
+    entity_map.pop("measured_ac_power")
     entity_map.pop("measured_dc_power_total")
     config = d.build_dashboard_config(
         entity_map=entity_map,
@@ -279,11 +305,63 @@ def test_forecast_card_survives_without_measured_row():
     card = next(
         c
         for c in config["views"][0]["cards"]
-        if c.get("title") == "Forecast vs. measured (site power)"
+        if c.get("title") == "Forecast vs. measured (DC power)"
     )
     assert [(r["entity"], r["name"]) for r in card["entities"]] == [
         ("sensor.real_power_production_now", "Forecast"),
     ]
+
+
+def test_forecast_card_dc_fallback_without_ac_meter():
+    """No AC meter but a DC-total sensor -> the card pairs the AC forecast with
+    the DC total and is retitled "(DC power)"."""
+    entity_map = _full_entity_map()
+    entity_map.pop("measured_ac_power")
+    config = d.build_dashboard_config(
+        entity_map=entity_map,
+        comparison_slugs=[],
+        measured_entities=[],
+        version="0.0.0",
+    )
+    card = next(
+        c
+        for c in config["views"][0]["cards"]
+        if c.get("title") == "Forecast vs. measured (DC power)"
+    )
+    assert [(r["entity"], r["name"]) for r in card["entities"]] == [
+        ("sensor.real_power_production_now", "Forecast"),
+        ("sensor.real_measured_dc_power_total", "Measured"),
+    ]
+
+
+def test_dc_diagnostics_card_gated_on_dc_sensors():
+    """The DC-model diagnostic card is dropped when its two DC diagnostic sensors
+    are absent, present (with the learned-eta attribute row) when they exist."""
+    # Present in the full map.
+    full = d.build_dashboard_config(
+        entity_map=_full_entity_map(),
+        comparison_slugs=[],
+        measured_entities=[],
+        version="0.0.0",
+    )
+    assert any(
+        c.get("title") == "DC model & inverter calibration (diagnostic)"
+        for c in full["views"][0]["cards"]
+    )
+    # Drop both DC diagnostic sensors -> the whole card is omitted.
+    entity_map = _full_entity_map()
+    entity_map.pop("power_production_now_dc")
+    entity_map.pop("energy_production_today_dc")
+    gone = d.build_dashboard_config(
+        entity_map=entity_map,
+        comparison_slugs=[],
+        measured_entities=[],
+        version="0.0.0",
+    )
+    assert not any(
+        c.get("title") == "DC model & inverter calibration (diagnostic)"
+        for c in gone["views"][0]["cards"]
+    )
 
 
 def test_forecast_card_omitted_without_power_now():
@@ -298,7 +376,7 @@ def test_forecast_card_omitted_without_power_now():
         version="0.0.0",
     )
     assert not any(
-        c.get("title") == "Forecast vs. measured (site power)"
+        str(c.get("title", "")).startswith("Forecast vs. measured")
         for c in config["views"][0]["cards"]
     )
 

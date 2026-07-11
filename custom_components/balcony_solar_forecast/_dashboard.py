@@ -36,14 +36,17 @@ from .const import (
     SELECT_SHADE_PROFILE_MODULE,
     SENSOR_DRIFT_MAE_CORRECTED,
     SENSOR_ENERGY_TODAY,
+    SENSOR_ENERGY_TODAY_DC,
     SENSOR_ENERGY_TODAY_P10,
     SENSOR_ENERGY_TODAY_P90,
     SENSOR_FORECAST_DAILY_KWH_MAE,
     SENSOR_FORECAST_HOURLY_MAE,
     SENSOR_FORECAST_VS_BEST_BASELINE_PCT,
     SENSOR_INTRADAY_SCALAR,
+    SENSOR_MEASURED_AC_POWER,
     SENSOR_MEASURED_DC_TOTAL,
     SENSOR_POWER_NOW,
+    SENSOR_POWER_NOW_DC,
     SENSOR_SHADE_PROFILE,
 )
 
@@ -82,6 +85,9 @@ DASHBOARD_ENTITY_KEYS: tuple[str, ...] = (
     SENSOR_ENERGY_TODAY,
     SENSOR_POWER_NOW,
     SENSOR_MEASURED_DC_TOTAL,
+    SENSOR_MEASURED_AC_POWER,
+    SENSOR_POWER_NOW_DC,
+    SENSOR_ENERGY_TODAY_DC,
     SENSOR_ENERGY_TODAY_P10,
     SENSOR_ENERGY_TODAY_P90,
     SENSOR_SOURCE_STATUS,
@@ -191,6 +197,7 @@ def build_dashboard_config(
     _add_vs_best_gauge(cards, entity_map)
     _add_scoreboard(cards, entity_map, comparison_slugs)
     _add_forecast_history(cards, entity_map)
+    _add_dc_diagnostics(cards, entity_map)
     _add_measured_power(cards, entity_map, measured_entities)
     _add_measured_lts(cards, measured_entities)
     _add_forecast_band(cards, entity_map)
@@ -301,31 +308,86 @@ def _add_scoreboard(
 def _add_forecast_history(
     cards: list[dict[str, Any]], entity_map: dict[str, str]
 ) -> None:
-    """Forecast-vs-measured SITE POWER comparison history-graph (SPEC §14.3).
+    """Forecast-vs-measured power comparison history-graph (SPEC §14.3).
 
-    A pure power comparison on ONE y-scale: the instantaneous forecast power
-    (``power_production_now``) against the measured site-total DC power
-    (``measured_dc_power_total``, the live sum of the per-module sensors). The
-    today-kWh row that used to share this card is gone — mixing kWh and W on one
-    axis is unreadable; the daily-kWh story lives in the band card + scoreboard.
+    The forecast power sensor (``power_production_now``) now reports AC (Phase 2),
+    so this card pairs it apples-to-apples with the measured site AC meter
+    (``measured_ac_power``) when the site has one configured — retitled
+    "Forecast vs. measured (AC power)". Without an AC meter it FALLS BACK to the
+    measured site-total DC power (``measured_dc_power_total``, the live sum of the
+    per-module sensors) and is retitled "(DC power)". The today-kWh row that used
+    to share this card is gone — mixing kWh and W on one axis is unreadable; the
+    daily-kWh story lives in the band card + scoreboard.
 
     Gated on the forecast-power row: the card is omitted entirely only when
-    ``power_production_now`` is absent. When just the measured-total sensor is
-    missing (no plane has an ``actual_entity``, so the summing sensor was never
-    created) the forecast-only row survives.
+    ``power_production_now`` is absent. When neither measured sensor exists (no AC
+    meter and no plane ``actual_entity``) the forecast-only row survives.
     """
     forecast_row = _row(entity_map, SENSOR_POWER_NOW, "Forecast")
     if forecast_row is None:
         return
     rows = [forecast_row]
-    measured_row = _row(entity_map, SENSOR_MEASURED_DC_TOTAL, "Measured")
-    if measured_row is not None:
-        rows.append(measured_row)
+    ac_row = _row(entity_map, SENSOR_MEASURED_AC_POWER, "Measured")
+    if ac_row is not None:
+        # AC meter present → AC-vs-AC, the physically-honest comparison.
+        rows.append(ac_row)
+        title = "Forecast vs. measured (AC power)"
+    else:
+        # No AC meter → fall back to the DC total (AC forecast vs DC measured).
+        title = "Forecast vs. measured (DC power)"
+        measured_row = _row(entity_map, SENSOR_MEASURED_DC_TOTAL, "Measured")
+        if measured_row is not None:
+            rows.append(measured_row)
     cards.append(
         {
             "type": "history-graph",
-            "title": "Forecast vs. measured (site power)",
+            "title": title,
             "hours_to_show": 72,
+            "entities": rows,
+        }
+    )
+
+
+def _add_dc_diagnostics(
+    cards: list[dict[str, Any]], entity_map: dict[str, str]
+) -> None:
+    """Model-internal DC view + the AC-meter-calibrated inverter η (Phase 4).
+
+    A lean diagnostic ``entities`` card so the operator can still see the DC
+    model — now that the main power/energy sensors report AC — alongside the
+    learned DC→AC efficiency. The DC curve remains the self-learning / scoreboard
+    truth (SPEC §5); these two rows read the unchanged DC data keys. The learned
+    site η (``inverter_efficiency_learned``) rides as an attribute of the AC
+    ``power_production_now`` sensor (it has no scalar entity of its own), so it is
+    surfaced here via an ``attribute`` entities-row — a built-in row type, not a
+    custom card. Gated on the two DC diagnostic sensors existing; the η row is
+    added only when the AC power sensor is present.
+    """
+    rows: list[dict[str, Any]] = []
+    for key, name in (
+        (SENSOR_POWER_NOW_DC, "Forecast power now (DC model)"),
+        (SENSOR_ENERGY_TODAY_DC, "Forecast energy today (DC model)"),
+    ):
+        row = _row(entity_map, key, name)
+        if row is not None:
+            rows.append(row)
+    if not rows:
+        return
+    ac_power = entity_map.get(SENSOR_POWER_NOW)
+    if ac_power is not None:
+        rows.append(
+            {
+                "type": "attribute",
+                "entity": ac_power,
+                "attribute": "inverter_efficiency_learned",
+                "name": "Learned inverter η (AC-meter calibrated)",
+            }
+        )
+    cards.append(
+        {
+            "type": "entities",
+            "title": "DC model & inverter calibration (diagnostic)",
+            "show_header_toggle": False,
             "entities": rows,
         }
     )
@@ -354,7 +416,11 @@ def _add_measured_power(
         card: dict[str, Any] = {
             "type": _POWER_HISTORY_CARD,
             "total_sensor": total,
-            "title": "Hourly production per module",
+            # Title spells out the two units on the card: the stacked bars are
+            # the measured per-module DC production, the dashed line is the AC
+            # forecast (power_production_now/energy_production_today are AC since
+            # Phase 2), so the mixed-unit overlay is never misread.
+            "title": "Production per module (measured DC · forecast AC)",
         }
         forecast = entity_map.get(SENSOR_ENERGY_TODAY)
         if forecast is not None:

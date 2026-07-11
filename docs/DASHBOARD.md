@@ -80,7 +80,9 @@ Solar Forecast**), e.g.:
 | Kill-gate | `binary_sensor.balcony_solar_forecast_kill_gate_passed` |
 | Today P10 / P90 | `sensor.balcony_solar_forecast_energy_production_today_p10` / `_p90` |
 | Per-comparison MAE | `sensor.balcony_solar_forecast_comparison_daily_kwh_mae_<slug>` |
-| Measured site power (total) | `sensor.balcony_solar_forecast_measured_dc_power_total` |
+| Measured site power (DC total) | `sensor.balcony_solar_forecast_measured_dc_power_total` |
+| Measured site power (AC meter) | `sensor.balcony_solar_forecast_measured_ac_power` (only when a total-AC meter is configured) |
+| DC model diagnostics | `sensor.balcony_solar_forecast_power_production_now_dc` / `sensor.balcony_solar_forecast_energy_production_today_dc` |
 | Measured module power | `sensor.inverter_port_{1,2}_dc_power[_2.._4]` |
 
 If your entity ids differ (multiple installs, renamed entities), fix the
@@ -150,6 +152,31 @@ comparison_sensors:
 
 ---
 
+## 2b. Configure the total-AC meter (optional, enables AC-vs-AC)
+
+The main power/energy sensors report **AC** (behind the inverters) since Phase 2.
+If you have a single meter for the whole site's AC output, point the integration
+at it so the dashboard's *Forecast vs. measured* card becomes an honest
+**AC-vs-AC** comparison and the DC→AC inverter efficiency η is calibrated against
+real data (never load-bearing — the DC model and scoreboard are untouched).
+
+1. **Settings → Devices & Services → Balcony Solar Forecast → three-dot menu →
+   Reconfigure** (the AC meter is *structural* site config, so it lives in
+   Reconfigure, not *Configure*).
+2. Set **Total-AC meter (behind the inverters)** to your whole-site AC power
+   sensor. Enable **Invert the AC meter sign** if your meter reports the fed-in
+   balcony-solar power as a negative value.
+
+That creates `sensor.balcony_solar_forecast_measured_ac_power` (only exists once a
+meter is configured) and, once ~20 eligible hours have been folded, the learned η
+appears in the `inverter_efficiency_learned` attribute of
+`sensor.balcony_solar_forecast_power_production_now`. The one-click
+`install_dashboard` action then wires the AC-vs-AC card automatically; in the
+copy-paste YAML, swap the measured row to `…_measured_ac_power` (the AC-vs-AC
+alternative is in a comment right below that card).
+
+---
+
 ## 3. What the dashboard shows
 
 This section describes the **generated** dashboard from the `install_dashboard`
@@ -168,21 +195,33 @@ without the bundled frontend resources.
   `sensor.…_vs_best_baseline_pct`; positive = engine better on daily-kWh MAE.
 - **Skill scoreboard** (entities) — engine daily-kWh MAE, engine hourly MAE,
   engine-vs-best percent, plus each configured comparison's daily-kWh MAE.
-- **Forecast vs. measured (site power)** (history-graph) — the instantaneous
-  forecast power overlaid with the measured site-total DC power
+- **Forecast vs. measured (AC / DC power)** (history-graph) — the instantaneous
+  forecast power (`power_production_now`, which reports **AC** since Phase 2)
+  overlaid with a measured power row on one y-scale. When a **total-AC meter** is
+  configured the measured row is `sensor.…_measured_ac_power` — an honest,
+  apples-to-apples **AC-vs-AC** comparison, and the card is titled *(AC power)*.
+  Without an AC meter it falls back to the measured site-total **DC** power
   (`sensor.…_measured_dc_power_total`, the live sum of the per-module sensors),
-  a like-for-like W-vs-W comparison on one y-scale. The today-kWh row is gone:
-  mixing kWh and W on one axis is unreadable (the daily-kWh story lives in the
-  band card + scoreboard). The measured-total sensor exists only when at least
-  one plane has an `actual_entity`; with none configured the graph shows the
-  forecast row alone.
-- **Hourly production per module** (bundled card — no HACS install) — an
-  energy-dashboard-style chart: one **stacked hourly production bar per module**
-  (M1…M8, coloured segments) with a **dashed forecast line**; hovering (or
-  touching) shows a crosshair with every module's Wh **and the total** for that
-  hour (§4c). It replaces the old messy 8-line measured-power history-graph. On a
-  partial install where the measured-total sensor is absent it falls back to that
-  per-module `history-graph` so a measured view still renders.
+  titled *(DC power)*. The today-kWh row is gone: mixing kWh and W on one axis is
+  unreadable (the daily-kWh story lives in the band card + scoreboard). With
+  neither measured sensor (no AC meter, no plane `actual_entity`) the graph shows
+  the forecast row alone.
+- **DC model & inverter calibration (diagnostic)** (entities) — the model-internal
+  **DC** forecast (`power_production_now_dc`, `energy_production_today_dc`), kept
+  visible now that the main sensors report AC (the DC curve remains the
+  learner/scoreboard ground truth). The AC-meter-calibrated inverter efficiency η
+  rides as the `inverter_efficiency_learned` attribute of `power_production_now`,
+  surfaced here as an attribute row (learned η, folded-sample count, applied
+  value). Gated on the two DC diagnostic sensors existing.
+- **Production per module (measured DC · forecast AC)** (bundled card — no HACS
+  install) — an energy-dashboard-style chart: one **stacked hourly production bar
+  per module** (M1…M8, coloured segments — measured **DC**) with a **dashed
+  forecast line** (the **AC** forecast); the title and the line's provenance
+  caption spell the two units out so the mixed-unit overlay is never misread.
+  Hovering (or touching) shows a crosshair with every module's Wh **and the
+  total** for that hour (§4c). It replaces the old messy 8-line measured-power
+  history-graph. On a partial install where the measured-total sensor is absent it
+  falls back to that per-module `history-graph` so a measured view still renders.
 - **Measured daily energy per module** (statistics-graph) — daily LTS sums per
   representative module (bar), a best-effort per-plane view.
 - **Today's forecast band** (entities) — P10 / P50 / P90 for today (SPEC §6).

@@ -5,7 +5,12 @@
       "energy_production_tomorrow": {"name": "Energieertrag morgen"},
       "energy_production_d2": {"name": "Energieertrag übermorgen"},
       "power_production_now": {"name": "Momentanleistung"},
+      "energy_production_today_dc": {"name": "Energieertrag heute (DC)"},
+      "energy_production_tomorrow_dc": {"name": "Energieertrag morgen (DC)"},
+      "energy_production_d2_dc": {"name": "Energieertrag übermorgen (DC)"},
+      "power_production_now_dc": {"name": "Momentanleistung (DC)"},
       "measured_dc_power_total": {"name": "Gemessene DC-Leistung (gesamt)"},
+      "measured_ac_power": {"name": "Gemessene AC-Leistung"},
       "last_fetch_age_min": {"name": "Alter des letzten Abrufs"},
       "source_status": {
         "name": "Quellenstatus",
@@ -208,12 +213,16 @@
           "longitude": "Längengrad",
           "fetch_interval_seconds": "Abrufintervall Wetterdaten (Sekunden)",
           "recompute_interval_seconds": "Neuberechnungsintervall (Sekunden)",
+          "ac_actual_entity": "Gesamt-AC-Zähler (hinter den Wechselrichtern)",
+          "ac_actual_invert": "Vorzeichen des AC-Zählers invertieren",
           "site": "Standort-Konfiguration (Ebenen, Horizont, WR-Gruppen)"
         },
         "data_description": {
           "name": "Eindeutiger Name dieser Anlage – nur eine Instanz je Name.",
           "fetch_interval_seconds": "Wie oft Open-Meteo abgefragt wird (Standard 1800 = 30 min).",
-          "recompute_interval_seconds": "Wie oft die Prognose neu gerechnet wird (Standard 900 = 15 min)."
+          "recompute_interval_seconds": "Wie oft die Prognose neu gerechnet wird (Standard 900 = 15 min).",
+          "ac_actual_entity": "Optional. Der Sensor, der die Gesamt-AC-Leistung hinter allen Wechselrichtern misst — das Kalibrierungsziel für den gelernten Wechselrichter-Wirkungsgrad (η) und den gleichwertigen AC-gegen-AC-Vergleich im Dashboard. Leer lassen, wenn kein Gesamt-AC-Zähler vorhanden ist.",
+          "ac_actual_invert": "Aktivieren, wenn der AC-Zähler die eingespeiste Balkon-Solar-Leistung als negativen Wert meldet; der Messwert wird einmal negiert, damit die gemessene AC-Leistung positiv angezeigt wird."
         }
       },
       "reconfigure": {
@@ -224,11 +233,15 @@
           "longitude": "Längengrad",
           "fetch_interval_seconds": "Abrufintervall Wetterdaten (Sekunden)",
           "recompute_interval_seconds": "Neuberechnungsintervall (Sekunden)",
+          "ac_actual_entity": "Gesamt-AC-Zähler (hinter den Wechselrichtern)",
+          "ac_actual_invert": "Vorzeichen des AC-Zählers invertieren",
           "site": "Standort-Konfiguration (Ebenen, Horizont, WR-Gruppen)"
         },
         "data_description": {
           "fetch_interval_seconds": "Wie oft Open-Meteo abgefragt wird (Standard 1800 = 30 min).",
-          "recompute_interval_seconds": "Wie oft die Prognose neu gerechnet wird (Standard 900 = 15 min)."
+          "recompute_interval_seconds": "Wie oft die Prognose neu gerechnet wird (Standard 900 = 15 min).",
+          "ac_actual_entity": "Optional. Der Sensor, der die Gesamt-AC-Leistung hinter allen Wechselrichtern misst — das Kalibrierungsziel für den gelernten Wechselrichter-Wirkungsgrad (η) und den gleichwertigen AC-gegen-AC-Vergleich im Dashboard. Leer lassen, wenn kein Gesamt-AC-Zähler vorhanden ist.",
+          "ac_actual_invert": "Aktivieren, wenn der AC-Zähler die eingespeiste Balkon-Solar-Leistung als negativen Wert meldet; der Messwert wird einmal negiert, damit die gemessene AC-Leistung positiv angezeigt wird."
         }
       }
     },

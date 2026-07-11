@@ -62,6 +62,14 @@ CONF_SITE = "site"  # single object holding the full editable site config
 # --- Config-flow keys (inside the site object) ---
 CONF_PLANES = "planes"
 CONF_GROUPS = "groups"
+# Site-level TOTAL-AC meter behind all inverters (the only whole-site AC that is
+# actually measured); the AC calibration target in a later phase. Optional.
+CONF_AC_ACTUAL_ENTITY = "ac_actual_entity"
+# The site AC meter can be SIGN-INVERTED (the operator's meter reports the fed-in
+# balcony-solar AC as a NEGATED value). When True the reading is negated ONCE at
+# the read boundary so the measured sensor and the calibration reader are
+# sign-correct. Optional; default False.
+CONF_AC_ACTUAL_INVERT = "ac_actual_invert"
 # plane fields
 CONF_PLANE_NAME = "name"
 CONF_AZIMUTH = "azimuth_deg"  # 0=N clockwise
@@ -83,6 +91,7 @@ CONF_HZ_TAU_BARE = "tau_bare"  # winter transmittance when seasonal
 CONF_GROUP_NAME = "name"
 CONF_GROUP_PLANES = "plane_names"  # plane names feeding this AC clamp
 CONF_GROUP_AC_LIMIT = "ac_limit_w"  # AC clamp, VA/W
+CONF_GROUP_INVERTER_EFFICIENCY = "inverter_efficiency"  # optional: per-group DC->AC efficiency
 
 # --- Physics constants (SPEC §4 physics musts) ---
 ALBEDO_DEFAULT = 0.2
@@ -106,6 +115,39 @@ ROSS_COEFF = 0.0342  # Tcell = Tamb + ROSS_COEFF * POA
 TEMP_COEFF_PER_K = -0.0034  # power derate per K above 25 C (-0.34 %/K)
 TEMP_REF_C = 25.0
 DEFAULT_EFFICIENCY = 0.96
+# DC->AC micro-inverter conversion efficiency (HMS-800W-2T-class CEC/EU weighted
+# efficiency). DISTINCT from DEFAULT_EFFICIENCY above, which is the DC-side
+# system loss folded into dc_power(): this one is the inverter's DC->AC stage,
+# applied by electrical.clamp_groups_ac AFTER the DC model, per inverter group.
+DEFAULT_INVERTER_EFFICIENCY = 0.965
+INVERTER_EFFICIENCY_MIN = 0.80  # sane floor for a configured/loaded eta_inv
+INVERTER_EFFICIENCY_MAX = 1.0   # a real converter never gains power
+# --- Inverter DC->AC efficiency site calibration (AC-side Phase 3) ----------
+# A single site-level LEARNED scalar eta_inv, calibrated against the site's
+# TOTAL-AC meter (SiteConfig.ac_actual_entity) so the AC forecast tracks the
+# real inverter conversion instead of the datasheet DEFAULT_INVERTER_EFFICIENCY.
+# One scalar fits ALL groups: the operator has only a whole-site AC meter and
+# the HMS-800W-2T inverters are identical. NEVER load-bearing — no AC meter /
+# too few samples / an out-of-band ratio all fall back to the config/default
+# eta, and the DC learning + scoreboard stay untouched.
+INVERTER_CAL_MIN = 0.90  # physically-plausible micro-inverter operating floor;
+INVERTER_CAL_MAX = 0.99  # a measured ratio outside [MIN, MAX] is REJECTED (it is
+#                          not a plausible inverter eta — e.g. a meter that also
+#                          sees house load or is net-metered)
+INVERTER_CAL_EMA_ALPHA = 0.10  # steady-state EMA weight (adaptive warm-up folds
+#                                the first 1/ALPHA samples as an exact mean)
+INVERTER_CAL_MIN_LOAD_W = 100.0  # below this summed DC the inverter self-
+#                                  consumption / MPPT start threshold distorts the
+#                                  ratio — skip the sample
+INVERTER_CAL_MIN_SAMPLES = 20  # distinct eligible hours before the learned eta is
+#                                trusted (else the config/default eta is used)
+# Clip-headroom gate for a calibration hour (AC-side Phase 3): the datasheet-
+# derived AC (DEFAULT_INVERTER_EFFICIENCY * summed DC) must sit below this
+# fraction of the summed group AC ceiling for the hour to count as UNCLIPPED — a
+# clipped hour's AC is capped at the ceiling, so its measured-AC/DC ratio would
+# understate eta. Gated on the INDEPENDENT DC side (not the measured AC) so a
+# meter glitch cannot both pass the gate and corrupt the ratio.
+INVERTER_CAL_CLIP_HEADROOM_FRAC = 0.90
 
 # Seasonal foliage ramp (SPEC §13: cosine ramp over April / November).
 # Day-of-year anchors for the leafed (summer) plateau; outside is bare.
@@ -138,10 +180,22 @@ SENSOR_ENERGY_TODAY = "energy_production_today"
 SENSOR_ENERGY_TOMORROW = "energy_production_tomorrow"
 SENSOR_ENERGY_D2 = "energy_production_d2"
 SENSOR_POWER_NOW = "power_production_now"
+# --- AC-side forecast Phase 2 (SPEC AC-side forecast) ----------------------
+# The main energy / power / band sensors above now report the served AC
+# (operator-facing standard); the model-internal DC view moves to these new
+# DIAGNOSTIC sensors, reading the coordinator's unchanged DC data keys.
+SENSOR_POWER_NOW_DC = "power_production_now_dc"
+SENSOR_ENERGY_TODAY_DC = "energy_production_today_dc"
+SENSOR_ENERGY_TOMORROW_DC = "energy_production_tomorrow_dc"
+SENSOR_ENERGY_D2_DC = "energy_production_d2_dc"
 # Measured site-total DC power: the live sum of the planes' actual_entity
 # sensors (ground truth), an integration-owned sensor independent of the
 # forecast coordinator (see sensor.MeasuredDcTotalSensor).
 SENSOR_MEASURED_DC_TOTAL = "measured_dc_power_total"
+# Measured site-total AC power: the live reading of the site's single AC meter
+# (SiteConfig.ac_actual_entity), the AC ground-truth partner of the measured DC
+# total (see sensor.MeasuredAcPowerSensor); created only when configured.
+SENSOR_MEASURED_AC_POWER = "measured_ac_power"
 BINARY_SENSOR_DEGRADED = "degraded"
 
 # --- Shade-profile visualisation entities (sun path vs learned shade) -------
@@ -702,6 +756,14 @@ STORAGE_DATA_VERSION_V3 = 3
 STORE_KEY_QUANTILE_STATE = "quantile_state"    # QuantileState: {bin_key: relerr ring}
 STORE_KEY_SCOREBOARD_STATE = "scoreboard_state"  # ScoreboardState: rolling window of DayScore
 STORE_KEY_COMPARISON_RING = "comparison_ring"  # {iso_date: {comparison_name: daily_kwh}} read-from-recorder cache
+# Inverter-efficiency site-calibration learner state (AC-side Phase 3). Added
+# ADDITIVELY WITHIN the v3 schema (NO version bump): _empty_state injects the
+# neutral InverterCalState and the shared load path default-reads a store that
+# lacks the key to neutral, so every existing v3 store stays byte-faithful and
+# the migration tests that pin v3 keep passing. Like drift_state it is a
+# top-level learner section that does NOT ride the bias/shademap rollback ring
+# (it is self-gating + never load-bearing, so a rollback need not touch it).
+STORE_KEY_INVERTER_CAL_STATE = "inverter_cal_state"  # InverterCalState (learned eta_inv)
 
 # --- New diagnostic sensors / binary sensors (SPEC §8/§10) -----------------
 # Entity object_ids are unprefixed: the device slug already carries
@@ -730,6 +792,9 @@ ATTR_WH_PERIOD_P90 = "wh_period_p90"
 
 # --- Coordinator <-> platform contract additions (self.data keys, v0.4) -----
 DATA_KEY_QUANTILE_CURVES = "quantile_curves"      # {"p10": {iso: Wh}, "p50": ..., "p90": ...} 15-min
+# AC-side band curves (Phase 2): {"p10": {iso_hour: Wh}, "p90": {iso_hour: Wh}}
+# HOURLY Wh (the AC bands are computed at hourly resolution; P50 == ac_watts).
+DATA_KEY_QUANTILE_CURVES_AC = "quantile_curves_ac"
 DATA_KEY_SCOREBOARD = "scoreboard"                # dict: engine_mae / per-comparison mae / vs_best_pct / gate / strata
 DATA_KEY_KILL_GATE_PASSED = "kill_gate_passed"    # bool | None (None == not enough window yet)
 

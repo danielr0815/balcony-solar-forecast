@@ -4,16 +4,25 @@ Owner: engine. Pure, HA-free. Implements SPEC §4 step 7:
   - Ross cell temperature: Tcell = Tamb + ROSS_COEFF * POA.
   - Power derate TEMP_COEFF_PER_K per K vs TEMP_REF_C.
   - Per-inverter-group AC clamp: min(sum of member ports, ac_limit_w).
+  - Per-inverter-group DC->AC transform (clamp_groups_ac): served DC clipped at
+    ac_limit_w / eta_inv and delivered AC = min(eta_inv * sum(DC), ac_limit_w).
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from ..const import ROSS_COEFF, TEMP_COEFF_PER_K, TEMP_REF_C
+from ..const import (
+    DEFAULT_INVERTER_EFFICIENCY,
+    INVERTER_EFFICIENCY_MAX,
+    INVERTER_EFFICIENCY_MIN,
+    ROSS_COEFF,
+    TEMP_COEFF_PER_K,
+    TEMP_REF_C,
+)
 from .types import InverterGroup
 
-__all__ = ["dc_power", "clamp_groups"]
+__all__ = ["dc_power", "clamp_groups", "clamp_groups_ac"]
 
 
 def dc_power(
@@ -117,3 +126,122 @@ def clamp_groups(
             out[name] = out[name] * scale
 
     return out
+
+
+def _clamp_eta(eta: float) -> float:
+    """Clamp a group's DC->AC efficiency into [MIN, MAX]; garbage -> default.
+
+    Defensive: a directly-constructed InverterGroup can carry any value (only
+    ``from_dict`` clamps on load), so the physical transform floors/caps it here
+    too. NaN / non-numeric degrade to ``DEFAULT_INVERTER_EFFICIENCY`` rather than
+    poisoning the whole slot.
+    """
+    try:
+        e = float(eta)
+    except (TypeError, ValueError):
+        return DEFAULT_INVERTER_EFFICIENCY
+    if e != e:  # NaN guard
+        return DEFAULT_INVERTER_EFFICIENCY
+    if e < INVERTER_EFFICIENCY_MIN:
+        return INVERTER_EFFICIENCY_MIN
+    if e > INVERTER_EFFICIENCY_MAX:
+        return INVERTER_EFFICIENCY_MAX
+    return e
+
+
+def clamp_groups_ac(
+    plane_watts: Mapping[str, float],
+    groups: Sequence[InverterGroup],
+    *,
+    ungrouped_eta: float = DEFAULT_INVERTER_EFFICIENCY,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Per-inverter-group DC->AC transform: served DC + delivered AC per plane.
+
+    The deterministic physical transform layered on top of the DC model. Per
+    group, with eta = ``inverter_efficiency`` clamped to [INVERTER_EFFICIENCY_MIN,
+    INVERTER_EFFICIENCY_MAX]:
+
+      * ``U`` = summed unclamped member DC;
+      * ``AC_group = min(eta * U, ac_limit_w)`` — the micro-inverter's AC clamp;
+      * ``D = ac_limit_w / eta`` — the DC clip point, HIGHER than ``ac_limit_w``:
+        this is where the ports really clip, because the micro-inverter clips its
+        AC output and back-drives the MPP off its maximum, so the DC that can be
+        served rises to ``ac_limit_w / eta`` before the ceiling bites;
+      * ``dc_clamped_group = min(U, D)``, and by construction
+        ``AC_group == eta * dc_clamped_group`` in both regimes.
+
+    BOTH results are redistributed proportionally back onto the members (the same
+    proportional-scale idiom as :func:`clamp_groups`): each member keeps its share
+    ``U_name / U`` of the clamped group DC and of the group AC. A group whose
+    members sum to zero (night / dark slot) passes through as 0.0 for both.
+
+    Planes in NO inverter group have no configured inverter or AC limit, so there
+    is no group clip to apply. DECISION (documented): their AC is still modeled as
+    ``DC * DEFAULT_INVERTER_EFFICIENCY`` — physically a plane always feeds *some*
+    micro-inverter even when the operator did not group it, so a flat default
+    conversion is more faithful than pretending AC == DC. Their DC passes through
+    unchanged. (The reference site groups every plane, so this is an edge case.)
+
+    NOTE: this is ADDITIONAL to :func:`clamp_groups`, which is left intact — the
+    DC learning / scoreboard path depends on its exact ``min(sum, ac_limit)``
+    clip at ``ac_limit_w`` (not at the corrected ``ac_limit_w / eta``).
+
+    Args:
+        plane_watts: {plane_name: unclamped DC power W}.
+        groups: inverter groups defining the AC clamp + efficiency.
+
+    Returns:
+        ``(dc_clamped_by_plane, ac_by_plane)``: the served DC per plane (clipped
+        at ``ac_limit_w / eta`` for grouped planes, unchanged for ungrouped) and
+        the delivered AC per plane.
+    """
+    # DC baseline: pass every plane's DC through; grouped members are overwritten
+    # below with their clip-point-corrected DC. AC baseline: ungrouped planes get
+    # the flat ``ungrouped_eta`` conversion (the datasheet default, or the trusted
+    # site-level LEARNED eta_inv when the caller injects it — the engine passes
+    # the SAME eta it weights the pre-clamp AC by, so the served and pre-clamp AC
+    # of an ungrouped plane stay mutually consistent); grouped members are
+    # overwritten with their per-group eta * clamped DC.
+    eta_ungrouped = _clamp_eta(ungrouped_eta)
+    dc_out: dict[str, float] = dict(plane_watts)
+    ac_out: dict[str, float] = {
+        name: watts * eta_ungrouped
+        for name, watts in plane_watts.items()
+    }
+
+    for group in groups:
+        members = group.plane_names
+        if not members:
+            continue
+
+        total = 0.0
+        present: list[str] = []
+        for name in members:
+            if name in dc_out:
+                total += dc_out[name]
+                present.append(name)
+
+        if not present:
+            continue
+
+        eta = _clamp_eta(group.inverter_efficiency)
+
+        if total <= 0.0:
+            # No power in this group's ports -> passthrough zero (both curves).
+            for name in present:
+                dc_out[name] = 0.0
+                ac_out[name] = 0.0
+            continue
+
+        # Corrected DC clip point sits at ac_limit / eta (above the AC limit),
+        # where the inverter's AC clamp back-drives the MPP off its maximum.
+        clip_point = group.ac_limit_w / eta
+        dc_group = total if total <= clip_point else clip_point
+        scale_dc = dc_group / total
+        scale_ac = eta * scale_dc  # AC = eta * clamped DC, split proportionally
+        for name in present:
+            base = dc_out[name]
+            dc_out[name] = base * scale_dc
+            ac_out[name] = base * scale_ac
+
+    return dc_out, ac_out

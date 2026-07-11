@@ -87,9 +87,11 @@ const I18N = {
       "No measured-power sensor found — is the Balcony Solar Forecast integration set up?",
     noStats: "No hourly statistics yet",
     noStatsRange: "No statistics for this range",
-    // Provenance caption above the plot when a forecast line IS drawn.
-    forecastLive: "Forecast (live)",
-    forecastIssued: "Forecast (as issued 01:30)",
+    // Provenance caption above the plot when a forecast line IS drawn. The
+    // dashed line is the AC forecast (power_production_now/energy_production_today
+    // are AC since Phase 2) while the stacked bars are measured DC per module.
+    forecastLive: "Forecast AC (live)",
+    forecastIssued: "Forecast AC (as issued 01:30)",
     // Under-plot notes when NO past-day line is drawn ({d} = the date).
     forecastError: "Forecast lookup failed",
     forecastMissing:
@@ -112,9 +114,12 @@ const I18N = {
       "Kein Messleistungs-Sensor gefunden — ist die Integration „Balcony Solar Forecast“ eingerichtet?",
     noStats: "Noch keine Stundenstatistik",
     noStatsRange: "Keine Statistikdaten für diesen Zeitraum",
-    // Provenance caption above the plot when a forecast line IS drawn.
-    forecastLive: "Prognose (live)",
-    forecastIssued: "Prognose (Stand 01:30)",
+    // Provenance caption above the plot when a forecast line IS drawn. Die
+    // gestrichelte Linie ist die AC-Prognose (power_production_now/
+    // energy_production_today sind seit Phase 2 AC), die Balken die gemessene
+    // DC-Produktion je Modul.
+    forecastLive: "Prognose AC (live)",
+    forecastIssued: "Prognose AC (Stand 01:30)",
     // Under-plot notes when NO past-day line is drawn ({d} = the date).
     forecastError: "Prognose-Abruf fehlgeschlagen",
     forecastMissing:

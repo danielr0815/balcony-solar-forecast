@@ -101,22 +101,55 @@ views:
             name: Alt 1600W
 
       # ----------------------------------------------------------------
-      # Forecast vs. measured SITE POWER (SPEC §14.3): a like-for-like W-vs-W
-      # comparison on one y-scale — the instantaneous forecast power overlaid
-      # with the measured site-total DC power (the integration's own
-      # measured_dc_power_total sensor, the live sum of the per-module DC-power
-      # entities). The today-kWh row is gone: mixing kWh and W on one axis is
-      # unreadable (the daily-kWh story is in the band card + scoreboard).
-      # history-graph is a built-in card.
+      # Forecast vs. measured POWER (SPEC §14.3): a W-vs-W comparison on one
+      # y-scale. power_production_now reports AC (the operator-facing standard
+      # since Phase 2). The measured row here is the site-total DC power (the
+      # integration's own measured_dc_power_total sensor, the live sum of the
+      # per-module DC-power entities) — always present when any plane has an
+      # actual_entity, so it is the safe generic default. If you configure a
+      # TOTAL-AC meter (config flow → "Total-AC meter"), swap the measured row
+      # to sensor.balcony_solar_forecast_measured_ac_power for a like-for-like
+      # AC-vs-AC comparison and retitle to "(AC power)" — the alternative is in
+      # the comment just below. The today-kWh row is gone: mixing kWh and W on
+      # one axis is unreadable (the daily-kWh story is in the band card +
+      # scoreboard). history-graph is a built-in card.
       # ----------------------------------------------------------------
       - type: history-graph
-        title: Forecast vs. measured (site power)
+        title: Forecast vs. measured (DC power)
         hours_to_show: 72
         entities:
           - entity: sensor.balcony_solar_forecast_power_production_now
             name: Forecast
           - entity: sensor.balcony_solar_forecast_measured_dc_power_total
             name: Measured
+      # AC-vs-AC alternative (uncomment + delete the DC card above when you have
+      # a total-AC meter configured — measured_ac_power is created only then):
+      # - type: history-graph
+      #   title: Forecast vs. measured (AC power)
+      #   hours_to_show: 72
+      #   entities:
+      #     - entity: sensor.balcony_solar_forecast_power_production_now
+      #       name: Forecast
+      #     - entity: sensor.balcony_solar_forecast_measured_ac_power
+      #       name: Measured
+
+      # ----------------------------------------------------------------
+      # DC model & inverter calibration (diagnostic). The main power/energy
+      # sensors report AC (Phase 2); these two diagnostics keep the model-
+      # internal DC view visible (the DC curve stays the learner/scoreboard
+      # truth, SPEC §5). The AC-meter-calibrated inverter efficiency η lives as
+      # the "inverter_efficiency_learned" attribute of
+      # sensor.balcony_solar_forecast_power_production_now — open its more-info
+      # dialog to read the learned eta, folded-sample count and applied value.
+      # ----------------------------------------------------------------
+      - type: entities
+        title: DC model & inverter calibration (diagnostic)
+        show_header_toggle: false
+        entities:
+          - entity: sensor.balcony_solar_forecast_power_production_now_dc
+            name: Forecast power now (DC model)
+          - entity: sensor.balcony_solar_forecast_energy_production_today_dc
+            name: Forecast energy today (DC model)
 
       # >>> EDIT ME <<< OPERATOR-SPECIFIC entity ids below (this + the next
       # statistics-graph card, and the comparison rows above). The
