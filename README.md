@@ -42,6 +42,10 @@ Hinzufügen der Integration werden abgefragt:
   **Horizont**-Profile je Ebene und die **Wechselrichter-Gruppen** mit ihren
   Mess-Entitäten. Das mitgelieferte Referenz-Setup ist als **editierbarer
   Default** vorbelegt — Vorlage und Testfall, kein Zwang.
+- optional ein **Gesamt-AC-Zähler** (hinter allen Wechselrichtern) plus ein
+  Vorzeichen-Invert-Flag: das Kalibrierungsziel für den gelernten
+  Wechselrichter-Wirkungsgrad η und der gleichwertige AC-gegen-AC-Vergleich im
+  Dashboard.
 
 Optional lässt sich je Ebene beim Anlegen eine **`shade_group`** setzen — Module
 mit gleicher Verschattung (Gebäudekante, Baumreihe) bilden dann einen
@@ -96,6 +100,13 @@ Ergänzende Anleitungen:
   Transmissionsfeld je Messkanal × Sonnenstand (lernt Hang, Bäume,
   Gebäudekante) und ein Intraday-Bias-Korrektor (rettet Nebelmorgen).
   Alles geclamped, driftüberwacht, abschaltbar.
+- **AC-Standard (v0.17):** die Haupt-Sensoren (`energy_production_*`,
+  `power_production_now`, Bänder) melden die **AC**-Leistung hinter den
+  Wechselrichtern — der betreiberseitige Standard. Das DC-Modell rechnet und
+  lernt weiterhin intern (Grundwahrheit für Lerner und Scoreboard) und bleibt
+  auf den `*_dc`-Diagnose-Sensoren sichtbar. Ist ein **Gesamt-AC-Zähler**
+  konfiguriert, kalibriert die Integration den DC→AC-Wirkungsgrad η daran
+  (nie load-bearing) und das Dashboard vergleicht AC gegen AC.
 - **Verschattung sichtbar:** für ein wählbares Modul und Datum zeigt ein
   Diagramm die Sonnenbahn (Elevation über Azimut) mit der aktuell gelernten
   Verschattung (Transmission τ, eingefärbt) und den Horizontlinien — die

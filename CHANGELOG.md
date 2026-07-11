@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **AC-side forecast (Phases 1–4).** The forecast now models the served **AC**
+  power behind the micro-inverters, not only the DC array:
+  - **DC→AC chain** — per inverter group `AC = min(η_inv · Σ_ports DC ·
+    slot-factor, ac_limit_w)`, with the DC clip point at `ac_limit_w / η_inv`
+    (where the ports really clip, because the micro-inverter caps AC and
+    back-drives the MPP).
+  - **`measured_ac_power` sensor** — the live reading of an optional whole-site AC
+    meter, the AC ground-truth partner of `measured_dc_power_total`; created only
+    when a meter is configured, with an optional sign-invert for meters that
+    report the fed-in balcony-solar power as a negative value.
+  - **Learned inverter efficiency η** — a single site-level scalar calibrated
+    against the AC meter over unclipped, above-min-load hours, clamped to
+    [0.90, 0.99] and trusted only after ≥ 20 eligible hours. **Never
+    load-bearing**: no meter / too few samples / an out-of-band ratio all fall
+    back to the configured/default η, and the DC learning + scoreboard are
+    untouched. It rides as the `inverter_efficiency_learned` attribute of
+    `power_production_now`.
+  - **Config-flow AC-meter picker** — the setup and reconfigure steps gain
+    optional **Total-AC meter (behind the inverters)** and **Invert the AC meter
+    sign** fields, merged into the site config so they round-trip through
+    `SiteConfig` exactly like the coordinates.
+  - **Dashboard** — the *Forecast vs. measured* card pairs the AC forecast with
+    the AC meter (an honest **AC-vs-AC** comparison) when one is configured,
+    falling back to the DC total otherwise; a new *DC model & inverter calibration
+    (diagnostic)* card surfaces the DC forecast plus the learned η; the
+    power-history card's title and provenance caption now mark the bars as measured
+    DC and the dashed line as the AC forecast.
+
+### Changed
+
+- **The existing main sensors now report AC (behind the inverters), not DC** — a
+  deliberate, operator-visible history step. `energy_production_today / _tomorrow
+  / _d2`, `power_production_now` and the P10/P50/P90 bands are the **AC** curve
+  (the operator-facing standard); the model-internal **DC** view moved to the new
+  `power_production_now_dc` and `energy_production_{today,tomorrow,d2}_dc`
+  diagnostic sensors. DC stays the self-learning / scoreboard ground truth, so the
+  learning behaviour and skill scores are unchanged — only the headline unit is now
+  AC.
+
 ## [0.17.1] - 2026-07-11
 
 ### Fixed
