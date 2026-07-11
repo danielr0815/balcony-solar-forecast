@@ -50,7 +50,10 @@ Modul-Kanal); gepoolt wird nur **beim Lesen** (n-gewichtet), sodass Gruppieren
 und Auflösen jederzeit **verlustfrei reversibel** sind. Die Schattenprofil-Karte
 zeigt Gruppen- und Einzelsicht zum direkten Vergleich. Der Service
 **`suggest_shade_groups`** vergleicht die einzeln gelernten Kanäle bin-weise und
-schlägt datengetrieben Gruppen vor, statt sie am Diagramm abzuschätzen.
+schlägt datengetrieben Gruppen vor, statt sie am Diagramm abzuschätzen. Ebenfalls
+optional je Ebene: **`ross_coeff`**, der montageabhängige Ross-Zelltemperatur-
+Koeffizient (freistehend/gut hinterlüftet kühler, fassadenparallel wärmer), sonst
+der globale Default.
 
 Nachträglich lassen sich über **Konfigurieren** (Optionen) anpassen:
 
@@ -58,6 +61,10 @@ Nachträglich lassen sich über **Konfigurieren** (Optionen) anpassen:
   Day-ahead-Bias),
 - die **Quantilbänder** (P10/P50/P90) an- oder abschalten,
 - die **Vergleichssensoren** für das Skill-Scoreboard.
+
+**Strukturelle** Änderungen am Site-Objekt (Ebenen, Horizonte, WR-Gruppen,
+`shade_group`/`ross_coeff`) laufen dagegen über **Neu konfigurieren** im
+Drei-Punkte-Menü der Integration.
 
 Das Observability-Dashboard lässt sich mit einem Aufruf einrichten: ein leeres
 Dashboard über **Einstellungen → Dashboards** anlegen (URL `balcony-solar`) und
@@ -92,7 +99,9 @@ Ergänzende Anleitungen:
   **Karte bringt die Integration selbst mit** (im Kartenwähler als „Balcony
   Shade Profile", keine HACS-/Zusatzinstallation, die Lovelace-Ressource wird
   automatisch registriert); alternativ weiterhin als ApexCharts-Karte
-  (siehe [docs/DASHBOARD.md](docs/DASHBOARD.md)).
+  (siehe [docs/DASHBOARD.md](docs/DASHBOARD.md)). Ebenso mitgeliefert ist eine
+  **zweite** abhängigkeitsfreie Karte „Balcony Power History" — gestapelte
+  stündliche Produktionsbalken je Modul mit gestrichelter Prognoselinie.
 - **Keine schweren Abhängigkeiten:** stdlib-only zur Laufzeit
   (kein numpy/pandas/pvlib), HA-freier Kern mit Golden-Tests.
 - **Standard-Schnittstellen:** kWh-Sensoren (kompatibel zu bestehenden

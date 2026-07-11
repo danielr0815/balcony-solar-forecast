@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`energy_production_today` headline no longer understated on AC-clamped,
+  up-corrected slots.** The day-ahead headline strips the transient intraday
+  scalar by dividing it back out of each current-day slot. On a slot where the
+  up-corrected grouped power hit the inverter AC ceiling, the second re-clamp had
+  already discarded the scalar, so dividing it out again removed a correction
+  that was never applied — understating the headline by up to the full factor
+  (2.5). The engine now exposes the per-slot pre-re-clamp corrected total
+  (`ForecastResult.corrected_unclamped_watts`); the coordinator uses the served
+  ceiling unchanged on a clamped slot and divides only where the scalar actually
+  reached the served value. Sites with no inverter groups (clamp never bites) and
+  older cached results (empty field → divide-always) are bit-identical to before.
+
 ## [0.14.0] - 2026-07-10
 
 ### Added
@@ -60,6 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   centralised in the coordinator and entity updates are local.
 
 ## [0.13.0] - 2026-07-10
+
+### Added
+- **Brand icon (local, no upstream submission).** The integration now ships its
+  own brand PNGs under `custom_components/balcony_solar_forecast/brand/`
+  (`icon`/`logo`, plus `@2x`), served by Home Assistant ≥ 2026.3's **local brands
+  proxy** — so the custom integration shows its icon with no PR to the
+  `home-assistant/brands` repository (a deliberate no-upstream-submission choice).
 
 ### Changed
 - **Shade groups now pool at READ time, not by merging (supersedes the v0.12.0
@@ -146,6 +166,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   controls card (those controls are embedded in the bundled diagram card) and its
   shademap note now points at *your* site's obstructions generically instead of
   hardcoding the reference install's east-hill/wall/tree sectors.
+
+### Fixed
+- **Learner corrections + quantile bands re-clamped to the inverter AC limits.**
+  The fast-learner slot factor is applied to the already-clamped per-plane watts
+  and the groups are then clamped a SECOND time, so an up-correction (factor > 1)
+  or a P90 band factor > 1 can no longer lift the served curve above what the
+  inverters can physically deliver (live-observed 3382 W on a 3200 W site).
+  Down-corrections (factor ≤ 1) and ungrouped, ceiling-free planes are unchanged.
 
 ## [0.9.0] - 2026-07-10
 

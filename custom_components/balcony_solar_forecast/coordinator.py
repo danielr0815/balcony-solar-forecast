@@ -491,6 +491,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         Depends on the LIVE state (the legacy source is added only when the group
         channel exists), so it is rebuilt at read/bind time, never cached.
+
+        Reversibility caveat: the per-plane learning (since v0.13) is always
+        preserved when a group is dissolved, but a pre-v0.13 merged group channel
+        ``g`` (named after the group, not any member) is then orphaned — no plane
+        reads it once its members no longer share ``g`` — so its evidence becomes
+        unreadable (recoverable via the ``rollback_learners`` service or by
+        re-grouping the members under the same name).
         """
         planes = self._site.planes
         channels = getattr(state, "channels", None) or {}
@@ -1125,6 +1132,23 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         so the divide is always safe. Only the current local day is affected —
         tomorrow/d2 slots lie beyond the apply horizon and already carry factor
         1.0, so they equal the plain ``daily_kwh`` roll-up.
+
+        CLAMP INTERACTION (MED-1): the served ``total_watts`` is POST second AC
+        clamp. On a slot where the up-corrected grouped power hit the inverter
+        ceiling, that second clamp bit and the scalar had NO effect on the served
+        value — dividing the scalar back out there removes a correction that was
+        never applied and understates the headline (up to the full factor). We
+        detect such a slot from ``result.corrected_unclamped_watts`` (the
+        pre-re-clamp corrected total): ``prereclamp - watts > 1e-6`` means the
+        re-clamp bit. On a clamped slot we keep ``watts`` UNCHANGED (the ceiling
+        — the true day-ahead value lies between ceiling/factor and the ceiling,
+        and equals the ceiling whenever the day-ahead curve alone would also
+        clamp, the typical clear-midday case); on an unclamped slot we divide the
+        factor out exactly as before. A site with NO inverter groups never clamps
+        (prereclamp == watts every slot) so its headline is bit-identical to the
+        pre-MED-1 divide-always path. When ``corrected_unclamped_watts`` is empty
+        (a v0.1 / older cached result) we cannot tell clamped from unclamped, so
+        we fall back to divide-always (SPEC §8).
         """
         scalar = self._intraday_scalar
         fast_active = (
@@ -1132,10 +1156,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             and not self._drift_state.fast_disabled
             and scalar != INTRADAY_NEUTRAL
         )
+        prereclamp = result.corrected_unclamped_watts
+        have_prereclamp = len(prereclamp) == len(result.total_watts)
         local_today = dt_util.as_local(now).date()
         total_wh = 0.0
         seen = False
-        for start, watts in zip(result.slot_starts, result.total_watts, strict=False):
+        for i, (start, watts) in enumerate(
+            zip(result.slot_starts, result.total_watts, strict=False)
+        ):
             start_utc = dt_util.as_utc(start)
             if dt_util.as_local(start_utc).date() != local_today:
                 continue
@@ -1145,7 +1173,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 age_min = (start_utc - now).total_seconds() / 60.0
                 if age_min > -15.0:  # matches the slot_factor gate
                     factor = bias_mod.intraday_factor_at(max(0.0, age_min), scalar)
-            total_wh += (watts / factor) * 0.25
+            # A clamped slot's served ``watts`` is the AC ceiling the factor never
+            # reached, so dividing it out understates the day-ahead value — keep
+            # the ceiling. Otherwise recover the pre-factor value by dividing.
+            if have_prereclamp and prereclamp[i] - watts > 1e-6:
+                total_wh += watts * 0.25
+            else:
+                total_wh += (watts / factor) * 0.25
         return round(total_wh / 1000.0, 3) if seen else None
 
     def _build_data(

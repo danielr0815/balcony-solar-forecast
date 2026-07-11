@@ -397,6 +397,17 @@ class ForecastResult:
     raw_total_watts: tuple[float, ...] = ()          # pure-physics site total
     raw_hourly_wh: dict[str, float] = field(default_factory=dict)  # {iso_hour: Wh}
     raw_daily_kwh: dict[str, float] = field(default_factory=dict)  # {iso_date: kWh}
+    # PRE-re-clamp corrected site total per slot: ``sum(cor_clamped * factor)``
+    # BEFORE the second AC clamp, aligned to ``slot_starts``. The served
+    # ``total_watts`` is this same series AFTER the second clamp, so a slot where
+    # ``corrected_unclamped_watts[i] - total_watts[i] > 0`` is one where the
+    # re-clamp bit (the up-corrected curve hit the inverter ceiling). The
+    # coordinator's ``energy_today_kwh`` day-ahead strip needs this to tell a
+    # clamped slot (where dividing the intraday factor back out would understate
+    # the headline — the factor never reached the served value) from an
+    # unclamped one. Empty () on a v0.1 / older cached result => strip falls back
+    # to divide-always (SPEC §8).
+    corrected_unclamped_watts: tuple[float, ...] = ()
     # Which learner layer(s) shaped ``total_watts`` this cycle
     # (const.CORRECTION_SOURCE_*). Empty string == not yet set by the engine.
     correction_source: str = ""
