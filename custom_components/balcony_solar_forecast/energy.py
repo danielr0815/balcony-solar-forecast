@@ -3,8 +3,10 @@
 Home Assistant's Energy dashboard discovers per-integration solar forecasts
 through ``async_get_solar_forecast(hass, config_entry_id)`` returning
 ``{"wh_hours": {iso_hour: wh, ...}}`` (SPEC §8). We hand back the engine's
-hourly Wh roll-up for the requested entry so the dashboard can draw the
-expected-production overlay without any consumer-side coupling.
+served-AC hourly Wh roll-up (``hourly_wh_ac``) for the requested entry: AC is
+the energy actually produced into the home (the operator-facing standard, Phase
+2), so it is what the Energy dashboard's expected-production overlay wants —
+without any consumer-side coupling.
 """
 
 from __future__ import annotations
@@ -29,8 +31,10 @@ async def async_get_solar_forecast(
     if coordinator is None:
         return None
     data: dict[str, Any] = coordinator.data or {}
-    hourly = data.get("hourly_wh")
+    # Served-AC hourly curve (Phase 2): the energy produced into the home. Already
+    # keyed by ISO-8601 UTC hour start (coordinator). Empty/absent (no forecast
+    # yet, or a v0.1 cached result) => no overlay rather than a stale curve.
+    hourly = data.get("hourly_wh_ac")
     if not hourly:
         return None
-    # hourly_wh is already keyed by ISO-8601 UTC hour start (coordinator).
     return {"wh_hours": dict(hourly)}

@@ -123,10 +123,32 @@ def _raw_power_now(result: ForecastResult, now: datetime) -> float:
     return _power_at(result.slot_starts, series, now)
 
 
+def _power_now_ac(result: ForecastResult, now: datetime) -> float:
+    """Instantaneous site AC power at the 15-min slot containing ``now``.
+
+    The AC analogue of :func:`_power_now`, over ``result.ac_watts`` (the served
+    AC curve). An empty AC curve (v0.1 / older cached result) yields 0.0.
+    """
+    return _power_at(result.slot_starts, result.ac_watts, now)
+
+
 def _local_daily_kwh(result: ForecastResult) -> dict[str, float]:
     """Roll the 15-min curve up to LOCAL calendar-day kWh."""
     daily: dict[str, float] = {}
     for start, watts in zip(result.slot_starts, result.total_watts, strict=False):
+        local_day = dt_util.as_local(dt_util.as_utc(start)).date().isoformat()
+        daily[local_day] = daily.get(local_day, 0.0) + watts * 0.25 / 1000.0
+    return {k: round(v, 3) for k, v in daily.items()}
+
+
+def _local_daily_kwh_ac(result: ForecastResult) -> dict[str, float]:
+    """Roll the 15-min AC curve up to LOCAL calendar-day kWh (AC analogue).
+
+    Mirrors :func:`_local_daily_kwh` over ``result.ac_watts``; an empty AC curve
+    yields an empty dict.
+    """
+    daily: dict[str, float] = {}
+    for start, watts in zip(result.slot_starts, result.ac_watts, strict=False):
         local_day = dt_util.as_local(dt_util.as_utc(start)).date().isoformat()
         daily[local_day] = daily.get(local_day, 0.0) + watts * 0.25 / 1000.0
     return {k: round(v, 3) for k, v in daily.items()}

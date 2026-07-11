@@ -101,6 +101,7 @@ from ..const import (
     ALBEDO_DEFAULT,
     ALBEDO_SNOW,
     CORRECTION_SOURCE_NONE,
+    DEFAULT_INVERTER_EFFICIENCY,
     SLOT_MINUTES,
     SNOW_DEPTH_THRESHOLD_M,
 )
@@ -491,6 +492,18 @@ def compute_forecast(
     total_group_limit = sum(g.ac_limit_w for g in groups)
     grouped_names = {name for g in groups for name in g.plane_names}
 
+    # Per-plane DC->AC efficiency for the PRE-AC-clamp AC total (the AC analogue
+    # of ``corrected_unclamped_watts``, SPEC AC-side Phase 2): a grouped plane
+    # uses its group's clamped eta_inv, an ungrouped plane the flat default —
+    # exactly the split ``electrical.clamp_groups_ac`` applies, so the pre-clamp
+    # AC equals the served AC on every UNclipped slot. Static over the window.
+    plane_eta = {p.name: DEFAULT_INVERTER_EFFICIENCY for p in planes}
+    for g in groups:
+        eta_g = electrical._clamp_eta(g.inverter_efficiency)
+        for name in g.plane_names:
+            if name in plane_eta:
+                plane_eta[name] = eta_g
+
     slot_starts: list[datetime] = []
     # RAW (pure-physics) per-slot site total and per-plane series.
     raw_total_watts: list[float] = []
@@ -527,12 +540,24 @@ def compute_forecast(
     ac_watts: list[float] = []
     ac_hourly_wh: dict[str, float] = {}
     ac_daily_kwh: dict[str, float] = {}
+    # AC-side PRE-clamp total per slot (Phase 2): the AC analogue of
+    # ``corrected_unclamped_watts`` — Sum_planes eta(group) * (cor_unclamped *
+    # factor) BEFORE the inverter AC clamp, aligned to slot_starts.
+    ac_corrected_unclamped_watts: list[float] = []
+    # Physical AC ceiling per slot (aligned to slot_starts): sum of the group AC
+    # limits + the AC of any ceiling-free (ungrouped) planes. Used only to cap the
+    # AC quantile band curves after the main loop (mirrors ``slot_ceilings`` for DC).
+    ac_slot_ceilings: list[float] = []
 
     def _append_zero_slot() -> None:
         raw_total_watts.append(0.0)
         total_watts.append(0.0)
         corrected_unclamped_watts.append(0.0)
         ac_watts.append(0.0)
+        # No production => no pre-clamp AC and no ungrouped AC contribution; the
+        # group ceiling is the slot's AC ceiling (band watts are zero here anyway).
+        ac_corrected_unclamped_watts.append(0.0)
+        ac_slot_ceilings.append(total_group_limit)
         kc_series.append(0.0)
         # No production => no ungrouped contribution; the group ceiling is the
         # slot's ceiling (band watts are zero here anyway, so this only keeps the
@@ -739,6 +764,24 @@ def compute_forecast(
         ac_wh = ac_slot_total * _SLOT_HOURS
         ac_hourly_wh[hkey] = ac_hourly_wh.get(hkey, 0.0) + ac_wh
         ac_daily_kwh[day_key] = ac_daily_kwh.get(day_key, 0.0) + ac_wh / 1000.0
+        # Pre-AC-clamp AC total (AC analogue of corrected_unclamped_watts): the
+        # eta-weighted factored DC per plane summed BEFORE the inverter AC clamp.
+        # On a clipped slot this exceeds ``ac_slot_total`` (the served, clamped AC);
+        # the coordinator's AC day-ahead strip uses the gap to detect a clamped
+        # slot (SPEC §8). Equals ``ac_slot_total`` exactly on an unclipped slot.
+        ac_corrected_unclamped_watts.append(
+            sum(plane_eta[name] * w for name, w in ac_input.items())
+        )
+        # Physical AC ceiling for this slot's band cap: the group AC limits plus
+        # the served AC of any ceiling-free (ungrouped) planes (mirrors the DC
+        # ``slot_ceilings`` on the AC curve — a P90 factor > 1 must never exceed
+        # what the inverters can deliver).
+        ungrouped_ac = sum(
+            ac_by_plane.get(p.name, 0.0)
+            for p in planes
+            if p.name not in grouped_names
+        )
+        ac_slot_ceilings.append(total_group_limit + ungrouped_ac)
 
     plane_results = tuple(
         PlaneResult(
@@ -767,6 +810,10 @@ def compute_forecast(
     p10_hourly_wh: dict[str, float] = {}
     p50_hourly_wh: dict[str, float] = {}
     p90_hourly_wh: dict[str, float] = {}
+    # AC-side P10 / P90 hourly band roll-ups (Phase 2): the AC analogue of the DC
+    # p10/p90 hourly curves, capped at the per-slot AC ceiling. P50 == ac_watts.
+    ac_p10_hourly_wh: dict[str, float] = {}
+    ac_p90_hourly_wh: dict[str, float] = {}
     band_by_slot = hk.band_by_slot
     if band_by_slot:
         p10_watts, p50_watts, p90_watts = quantiles.band_curve_from_corrected(
@@ -804,6 +851,31 @@ def compute_forecast(
             p50_hourly_wh[hkey] = p50_hourly_wh.get(hkey, 0.0) + p50_watts[i] * _SLOT_HOURS
             p90_hourly_wh[hkey] = p90_hourly_wh.get(hkey, 0.0) + p90_watts[i] * _SLOT_HOURS
 
+        # AC-side band curves (Phase 2): the SAME band factors applied to the
+        # served AC curve, capped at the per-slot AC ceiling, rolled up to hourly
+        # on the SAME hour keys as ``ac_hourly_wh``. Structurally identical to the
+        # DC roll-up above — just on the AC curve / ceiling. P50 == ac_watts, so
+        # only P10 / P90 are carried.
+        ac_p10_w, _ac_p50_w, ac_p90_w = quantiles.band_curve_from_corrected(
+            ac_watts, slot_starts, band_by_slot,
+        )
+        ac_p10_w = tuple(
+            min(w, ac_slot_ceilings[i]) for i, w in enumerate(ac_p10_w)
+        )
+        ac_p90_w = tuple(
+            min(w, ac_slot_ceilings[i]) for i, w in enumerate(ac_p90_w)
+        )
+        for i, start in enumerate(slot_starts):
+            hkey = (
+                start.astimezone(UTC)
+                .replace(minute=0, second=0, microsecond=0)
+                .isoformat()
+            )
+            if hkey not in ac_hourly_wh:
+                continue
+            ac_p10_hourly_wh[hkey] = ac_p10_hourly_wh.get(hkey, 0.0) + ac_p10_w[i] * _SLOT_HOURS
+            ac_p90_hourly_wh[hkey] = ac_p90_hourly_wh.get(hkey, 0.0) + ac_p90_w[i] * _SLOT_HOURS
+
     return ForecastResult(
         slot_starts=tuple(slot_starts),
         total_watts=tuple(total_watts),
@@ -813,6 +885,9 @@ def compute_forecast(
         ac_watts=tuple(ac_watts),
         ac_hourly_wh=ac_hourly_wh,
         ac_daily_kwh=ac_daily_kwh,
+        ac_corrected_unclamped_watts=tuple(ac_corrected_unclamped_watts),
+        ac_p10_hourly_wh=ac_p10_hourly_wh,
+        ac_p90_hourly_wh=ac_p90_hourly_wh,
         raw_total_watts=tuple(raw_total_watts),
         raw_hourly_wh=raw_hourly_wh,
         raw_daily_kwh=raw_daily_kwh,

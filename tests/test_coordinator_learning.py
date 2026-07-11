@@ -988,6 +988,94 @@ def test_dayahead_today_no_groups_bit_identical_to_legacy():
     assert energy == pytest.approx(round(served / 1.3 * 0.25 / 1000.0, 3))
 
 
+# ---------------------------------------------------------------------------
+# AC-side headline: _dayahead_today_kwh_ac strips the factor identically
+# ---------------------------------------------------------------------------
+
+
+def _one_slot_ac_result(
+    *, ac_w: float, ac_prereclamp_w: float | None, start: datetime
+) -> ForecastResult:
+    """A single-slot ForecastResult carrying an explicit AC pre-clamp total.
+
+    ``ac_prereclamp_w`` is ``ac_corrected_unclamped_watts[0]``; None leaves it
+    empty (the legacy / older-cached case). The DC fields are filler.
+    """
+    return ForecastResult(
+        slot_starts=(start,),
+        total_watts=(ac_w,),
+        plane_results=(PlaneResult(name="M1", watts=(ac_w,)),),
+        hourly_wh={start.isoformat(): ac_w * 0.25},
+        ac_watts=(ac_w,),
+        ac_corrected_unclamped_watts=(
+            () if ac_prereclamp_w is None else (ac_prereclamp_w,)
+        ),
+    )
+
+
+def test_dayahead_today_ac_clamped_slot_uses_ceiling():
+    """AC-side MED-1: a slot where the inverter AC clamp bit contributes the
+    served ceiling UNCHANGED (the intraday factor never reached it)."""
+    c = _make_coordinator()
+    c._intraday_scalar = 1.3
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    # Served AC 800 W (the AC limit); pre-clamp 1040 W == the factor really bit.
+    result = _one_slot_ac_result(ac_w=800.0, ac_prereclamp_w=1040.0, start=start)
+    energy = c._dayahead_today_kwh_ac(result, now=start)
+    assert energy == pytest.approx(0.2)  # 800 W * 0.25 h / 1000
+    assert energy != pytest.approx(0.154)  # NOT the understated 800/1.3 divide
+
+
+def test_dayahead_today_ac_unclamped_slot_divides_factor_out():
+    """An unclamped AC slot strips the intraday factor by dividing, as before."""
+    c = _make_coordinator()
+    c._intraday_scalar = 1.3
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    result = _one_slot_ac_result(ac_w=720.0, ac_prereclamp_w=720.0, start=start)
+    energy = c._dayahead_today_kwh_ac(result, now=start)
+    assert energy == pytest.approx(round(720.0 / 1.3 * 0.25 / 1000.0, 3))
+
+
+def test_dayahead_today_ac_empty_prereclamp_falls_back_to_divide():
+    """No ac_corrected_unclamped_watts (older cached result) -> divide-always."""
+    c = _make_coordinator()
+    c._intraday_scalar = 1.3
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    result = _one_slot_ac_result(ac_w=800.0, ac_prereclamp_w=None, start=start)
+    energy = c._dayahead_today_kwh_ac(result, now=start)
+    assert energy == pytest.approx(round(800.0 / 1.3 * 0.25 / 1000.0, 3))
+
+
+def test_build_data_carries_ac_keys():
+    """_build_data mirrors every DC headline/curve/roll-up key on the AC side."""
+    c = _make_coordinator()  # tz = UTC, fast learner neutral (factor 1.0)
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    now = start + timedelta(minutes=1)
+    result = ForecastResult(
+        slot_starts=(start,),
+        total_watts=(400.0,),
+        plane_results=(PlaneResult(name="M1", watts=(400.0,)),),
+        hourly_wh={start.isoformat(): 100.0},
+        ac_watts=(360.0,),
+        ac_hourly_wh={start.isoformat(): 90.0},
+        ac_corrected_unclamped_watts=(360.0,),
+    )
+    data = c._build_data(result, dict(result.hourly_wh), now, "fresh", timedelta(minutes=1))
+    # DC keys unchanged (the model-internal truth).
+    assert data["power_now_w"] == pytest.approx(400.0)
+    assert data["energy_today_kwh"] == pytest.approx(0.1)
+    # AC keys mirror them from the ac_* fields.
+    assert data["power_now_w_ac"] == pytest.approx(360.0)
+    assert data["energy_today_kwh_ac"] == pytest.approx(0.09)
+    assert data["watts_ac"] == {start.isoformat(): 360.0}
+    assert data["wh_period_ac"] == {start.isoformat(): 90.0}
+    assert data["hourly_wh_ac"] == {start.isoformat(): 90.0}
+    assert data["daily_kwh_ac"] == {start.date().isoformat(): pytest.approx(0.09)}
+    # Tomorrow / d2 AC roll-ups: no slots there.
+    assert data["energy_tomorrow_kwh_ac"] is None
+    assert data["energy_d2_kwh_ac"] is None
+
+
 def test_learner_status_layer_strings():
     """_learner_status returns the layer-keyed ENUM strings (coordinator:674)."""
     c = _make_coordinator()

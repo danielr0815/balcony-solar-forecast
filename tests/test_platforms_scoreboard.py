@@ -36,6 +36,7 @@ from balcony_solar_forecast.const import (  # noqa: E402
     CONF_COMPARISON_SENSORS,
     DATA_KEY_KILL_GATE_PASSED,
     DATA_KEY_QUANTILE_CURVES,
+    DATA_KEY_QUANTILE_CURVES_AC,
     DATA_KEY_SCOREBOARD,
     FORECAST_RESP_KEY_P10,
     FORECAST_RESP_KEY_P50,
@@ -320,10 +321,11 @@ def test_energy_band_sensor_sums_today(monkeypatch):
     monkeypatch.setattr(sensor_mod.dt_util, "now", lambda: fixed)
     monkeypatch.setattr(sensor_mod.dt_util, "as_local", lambda d: d)
 
+    # Phase 2: the band sensor reports the served-AC band (DATA_KEY_QUANTILE_CURVES_AC).
     start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
     curve = _band_curve(start, [100.0, 100.0, 100.0, 100.0])  # 400 Wh today
     coord = _FakeCoordinator(
-        {DATA_KEY_QUANTILE_CURVES: {FORECAST_RESP_KEY_P10: curve}}
+        {DATA_KEY_QUANTILE_CURVES_AC: {FORECAST_RESP_KEY_P10: curve}}
     )
     sensor = _bare(EnergyBandSensor, coord, _band=FORECAST_RESP_KEY_P10)
     assert sensor.native_value == pytest.approx(0.4)
@@ -334,10 +336,10 @@ def test_energy_band_sensor_none_when_no_band(monkeypatch):
     monkeypatch.setattr(sensor_mod.dt_util, "now", lambda: fixed)
     monkeypatch.setattr(sensor_mod.dt_util, "as_local", lambda d: d)
 
-    # Quantiles off / cold start: no curve -> None (no fabricated spread).
+    # Quantiles off / cold start: no AC curve -> None (no fabricated spread).
     coord = _FakeCoordinator({})
     assert _bare(EnergyBandSensor, coord, _band=FORECAST_RESP_KEY_P90).native_value is None
-    coord2 = _FakeCoordinator({DATA_KEY_QUANTILE_CURVES: {FORECAST_RESP_KEY_P90: {}}})
+    coord2 = _FakeCoordinator({DATA_KEY_QUANTILE_CURVES_AC: {FORECAST_RESP_KEY_P90: {}}})
     assert _bare(EnergyBandSensor, coord2, _band=FORECAST_RESP_KEY_P90).native_value is None
 
 
@@ -349,7 +351,7 @@ def test_energy_band_sensor_none_when_all_slots_other_day(monkeypatch):
     start = datetime(2026, 7, 6, 10, 0, tzinfo=UTC)  # tomorrow's slots
     curve = _band_curve(start, [100.0, 100.0])
     coord = _FakeCoordinator(
-        {DATA_KEY_QUANTILE_CURVES: {FORECAST_RESP_KEY_P10: curve}}
+        {DATA_KEY_QUANTILE_CURVES_AC: {FORECAST_RESP_KEY_P10: curve}}
     )
     sensor = _bare(EnergyBandSensor, coord, _band=FORECAST_RESP_KEY_P10)
     # No slot falls on today -> None, not 0.

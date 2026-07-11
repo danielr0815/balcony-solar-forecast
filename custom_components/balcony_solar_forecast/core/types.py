@@ -495,6 +495,25 @@ class ForecastResult:
     p10_hourly_wh: dict[str, float] = field(default_factory=dict)
     p50_hourly_wh: dict[str, float] = field(default_factory=dict)
     p90_hourly_wh: dict[str, float] = field(default_factory=dict)
+    # --- AC-side day-ahead + band analogues (Phase 2, SPEC AC-side forecast) ---
+    # PRE-AC-clamp AC total per slot: Sum_planes eta(group) * (cor_unclamped * factor)
+    # BEFORE the inverter AC clamp bites, aligned to ``slot_starts`` — the AC
+    # analogue of ``corrected_unclamped_watts``. The served ``ac_watts`` is this
+    # same series AFTER the per-group AC clamp, so a slot where
+    # ``ac_corrected_unclamped_watts[i] - ac_watts[i] > 0`` is one where the AC
+    # clamp bit; the coordinator's AC day-ahead strip reads it to tell a clamped
+    # slot (ceiling kept) from an unclamped one (factor divided out). Empty () on a
+    # v0.1 / older cached result => strip falls back to divide-always (SPEC §8).
+    ac_corrected_unclamped_watts: tuple[float, ...] = ()
+    # Hourly Wh roll-ups of the AC P10 / P90 band curves (keyed by ISO-8601 UTC
+    # hour, the SAME keys as ``ac_hourly_wh``). The AC analogue of
+    # ``p10_hourly_wh`` / ``p90_hourly_wh``: per slot ac_band_watts =
+    # min(ac_watts * band_factor, ac_ceiling), ac_ceiling = sum of group AC limits
+    # (+ any ungrouped-plane AC). Filled only when the DC bands are present
+    # (band_by_slot active); empty otherwise. P50 == ac_watts, so no separate AC
+    # p50 field is carried.
+    ac_p10_hourly_wh: dict[str, float] = field(default_factory=dict)
+    ac_p90_hourly_wh: dict[str, float] = field(default_factory=dict)
 
     def with_total(self, total_watts: tuple[float, ...]) -> ForecastResult:
         """Return a copy with a replaced total (e.g. after a learner clamp)."""

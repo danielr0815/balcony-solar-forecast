@@ -5,7 +5,12 @@
       "energy_production_tomorrow": {"name": "Energy production tomorrow"},
       "energy_production_d2": {"name": "Energy production day after tomorrow"},
       "power_production_now": {"name": "Power production now"},
+      "energy_production_today_dc": {"name": "Energy production today (DC)"},
+      "energy_production_tomorrow_dc": {"name": "Energy production tomorrow (DC)"},
+      "energy_production_d2_dc": {"name": "Energy production day after tomorrow (DC)"},
+      "power_production_now_dc": {"name": "Power production now (DC)"},
       "measured_dc_power_total": {"name": "Measured DC power (total)"},
+      "measured_ac_power": {"name": "Measured AC power"},
       "last_fetch_age_min": {"name": "Last fetch age"},
       "source_status": {
         "name": "Source status",

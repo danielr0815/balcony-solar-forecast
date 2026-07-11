@@ -13,6 +13,8 @@ These reuse the analytic physics stand-ins + fixtures from ``test_engine_learnin
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 from balcony_solar_forecast.const import DEFAULT_INVERTER_EFFICIENCY
 from balcony_solar_forecast.core import engine
@@ -20,6 +22,7 @@ from balcony_solar_forecast.core.engine import LearnerHooks
 from balcony_solar_forecast.core.types import (
     InverterGroup,
     PlaneConfig,
+    QuantileBands,
     SiteConfig,
 )
 
@@ -254,6 +257,128 @@ class TestDcUntouched:
 # ---------------------------------------------------------------------------
 # 6. Per-group efficiency overrides flow through to the site AC total
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 7. AC pre-clamp total (ac_corrected_unclamped_watts) — Phase 2
+# ---------------------------------------------------------------------------
+
+
+class TestAcCorrectedUnclamped:
+    def test_length_and_unclipped_equals_ac_watts(self, patched_physics):
+        # On a never-clipping site every slot is unclipped, so the pre-AC-clamp
+        # AC total equals the served AC total exactly (the clamp never bit).
+        site = _never_clamped_site()
+        weather = _clear_sky_series()
+        res = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        assert len(res.ac_corrected_unclamped_watts) == len(res.ac_watts)
+        assert len(res.ac_corrected_unclamped_watts) == len(res.slot_starts)
+        for i in range(len(weather)):
+            assert res.ac_corrected_unclamped_watts[i] == pytest.approx(
+                res.ac_watts[i]
+            )
+
+    def test_clipped_slot_preclamp_exceeds_served_ac(self, patched_physics):
+        # On a clamp-biting site the inverter AC clamp caps the served AC at the
+        # 800 W limit, but the PRE-clamp AC (eta * factored DC) is far higher, so
+        # the gap reveals the clamped slot (the AC analogue of MED-1).
+        site = _clamped_site()
+        weather = _clear_sky_series()
+        res = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        assert res.ac_watts[_NOON_INDEX] == pytest.approx(800.0)
+        assert res.ac_corrected_unclamped_watts[_NOON_INDEX] > 800.0
+        # Never below the served AC anywhere (pre-clamp >= served by construction).
+        for pre, served in zip(
+            res.ac_corrected_unclamped_watts, res.ac_watts, strict=False
+        ):
+            assert pre >= served - 1e-6
+
+
+# ---------------------------------------------------------------------------
+# 8. AC band curves (ac_p10_hourly_wh / ac_p90_hourly_wh) — Phase 2
+# ---------------------------------------------------------------------------
+
+
+class TestAcBands:
+    def test_no_bands_leaves_ac_band_fields_empty(self, patched_physics):
+        site = _two_plane_site()
+        weather = _clear_sky_series()
+        res = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        assert res.ac_p10_hourly_wh == {}
+        assert res.ac_p90_hourly_wh == {}
+
+    def test_ac_bands_present_and_keyed_like_ac_hourly(self, patched_physics):
+        # An unclipped site with a unit-ish band: AC bands roll up on the SAME hour
+        # keys as ac_hourly_wh, and p90 = 1.5 * ac_hourly (no ceiling bite here).
+        site = _never_clamped_site()
+        weather = _clear_sky_series()
+        band = QuantileBands(p10=0.6, p50=1.0, p90=1.5, n=40)
+        base = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        band_by_slot = {s: band for s in base.slot_starts}
+        res = engine.compute_forecast(
+            site, weather, now=_TEST_DATE,
+            hooks=LearnerHooks(band_by_slot=band_by_slot),
+        )
+        assert set(res.ac_p10_hourly_wh) == set(res.ac_hourly_wh)
+        assert set(res.ac_p90_hourly_wh) == set(res.ac_hourly_wh)
+        for hkey, wh in res.ac_hourly_wh.items():
+            assert res.ac_p90_hourly_wh[hkey] == pytest.approx(1.5 * wh)
+            assert res.ac_p10_hourly_wh[hkey] == pytest.approx(0.6 * wh)
+
+    def test_ac_band_capped_at_ac_ceiling(self, patched_physics):
+        # A clamp-biting site: the P90 factor (2.0) would double the noon AC, but
+        # the AC ceiling (the single group's 800 W AC limit) caps it. Each hour's
+        # AC P90 Wh can never exceed the ceiling integrated over its slots.
+        site = _clamped_site()
+        weather = _clear_sky_series()
+        band = QuantileBands(p10=0.8, p50=1.0, p90=2.0, n=40)
+        base = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        band_by_slot = {s: band for s in base.slot_starts}
+        res = engine.compute_forecast(
+            site, weather, now=_TEST_DATE,
+            hooks=LearnerHooks(band_by_slot=band_by_slot),
+        )
+        # A full hour of 4 slots each capped at the 800 W AC limit is 800 Wh max.
+        for wh in res.ac_p90_hourly_wh.values():
+            assert wh <= 800.0 + 1e-6
+        # The clamped noon hour is pinned to the ceiling (the P90 factor washed
+        # out against the cap): its AC P90 Wh equals the served AC hour Wh.
+        noon_hkey = (
+            base.slot_starts[_NOON_INDEX]
+            .astimezone(UTC)
+            .replace(minute=0, second=0, microsecond=0)
+            .isoformat()
+        )
+        assert res.ac_p90_hourly_wh[noon_hkey] == pytest.approx(
+            res.ac_hourly_wh[noon_hkey]
+        )
+
+
+# ---------------------------------------------------------------------------
+# 9. DC path + DC bands untouched by the AC additions — Phase 2
+# ---------------------------------------------------------------------------
+
+
+class TestDcUntouchedByAcPhase2:
+    def test_ac_fields_do_not_leak_into_dc_bands(self, patched_physics):
+        site = _two_plane_site()
+        weather = _clear_sky_series()
+        band = QuantileBands(p10=0.7, p50=1.0, p90=1.4, n=40)
+        base = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        band_by_slot = {s: band for s in base.slot_starts}
+        res = engine.compute_forecast(
+            site, weather, now=_TEST_DATE,
+            hooks=LearnerHooks(band_by_slot=band_by_slot),
+        )
+        # DC curve + DC band roll-ups are entirely independent of the AC fields.
+        assert res.total_watts == base.total_watts
+        assert res.hourly_wh == base.hourly_wh
+        assert res.daily_kwh == base.daily_kwh
+        # The DC p50 band with a unit-ish factor still equals the pre-AC behaviour:
+        # AC bands exist alongside, never replacing, the DC band curves.
+        assert res.p90_hourly_wh  # DC bands present
+        assert res.ac_p90_hourly_wh  # AC bands present too
+        assert res.p90_hourly_wh.keys() == res.hourly_wh.keys()
 
 
 class TestPerGroupEfficiency:

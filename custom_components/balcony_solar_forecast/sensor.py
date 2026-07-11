@@ -78,6 +78,7 @@ from .const import (
     DATA_KEY_INTRADAY_SCALAR,
     DATA_KEY_LEARNER_STATUS,
     DATA_KEY_QUANTILE_CURVES,
+    DATA_KEY_QUANTILE_CURVES_AC,
     DATA_KEY_SCOREBOARD,
     DOMAIN,
     FORECAST_RESP_KEY_P10,
@@ -96,16 +97,21 @@ from .const import (
     SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX,
     SENSOR_DRIFT_MAE_CORRECTED,
     SENSOR_ENERGY_D2,
+    SENSOR_ENERGY_D2_DC,
     SENSOR_ENERGY_TODAY,
+    SENSOR_ENERGY_TODAY_DC,
     SENSOR_ENERGY_TODAY_P10,
     SENSOR_ENERGY_TODAY_P90,
     SENSOR_ENERGY_TOMORROW,
+    SENSOR_ENERGY_TOMORROW_DC,
     SENSOR_FORECAST_DAILY_KWH_MAE,
     SENSOR_FORECAST_HOURLY_MAE,
     SENSOR_FORECAST_VS_BEST_BASELINE_PCT,
     SENSOR_INTRADAY_SCALAR,
+    SENSOR_MEASURED_AC_POWER,
     SENSOR_MEASURED_DC_TOTAL,
     SENSOR_POWER_NOW,
+    SENSOR_POWER_NOW_DC,
     SENSOR_SHADE_PROFILE,
     STATUS_CACHED,
     STATUS_FRESH,
@@ -141,6 +147,9 @@ SENSOR_LEARNER_STATUS_DAY_AHEAD = "learner_status_day_ahead"
 _KEY_STATUS = "status"
 _KEY_WEATHER_AGE_S = "weather_age_seconds"
 _KEY_POWER_NOW_W = "power_now_w"
+# AC-side (Phase 2): the operator-facing power sensor reads the served-AC key;
+# the DC key above backs the new *_dc diagnostic.
+_KEY_POWER_NOW_W_AC = "power_now_w_ac"
 _KEY_WATTS = "watts"
 _KEY_WH_PERIOD = "wh_period"
 _KEY_HOURLY_WH = "hourly_wh"
@@ -149,8 +158,16 @@ _LOGGER = logging.getLogger(__name__)
 _KEY_SLOT_STARTS = "slot_starts"
 _KEY_PLANE_WATTS = "plane_watts"
 _KEY_COMPUTED_AT = "computed_at"
-# The three daily-energy keys, indexed by day offset (today=0).
+# The three daily-energy keys, indexed by day offset (today=0). ``_ENERGY_KEYS``
+# is the model-internal DC roll-up (now read by the *_dc diagnostic sensors);
+# ``_ENERGY_KEYS_AC`` is the served-AC roll-up the main energy sensors report
+# (AC is the operator-facing standard, Phase 2).
 _ENERGY_KEYS = ("energy_today_kwh", "energy_tomorrow_kwh", "energy_d2_kwh")
+_ENERGY_KEYS_AC = (
+    "energy_today_kwh_ac",
+    "energy_tomorrow_kwh_ac",
+    "energy_d2_kwh_ac",
+)
 
 # Sub-keys inside the coordinator's DATA_KEY_SCOREBOARD summary dict (the shape
 # core.scoreboard.scoreboard_summary emits; see that module's docstring). Read
@@ -183,6 +200,17 @@ async def async_setup_entry(
         EnergyProductionSensor(coordinator, SENSOR_ENERGY_TOMORROW, day_offset=1),
         EnergyProductionSensor(coordinator, SENSOR_ENERGY_D2, day_offset=2),
         PowerNowSensor(coordinator),
+        # --- model-internal DC diagnostics (Phase 2): the pre-AC-clamp view ---
+        PowerNowDcSensor(coordinator),
+        EnergyProductionDcSensor(
+            coordinator, SENSOR_ENERGY_TODAY_DC, _ENERGY_KEYS[0]
+        ),
+        EnergyProductionDcSensor(
+            coordinator, SENSOR_ENERGY_TOMORROW_DC, _ENERGY_KEYS[1]
+        ),
+        EnergyProductionDcSensor(
+            coordinator, SENSOR_ENERGY_D2_DC, _ENERGY_KEYS[2]
+        ),
         LastFetchAgeSensor(coordinator),
         SourceStatusSensor(coordinator),
         # --- learning-layer diagnostics (v0.2.0 + v0.3.0, SPEC §5) ---
@@ -223,6 +251,14 @@ async def async_setup_entry(
                 [name for _eid, name in measured],
             )
         )
+
+    # Measured site-total AC power (ground truth): the live reading of the site's
+    # single AC meter. Added ONLY when ac_actual_entity is configured — with none
+    # there is nothing to read, so the sensor is omitted rather than published
+    # permanently unavailable (mirrors the DC-total gate above).
+    ac_source = _measured_ac_source(coordinator)
+    if ac_source:
+        entities.append(MeasuredAcPowerSensor(coordinator, ac_source))
 
     # One MAE sensor per configured comparison forecast (SPEC §9/§10). The list
     # is read from the merged entry config (data + options); it ships EMPTY, so
@@ -461,7 +497,11 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
     def __init__(self, coordinator: Any, key: str, day_offset: int) -> None:
         super().__init__(coordinator, key)
         self._day_offset = day_offset
-        self._energy_key = _ENERGY_KEYS[day_offset]
+        # AC is the operator-facing standard (Phase 2): the headline reads the
+        # served-AC day roll-up. The 15-min ``watts`` / ``wh_period`` curve
+        # attributes stay the DC model curve (the AC bands are hourly-only, so the
+        # matching 15-min band attributes remain the DC band shape).
+        self._energy_key = _ENERGY_KEYS_AC[day_offset]
 
     def _target_date(self):
         """Local calendar date this sensor sums (today + offset)."""
@@ -512,7 +552,14 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
 
 
 class PowerNowSensor(BalconyForecastEntity, SensorEntity):
-    """Instantaneous forecast AC power for the slot covering *now* (W)."""
+    """Instantaneous forecast AC power for the slot covering *now* (W).
+
+    AC is the operator-facing standard (Phase 2): the state is the served-AC
+    power (``power_now_w_ac``); the model-internal DC value moves to the
+    ``power_production_now_dc`` diagnostic. The per-group DC->AC efficiency ride
+    along as the ``inverter_efficiency`` attribute (the factor that maps the DC
+    model to this AC output).
+    """
 
     _attr_device_class = SensorDeviceClass.POWER
     _attr_native_unit_of_measurement = UnitOfPower.WATT
@@ -524,8 +571,20 @@ class PowerNowSensor(BalconyForecastEntity, SensorEntity):
     @property
     def native_value(self) -> float | None:
         data = self.coordinator.data or {}
-        value = data.get(_KEY_POWER_NOW_W)
+        value = data.get(_KEY_POWER_NOW_W_AC)
         return None if value is None else round(float(value), 1)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        # Per-group configured DC->AC efficiency (eta_inv), a lean static summary
+        # of the transform behind this AC output. Empty when no groups configured.
+        site = getattr(self.coordinator, "_site", None)
+        groups = getattr(site, "groups", ()) if site is not None else ()
+        return {
+            "inverter_efficiency": {
+                g.name: g.inverter_efficiency for g in groups
+            }
+        }
 
 
 class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
@@ -638,6 +697,79 @@ class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
         }
 
 
+class MeasuredAcPowerSensor(BalconyForecastEntity, SensorEntity):
+    """Measured site-total AC power: the live reading of the site's SINGLE AC
+    meter behind all inverters (SiteConfig.ac_actual_entity) — the AC ground-
+    truth partner of :class:`MeasuredDcTotalSensor` and the time-accurate mate of
+    the forecast AC power sensor.
+
+    Unlike the DC total (a SUM over per-module sensors) this tracks ONE entity:
+    only the aggregate site AC is metered, never per-inverter AC. Created only
+    when ``ac_actual_entity`` is configured (nothing to read otherwise). Same two
+    design points as the DC total:
+      * ``available`` is DECOUPLED from the coordinator — True while the AC meter
+        reports a numeric value, unavailable only when it is dead. Measured
+        production is ground truth and must keep being recorded even while the
+        FORECAST is degraded/unavailable.
+      * ``MEASUREMENT`` + ``POWER`` + ``W`` => Home Assistant keeps long-term
+        statistics, and there are no bulky curve attributes, so this sensor is
+        deliberately NOT excluded from the recorder: its history IS the point.
+
+    It never reads ``coordinator.data``: it subscribes to the AC meter directly
+    via ``async_track_state_change_event`` (auto-unsubscribed on removal) and
+    recomputes on every change plus once on add — independent of the forecast
+    recompute cadence.
+    """
+
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: Any, source_id: str) -> None:
+        super().__init__(coordinator, SENSOR_MEASURED_AC_POWER)
+        self._source_id = source_id
+        self._value: float | None = None
+        self._reporting = False
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # Track the single AC meter directly (ground truth is independent of the
+        # forecast coordinator's tick). async_on_remove auto-unsubscribes.
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, [self._source_id], self._handle_source_event
+            )
+        )
+        # Seed the cached state before the first write so it is correct on add.
+        self._recompute()
+
+    @callback
+    def _handle_source_event(self, event: Any) -> None:
+        """Recompute + publish on any AC-meter state change."""
+        self._recompute()
+        self.async_write_ha_state()
+
+    def _recompute(self) -> None:
+        """Cache the AC meter's current numeric value (None if unusable)."""
+        value = _numeric_state(self.hass.states.get(self._source_id))
+        self._reporting = value is not None
+        self._value = round(value, 1) if value is not None else None
+
+    @property
+    def available(self) -> bool:
+        # Ground truth: available while the AC meter reports a numeric value,
+        # decoupled from the coordinator's last_update_success.
+        return self._reporting
+
+    @property
+    def native_value(self) -> float | None:
+        return self._value
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"source": self._source_id}
+
+
 class _DiagnosticSensor(BalconyForecastEntity, SensorEntity):
     """Base for always-available diagnostic sensors (SPEC §7 visibility)."""
 
@@ -694,6 +826,60 @@ class SourceStatusSensor(_DiagnosticSensor):
             # No fresh/cached/physics curve was issued this cycle.
             return STATUS_UNAVAILABLE
         return data.get(_KEY_STATUS)
+
+
+# ---------------------------------------------------------------------------
+# Model-internal DC diagnostics (Phase 2 — the pre-AC-clamp forecast view)
+# ---------------------------------------------------------------------------
+# Phase 2 makes the served AC the operator-facing standard on the main power /
+# energy sensors; the DC curve remains the self-learning / scoreboard truth and
+# is surfaced here as DIAGNOSTIC sensors reading the coordinator's UNCHANGED DC
+# data keys (power_now_w / energy_{today,tomorrow,d2}_kwh).
+
+
+class PowerNowDcSensor(_DiagnosticSensor):
+    """Model-internal DC forecast power for the slot covering *now* (W).
+
+    The DC counterpart of :class:`PowerNowSensor` (reads ``power_now_w``). The DC
+    curve stays the learner/scoreboard truth; this diagnostic keeps it visible
+    now that the main power sensor reports AC (Phase 2).
+    """
+
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: Any) -> None:
+        super().__init__(coordinator, SENSOR_POWER_NOW_DC)
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data or {}
+        value = data.get(_KEY_POWER_NOW_W)
+        return None if value is None else round(float(value), 1)
+
+
+class EnergyProductionDcSensor(_DiagnosticSensor):
+    """Model-internal DC daily forecast energy (kWh), one per day offset.
+
+    The DC counterpart of :class:`EnergyProductionSensor` (reads the coordinator's
+    DC day roll-up ``energy_{today,tomorrow,d2}_kwh``). No ``state_class`` — a
+    *forecast* never feeds long-term statistics. Diagnostic + always available so
+    the operator can compare the DC model view against the AC headline.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+
+    def __init__(self, coordinator: Any, key: str, data_key: str) -> None:
+        super().__init__(coordinator, key)
+        self._data_key = data_key
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data or {}
+        value = data.get(self._data_key)
+        return None if value is None else round(float(value), 3)
 
 
 # ---------------------------------------------------------------------------
@@ -960,12 +1146,13 @@ class ComparisonDailyKwhMaeSensor(_ScoreboardSensor):
 class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
     """Today's forecast energy at one quantile band (P10 or P90), kWh.
 
-    Sums the 15-min band Wh curve (``DATA_KEY_QUANTILE_CURVES[band]``) over the
-    slots that fall on the local *today*, mirroring the served energy sensor.
-    A *forecast*, so no ``state_class`` (never feeds long-term statistics, like
-    the served energy sensors). ``None`` when no band was issued (quantiles off
-    / cold start) — the band honestly collapses rather than fabricating a
-    spread. Follows the coordinator's availability (not a diagnostic).
+    AC is the operator-facing standard (Phase 2): sums the AC band Wh curve
+    (``DATA_KEY_QUANTILE_CURVES_AC[band]``, HOURLY Wh) over the hours that fall
+    on the local *today*, mirroring the served AC energy sensor. A *forecast*, so
+    no ``state_class`` (never feeds long-term statistics, like the served energy
+    sensors). ``None`` when no band was issued (quantiles off / cold start) — the
+    band honestly collapses rather than fabricating a spread. Follows the
+    coordinator's availability (not a diagnostic).
     """
 
     _attr_device_class = SensorDeviceClass.ENERGY
@@ -978,7 +1165,7 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
     @property
     def native_value(self) -> float | None:
         data = self.coordinator.data or {}
-        curves = data.get(DATA_KEY_QUANTILE_CURVES)
+        curves = data.get(DATA_KEY_QUANTILE_CURVES_AC)
         curve = curves.get(self._band) if isinstance(curves, dict) else None
         if not isinstance(curve, dict) or not curve:
             return None
@@ -1150,3 +1337,16 @@ def _measured_sources(coordinator: Any) -> list[tuple[str, str]]:
                 (entity_id, name if isinstance(name, str) and name else entity_id)
             )
     return out
+
+
+def _measured_ac_source(coordinator: Any) -> str | None:
+    """The site's single AC meter entity id (SiteConfig.ac_actual_entity), or None.
+
+    The whole-site AC calibration target behind all inverters. None (the sensor
+    is then omitted) when the site has no configured AC meter. Never raises.
+    """
+    site = getattr(coordinator, "_site", None)
+    if site is None:
+        return None
+    entity_id = getattr(site, "ac_actual_entity", None)
+    return entity_id if isinstance(entity_id, str) and entity_id else None

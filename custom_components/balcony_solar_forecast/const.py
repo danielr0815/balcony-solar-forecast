@@ -149,10 +149,22 @@ SENSOR_ENERGY_TODAY = "energy_production_today"
 SENSOR_ENERGY_TOMORROW = "energy_production_tomorrow"
 SENSOR_ENERGY_D2 = "energy_production_d2"
 SENSOR_POWER_NOW = "power_production_now"
+# --- AC-side forecast Phase 2 (SPEC AC-side forecast) ----------------------
+# The main energy / power / band sensors above now report the served AC
+# (operator-facing standard); the model-internal DC view moves to these new
+# DIAGNOSTIC sensors, reading the coordinator's unchanged DC data keys.
+SENSOR_POWER_NOW_DC = "power_production_now_dc"
+SENSOR_ENERGY_TODAY_DC = "energy_production_today_dc"
+SENSOR_ENERGY_TOMORROW_DC = "energy_production_tomorrow_dc"
+SENSOR_ENERGY_D2_DC = "energy_production_d2_dc"
 # Measured site-total DC power: the live sum of the planes' actual_entity
 # sensors (ground truth), an integration-owned sensor independent of the
 # forecast coordinator (see sensor.MeasuredDcTotalSensor).
 SENSOR_MEASURED_DC_TOTAL = "measured_dc_power_total"
+# Measured site-total AC power: the live reading of the site's single AC meter
+# (SiteConfig.ac_actual_entity), the AC ground-truth partner of the measured DC
+# total (see sensor.MeasuredAcPowerSensor); created only when configured.
+SENSOR_MEASURED_AC_POWER = "measured_ac_power"
 BINARY_SENSOR_DEGRADED = "degraded"
 
 # --- Shade-profile visualisation entities (sun path vs learned shade) -------
@@ -741,6 +753,9 @@ ATTR_WH_PERIOD_P90 = "wh_period_p90"
 
 # --- Coordinator <-> platform contract additions (self.data keys, v0.4) -----
 DATA_KEY_QUANTILE_CURVES = "quantile_curves"      # {"p10": {iso: Wh}, "p50": ..., "p90": ...} 15-min
+# AC-side band curves (Phase 2): {"p10": {iso_hour: Wh}, "p90": {iso_hour: Wh}}
+# HOURLY Wh (the AC bands are computed at hourly resolution; P50 == ac_watts).
+DATA_KEY_QUANTILE_CURVES_AC = "quantile_curves_ac"
 DATA_KEY_SCOREBOARD = "scoreboard"                # dict: engine_mae / per-comparison mae / vs_best_pct / gate / strata
 DATA_KEY_KILL_GATE_PASSED = "kill_gate_passed"    # bool | None (None == not enough window yet)
 
