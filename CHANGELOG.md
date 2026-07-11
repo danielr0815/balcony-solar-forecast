@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Power-history week view massively overstated today's production.** The week
+  bars use the `period: "day"` mean statistic × 24 h, which recovers a day's
+  energy exactly — but only for a COMPLETE day. For the still-running current
+  day, Home Assistant builds the daily mean over just the hours elapsed so far
+  (the sunlit ones), so × 24 extrapolated a full day from them and overstated
+  today by up to ~24/elapsed-hours (e.g. ~17.6 kWh at ~16:00 for a ~12 kWh day).
+  Today's column is now summed from HOURLY statistics (× 1 h) exactly like the
+  day view, so it shows production up to now; complete past days are unchanged.
+
 ## [0.17.0] - 2026-07-11
 
 ### Added

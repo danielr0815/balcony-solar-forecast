@@ -19,6 +19,8 @@
 //      moment navigation starts, and the final state is "missing" (NOT
 //      "error"), with oldest_available captured for the archive-since note.
 //   3. DAY nav where the service call THROWS → state "error" (+ message).
+//   4. WEEK bars: today's column is the summed HOURLY energy, not the running
+//      daily-mean × 24 h (which overstates a still-running day).
 //
 // Run:  node tests/harness/power_card_harness.mjs
 // CI:   tests/test_frontend_harness.py wraps this via subprocess (skips when
@@ -158,8 +160,15 @@ const STATES = {
 
   await card._fetch();
 
-  assert(statCalls.length === 1, `expected 1 statistics call, got ${statCalls.length}`);
-  assert(statCalls[0].period === "day", `week stats period is ${statCalls[0].period}`);
+  assert(
+    statCalls.length === 2,
+    `expected 2 statistics calls (daily + today-hourly), got ${statCalls.length}`,
+  );
+  assert(statCalls[0].period === "day", `week daily stats period is ${statCalls[0].period}`);
+  assert(
+    statCalls[1].period === "hour",
+    `today's partial column must use hourly stats, got ${statCalls[1].period}`,
+  );
   assert(
     issuedDates.length === 6,
     `expected 6 issued lookups (non-today days), got ${issuedDates.length}`,
@@ -276,6 +285,75 @@ const STATES = {
     `error message not remembered: "${card._forecastError}"`,
   );
   console.log('OK scenario 3: service exception → "error" + remembered message');
+}
+
+// ============================================================================
+// Scenario 4 — WEEK bars: today's column = summed HOURLY energy, NOT the
+// running daily-mean × 24 h (the v0.17.0 overstatement bug: a still-running
+// day's daily mean covers only the sunlit hours seen so far).
+// ============================================================================
+{
+  const dayMs = (offset) => {
+    const now = new Date();
+    return new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() + offset,
+    ).getTime();
+  };
+  const hass = {
+    language: "de",
+    states: STATES,
+    callWS: async (msg) => {
+      if (msg.type === "recorder/statistics_during_period" && msg.period === "day") {
+        // 6 COMPLETE past days at 1000 W mean → 24000 Wh each; no today row
+        // (the daily query is capped at last local midnight).
+        return {
+          "sensor.m1": [-6, -5, -4, -3, -2, -1].map((o) => ({
+            start: dayMs(o),
+            mean: 1000,
+          })),
+        };
+      }
+      if (msg.type === "recorder/statistics_during_period" && msg.period === "hour") {
+        // Today so far: 8 sunlit hours averaging 1500 W → 12000 Wh (partial).
+        return {
+          "sensor.m1": Array.from({ length: 8 }, () => ({
+            start: dayMs(0),
+            mean: 1500,
+          })),
+        };
+      }
+      if (msg.type === "call_service") {
+        return {
+          response: { result: { available: false, oldest_available: null } },
+        };
+      }
+      throw new Error(`unexpected WS ${msg.type}`);
+    },
+  };
+  const card = makeCard(hass);
+  card._view = "week";
+  card._offset = 0;
+
+  await card._fetch();
+
+  const bars = card._weekBars["sensor.m1"];
+  assert(Array.isArray(bars) && bars.length === 7, "no 7-slot week bars built");
+  assert(
+    bars[6] === 12000,
+    `today's bar is ${bars[6]} Wh, want summed hourly 12000 (not daily-mean × 24)`,
+  );
+  assert(
+    bars[6] !== 1500 * 24,
+    `today used daily-mean × 24 (${1500 * 24}) — the overstatement bug`,
+  );
+  for (const i of [0, 1, 2, 3, 4, 5]) {
+    assert(bars[i] === 24000, `complete-day slot ${i} is ${bars[i]}, want 24000`);
+  }
+  console.log(
+    "OK scenario 4: week today = summed hourly energy; complete days = mean × 24",
+  );
 }
 
 console.log("ALL OK: power-card runtime harness passed");
