@@ -216,3 +216,29 @@ get_shade_profile:
       required: false
       selector:
         text:
+
+get_issued_forecast:
+  name: Get issued forecast
+  description: >-
+    Return the day-ahead forecast AS IT WAS ISSUED for one past local date, read
+    from the 90-day issued ring (the frozen ~01:30 stand, no hindsight). Read-only
+    diagnostic used by the power-history card's dashed forecast line on past days;
+    a date with no archived snapshot returns "available: false". Returns a
+    response (SPEC §15.4).
+  fields:
+    entry_id:
+      name: Config entry
+      description: >-
+        Target config entry. Omit only if a single site is configured.
+      example: "1234567890abcdef"
+      required: false
+      selector:
+        text:
+    date:
+      name: Date
+      description: >-
+        The local date whose issued forecast to return, ISO format YYYY-MM-DD.
+      example: "2026-06-21"
+      required: true
+      selector:
+        text:

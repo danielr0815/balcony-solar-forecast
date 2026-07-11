@@ -741,7 +741,25 @@ des Heute-Sensors); ein **Hover-Panel** zeigt je Stunde die Werte je Modul plus
 Gesamt und Prognose. Die Modulkanäle werden über die
 `sources`/`source_names`-Attribute von `measured_dc_power_total`
 **auto-discovered** (keine YAML-Konfiguration der Kanäle nötig); die Karte
-aktualisiert sich alle **5 min**.
+aktualisiert sich alle **5 min** — aber nur in der Live-Ansicht (Heute /
+aktuelle Woche); eine Vergangenheits-Ansicht ist statisch und wird nicht
+nachgeladen.
+
+Seit v0.15 bietet die Karte (karten-lokale, nicht persistierte) **Tages-/
+Wochennavigation**: eine Kopfzeile `◀ [Label] ▶` blättert den gewählten Tag
+(Heute / Gestern / lokales Datum; ▶ deaktiviert am heutigen Tag), ein
+**Tag|Woche**-Umschalter zeigt eine **Wochenansicht** mit sieben gestapelten
+Tagesbalken der Tagesproduktion je Modul (aus `period: "day"`-Mittelwert-
+statistiken, Mittel-W × 24 h = Tages-Wh; das Fenster endet am gewählten Tag und
+springt in 7-Tages-Schritten). Für **vergangene Tage** zeigt die gestrichelte
+Linie im Tagesmodus die Prognose **wie ausgegeben** aus dem 90-Tage-Ausgabe-Ring
+— gelesen über die schreibgeschützte Aktion `get_issued_forecast` (SPEC §9).
+Wichtig gegen Leakage: das ist der **eingefrorene ~01:30-Stand ohne Rückschau**
+(nie aus dem heutigen gelernten Zustand nachgerechnet), sodass ein direkter
+Vergleich „ausgegeben vs. gemessen" ehrlich bleibt; fehlt ein archivierter
+Snapshot, entfällt die Linie mit dezentem Hinweis. Die **Wochenansicht zeichnet
+bewusst keine Prognoselinie** (Mischung aus ausgegebener Vergangenheits- und
+Live-Heute-Kurve wäre irreführend).
 
 Seit v0.9 fixiert die Karte ihre x-Achse auf die **jahresstabile**
 Tageslicht-Azimutspanne (Minimum/Maximum aus beiden Sonnenwenden, Python-seitig

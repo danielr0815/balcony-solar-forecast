@@ -181,6 +181,20 @@
           "description": "Das darzustellende lokale Datum im ISO-Format JJJJ-MM-TT. Leer lassen, um das aktuell gewählte Datum des Diagramms zu verwenden."
         }
       }
+    },
+    "get_issued_forecast": {
+      "name": "Ausgegebene Prognose abrufen",
+      "description": "Liefert die Day-Ahead-Prognose so, wie sie für ein vergangenes lokales Datum ausgegeben wurde, aus dem 90-Tage-Ausgabe-Ring (der eingefrorene Stand, ohne Rückschau). Wird von der gestrichelten Prognoselinie der Power-History-Karte für vergangene Tage genutzt.",
+      "fields": {
+        "entry_id": {
+          "name": "Konfigurationseintrag",
+          "description": "Ziel-Konfigurationseintrag. Nur weglassen, wenn genau eine Anlage konfiguriert ist."
+        },
+        "date": {
+          "name": "Datum",
+          "description": "Das lokale Datum, dessen ausgegebene Prognose geliefert werden soll, im ISO-Format JJJJ-MM-TT."
+        }
+      }
     }
   },
   "config": {

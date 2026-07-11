@@ -507,6 +507,7 @@ SERVICE_ROLLBACK_LEARNERS = "rollback_learners"  # restore learner state from th
 SERVICE_INSTALL_DASHBOARD = "install_dashboard"  # write the observability dashboard
 SERVICE_SUGGEST_SHADE_GROUPS = "suggest_shade_groups"  # data-driven shade-group suggestion
 SERVICE_GET_SHADE_PROFILE = "get_shade_profile"  # read-only shade profile for a module/date (card compare)
+SERVICE_GET_ISSUED_FORECAST = "get_issued_forecast"  # read-only issued day-ahead curve for a past date (card)
 
 # --- Bootstrap JSON schema (SPEC §6; scripts/backfill.py <-> store) ---------
 # The import service validates + clamps and REJECTS unknown schema versions.

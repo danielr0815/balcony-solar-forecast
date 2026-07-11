@@ -350,6 +350,19 @@ def test_power_history_js_card_sanity():
     # The hover crosshair wires a mousemove handler over the plot overlay.
     assert "mousemove" in text, "power-history card JS has no mousemove hover"
 
+    # Day/Week navigation (part 2b): the ◀/▶ nav glyphs, the Day|Week toggle
+    # labels in both locales, and the week view's daily-statistics marker.
+    assert "◀" in text and "▶" in text, "power-history card JS has no nav arrows"
+    for label in ("Day", "Week", "Tag", "Woche"):
+        assert f'"{label}"' in text, f"power-history card JS missing toggle label {label!r}"
+    assert 'period: "day"' in text, "power-history card JS has no week (daily) statistics query"
+
+    # Past-day dashed line = the ISSUED archived forecast, read via the read-only
+    # get_issued_forecast action (the stable low-level websocket variant).
+    assert "get_issued_forecast" in text, "power-history card JS does not call get_issued_forecast"
+    assert "call_service" in text, "power-history card JS does not use the WS call_service command"
+    assert "return_response" in text, "power-history card JS does not request a service response"
+
     # Self-contained module: no external-URL ES imports, and it must NOT pull in
     # the sibling shade-profile card (each card stays independent).
     assert re.search(r'from\s+["\']https?:', text) is None

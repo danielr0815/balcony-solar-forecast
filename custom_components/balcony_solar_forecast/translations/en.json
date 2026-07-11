@@ -181,6 +181,20 @@
           "description": "The local date to visualise, ISO format YYYY-MM-DD. Omit to use the diagram's currently selected date."
         }
       }
+    },
+    "get_issued_forecast": {
+      "name": "Get issued forecast",
+      "description": "Return the day-ahead forecast as it was issued for one past local date, read from the 90-day issued ring (the frozen stand, no hindsight). Used by the power-history card's dashed forecast line on past days.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "Target config entry. Omit only if a single site is configured."
+        },
+        "date": {
+          "name": "Date",
+          "description": "The local date whose issued forecast to return, ISO format YYYY-MM-DD."
+        }
+      }
     }
   },
   "config": {

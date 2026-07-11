@@ -27,7 +27,7 @@ from homeassistant.core import State
 from homeassistant.util import dt as dt_util
 
 from .const import LABEL_FROZEN_STALE_SECONDS
-from .core import DriftState, ForecastResult
+from .core.types import DriftState, ForecastResult
 
 # Live-actual state guards: states we never treat as a measurement.
 _UNUSABLE_STATES = ("unknown", "unavailable", "none", "")

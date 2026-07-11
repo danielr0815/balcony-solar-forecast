@@ -362,12 +362,30 @@ auto-discovered from `hass.states` when not configured:
 
 The bars come from the recorder's **hourly long-term statistics** (the mean DC
 power of each module sensor over the hour × 1 h = Wh), pulled directly via the
-`recorder/statistics_during_period` websocket command from local midnight to now
-— refetched on load, every 5 minutes, and when the local day rolls over. Modules
-therefore need `state_class` for LTS to exist (they do — LTS since 2024-07);
-until the recorder has written hourly statistics the card shows a *No hourly
-statistics yet* hint. If the forecast sensor is missing its `wh_period` attribute
-the bars still render, just without the dashed line.
+`recorder/statistics_during_period` websocket command over the selected day's
+`[00:00, +24h)` local window — refetched on load, every 5 minutes, and when the
+local day rolls over (only while you are viewing **today**; a past day is static
+and never re-fetched). Modules therefore need `state_class` for LTS to exist
+(they do — LTS since 2024-07); until the recorder has written hourly statistics
+the card shows a *No hourly statistics yet* hint (a past day with no data shows
+*No statistics for this range*). If the forecast sensor is missing its `wh_period`
+attribute the bars still render, just without the dashed line.
+
+**Day / week navigation.** A header `◀ [label] ▶` steps the selected day (label:
+*Today* / *Yesterday* / the local date), and ▶ is disabled once you are back at
+today. A **Day | Week** toggle switches to a **week view**: seven stacked
+day-bars of daily production per module (from `period: "day"` mean statistics,
+mean W × 24 h = daily Wh), the window ending at the selected day and stepping by
+seven days. The selection lives in the card only — it is never persisted.
+
+**Forecast line on past days.** For *today* the dashed line is the live `wh_period`
+curve, exactly as before. For a **past day** the card instead draws the forecast
+**as it was issued** for that day — read from the integration's 90-day issued ring
+via the read-only `get_issued_forecast` action (the frozen ~01:30 day-ahead stand,
+with no hindsight), so you can compare what was actually forecast against what the
+modules measured. A day with no archived snapshot shows a small *(no archived
+forecast)* hint and no line. The **week view draws no forecast line** — mixing an
+issued past line with today's live curve across the window would mislead.
 
 If you installed the dashboard via the one-click `install_dashboard` action
 (§1a), this card is **already embedded** (wired to your two entity ids). To add
