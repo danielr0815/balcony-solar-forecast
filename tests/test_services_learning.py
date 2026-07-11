@@ -673,17 +673,22 @@ def test_get_shade_profile_unsupported_coordinator_raises():
 # from the store's 90-day ring for the power-history card's past-day line.
 # Found → curves sliced to the local day (same helper the nightly scorer uses);
 # missing → available:false (NOT an error); bad date → ServiceValidationError.
+# BOTH branches report oldest_available (first ascending ring key, else None).
 # --------------------------------------------------------------------------
 
 
 class _IssuedStore:
-    """Minimal store stand-in exposing the issued ring's read accessor."""
+    """Minimal store stand-in exposing the issued ring's read accessors."""
 
     def __init__(self, ring):
         self._ring = dict(ring)  # {iso_date: snapshot dict}
 
     def get_issued(self, iso_date):
         return self._ring.get(iso_date)
+
+    def issued_dates(self):
+        # Ascending, exactly like ForecastStore.issued_dates() (sorted(...)).
+        return sorted(self._ring)
 
 
 class _IssuedCoordinator:
@@ -730,6 +735,8 @@ def test_get_issued_forecast_found_slices_to_local_day():
     assert result["available"] is True
     assert result["date"] == iso
     assert result["issued_at"] == snap.issued_at
+    # The AVAILABLE branch also reports the ring's oldest archived date.
+    assert result["oldest_available"] == iso
     # hourly_wh == corrected curve sliced to the local day by the SAME helper the
     # drift monitor uses, then rounded like the store (round to 3).
     expected = {
@@ -767,7 +774,30 @@ def test_get_issued_forecast_missing_day_is_available_false():
     resp = svc._handle_get_issued_forecast(
         hass, _Call({"date": "2026-06-21"})
     )
-    assert resp == {"result": {"date": "2026-06-21", "available": False}}
+    # Empty ring → oldest_available is None (nothing archived yet).
+    assert resp == {
+        "result": {
+            "date": "2026-06-21",
+            "available": False,
+            "oldest_available": None,
+        }
+    }
+
+
+def test_get_issued_forecast_missing_day_reports_oldest_available():
+    # A miss on a NON-empty ring names the ring's oldest (first ascending) day,
+    # so the card can render "archive since <date>" next to the missing note.
+    snap = _issued_snapshot()
+    coord = _IssuedCoordinator(
+        {"2026-06-25": snap.to_dict(), "2026-06-20": snap.to_dict()}
+    )
+    hass = _FakeHass({"e1": coord})
+    resp = svc._handle_get_issued_forecast(
+        hass, _Call({"date": "2026-06-18"})
+    )
+    result = resp["result"]
+    assert result["available"] is False
+    assert result["oldest_available"] == "2026-06-20"
 
 
 def test_get_issued_forecast_bad_date_raises():
@@ -792,6 +822,7 @@ def test_get_issued_forecast_corrected_falls_back_to_raw():
     resp = svc._handle_get_issued_forecast(hass, _Call({"date": iso}))
     # hourly_wh falls back to the raw curve (exactly the nightly scorer's rule).
     assert resp["result"]["hourly_wh"] == {"2026-06-21T10:00:00+00:00": 300.0}
+    assert resp["result"]["oldest_available"] == iso
 
 
 def test_get_issued_forecast_unsupported_coordinator_raises():

@@ -752,6 +752,12 @@ def _handle_get_issued_forecast(
     monitor / nightly scorer use — so the returned ``hourly_wh`` (the served, i.e.
     corrected, curve; the raw physics curve rides along under ``raw_hourly_wh``) is
     exactly the day the nightly job scored against measured actuals.
+
+    BOTH branches additionally carry ``oldest_available``: the OLDEST archived
+    date in the ring (``store.issued_dates()`` is sorted ascending, so its first
+    entry), or ``None`` on an empty ring. The card turns a miss into an honest
+    "archive since <date>" hint instead of a bare emptiness the operator would
+    misread as "the forecast stopped updating".
     """
     # Lazy imports: ``_glue_util`` pulls in ``.core.types`` (DriftState /
     # ForecastResult), which would create an import cycle if done at module load —
@@ -778,10 +784,22 @@ def _handle_get_issued_forecast(
         ) from err
     iso = day.isoformat()
 
+    # Oldest archived day (ascending ring keys → first entry), None when the
+    # ring is empty or a legacy store lacks the accessor.
+    dates_getter = getattr(store, "issued_dates", None)
+    issued = dates_getter() if callable(dates_getter) else []
+    oldest = issued[0] if issued else None
+
     stored = getter(iso)
     if stored is None:
         # Missing day: not an error — the card draws no forecast line.
-        return {"result": {"date": iso, "available": False}}
+        return {
+            "result": {
+                "date": iso,
+                "available": False,
+                "oldest_available": oldest,
+            }
+        }
 
     snap = IssuedSnapshot.from_dict(stored)
     # corrected == the ISSUED (served) curve; fall back to raw exactly like the
@@ -798,6 +816,7 @@ def _handle_get_issued_forecast(
             "date": iso,
             "available": True,
             "issued_at": snap.issued_at,
+            "oldest_available": oldest,
             "hourly_wh": {k: _round3(v) for k, v in corrected.items()},
             "raw_hourly_wh": {k: _round3(v) for k, v in raw.items()},
         }

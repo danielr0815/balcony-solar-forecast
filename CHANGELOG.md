@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Power-history card: forecast overlay in the week view.** Each day column now
+  carries a dashed forecast segment at that day's forecast total — past days
+  from the archived ISSUED snapshots (one `get_issued_forecast` lookup per day,
+  fired concurrently and cached per window), today from the live `wh_period`
+  sum. A day with no archived snapshot keeps an honest gap (no segment), and
+  the hover panel gains a **Forecast** row ("—" on gap days). The
+  `get_issued_forecast` response additionally reports `oldest_available` (the
+  oldest archived date in the 90-day ring, or `null` while the ring is empty).
+
+### Fixed
+
+- **Power-history card: an empty past day was misread as "the forecast is not
+  updating".** Navigating the day view to a date without an archived snapshot
+  silently dropped the line behind a tiny hint. Now the previous day's line is
+  cleared the moment navigation starts (no stale line while the new day loads),
+  a FAILED service lookup is reported distinctly (*Forecast lookup failed*)
+  from a genuinely missing snapshot (*No archived forecast for \<date\> — the
+  archive fills with each nightly run.*, plus *archive since \<date\>* when the
+  ring is non-empty), and a drawn line carries a provenance caption —
+  *Forecast (live)* today vs *Forecast (as issued 01:30)* on past days.
+
 ## [0.16.1] - 2026-07-11
 
 ## [0.16.0] - 2026-07-11
