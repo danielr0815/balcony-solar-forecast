@@ -671,7 +671,11 @@ Tageslicht-Sample der Sonnenbahn) — `transmittance` ist die **gepoolte**
 effektive τ; parallel dazu trägt `transmittance_individual` (v0.13) die τ des
 **eigenen** Kanals des Moduls allein, sodass der Betreiber die Einzel- gegen die
 Gruppensicht vergleichen kann (leere Liste bei ungruppierter Ebene, dann
-== gepoolte Sicht — formstabil) — und
+== gepoolte Sicht — formstabil); zusätzlich `sample_n` (v0.15) — je Sample die
+**gepoolte Shademap-Bin-Evidenz** (Sample-Zahl n) hinter der effektiven τ,
+0 = nur statischer Prior, aus derselben Read-Pool-Menge wie die τ summiert
+(`shademap.pooled_bin_n`, kann so nie von der gezeigten Transmittanz abweichen);
+die Karte skaliert jeden Punkt danach (Confidence-Visualisierung) — und
 `horizon_azimuth`/`static_horizon`/`shade_horizon` (Horizontlinien auf einem
 Azimut-Raster über die Tageslicht-Spanne). Zusammenfassung:
 `shaded_fraction`, `mean_transmittance`, `has_learned_data`/`learned_bins`
@@ -747,6 +751,23 @@ bleibt statt saisonal umzuskalieren. Zusätzlich zeigt ein **Hover-Cursor** (SVG
 Overlay über der Plot-Fläche, per Maus/Touch) am nächstgelegenen Bahn-Sample ein
 Fadenkreuz plus eine feste Ablese-Zeile mit Uhrzeit, Azimut samt Himmelsrichtung,
 Verschattung in % (τ) und Elevation.
+
+Seit v0.15 bietet die Karte zwei weitere Komforts. **Confidence:** jeder
+Bahn-Punkt wird nach `sample_n` skaliert — n=0 (nur statischer Prior) als kleiner
+**hohler** Ring in der τ-Farbe, n>0 als gefüllter Punkt, dessen Radius mit der
+Evidenz bis zur Sättigung bei `N_SAT` (12) Samples wächst; die Ablese-Zeile
+ergänzt `· n=<x>`. **Vergleichsdatum:** ein **karten-lokaler** Datumswähler
+(„Vergleich“, per × löschbar; ändert NIE die geteilte Datums-Entität) blendet
+eine ZWEITE Sonnenbahn desselben Moduls für ein anderes Datum als gestrichelte
+Linie mit hohlen τ-Ringen ein (deren Verschattungshorizont wird bewusst NICHT
+gezeichnet), mit Legendenzeile „── <Primärdatum>  - - <Vergleichsdatum>“; die
+Ablese-Zeile hängt das azimut-nächste Vergleichssample an
+(`· vs <Datum>: <%> (τ …)`). Die Vergleichsdaten liefert die neue, rein lesende
+Aktion `balcony_solar_forecast.get_shade_profile` (`SupportsResponse.ONLY`): sie
+berechnet das Profil für ein Modul/Datum (Vorgaben = aktuelle Diagrammauswahl)
+über `coordinator.build_shade_profile_for`, OHNE die Live-Auswahl zu ändern oder
+den Ein-Slot-Memo zu verdrängen (Ad-hoc-Abfrage, uncached). Die Karte ruft sie
+über das stabile Low-Level-Websocket-`call_service` mit `return_response` auf.
 
 ### 15.5 Dashboard-Installation per Aktion (Ein-Klick)
 

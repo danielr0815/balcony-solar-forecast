@@ -314,6 +314,17 @@ def test_js_card_file_sanity():
     # The hover crosshair wires a mousemove handler over the plot overlay.
     assert "mousemove" in text, "card JS has no hover crosshair (mousemove)"
 
+    # Card-LOCAL comparison date (SPEC §15): a second sun path overlaid from the
+    # read-only get_shade_profile service. Assert the compare-date input marker,
+    # the two-locale "Compare" label, and the reliable service-call-with-response
+    # variant (the low-level websocket call_service with return_response).
+    assert "compare-input" in text, "card JS has no comparison date input"
+    for label in ("Compare", "Vergleich"):
+        assert f'"{label}"' in text, f"card JS is missing compare label {label!r}"
+    assert "get_shade_profile" in text, "card JS does not call get_shade_profile"
+    assert "return_response" in text, "card JS does not request a service response"
+    assert "call_service" in text, "card JS does not use the WS call_service command"
+
     # No external-URL ES imports (self-contained module).
     assert re.search(r'from\s+["\']https?:', text) is None
 

@@ -163,6 +163,24 @@
           "description": "Mindestanzahl gemeinsam gelernter Sonnenstands-Bins, die zwei Ebenen aufweisen müssen, bevor ihre Ähnlichkeit als Beleg zählt; darunter gilt das Paar als unzureichend und wird nicht gruppiert."
         }
       }
+    },
+    "get_shade_profile": {
+      "name": "Verschattungsprofil abrufen",
+      "description": "Liefert die Sonnenbahn- und Verschattungs-Kurvenarrays für ein Modul an einem lokalen Datum, ohne die aktive Diagrammauswahl zu ändern. Wird vom Vergleichsdatum-Overlay der Verschattungsprofil-Karte genutzt.",
+      "fields": {
+        "entry_id": {
+          "name": "Konfigurationseintrag",
+          "description": "Ziel-Konfigurationseintrag. Nur weglassen, wenn genau eine Anlage konfiguriert ist."
+        },
+        "module": {
+          "name": "Modul",
+          "description": "Das zu profilierende Modul/die Ebene. Leer lassen, um das aktuell gewählte Modul des Diagramms zu verwenden."
+        },
+        "date": {
+          "name": "Datum",
+          "description": "Das darzustellende lokale Datum im ISO-Format JJJJ-MM-TT. Leer lassen, um das aktuell gewählte Datum des Diagramms zu verwenden."
+        }
+      }
     }
   },
   "config": {

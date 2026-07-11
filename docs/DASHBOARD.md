@@ -254,6 +254,8 @@ excluded from the recorder like the energy-curve dicts:
 - `azimuth`, `sun_elevation`, `transmittance`, `time` — one entry per daylight
   sun-path sample (transmittance is the *effective* beam τ the forecast applies
   there: the static config horizon blended with the learned shademap);
+- `sample_n` — one entry per sun-path sample: the pooled shademap-bin sample
+  count (learned *evidence*) behind that sample's τ (`0` = static prior only);
 - `horizon_azimuth`, `static_horizon`, `shade_horizon` — the config horizon and
   the learned shade horizon (elevation below which the beam is mostly blocked)
   on an azimuth grid over the day's daylight span.
@@ -283,6 +285,21 @@ solstices), so the sun path stays comparable as you step through dates instead
 of rescaling with the season, and hovering (or touching) the chart snaps a
 crosshair to the nearest sun-path point and shows a readout line with its time,
 azimuth + compass direction, shading % (τ) and elevation.
+
+Two more comforts sit in the card header. **Confidence**: each sun-path dot is
+now *sized* by how much the shademap has actually learned at that sun position —
+a small hollow ring means "static prior only" (no learned evidence yet), a
+filled dot grows with the pooled sample count and saturates once the bin is well
+trained, so you can tell a confidently-learned shadow from an unlearned guess at
+a glance (the hover readout adds `· n=<count>`). **Compare**: a card-local
+"Compare" date picker overlays a *second* date's sun path as a dashed line with
+hollow τ rings (its shade horizon is left off to keep the plot readable); a
+legend line names both dates and the crosshair readout appends the comparison's
+shading at the same azimuth (`· vs <date>: <shading>% (τ …)`). The comparison
+lives entirely in the card — it never changes the shared date entity — and
+follows the module you pick; the × button clears it. It is powered by a new
+read-only action, `balcony_solar_forecast.get_shade_profile`, which returns the
+diagram's curve arrays for any module/date without touching the live selection.
 
 The card auto-discovers the three shade-profile entities above, so the default
 YAML is simply `type: custom:balcony-shade-profile-card`. It has four optional

@@ -181,3 +181,38 @@ suggest_shade_groups:
           min: 1
           max: 500
           mode: box
+
+get_shade_profile:
+  name: Get shade profile
+  description: >-
+    Return the sun-path + learned-shade profile (the shade-profile diagram's
+    curve arrays) for one module on one local date, without changing the live
+    diagram selection. Read-only diagnostic used by the card's comparison-date
+    overlay; returns a response (SPEC §15).
+  fields:
+    entry_id:
+      name: Config entry
+      description: >-
+        Target config entry. Omit only if a single site is configured.
+      example: "1234567890abcdef"
+      required: false
+      selector:
+        text:
+    module:
+      name: Module
+      description: >-
+        The module/plane to profile. Omit to use the diagram's currently
+        selected module.
+      example: M2
+      required: false
+      selector:
+        text:
+    date:
+      name: Date
+      description: >-
+        The local date to visualise, ISO format YYYY-MM-DD. Omit to use the
+        diagram's currently selected date.
+      example: "2026-06-21"
+      required: false
+      selector:
+        text:

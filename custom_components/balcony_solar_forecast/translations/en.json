@@ -163,6 +163,24 @@
           "description": "Minimum number of shared sun-position bins two planes must both have learned before their similarity counts as evidence; below it the pair is insufficient and never grouped."
         }
       }
+    },
+    "get_shade_profile": {
+      "name": "Get shade profile",
+      "description": "Return the sun-path and learned-shade curve arrays for one module on one local date, without changing the live diagram selection. Used by the shade-profile card's comparison-date overlay.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "Target config entry. Omit only if a single site is configured."
+        },
+        "module": {
+          "name": "Module",
+          "description": "The module/plane to profile. Omit to use the diagram's currently selected module."
+        },
+        "date": {
+          "name": "Date",
+          "description": "The local date to visualise, ISO format YYYY-MM-DD. Omit to use the diagram's currently selected date."
+        }
+      }
     }
   },
   "config": {

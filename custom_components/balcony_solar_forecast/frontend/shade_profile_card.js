@@ -38,9 +38,18 @@ const TAU_PARTIAL_MIN = 0.5; // τ in [0.5, 0.85) → partial; below → shaded
 const COLOR_FREE = "#2ecc71";
 const COLOR_PARTIAL = "#e67e22";
 const COLOR_SHADED = "#c0392b";
-const COLOR_SUN = "#f1c40f"; // sun-path polyline
+const COLOR_SUN = "#f1c40f"; // sun-path polyline (+ comparison overlay, dashed)
 const COLOR_SHADE_FILL = "#7f8c8d"; // learned shade horizon fill
 const COLOR_STATIC_HORIZON = "#95a5a6"; // static config horizon (dashed)
+
+// Confidence visualisation (SPEC §5): each sun-path dot's radius encodes the
+// pooled shademap-bin evidence n behind that sample. n=0 (static prior only) →
+// a small HOLLOW ring; n>0 → a filled dot whose radius ramps DOT_R_MIN..DOT_R_FULL
+// and SATURATES at N_SAT samples (beyond which more evidence adds no size). The
+// comparison overlay reuses the sizing but its rings are ALWAYS hollow.
+const DOT_R_FULL = 3; // radius at/above N_SAT samples (the pre-confidence size)
+const DOT_R_MIN = 1.65; // radius for n=0 / a single sample (~55% of DOT_R_FULL)
+const N_SAT = 12; // evidence count at which the dot reaches full size
 
 // Sensor attribute names (must match const.ATTR_SP_* on the Python side).
 const A_AZIMUTH = "azimuth";
@@ -49,10 +58,17 @@ const A_TRANSMITTANCE = "transmittance";
 // The module's OWN-channel τ (read-time pooling, SPEC §5). Non-empty only when
 // the plane is grouped; drives the "Single" view of the group/single toggle.
 const A_TRANSMITTANCE_INDIVIDUAL = "transmittance_individual";
+// Pooled shademap-bin evidence n per sun-path sample (SPEC §5). Drives the
+// confidence dot sizing; a missing / short array falls back to fixed-size dots.
+const A_SAMPLE_N = "sample_n";
 const A_TIME = "time";
 const A_HORIZON_AZIMUTH = "horizon_azimuth";
 const A_SHADE_HORIZON = "shade_horizon";
 const A_STATIC_HORIZON = "static_horizon";
+// The plotted module + local date, echoed by the sensor's profile dict. Used to
+// tag the comparison fetch (re-fetch on module change) + the legend line.
+const A_MODULE = "module";
+const A_DATE = "date";
 // Year-stable x-axis bounds (widest daylight azimuth span of the whole year at
 // the site, both solstices — computed Python-side). Fixing the axis to these
 // keeps the sun path comparable across dates instead of rescaling per season.
@@ -74,6 +90,10 @@ const I18N = {
     viewGroup: "Group",
     viewSingle: "Single",
     shaded: "shaded",
+    compare: "Compare",
+    clearCompare: "Clear comparison",
+    compareError: "Comparison date could not be loaded.",
+    hoverVs: "vs",
     noEntities:
       "No shade-profile entities found — is the Balcony Solar Forecast integration set up?",
     noSamples: "No daylight samples for this date.",
@@ -89,6 +109,10 @@ const I18N = {
     viewGroup: "Gruppe",
     viewSingle: "Einzeln",
     shaded: "verschattet",
+    compare: "Vergleich",
+    clearCompare: "Vergleich löschen",
+    compareError: "Vergleichsdatum konnte nicht geladen werden.",
+    hoverVs: "vs",
     noEntities:
       "Keine Verschattungsprofil-Entitäten gefunden — ist die Integration „Balcony Solar Forecast“ eingerichtet?",
     noSamples: "Keine Tageslicht-Datenpunkte für dieses Datum.",
@@ -121,6 +145,20 @@ function tauColor(t) {
   return COLOR_SHADED;
 }
 
+/**
+ * Evidence count n → dot radius (confidence viz). n=0 (or non-finite) → the
+ * minimum radius (drawn hollow by the caller); n>0 ramps DOT_R_MIN..DOT_R_FULL,
+ * saturating at N_SAT samples. The confidence sizing only kicks in when the
+ * sensor supplies a parallel sample_n array; otherwise callers pass the fixed
+ * DOT_R_FULL and never call this.
+ */
+function dotRadius(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return DOT_R_MIN;
+  const frac = Math.min(1, v / N_SAT);
+  return DOT_R_MIN + (DOT_R_FULL - DOT_R_MIN) * frac;
+}
+
 /** Local ISO timestamp → "HH:MM" (best-effort; tolerant of odd input). */
 function hhmm(iso) {
   if (typeof iso !== "string") return "";
@@ -150,6 +188,17 @@ class BalconyShadeProfileCard extends HTMLElement {
     this._lastSensor = undefined;
     this._lastSelect = undefined;
     this._lastDate = undefined;
+    // Card-LOCAL comparison date (SPEC §15): a second sun path overlaid from the
+    // read-only get_shade_profile service, kept entirely in the card (it never
+    // touches the shared date entity). `_compareDate` is the ISO string in the
+    // input; `_compareData` the fetched profile dict; `_compareModule` the module
+    // it was fetched for (re-fetched when the primary module changes); the flags
+    // gate an in-flight fetch and surface a load error inline.
+    this._compareDate = "";
+    this._compareData = null;
+    this._compareModule = null;
+    this._compareError = false;
+    this._compareLoading = false;
   }
 
   // --- Lovelace card API --------------------------------------------------
@@ -256,12 +305,147 @@ class BalconyShadeProfileCard extends HTMLElement {
     }
 
     body.appendChild(this._controls(hass, ids, s, sel, d, t));
+    // Legend line (── primary  - - compare) — only when a comparison is loaded
+    // for the module now on screen.
+    const legend = this._legend(s);
+    if (legend) body.appendChild(legend);
+    // Inline comparison-load error; the card keeps working regardless.
+    if (this._compareError) {
+      const errLine = document.createElement("div");
+      errLine.className = "note compare-error";
+      errLine.textContent = t.compareError;
+      body.appendChild(errLine);
+    }
     // Fixed-height hover status line (idle hint when not hovering); lives in the
     // header area so the crosshair readout never shifts the layout. Kept on
     // `this` so the plot's hover handler can update it without a re-render.
     this._readoutEl = this._statusLine(t);
     body.appendChild(this._readoutEl);
     body.appendChild(this._plot(s, t));
+    // A card-local comparison date follows the primary module: (re)fetch it when
+    // it is set but missing / stale for the module now on screen.
+    this._maybeRefetchCompare(hass, s);
+  }
+
+  // --- comparison date (card-local overlay) -------------------------------
+
+  /** The current comparison profile IF valid for the module now on screen. */
+  _activeCompare(s) {
+    const cmp = this._compareData;
+    if (!cmp || !s) return null;
+    const attrs = s.attributes || {};
+    // Only overlay a comparison fetched for the module currently plotted (a
+    // stale-module response is dropped; a re-fetch is already in flight).
+    if (cmp[A_MODULE] && attrs[A_MODULE] && cmp[A_MODULE] !== attrs[A_MODULE]) {
+      return null;
+    }
+    return isArray(cmp[A_AZIMUTH]) && cmp[A_AZIMUTH].length > 0 ? cmp : null;
+  }
+
+  /** Module currently plotted by the primary sensor (drives the compare fetch). */
+  _currentModule(s) {
+    return (s && s.attributes && s.attributes[A_MODULE]) || null;
+  }
+
+  /** Legend row: "── <primary date>   - - <compare date>" (only when loaded). */
+  _legend(s) {
+    const cmp = this._activeCompare(s);
+    if (!cmp) return null;
+    const attrs = s.attributes || {};
+    const wrap = document.createElement("div");
+    wrap.className = "legend";
+    const mk = (glyph, dateStr) => {
+      const item = document.createElement("span");
+      item.className = "legend-item";
+      const line = document.createElement("span");
+      line.className = "legend-line";
+      line.textContent = glyph;
+      const txt = document.createElement("span");
+      txt.textContent = " " + (dateStr || "—");
+      item.appendChild(line);
+      item.appendChild(txt);
+      return item;
+    };
+    wrap.appendChild(mk("──", attrs[A_DATE]));
+    wrap.appendChild(mk("- -", cmp[A_DATE] || this._compareDate));
+    return wrap;
+  }
+
+  /** Date-input change: empty clears; a value fetches for the current module. */
+  _onCompareChange(hass, s, value) {
+    if (!value) {
+      this._clearCompare();
+      return;
+    }
+    this._compareDate = value;
+    this._compareError = false;
+    this._compareData = null;
+    this._compareModule = null;
+    this._loadCompare(hass, this._currentModule(s));
+  }
+
+  /** The × button: drop the comparison entirely and re-render. */
+  _clearCompare() {
+    this._compareDate = "";
+    this._compareData = null;
+    this._compareModule = null;
+    this._compareError = false;
+    this._compareLoading = false;
+    this._rerender();
+  }
+
+  /** (Re)fetch the comparison when it is set but stale for the shown module. */
+  _maybeRefetchCompare(hass, s) {
+    if (!this._compareDate || this._compareLoading) return;
+    const module = this._currentModule(s);
+    // Fresh data for this exact module → nothing to do.
+    if (this._compareData && this._compareModule === module) return;
+    // Don't hammer a module/date pair that just failed.
+    if (this._compareError && this._compareModule === module) return;
+    this._loadCompare(hass, module);
+  }
+
+  /** Fetch the comparison profile via the service, then re-render the overlay. */
+  async _loadCompare(hass, module) {
+    if (!hass || !this._compareDate) return;
+    this._compareLoading = true;
+    const iso = this._compareDate;
+    try {
+      const profile = await this._fetchCompare(hass, module, iso);
+      if (iso !== this._compareDate) return; // date changed mid-flight
+      this._compareData = profile;
+      this._compareModule = module;
+      this._compareError = !profile;
+    } catch (_e) {
+      if (iso !== this._compareDate) return;
+      this._compareData = null;
+      this._compareModule = module;
+      this._compareError = true;
+    } finally {
+      this._compareLoading = false;
+    }
+    this._rerender();
+  }
+
+  /** Call the read-only get_shade_profile service and return the profile dict. */
+  async _fetchCompare(hass, module, iso) {
+    // The frontend `callService` wrapper's return-response argument order has
+    // churned across HA releases, so use the stable low-level websocket
+    // `call_service` command with `return_response: true`.
+    const serviceData = { date: iso };
+    if (module) serviceData.module = module;
+    const res = await hass.callWS({
+      type: "call_service",
+      domain: "balcony_solar_forecast",
+      service: "get_shade_profile",
+      service_data: serviceData,
+      return_response: true,
+    });
+    // The command resolves to { context, response }; the service wraps its
+    // payload as { result: <profile> }.
+    const resp = res && res.response;
+    const profile = resp && resp.result;
+    return profile && typeof profile === "object" ? profile : null;
   }
 
   /** Fixed-height status readout, starting on the idle hint. */
@@ -290,6 +474,24 @@ class BalconyShadeProfileCard extends HTMLElement {
         border: 1px solid var(--divider-color, #e0e0e0);
         border-radius: 6px; padding: 6px 8px; min-height: 34px;
       }
+      .compare-row { display: inline-flex; align-items: center; gap: 6px; }
+      .compare-clear {
+        font: inherit; line-height: 1; cursor: pointer;
+        color: var(--primary-text-color);
+        background: var(--card-background-color, #fff);
+        border: 1px solid var(--divider-color, #e0e0e0);
+        border-radius: 6px; min-height: 34px; padding: 4px 10px;
+      }
+      .legend {
+        display: flex; flex-wrap: wrap; gap: 16px; padding: 0 0 8px;
+        color: var(--secondary-text-color); font-size: 0.8rem;
+      }
+      .legend-item { display: inline-flex; align-items: baseline; }
+      .legend-line {
+        color: ${COLOR_SUN}; font-weight: 700; letter-spacing: 1px;
+        white-space: nowrap;
+      }
+      .compare-error { color: var(--error-color, #c0392b); }
       .toggle {
         display: inline-flex; border: 1px solid var(--divider-color, #e0e0e0);
         border-radius: 6px; overflow: hidden; min-height: 34px;
@@ -387,6 +589,39 @@ class BalconyShadeProfileCard extends HTMLElement {
       wrap.appendChild(field);
     }
 
+    // Card-LOCAL comparison date (SPEC §15): overlays a SECOND date's sun path
+    // via the read-only get_shade_profile service. Empty by default; the × button
+    // clears it. It NEVER writes the shared date entity — it stays inside the card.
+    {
+      const field = document.createElement("div");
+      field.className = "field";
+      const label = document.createElement("label");
+      label.textContent = t.compare;
+      const row = document.createElement("div");
+      row.className = "compare-row";
+      const input = document.createElement("input");
+      input.type = "date";
+      input.className = "compare-input";
+      input.value = /^\d{4}-\d{2}-\d{2}$/.test(this._compareDate)
+        ? this._compareDate
+        : "";
+      input.addEventListener("change", (ev) => {
+        this._onCompareChange(hass, s, ev.target.value);
+      });
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "compare-clear";
+      clear.textContent = "×";
+      clear.title = t.clearCompare;
+      clear.setAttribute("aria-label", t.clearCompare);
+      clear.addEventListener("click", () => this._clearCompare());
+      row.appendChild(input);
+      row.appendChild(clear);
+      field.appendChild(label);
+      field.appendChild(row);
+      wrap.appendChild(field);
+    }
+
     // Group/Single τ view toggle — only when the sensor exposes a non-empty
     // individual (own-channel) τ array, i.e. this module is grouped (SPEC §5).
     const indiv = s.attributes[A_TRANSMITTANCE_INDIVIDUAL];
@@ -436,6 +671,7 @@ class BalconyShadeProfileCard extends HTMLElement {
     const sunEl = a[A_SUN_ELEVATION];
     const tau = a[A_TRANSMITTANCE];
     const indiv = a[A_TRANSMITTANCE_INDIVIDUAL];
+    const sampleN = a[A_SAMPLE_N];
     const time = a[A_TIME];
     const horAz = a[A_HORIZON_AZIMUTH];
     const shadeH = a[A_SHADE_HORIZON];
@@ -465,7 +701,28 @@ class BalconyShadeProfileCard extends HTMLElement {
           )
         : 0;
 
-    if (!nSun && !nHor) {
+    // Card-local comparison overlay: a SECOND date's sun path, fetched via the
+    // get_shade_profile service and kept in the card. Drawn only when loaded for
+    // the module now on screen; its shade horizon is intentionally NOT drawn.
+    const cmp = this._activeCompare(s);
+    const cAz = cmp ? cmp[A_AZIMUTH] : null;
+    const cEl = cmp ? cmp[A_SUN_ELEVATION] : null;
+    const cTau = cmp ? cmp[A_TRANSMITTANCE] : null;
+    const cN = cmp ? cmp[A_SAMPLE_N] : null;
+    const cDate = cmp ? cmp[A_DATE] || this._compareDate : null;
+    const nCmp =
+      cmp &&
+      isArray(cAz) &&
+      isArray(cEl) &&
+      isArray(cTau) &&
+      cAz.length > 0 &&
+      cAz.length === cEl.length &&
+      cAz.length === cTau.length
+        ? cAz.length
+        : 0;
+    const hasCmpN = isArray(cN) && cN.length === nCmp && nCmp > 0;
+
+    if (!nSun && !nHor && !nCmp) {
       return this._message(t.noSamples);
     }
 
@@ -479,11 +736,16 @@ class BalconyShadeProfileCard extends HTMLElement {
     const viewSuffix = hasIndiv
       ? `(${activeSingle ? t.viewSingle : t.viewGroup})`
       : "";
+    // Confidence viz drives the dot sizing only when the sensor supplies a
+    // parallel sample_n array (SPEC §5); otherwise dots stay the fixed size.
+    const hasSampleN = isArray(sampleN) && sampleN.length === nSun && nSun > 0;
 
     // --- domains ---------------------------------------------------------
     const azValues = [];
     for (let i = 0; i < nSun; i++) azValues.push(sunAz[i]);
     for (let i = 0; i < nHor; i++) azValues.push(horAz[i]);
+    // Union the comparison path's azimuths so its curve fits the same axis.
+    for (let i = 0; i < nCmp; i++) azValues.push(cAz[i]);
     let xMin = Math.min(...azValues);
     let xMax = Math.max(...azValues);
     // Year-stable x-axis: union the site's whole-year daylight azimuth span
@@ -513,6 +775,9 @@ class BalconyShadeProfileCard extends HTMLElement {
       if (isArray(shadeH)) elValues.push(shadeH[i]);
       if (isArray(staticH)) elValues.push(staticH[i]);
     }
+    // The comparison date (e.g. a summer day vs. a winter primary) can reach
+    // higher elevations; union it so both paths stay fully on-screen.
+    for (let i = 0; i < nCmp; i++) elValues.push(cEl[i]);
     const yMax = Math.max(...elValues) + 5;
 
     // --- layout ----------------------------------------------------------
@@ -581,19 +846,28 @@ class BalconyShadeProfileCard extends HTMLElement {
         }),
       );
 
-      // (4) one dot per sample, coloured by the ACTIVE view's τ, with a native
-      // hover tooltip.
+      // (4) one dot per sample, coloured by the ACTIVE view's τ, SIZED by the
+      // pooled evidence n (confidence viz), with a native hover tooltip. n=0
+      // (static prior only) → a small HOLLOW ring stroked in the τ colour; n>0 →
+      // a filled dot whose radius ramps with evidence to N_SAT. No sample_n array
+      // → the fixed full-size filled dot (graceful fallback).
       for (let i = 0; i < nSun; i++) {
+        const color = tauColor(activeTau[i]);
+        const n = hasSampleN ? Number(sampleN[i]) || 0 : null;
+        const filled = !hasSampleN || n > 0;
         const dot = svg("circle", {
           cx: X(sunAz[i]),
           cy: Y(sunEl[i]),
-          r: "3",
-          fill: tauColor(activeTau[i]),
+          r: hasSampleN ? dotRadius(n) : DOT_R_FULL,
+          fill: filled ? color : "transparent",
+          stroke: filled ? null : color,
+          "stroke-width": filled ? null : "1.2",
         });
         const title = document.createElementNS(SVGNS, "title");
+        const nTxt = hasSampleN ? ` · n=${n}` : "";
         title.textContent = `${hhmm(time[i])} · el ${Number(sunEl[i]).toFixed(
           1,
-        )}° · τ ${Number(activeTau[i]).toFixed(2)}`;
+        )}° · τ ${Number(activeTau[i]).toFixed(2)}${nTxt}`;
         dot.appendChild(title);
         el.appendChild(dot);
       }
@@ -624,9 +898,15 @@ class BalconyShadeProfileCard extends HTMLElement {
         sunAz,
         sunEl,
         tau: activeTau,
+        sampleN: hasSampleN ? sampleN : null,
         viewSuffix,
         time,
         n: nSun,
+        // Comparison overlay (nearest-in-azimuth readout), null when unloaded.
+        cmpAz: nCmp ? cAz : null,
+        cmpTau: nCmp ? cTau : null,
+        cmpDate: nCmp ? cDate : null,
+        nCmp,
         X,
         Y,
         xMin,
@@ -642,6 +922,42 @@ class BalconyShadeProfileCard extends HTMLElement {
       overlay.addEventListener("mouseleave", onLeave);
       overlay.addEventListener("touchstart", onMove, { passive: true });
       overlay.addEventListener("touchmove", onMove, { passive: true });
+    }
+
+    // (6) card-local comparison overlay: a DASHED sun path (same yellow, 0.6
+    // opacity) + HOLLOW τ-coloured rings for the comparison date. Its shade
+    // horizon is intentionally NOT drawn (keeps the plot readable); confidence
+    // sizing applies but the rings are ALWAYS hollow. Decorative only —
+    // pointer-events off so it never steals the primary crosshair's hover.
+    if (nCmp) {
+      const pts = [];
+      for (let i = 0; i < nCmp; i++) pts.push(`${X(cAz[i])},${Y(cEl[i])}`);
+      el.appendChild(
+        svg("polyline", {
+          points: pts.join(" "),
+          fill: "none",
+          stroke: COLOR_SUN,
+          "stroke-width": "2",
+          "stroke-linejoin": "round",
+          "stroke-dasharray": "5 4",
+          opacity: "0.6",
+          "pointer-events": "none",
+        }),
+      );
+      for (let i = 0; i < nCmp; i++) {
+        el.appendChild(
+          svg("circle", {
+            cx: X(cAz[i]),
+            cy: Y(cEl[i]),
+            r: hasCmpN ? dotRadius(cN[i]) : DOT_R_FULL,
+            fill: "none",
+            stroke: tauColor(cTau[i]),
+            "stroke-width": "1.2",
+            opacity: "0.8",
+            "pointer-events": "none",
+          }),
+        );
+      }
     }
 
     // No sun-path samples but horizons drawn → annotate.
@@ -735,12 +1051,31 @@ class BalconyShadeProfileCard extends HTMLElement {
     const sector = ((Math.round(az / 45) % 8) + 8) % 8;
     const compass = (t.compass && t.compass[sector]) || "";
     const shadingPct = Math.round((1 - tau) * 100);
+    // Confidence: the pooled evidence n behind this sample (SPEC §5).
+    const nTag = ctx.sampleN ? ` · n=${Number(ctx.sampleN[i]) || 0}` : "";
     // Group/single view tag, only when a distinct individual view exists.
     const suffix = ctx.viewSuffix ? ` · ${ctx.viewSuffix}` : "";
+    // Comparison: the comparison sample NEAREST in azimuth, when a compare date
+    // is loaded — "· vs <date>: <shading>% (τ x.xx)".
+    let cmpTag = "";
+    if (ctx.nCmp && ctx.cmpAz) {
+      let cb = 0;
+      let cbD = Infinity;
+      for (let k = 0; k < ctx.nCmp; k++) {
+        const dd = Math.abs(Number(ctx.cmpAz[k]) - az);
+        if (dd < cbD) {
+          cbD = dd;
+          cb = k;
+        }
+      }
+      const ctau = Number(ctx.cmpTau[cb]);
+      const cpct = Math.round((1 - ctau) * 100);
+      cmpTag = ` · ${t.hoverVs} ${ctx.cmpDate}: ${cpct} % (τ ${ctau.toFixed(2)})`;
+    }
     return (
       `${ctx.time[i]} · ${Math.round(az)}° ${compass} · ` +
       `${t.hoverShading} ${shadingPct} % (τ ${tau.toFixed(2)}) · ` +
-      `${t.hoverElevation} ${Math.round(el)}°${suffix}`
+      `${t.hoverElevation} ${Math.round(el)}°${nTag}${suffix}${cmpTag}`
     );
   }
 

@@ -37,6 +37,7 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     ATTR_SP_AXIS_AZ_MIN,
     ATTR_SP_AZIMUTH,
     ATTR_SP_HORIZON_AZIMUTH,
+    ATTR_SP_SAMPLE_N,
     ATTR_SP_SHADE_HORIZON,
     ATTR_SP_STATIC_HORIZON,
     ATTR_SP_SUN_ELEVATION,
@@ -341,9 +342,9 @@ def test_sensor_available_even_when_update_failed():
 
 
 def test_sensor_unrecorded_attributes_are_exactly_the_curve_and_axis_attrs():
-    # The eight per-selection curve arrays (incl. the pooled/individual τ pair)
-    # PLUS the two year-stable axis bounds (constant site geometry — recorder
-    # history is noise) are excluded.
+    # The nine per-selection curve arrays (incl. the pooled/individual τ pair and
+    # the per-sample evidence count) PLUS the two year-stable axis bounds
+    # (constant site geometry — recorder history is noise) are excluded.
     assert sensor_mod.ShadeProfileSensor._unrecorded_attributes == frozenset(
         {
             ATTR_SP_TIME,
@@ -351,6 +352,7 @@ def test_sensor_unrecorded_attributes_are_exactly_the_curve_and_axis_attrs():
             ATTR_SP_SUN_ELEVATION,
             ATTR_SP_TRANSMITTANCE,
             ATTR_SP_TRANSMITTANCE_INDIVIDUAL,
+            ATTR_SP_SAMPLE_N,
             ATTR_SP_HORIZON_AZIMUTH,
             ATTR_SP_STATIC_HORIZON,
             ATTR_SP_SHADE_HORIZON,
@@ -410,3 +412,34 @@ def test_real_build_shade_profile_default_module():
     result = c.build_shade_profile()
     # No explicit module -> the front-plane default (M1).
     assert result["module"] == "M1"
+
+
+def test_real_build_shade_profile_for_is_read_only_and_memo_safe():
+    # The get_shade_profile service path (card comparison overlay): an EXPLICIT
+    # module/date query must neither mutate the live selection nor evict the
+    # single-slot primary memo.
+    c = _real_coordinator()
+    c.set_shade_profile_module("M1")
+    primary_day = date(2026, 6, 21)
+    c.set_shade_profile_date(primary_day)
+    primary = c.build_shade_profile()  # populates the single-slot memo
+    assert primary["module"] == "M1"
+
+    # Ad-hoc query for a DIFFERENT module + date.
+    other = c.build_shade_profile_for("M2", date(2026, 12, 21))
+    assert other["module"] == "M2"
+    assert other["date"] == "2026-12-21"
+    assert other["sample_count"] > 0
+    # sample_n rides along, parallel to the sun-path samples.
+    assert len(other[ATTR_SP_SAMPLE_N]) == other["sample_count"]
+
+    # Live selection untouched...
+    assert c.shade_profile_module == "M1"
+    assert c.shade_profile_date == primary_day
+    # ...and the primary memo entry survives (same cached object returned).
+    assert c.build_shade_profile() is primary
+
+
+def test_real_build_shade_profile_for_unknown_module_is_empty():
+    c = _real_coordinator()
+    assert c.build_shade_profile_for("nope", date(2026, 6, 21)) == {}

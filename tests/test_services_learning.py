@@ -12,6 +12,7 @@ skipped on the plain-core path.
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import pytest
 
@@ -559,3 +560,109 @@ def test_suggest_shade_groups_unsupported_coordinator_raises():
     hass = _FakeHass({"e1": _Bare()})
     with pytest.raises(ServiceValidationError):
         svc._handle_suggest_shade_groups(hass, _Call({}))
+
+
+# --------------------------------------------------------------------------
+# get_shade_profile handler (SPEC §15): read-only module/date profile for the
+# card's comparison-date overlay. Defaults module/date to the coordinator's
+# current selection; NEVER mutates that selection.
+# --------------------------------------------------------------------------
+
+
+class _ShadeProfileCoordinator:
+    """Fake coordinator exposing the shade-profile diagram read surface."""
+
+    def __init__(self, *, names, module, day, profile=None):
+        self._names = list(names)
+        # Stored privately so the test can prove the handler never writes them.
+        self._module = module
+        self._day = day
+        self._profile = profile
+        self.calls: list[tuple[str, date]] = []
+
+    @property
+    def shade_profile_module(self):
+        return self._module
+
+    @property
+    def shade_profile_date(self):
+        return self._day
+
+    def shade_profile_plane_names(self):
+        return list(self._names)
+
+    def build_shade_profile_for(self, module, day):
+        self.calls.append((module, day))
+        if self._profile is not None:
+            return self._profile
+        return {
+            "module": module,
+            "date": day.isoformat(),
+            "sample_count": 2,
+            "sample_n": [0, 5],
+            "transmittance": [1.0, 0.6],
+        }
+
+
+def test_get_shade_profile_defaults_to_current_selection():
+    coord = _ShadeProfileCoordinator(
+        names=["M1", "M2"], module="M2", day=date(2026, 6, 21)
+    )
+    hass = _FakeHass({"e1": coord})
+    resp = svc._handle_get_shade_profile(hass, _Call({}))
+    # Built for the coordinator's CURRENT module + date (nothing supplied).
+    assert coord.calls == [("M2", date(2026, 6, 21))]
+    result = resp["result"]
+    assert result["module"] == "M2"
+    assert result["date"] == "2026-06-21"
+    # The response carries the per-sample evidence array (confidence viz).
+    assert result["sample_n"] == [0, 5]
+    # Read-only: the live selection is untouched.
+    assert coord.shade_profile_module == "M2"
+    assert coord.shade_profile_date == date(2026, 6, 21)
+
+
+def test_get_shade_profile_explicit_module_and_date():
+    coord = _ShadeProfileCoordinator(
+        names=["M1", "M2"], module="M2", day=date(2026, 6, 21)
+    )
+    hass = _FakeHass({"e1": coord})
+    resp = svc._handle_get_shade_profile(
+        hass, _Call({"module": "M1", "date": "2026-12-21"})
+    )
+    assert coord.calls == [("M1", date(2026, 12, 21))]
+    assert resp["result"]["module"] == "M1"
+    # Explicit query still does not mutate the coordinator's selection.
+    assert coord.shade_profile_module == "M2"
+    assert coord.shade_profile_date == date(2026, 6, 21)
+
+
+def test_get_shade_profile_bad_date_raises_and_builds_nothing():
+    coord = _ShadeProfileCoordinator(
+        names=["M1"], module="M1", day=date(2026, 6, 21)
+    )
+    hass = _FakeHass({"e1": coord})
+    with pytest.raises(ServiceValidationError):
+        svc._handle_get_shade_profile(hass, _Call({"date": "31.12.2026"}))
+    assert coord.calls == []
+
+
+def test_get_shade_profile_bad_module_lists_valid_names():
+    coord = _ShadeProfileCoordinator(
+        names=["M1", "M2"], module="M1", day=date(2026, 6, 21)
+    )
+    hass = _FakeHass({"e1": coord})
+    with pytest.raises(ServiceValidationError) as excinfo:
+        svc._handle_get_shade_profile(hass, _Call({"module": "M9"}))
+    msg = str(excinfo.value)
+    assert "M1" in msg and "M2" in msg
+    assert coord.calls == []
+
+
+def test_get_shade_profile_unsupported_coordinator_raises():
+    class _Bare:
+        pass
+
+    hass = _FakeHass({"e1": _Bare()})
+    with pytest.raises(ServiceValidationError):
+        svc._handle_get_shade_profile(hass, _Call({}))
