@@ -58,6 +58,8 @@ v0.4 additions):
       "quantile_state":      QuantileState.to_dict(),               # {bin_key: [relerr,...]}
       "scoreboard_state":    ScoreboardState.to_dict(),             # {iso_date: DayScore}
       "comparison_ring":     {iso_date: {comparison_name: daily_kwh}},
+      # --- AC-side Phase 3 (added ADDITIVELY within v3; no version bump) ---
+      "inverter_cal_state":  InverterCalState.to_dict(),            # learned eta_inv (neutral when absent)
     }
 
 **Load is validate-and-clamp** (SPEC §5 "Store validate-and-clamp beim
@@ -107,6 +109,7 @@ from .const import (
     STORE_KEY_COMPARISON_RING,
     STORE_KEY_DRIFT_STATE,
     STORE_KEY_HOURLY_ACTUALS,
+    STORE_KEY_INVERTER_CAL_STATE,
     STORE_KEY_ISSUED_LOG,
     STORE_KEY_LAST_PAYLOAD,
     STORE_KEY_LEARNER_SNAPSHOTS,
@@ -119,6 +122,7 @@ from .const import (
 from .core.types import (
     BiasState,
     DriftState,
+    InverterCalState,
     LearnerSnapshot,
     QuantileState,
     ScoreboardState,
@@ -165,6 +169,11 @@ def _empty_state() -> dict[str, Any]:
         STORE_KEY_DRIFT_STATE: DriftState().to_dict(),
         STORE_KEY_LEARNER_SNAPSHOTS: [],  # list[LearnerSnapshot dict], newest last
         STORE_KEY_TRAINED_DAYS: [],  # sorted list[iso_date] (training idempotence)
+        # Inverter DC->AC efficiency site calibration (AC-side Phase 3). Added
+        # ADDITIVELY within the v3 schema (no version bump): the shared load path
+        # default-reads a store lacking this key to the neutral state, so every
+        # existing v2/v3 store stays byte-faithful.
+        STORE_KEY_INVERTER_CAL_STATE: InverterCalState().to_dict(),  # learned eta_inv
         # --- v3 scoreboard + quantile sections (neutral / empty) ---
         STORE_KEY_QUANTILE_STATE: QuantileState().to_dict(),  # {bin_key: [relerr,...]}
         STORE_KEY_SCOREBOARD_STATE: ScoreboardState().to_dict(),  # {iso_date: DayScore}
@@ -376,6 +385,14 @@ def _validate_learner_sections(
     state[STORE_KEY_TRAINED_DAYS] = sorted(
         {d for d in trained if isinstance(d, str)}
     )[-TRAINED_DAYS_RING:] if isinstance(trained, list) else []
+    # Inverter-efficiency calibration (AC-side Phase 3), carried through the SAME
+    # clamping round-trip: a store that PREDATES this key (any v2, or a v3 written
+    # before Phase 3) has no entry, so ``from_dict({})`` yields the neutral state
+    # and every OTHER section is untouched (byte-faithful). A populated key
+    # round-trips identically on clean data.
+    state[STORE_KEY_INVERTER_CAL_STATE] = InverterCalState.from_dict(
+        raw.get(STORE_KEY_INVERTER_CAL_STATE, {})
+    ).to_dict()
 
 
 def _coerce_comparison_ring(raw: Any) -> dict[str, Any]:
@@ -733,6 +750,26 @@ class ForecastStore:
     def set_drift_state(self, state: DriftState) -> None:
         """Persist the drift-monitor state (schedules a bundled write)."""
         self._data[STORE_KEY_DRIFT_STATE] = state.to_dict()
+        self._schedule_save()
+
+    # ------------------------------------------------------------------
+    # Learner state: inverter DC->AC efficiency site calibration (Phase 3)
+    # ------------------------------------------------------------------
+
+    def get_inverter_cal_state(self) -> InverterCalState:
+        """Return the persisted inverter calibration (neutral if absent/corrupt).
+
+        Always passes through ``from_dict`` so an in-memory blob that was never
+        validated (a hand-set test fixture, or a v2/pre-Phase-3 store missing the
+        key) still degrades to the neutral state on read.
+        """
+        return InverterCalState.from_dict(
+            self._data.get(STORE_KEY_INVERTER_CAL_STATE, {})
+        )
+
+    def set_inverter_cal_state(self, state: InverterCalState) -> None:
+        """Persist the inverter calibration (schedules a bundled write)."""
+        self._data[STORE_KEY_INVERTER_CAL_STATE] = state.to_dict()
         self._schedule_save()
 
     # ------------------------------------------------------------------

@@ -65,6 +65,11 @@ CONF_GROUPS = "groups"
 # Site-level TOTAL-AC meter behind all inverters (the only whole-site AC that is
 # actually measured); the AC calibration target in a later phase. Optional.
 CONF_AC_ACTUAL_ENTITY = "ac_actual_entity"
+# The site AC meter can be SIGN-INVERTED (the operator's meter reports the fed-in
+# balcony-solar AC as a NEGATED value). When True the reading is negated ONCE at
+# the read boundary so the measured sensor and the calibration reader are
+# sign-correct. Optional; default False.
+CONF_AC_ACTUAL_INVERT = "ac_actual_invert"
 # plane fields
 CONF_PLANE_NAME = "name"
 CONF_AZIMUTH = "azimuth_deg"  # 0=N clockwise
@@ -117,6 +122,32 @@ DEFAULT_EFFICIENCY = 0.96
 DEFAULT_INVERTER_EFFICIENCY = 0.965
 INVERTER_EFFICIENCY_MIN = 0.80  # sane floor for a configured/loaded eta_inv
 INVERTER_EFFICIENCY_MAX = 1.0   # a real converter never gains power
+# --- Inverter DC->AC efficiency site calibration (AC-side Phase 3) ----------
+# A single site-level LEARNED scalar eta_inv, calibrated against the site's
+# TOTAL-AC meter (SiteConfig.ac_actual_entity) so the AC forecast tracks the
+# real inverter conversion instead of the datasheet DEFAULT_INVERTER_EFFICIENCY.
+# One scalar fits ALL groups: the operator has only a whole-site AC meter and
+# the HMS-800W-2T inverters are identical. NEVER load-bearing — no AC meter /
+# too few samples / an out-of-band ratio all fall back to the config/default
+# eta, and the DC learning + scoreboard stay untouched.
+INVERTER_CAL_MIN = 0.90  # physically-plausible micro-inverter operating floor;
+INVERTER_CAL_MAX = 0.99  # a measured ratio outside [MIN, MAX] is REJECTED (it is
+#                          not a plausible inverter eta — e.g. a meter that also
+#                          sees house load or is net-metered)
+INVERTER_CAL_EMA_ALPHA = 0.10  # steady-state EMA weight (adaptive warm-up folds
+#                                the first 1/ALPHA samples as an exact mean)
+INVERTER_CAL_MIN_LOAD_W = 100.0  # below this summed DC the inverter self-
+#                                  consumption / MPPT start threshold distorts the
+#                                  ratio — skip the sample
+INVERTER_CAL_MIN_SAMPLES = 20  # distinct eligible hours before the learned eta is
+#                                trusted (else the config/default eta is used)
+# Clip-headroom gate for a calibration hour (AC-side Phase 3): the datasheet-
+# derived AC (DEFAULT_INVERTER_EFFICIENCY * summed DC) must sit below this
+# fraction of the summed group AC ceiling for the hour to count as UNCLIPPED — a
+# clipped hour's AC is capped at the ceiling, so its measured-AC/DC ratio would
+# understate eta. Gated on the INDEPENDENT DC side (not the measured AC) so a
+# meter glitch cannot both pass the gate and corrupt the ratio.
+INVERTER_CAL_CLIP_HEADROOM_FRAC = 0.90
 
 # Seasonal foliage ramp (SPEC §13: cosine ramp over April / November).
 # Day-of-year anchors for the leafed (summer) plateau; outside is bare.
@@ -725,6 +756,14 @@ STORAGE_DATA_VERSION_V3 = 3
 STORE_KEY_QUANTILE_STATE = "quantile_state"    # QuantileState: {bin_key: relerr ring}
 STORE_KEY_SCOREBOARD_STATE = "scoreboard_state"  # ScoreboardState: rolling window of DayScore
 STORE_KEY_COMPARISON_RING = "comparison_ring"  # {iso_date: {comparison_name: daily_kwh}} read-from-recorder cache
+# Inverter-efficiency site-calibration learner state (AC-side Phase 3). Added
+# ADDITIVELY WITHIN the v3 schema (NO version bump): _empty_state injects the
+# neutral InverterCalState and the shared load path default-reads a store that
+# lacks the key to neutral, so every existing v3 store stays byte-faithful and
+# the migration tests that pin v3 keep passing. Like drift_state it is a
+# top-level learner section that does NOT ride the bias/shademap rollback ring
+# (it is self-gating + never load-bearing, so a rollback need not touch it).
+STORE_KEY_INVERTER_CAL_STATE = "inverter_cal_state"  # InverterCalState (learned eta_inv)
 
 # --- New diagnostic sensors / binary sensors (SPEC §8/§10) -----------------
 # Entity object_ids are unprefixed: the device slug already carries

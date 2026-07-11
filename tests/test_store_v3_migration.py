@@ -44,6 +44,7 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     STORE_KEY_COMPARISON_RING,
     STORE_KEY_DRIFT_STATE,
     STORE_KEY_HOURLY_ACTUALS,
+    STORE_KEY_INVERTER_CAL_STATE,
     STORE_KEY_ISSUED_LOG,
     STORE_KEY_LAST_PAYLOAD,
     STORE_KEY_LEARNER_SNAPSHOTS,
@@ -56,6 +57,7 @@ from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     BiasState,
     DayScore,
     DriftState,
+    InverterCalState,
     LearnerSnapshot,
     QuantileState,
     ScoreboardState,
@@ -561,3 +563,73 @@ def test_roundtrip_v3_state_is_stable():
     once = validate_state(_populated_v2_store())
     twice = validate_state(once)
     assert once == twice
+
+
+# ===========================================================================
+# AC-side Phase 3: inverter-efficiency calibration persists ADDITIVELY within v3
+# ---------------------------------------------------------------------------
+# The calibration state is a new top-level learner section added WITHOUT a schema
+# bump: a store predating it (any v2, or a v3 written before Phase 3) has no key,
+# so it default-injects the NEUTRAL state while every existing section stays
+# byte-faithful — the same additive guarantee the v2->v3 sections give.
+# ===========================================================================
+
+
+def test_v2_migrates_with_neutral_inverter_cal_and_learners_intact():
+    """A v2 store (no inverter-cal key) migrates with a NEUTRAL cal state.
+
+    The key default-injects at the neutral InverterCalState and EVERY existing
+    learner section stays byte-faithful (the P3 addition never disturbs the
+    CRITICAL v2->v3 invariant). The schema stamp stays v3 (no bump).
+    """
+    v2 = _populated_v2_store()
+    before = copy.deepcopy(v2)
+    state = validate_state(v2)
+
+    assert state[_SCHEMA_KEY] == STORAGE_DATA_VERSION_V3
+    assert state[STORE_KEY_INVERTER_CAL_STATE] == InverterCalState().to_dict()
+    assert InverterCalState.from_dict(state[STORE_KEY_INVERTER_CAL_STATE]).n == 0
+    # Existing learner sections still byte-faithful.
+    assert state[STORE_KEY_BIAS_STATE] == before[STORE_KEY_BIAS_STATE]
+    assert state[STORE_KEY_SHADEMAP_STATE] == before[STORE_KEY_SHADEMAP_STATE]
+    assert state[STORE_KEY_DRIFT_STATE] == before[STORE_KEY_DRIFT_STATE]
+    assert state[STORE_KEY_LEARNER_SNAPSHOTS] == before[STORE_KEY_LEARNER_SNAPSHOTS]
+
+
+def test_populated_inverter_cal_survives_validate_byte_faithful():
+    """A v3 store carrying a populated inverter-cal key round-trips identically."""
+    base = validate_state(_populated_v2_store())
+    base = copy.deepcopy(base)
+    base[STORE_KEY_INVERTER_CAL_STATE] = InverterCalState(eta=0.94, n=37).to_dict()
+    state = validate_state(base)
+    assert state[STORE_KEY_INVERTER_CAL_STATE] == base[STORE_KEY_INVERTER_CAL_STATE]
+    cal = InverterCalState.from_dict(state[STORE_KEY_INVERTER_CAL_STATE])
+    assert cal.eta == pytest.approx(0.94)
+    assert cal.n == 37
+
+
+def test_corrupt_inverter_cal_degrades_to_neutral_preserving_learners():
+    """A garbage inverter-cal blob degrades to neutral; learners untouched."""
+    blob = validate_state(_populated_v2_store())
+    blob = copy.deepcopy(blob)
+    blob[STORE_KEY_INVERTER_CAL_STATE] = "not-a-dict"
+    bias_before = copy.deepcopy(blob[STORE_KEY_BIAS_STATE])
+    shade_before = copy.deepcopy(blob[STORE_KEY_SHADEMAP_STATE])
+
+    state = validate_state(blob)  # must NOT raise
+
+    assert state[STORE_KEY_INVERTER_CAL_STATE] == InverterCalState().to_dict()
+    assert state[STORE_KEY_BIAS_STATE] == bias_before
+    assert state[STORE_KEY_SHADEMAP_STATE] == shade_before
+
+
+async def test_store_inverter_cal_get_set_roundtrip():
+    """ForecastStore.get/set_inverter_cal_state round-trips through the blob."""
+    store = _store(_populated_v2_store())
+    await store.async_load()
+    # A freshly-migrated store starts neutral.
+    assert store.get_inverter_cal_state().n == 0
+    store.set_inverter_cal_state(InverterCalState(eta=0.935, n=25))
+    got = store.get_inverter_cal_state()
+    assert got.eta == pytest.approx(0.935)
+    assert got.n == 25

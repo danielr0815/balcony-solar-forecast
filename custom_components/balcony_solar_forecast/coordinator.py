@@ -141,6 +141,7 @@ from .core import (
     ComparisonConfig,
     DriftState,
     ForecastResult,
+    InverterCalState,
     IssuedSnapshot,
     LearnerConfig,
     LearnerHooks,
@@ -158,6 +159,9 @@ from .core import (
 from .core import bias as bias_mod
 from .core import (
     ensembleband as ensembleband_mod,
+)
+from .core import (
+    inverter_cal as inverter_cal_mod,
 )
 from .core import (
     quantiles as quantiles_mod,
@@ -329,6 +333,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._scoreboard_state: ScoreboardState = ScoreboardState()
         # Quantile relative-error ring (validate-and-clamp on load).
         self._quantile_state: QuantileState = QuantileState()
+        # Inverter DC->AC efficiency site calibration (AC-side Phase 3): a single
+        # learned eta_inv, validate-and-clamp on load. Neutral until the nightly
+        # AC-meter calibration folds enough eligible hours (never load-bearing).
+        self._inverter_cal_state: InverterCalState = InverterCalState()
         self._learner_states_loaded = False
 
         # Collapse detector: the frozen local date is persisted in DriftState
@@ -428,6 +436,16 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         except Exception:  # pragma: no cover - defensive, never crash setup
             _LOGGER.warning(
                 "Could not load quantile state; using empty", exc_info=True
+            )
+        # Inverter-efficiency calibration (AC-side Phase 3, independently guarded:
+        # a pre-Phase-3 store has no getter -> stay on the neutral in-memory state).
+        try:
+            self._inverter_cal_state = self._store.get_inverter_cal_state()
+        except AttributeError:
+            _LOGGER.debug("Store has no inverter-cal getter; using neutral state")
+        except Exception:  # pragma: no cover - defensive, never crash setup
+            _LOGGER.warning(
+                "Could not load inverter calibration; using neutral", exc_info=True
             )
         self._learner_states_loaded = True
 
@@ -937,8 +955,16 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             source = CORRECTION_SOURCE_INTRADAY
         else:
             source = CORRECTION_SOURCE_NONE
+        # Site-level LEARNED inverter eta_inv (AC-side Phase 3): None until the
+        # calibration is trusted (>= INVERTER_CAL_MIN_SAMPLES eligible hours), so
+        # the engine falls back to the per-group config eta. Never load-bearing;
+        # reshapes only the AC curve. ``getattr`` keeps a bare __new__-built
+        # coordinator (tests) working with the neutral (untrusted) default.
+        cal_state = getattr(self, "_inverter_cal_state", None) or InverterCalState()
+        inverter_efficiency = inverter_cal_mod.effective_eta(cal_state)
         return LearnerHooks(beam_tau=beam_tau, slot_factor=slot_factor,
-                            correction_source=source, band_by_slot=band_by_slot)
+                            correction_source=source, band_by_slot=band_by_slot,
+                            inverter_efficiency=inverter_efficiency)
 
     def _bind_beam_tau(self):
         """Bind ``shademap.effective_tau_pooled`` over the current ShademapState
@@ -1809,6 +1835,32 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     def _persist_quantile_state(self) -> None:
         self._call_store_setter("set_quantile_state", self._quantile_state)
 
+    def _persist_inverter_cal_state(self) -> None:
+        self._call_store_setter(
+            "set_inverter_cal_state", self._inverter_cal_state
+        )
+
+    async def _train_inverter_cal(self, day: date) -> None:
+        """Calibrate the site inverter DC->AC efficiency for a closed ``day``."""
+        return await _nightly.train_inverter_cal(self, day)
+
+    def inverter_efficiency_learned(self) -> dict[str, Any] | None:
+        """Lean diagnostic view of the learned site inverter eta_inv (Phase 3).
+
+        Returns ``{"eta": <EMA>, "n": <folded samples>, "effective": <applied>}``
+        where ``effective`` is None until the calibration is trusted (the config
+        eta then stands). None when the state is unavailable (bare coordinator).
+        """
+        cal = getattr(self, "_inverter_cal_state", None)
+        if cal is None:
+            return None
+        eff = inverter_cal_mod.effective_eta(cal)
+        return {
+            "eta": round(float(cal.eta), 4),
+            "n": int(cal.n),
+            "effective": None if eff is None else round(eff, 4),
+        }
+
     def _train_quantiles_day(self, day: date) -> None:
         """Sample one closed ``day`` into the quantile relative-error ring."""
         return _nightly.train_quantiles_day(self, day)
@@ -2029,3 +2081,16 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
         """Per-module measured DC energy for ``day``: (daily totals, hourly)."""
         return await _actuals.async_read_actuals(self, day)
+
+    async def _async_read_ac_actuals(self, day: date) -> dict[str, float]:
+        """Whole-site AC hourly energy for ``day`` (sign-corrected at the read
+        boundary). ``{}`` when no AC meter is configured."""
+        site = self._site
+        tz = dt_util.get_time_zone(self.hass.config.time_zone) or UTC
+        return await _actuals.async_read_ac_actuals(
+            self.hass,
+            getattr(site, "ac_actual_entity", None),
+            day,
+            tz,
+            invert=getattr(site, "ac_actual_invert", False),
+        )

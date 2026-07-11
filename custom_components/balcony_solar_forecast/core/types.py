@@ -20,6 +20,7 @@ from datetime import datetime
 from ..const import (
     ALBEDO_DEFAULT,
     CONF_AC_ACTUAL_ENTITY,
+    CONF_AC_ACTUAL_INVERT,
     CONF_ACTUAL_ENTITY,
     CONF_AZIMUTH,
     CONF_EFFICIENCY,
@@ -74,6 +75,7 @@ __all__ = [
     "BiasState",
     "ShademapBin",
     "ShademapState",
+    "InverterCalState",
     "DriftState",
     "LearnerSnapshot",
     "IssuedSnapshot",
@@ -292,6 +294,10 @@ class SiteConfig:
     phase. It is site-level (not per-group) because only the aggregate site AC
     is measured, never per-inverter AC. Opaque to the pure core (used only by
     the glue); default None == not configured.
+
+    ``ac_actual_invert`` (optional) negates that meter's reading at the read
+    boundary — the operator's meter can report the fed-in balcony-solar AC as a
+    NEGATED value; default False.
     """
 
     latitude: float
@@ -299,6 +305,7 @@ class SiteConfig:
     planes: tuple[PlaneConfig, ...]
     groups: tuple[InverterGroup, ...]
     ac_actual_entity: str | None = None
+    ac_actual_invert: bool = False
 
     @classmethod
     def from_dict(cls, d: dict) -> SiteConfig:
@@ -318,6 +325,7 @@ class SiteConfig:
                 InverterGroup.from_dict(g) for g in d.get(CONF_GROUPS, [])
             ),
             ac_actual_entity=ac_actual_entity,
+            ac_actual_invert=bool(d.get(CONF_AC_ACTUAL_INVERT, False)),
         )
 
     def to_dict(self) -> dict:
@@ -331,6 +339,10 @@ class SiteConfig:
         # exact pre-AC dict (no new key) — mirrors PlaneConfig.shade_group.
         if self.ac_actual_entity:
             d[CONF_AC_ACTUAL_ENTITY] = self.ac_actual_entity
+        # Write the invert flag only when True, so a default site round-trips
+        # without the new key (same only-when-set convention).
+        if self.ac_actual_invert:
+            d[CONF_AC_ACTUAL_INVERT] = self.ac_actual_invert
         return d
 
     def plane_by_name(self, name: str) -> PlaneConfig | None:
@@ -847,6 +859,47 @@ class ShademapState:
                 for chan, bins in self.channels.items()
             },
         }
+
+
+# ---------------------------------------------------------------------------
+# Inverter DC->AC efficiency site calibration (AC-side Phase 3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class InverterCalState:
+    """Site-level learned inverter DC->AC efficiency eta_inv (AC-side Phase 3).
+
+    A single scalar calibrated against the site's TOTAL-AC meter: ``eta`` is the
+    EMA of the eligible per-hour measured-AC / modeled-DC ratios and ``n`` counts
+    the folded (in-band) samples that drive BOTH the adaptive EMA warm-up and the
+    INVERTER_CAL_MIN_SAMPLES trust gate. One scalar fits every group (the site
+    has one whole-site AC meter + identical HMS-800W-2T inverters). Mirrors the
+    other learner states (frozen, plain-JSON, validate-and-clamp on load): a
+    missing / garbage blob yields the NEUTRAL state
+    (``eta = DEFAULT_INVERTER_EFFICIENCY``, ``n = 0``), never a raised exception.
+    The eligibility gates + band clamp live in ``core/inverter_cal.py``; this type
+    only carries + (de)serialises the pair.
+    """
+
+    eta: float = DEFAULT_INVERTER_EFFICIENCY
+    n: int = 0
+
+    @classmethod
+    def from_dict(cls, d: dict) -> InverterCalState:
+        if not isinstance(d, dict):
+            return cls()
+        return cls(
+            eta=_safe_float(
+                d.get("eta", DEFAULT_INVERTER_EFFICIENCY),
+                DEFAULT_INVERTER_EFFICIENCY,
+                minimum=0.0,
+            ),
+            n=_safe_int(d.get("n", 0), 0, minimum=0),
+        )
+
+    def to_dict(self) -> dict:
+        return {"eta": self.eta, "n": self.n}
 
 
 # ---------------------------------------------------------------------------

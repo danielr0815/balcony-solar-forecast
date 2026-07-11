@@ -152,6 +152,8 @@ def _clamp_eta(eta: float) -> float:
 def clamp_groups_ac(
     plane_watts: Mapping[str, float],
     groups: Sequence[InverterGroup],
+    *,
+    ungrouped_eta: float = DEFAULT_INVERTER_EFFICIENCY,
 ) -> tuple[dict[str, float], dict[str, float]]:
     """Per-inverter-group DC->AC transform: served DC + delivered AC per plane.
 
@@ -195,11 +197,15 @@ def clamp_groups_ac(
     """
     # DC baseline: pass every plane's DC through; grouped members are overwritten
     # below with their clip-point-corrected DC. AC baseline: ungrouped planes get
-    # the flat default-efficiency conversion (see docstring); grouped members are
+    # the flat ``ungrouped_eta`` conversion (the datasheet default, or the trusted
+    # site-level LEARNED eta_inv when the caller injects it — the engine passes
+    # the SAME eta it weights the pre-clamp AC by, so the served and pre-clamp AC
+    # of an ungrouped plane stay mutually consistent); grouped members are
     # overwritten with their per-group eta * clamped DC.
+    eta_ungrouped = _clamp_eta(ungrouped_eta)
     dc_out: dict[str, float] = dict(plane_watts)
     ac_out: dict[str, float] = {
-        name: watts * DEFAULT_INVERTER_EFFICIENCY
+        name: watts * eta_ungrouped
         for name, watts in plane_watts.items()
     }
 

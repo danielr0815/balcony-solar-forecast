@@ -37,6 +37,7 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     DAY_PART_MORNING,
     DRIFT_LOSS_STREAK_DAYS,
     INTRADAY_NEUTRAL,
+    INVERTER_CAL_MIN_SAMPLES,
     ISSUE_FAST_LEARNER_DISABLED,
     LABEL_FROZEN_STALE_SECONDS,
     LEARNER_LAYER_FAST,
@@ -56,6 +57,8 @@ from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     BiasState,
     DriftState,
     ForecastResult,
+    InverterCalState,
+    InverterGroup,
     IssuedSnapshot,
     LearnerConfig,
     PlaneConfig,
@@ -124,6 +127,13 @@ class _FakeStore:
 
     def set_drift_state(self, state) -> None:
         self.drift = state.to_dict()
+
+    # inverter DC->AC efficiency calibration (AC-side Phase 3)
+    def get_inverter_cal_state(self) -> InverterCalState:
+        return InverterCalState.from_dict(getattr(self, "inverter_cal", {}))
+
+    def set_inverter_cal_state(self, state) -> None:
+        self.inverter_cal = state.to_dict()
 
     # rollback ring (real ForecastStore API)
     def get_snapshots(self):
@@ -240,6 +250,8 @@ def _make_coordinator(store: _FakeStore | None = None) -> BalconySolarCoordinato
 
     c._quantiles_enabled = True
     c._quantile_state = QuantileState()
+    # AC-side Phase 3 inverter calibration: neutral (untrusted) by default.
+    c._inverter_cal_state = InverterCalState()
     return c
 
 
@@ -1651,3 +1663,258 @@ def test_build_shade_profile_passes_channel_and_pool(monkeypatch):
     # The MAIN curve uses the module's own channel; the pool adds its sibling.
     assert captured["channel"] == "M1"
     assert set(captured["pool"]) == {"M1", "M2"}
+
+
+# ---------------------------------------------------------------------------
+# AC-side Phase 3: inverter DC->AC efficiency site calibration
+# ---------------------------------------------------------------------------
+
+
+def _ac_meter_site(*, invert: bool = False) -> SiteConfig:
+    """A grouped site with a whole-site AC meter (ceiling 800 W)."""
+    return SiteConfig(
+        latitude=48.5,
+        longitude=12.2,
+        planes=(
+            PlaneConfig(name="M1", azimuth_deg=115.0, tilt_deg=70.0, wp=370.0,
+                        actual_entity="sensor.m1"),
+            PlaneConfig(name="M2", azimuth_deg=205.0, tilt_deg=70.0, wp=430.0,
+                        actual_entity="sensor.m2"),
+        ),
+        groups=(
+            InverterGroup(name="WR", plane_names=("M1", "M2"), ac_limit_w=800.0),
+        ),
+        ac_actual_entity="sensor.site_ac",
+        ac_actual_invert=invert,
+    )
+
+
+# --- coordinator hook binding ----------------------------------------------
+
+
+def test_hooks_carry_learned_eta_when_trusted():
+    c = _make_coordinator()
+    c._inverter_cal_state = InverterCalState(eta=0.93, n=INVERTER_CAL_MIN_SAMPLES)
+
+    class _W:
+        slots = ()
+
+    now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    hooks = c._build_learner_hooks(_W(), now)
+    assert hooks.inverter_efficiency == pytest.approx(0.93)
+
+
+def test_hooks_no_learned_eta_when_untrusted():
+    c = _make_coordinator()
+    c._inverter_cal_state = InverterCalState(
+        eta=0.93, n=INVERTER_CAL_MIN_SAMPLES - 1
+    )
+
+    class _W:
+        slots = ()
+
+    now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    hooks = c._build_learner_hooks(_W(), now)
+    assert hooks.inverter_efficiency is None
+
+
+# --- nightly calibration sweep ---------------------------------------------
+
+
+async def test_nightly_inverter_cal_folds_eligible_hours():
+    c = _make_coordinator()
+    c._site = _ac_meter_site()
+    iso = "2026-07-05"
+    day = datetime(2026, 7, 5).date()
+    # Summed per-module DC hourly actuals (one channel carrying the site total).
+    c._store.hourly_actuals[iso] = {
+        "M1": {
+            "2026-07-05T10:00:00+00:00": 500.0,  # eligible
+            "2026-07-05T11:00:00+00:00": 520.0,  # eligible
+            "2026-07-05T12:00:00+00:00": 900.0,  # clipped (dc-derived AC > 720)
+            "2026-07-05T13:00:00+00:00": 50.0,   # below the 100 W min load
+        }
+    }
+    ac_hourly = {
+        "2026-07-05T10:00:00+00:00": 480.0,   # ratio 0.96
+        "2026-07-05T11:00:00+00:00": 499.2,   # ratio 0.96
+        "2026-07-05T12:00:00+00:00": 760.0,
+        "2026-07-05T13:00:00+00:00": 48.0,
+    }
+
+    async def _fake_read(_day):
+        return ac_hourly
+
+    c._async_read_ac_actuals = _fake_read
+    await c._train_inverter_cal(day)
+
+    # Only the two eligible (unclipped, above min-load) hours folded.
+    assert c._inverter_cal_state.n == 2
+    assert c._inverter_cal_state.eta == pytest.approx(0.96)
+    # Persisted through the store setter.
+    assert c._store.get_inverter_cal_state().n == 2
+
+
+async def test_nightly_inverter_cal_noop_without_ac_entity():
+    c = _make_coordinator()  # _site() has no ac_actual_entity
+    day = datetime(2026, 7, 5).date()
+    before = c._inverter_cal_state
+    called = {"read": False}
+
+    async def _fake_read(_day):
+        called["read"] = True
+        return {"2026-07-05T10:00:00+00:00": 480.0}
+
+    c._async_read_ac_actuals = _fake_read
+    await c._train_inverter_cal(day)
+    assert c._inverter_cal_state is before   # unchanged
+    assert called["read"] is False           # short-circuited before the read
+
+
+async def test_nightly_inverter_cal_noop_when_all_hours_ineligible():
+    c = _make_coordinator()
+    c._site = _ac_meter_site()
+    iso = "2026-07-05"
+    day = datetime(2026, 7, 5).date()
+    # Both hours below the min load -> no eligible ratio -> state unchanged.
+    c._store.hourly_actuals[iso] = {
+        "M1": {
+            "2026-07-05T10:00:00+00:00": 40.0,
+            "2026-07-05T11:00:00+00:00": 30.0,
+        }
+    }
+
+    async def _fake_read(_day):
+        return {
+            "2026-07-05T10:00:00+00:00": 38.0,
+            "2026-07-05T11:00:00+00:00": 28.0,
+        }
+
+    c._async_read_ac_actuals = _fake_read
+    before = c._inverter_cal_state
+    await c._train_inverter_cal(day)
+    assert c._inverter_cal_state is before
+
+
+async def test_nightly_inverter_cal_read_exception_is_contained():
+    c = _make_coordinator()
+    c._site = _ac_meter_site()
+    iso = "2026-07-05"
+    day = datetime(2026, 7, 5).date()
+    c._store.hourly_actuals[iso] = {
+        "M1": {"2026-07-05T10:00:00+00:00": 500.0}
+    }
+    before = c._inverter_cal_state
+
+    async def _boom(_day):
+        raise RuntimeError("recorder down")
+
+    c._async_read_ac_actuals = _boom
+    # Must NOT raise; calibration left untouched.
+    await c._train_inverter_cal(day)
+    assert c._inverter_cal_state is before
+
+
+# --- AC-meter reader: sign inversion ---------------------------------------
+
+
+def test_ac_hourly_from_stats_negates_when_inverted():
+    from custom_components.balcony_solar_forecast._actuals import (
+        _ac_hourly_from_stats,
+    )
+
+    rows = [
+        {"start": "2026-07-05T10:00:00+00:00", "mean": -480.0},
+        {"start": "2026-07-05T11:00:00+00:00", "mean": -500.0},
+    ]
+    got = _ac_hourly_from_stats(rows, invert=True)
+    assert got["2026-07-05T10:00:00+00:00"] == pytest.approx(480.0)
+    assert got["2026-07-05T11:00:00+00:00"] == pytest.approx(500.0)
+    # Default: sign preserved.
+    plain = _ac_hourly_from_stats(rows, invert=False)
+    assert plain["2026-07-05T10:00:00+00:00"] == pytest.approx(-480.0)
+
+
+async def test_async_read_ac_actuals_empty_entity_returns_empty():
+    from custom_components.balcony_solar_forecast._actuals import (
+        async_read_ac_actuals,
+    )
+
+    day = datetime(2026, 7, 5).date()
+    assert await async_read_ac_actuals(None, None, day, UTC) == {}
+    assert await async_read_ac_actuals(None, "", day, UTC) == {}
+
+
+# --- SiteConfig round-trip: ac_actual_invert -------------------------------
+
+
+def test_siteconfig_roundtrip_ac_actual_invert_true():
+    from custom_components.balcony_solar_forecast.const import (
+        CONF_AC_ACTUAL_INVERT,
+    )
+
+    d = _ac_meter_site(invert=True).to_dict()
+    assert d[CONF_AC_ACTUAL_INVERT] is True
+    assert SiteConfig.from_dict(d).ac_actual_invert is True
+
+
+def test_siteconfig_default_invert_emits_no_key():
+    from custom_components.balcony_solar_forecast.const import (
+        CONF_AC_ACTUAL_INVERT,
+    )
+
+    d = _ac_meter_site(invert=False).to_dict()
+    assert CONF_AC_ACTUAL_INVERT not in d  # only-when-set convention
+    assert SiteConfig.from_dict(d).ac_actual_invert is False
+
+
+# --- MeasuredAcPowerSensor: dashboard sign flip ----------------------------
+
+
+def _measured_ac_sensor(coordinator, source_id: str):
+    from custom_components.balcony_solar_forecast.sensor import (
+        MeasuredAcPowerSensor,
+    )
+
+    s = MeasuredAcPowerSensor.__new__(MeasuredAcPowerSensor)
+    s.hass = coordinator.hass
+    s.coordinator = coordinator
+    s._source_id = source_id
+    s._value = None
+    s._reporting = False
+    return s
+
+
+def test_measured_ac_sensor_negates_when_inverted():
+    c = _make_coordinator()
+    c._site = _ac_meter_site(invert=True)
+    c.hass.states.set("sensor.site_ac", -480.0)
+    s = _measured_ac_sensor(c, "sensor.site_ac")
+    s._recompute()
+    assert s.native_value == pytest.approx(480.0)  # negated to positive
+
+
+def test_measured_ac_sensor_keeps_sign_when_not_inverted():
+    c = _make_coordinator()
+    c._site = _ac_meter_site(invert=False)
+    c.hass.states.set("sensor.site_ac", 480.0)
+    s = _measured_ac_sensor(c, "sensor.site_ac")
+    s._recompute()
+    assert s.native_value == pytest.approx(480.0)
+
+
+# --- diagnostic summary ----------------------------------------------------
+
+
+def test_inverter_efficiency_learned_summary():
+    c = _make_coordinator()
+    # Untrusted -> effective is None.
+    c._inverter_cal_state = InverterCalState(eta=0.94, n=5)
+    summ = c.inverter_efficiency_learned()
+    assert summ == {"eta": 0.94, "n": 5, "effective": None}
+    # Trusted -> effective is the clamped eta.
+    c._inverter_cal_state = InverterCalState(
+        eta=0.94, n=INVERTER_CAL_MIN_SAMPLES
+    )
+    summ = c.inverter_efficiency_learned()
+    assert summ["effective"] == pytest.approx(0.94)

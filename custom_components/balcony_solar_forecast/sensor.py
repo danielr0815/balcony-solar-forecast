@@ -580,11 +580,23 @@ class PowerNowSensor(BalconyForecastEntity, SensorEntity):
         # of the transform behind this AC output. Empty when no groups configured.
         site = getattr(self.coordinator, "_site", None)
         groups = getattr(site, "groups", ()) if site is not None else ()
-        return {
+        attrs: dict[str, Any] = {
             "inverter_efficiency": {
                 g.name: g.inverter_efficiency for g in groups
             }
         }
+        # Site-level LEARNED eta_inv (AC-side Phase 3): the AC-meter calibration's
+        # current EMA + folded-sample count, and the ``effective`` eta actually
+        # applied to the AC curve (None until trusted -> the config eta stands).
+        # Added only once the calibration has folded a sample (n > 0), so a site
+        # without an AC meter keeps the exact pre-Phase-3 attribute shape.
+        learned = None
+        getter = getattr(self.coordinator, "inverter_efficiency_learned", None)
+        if callable(getter):
+            learned = getter()
+        if learned is not None and learned.get("n", 0):
+            attrs["inverter_efficiency_learned"] = learned
+        return attrs
 
 
 class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
@@ -750,10 +762,21 @@ class MeasuredAcPowerSensor(BalconyForecastEntity, SensorEntity):
         self.async_write_ha_state()
 
     def _recompute(self) -> None:
-        """Cache the AC meter's current numeric value (None if unusable)."""
+        """Cache the AC meter's current numeric value (None if unusable).
+
+        The site meter can be SIGN-INVERTED (SiteConfig.ac_actual_invert): the
+        operator's meter reports fed-in balcony-solar AC as a negated value, so
+        negate ONCE here so the dashboard shows measured AC as a positive number.
+        """
         value = _numeric_state(self.hass.states.get(self._source_id))
         self._reporting = value is not None
-        self._value = round(value, 1) if value is not None else None
+        if value is None:
+            self._value = None
+            return
+        site = getattr(self.coordinator, "_site", None)
+        if getattr(site, "ac_actual_invert", False):
+            value = -value
+        self._value = round(value, 1)
 
     @property
     def available(self) -> bool:

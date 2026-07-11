@@ -94,7 +94,7 @@ zero-production and skipped safely.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, tzinfo
 
 from ..const import (
@@ -177,6 +177,13 @@ class LearnerHooks:
     slot_factor: SlotFactorHook | None = None
     correction_source: str = CORRECTION_SOURCE_NONE
     band_by_slot: dict[datetime, QuantileBands] | None = None
+    # AC-side inverter efficiency site calibration (AC-side Phase 3): a single
+    # LEARNED eta_inv calibrated against the site's TOTAL-AC meter that OVERRIDES
+    # the per-group config eta for ALL groups on the AC curve. None (default) =>
+    # the engine uses each group's own ``inverter_efficiency`` (ungrouped planes
+    # the DEFAULT), so a build without a trusted calibration is bit-identical.
+    # NEVER touches the DC path — only the served-AC transform reads it.
+    inverter_efficiency: float | None = None
 
 
 # Module-level identity hooks so the raw pass and a learner-free corrected pass
@@ -492,13 +499,34 @@ def compute_forecast(
     total_group_limit = sum(g.ac_limit_w for g in groups)
     grouped_names = {name for g in groups for name in g.plane_names}
 
+    # AC-side inverter efficiency (AC-side Phase 3): when ``hooks`` carry a
+    # trusted site-level LEARNED eta_inv it OVERRIDES the per-group config eta for
+    # ALL groups on the AC curve; None => each group keeps its own configured eta.
+    # ``ac_groups`` (the groups whose eta the AC transform sees) and ``plane_eta``
+    # (the pre-clamp AC weighting) are BOTH sourced from this one decision so the
+    # served AC and the pre-clamp AC stay mutually consistent. The DC path below
+    # never reads either — it keeps using ``groups`` verbatim, so it is untouched.
+    cal_eta = (
+        electrical._clamp_eta(hk.inverter_efficiency)
+        if hk.inverter_efficiency is not None
+        else None
+    )
+    ac_groups = (
+        tuple(replace(g, inverter_efficiency=cal_eta) for g in groups)
+        if cal_eta is not None
+        else groups
+    )
+
     # Per-plane DC->AC efficiency for the PRE-AC-clamp AC total (the AC analogue
     # of ``corrected_unclamped_watts``, SPEC AC-side Phase 2): a grouped plane
-    # uses its group's clamped eta_inv, an ungrouped plane the flat default —
-    # exactly the split ``electrical.clamp_groups_ac`` applies, so the pre-clamp
-    # AC equals the served AC on every UNclipped slot. Static over the window.
-    plane_eta = {p.name: DEFAULT_INVERTER_EFFICIENCY for p in planes}
-    for g in groups:
+    # uses its group's clamped eta_inv (the learned eta when calibrated), an
+    # ungrouped plane the learned eta when calibrated else the flat default —
+    # exactly the split ``electrical.clamp_groups_ac`` applies (over ``ac_groups``),
+    # so the pre-clamp AC equals the served AC on every UNclipped slot. Static
+    # over the window.
+    _ungrouped_eta = cal_eta if cal_eta is not None else DEFAULT_INVERTER_EFFICIENCY
+    plane_eta = {p.name: _ungrouped_eta for p in planes}
+    for g in ac_groups:
         eta_g = electrical._clamp_eta(g.inverter_efficiency)
         for name in g.plane_names:
             if name in plane_eta:
@@ -758,7 +786,9 @@ def compute_forecast(
         ac_input = {
             name: watts * factor for name, watts in cor_unclamped.items()
         }
-        _, ac_by_plane = electrical.clamp_groups_ac(ac_input, groups)
+        _, ac_by_plane = electrical.clamp_groups_ac(
+            ac_input, ac_groups, ungrouped_eta=_ungrouped_eta
+        )
         ac_slot_total = sum(ac_by_plane.values())
         ac_watts.append(ac_slot_total)
         ac_wh = ac_slot_total * _SLOT_HOURS

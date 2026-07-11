@@ -38,10 +38,12 @@ from .const import (
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_RAW_HOURLY_WH,
     DAY_PART_MIDDAY,
+    DEFAULT_INVERTER_EFFICIENCY,
     DRIFT_LOSS_MARGIN,
     DRIFT_LOSS_MIN_ABS_WH,
     DRIFT_LOSS_STREAK_DAYS,
     DRIFT_WINDOW_DAYS,
+    INVERTER_CAL_CLIP_HEADROOM_FRAC,
     ISSUE_FAST_LEARNER_DISABLED,
     ISSUE_SLOW_LEARNER_DISABLED,
     LEARNER_LAYER_FAST,
@@ -58,6 +60,9 @@ from .core import (
     solpos,
 )
 from .core import bias as bias_mod
+from .core import (
+    inverter_cal as inverter_cal_mod,
+)
 from .core import (
     quantiles as quantiles_mod,
 )
@@ -142,6 +147,16 @@ async def async_nightly_job(coord, now: datetime | None = None) -> None:
         except Exception:  # pragma: no cover - never crash the scheduler
             _LOGGER.warning(
                 "Nightly scoreboard scoring failed for %s", day, exc_info=True
+            )
+        # Inverter DC->AC efficiency site calibration (AC-side Phase 3): fold this
+        # closed day's eligible AC/DC hours into the learned eta_inv. Independently
+        # guarded so an AC-meter read failure never aborts the DC nightly job (and
+        # vice-versa); a no-meter / no-eligible-hours day is a silent no-op.
+        try:
+            await coord._train_inverter_cal(day)
+        except Exception:  # pragma: no cover - never crash the scheduler
+            _LOGGER.warning(
+                "Nightly inverter calibration failed for %s", day, exc_info=True
             )
 
 
@@ -447,6 +462,82 @@ def train_quantiles_day(coord, day: date) -> None:
         coord._quantile_state, samples, training_date=iso
     )
     coord._persist_quantile_state()
+
+
+async def train_inverter_cal(coord, day: date) -> None:
+    """Calibrate the site inverter DC->AC efficiency for a closed ``day``.
+
+    NEVER load-bearing (AC-side Phase 3). Gated + degrading at every step:
+      * no ``ac_actual_entity`` configured -> no-op (no whole-site AC meter);
+      * no stored per-module DC hourly actuals for the day -> no-op (the DC
+        learners read + persisted them earlier in the sweep);
+      * an empty / failed AC-meter read -> no-op.
+
+    For each hour present in BOTH the summed per-module DC hourly actuals AND the
+    whole-site AC meter, form ``(p_ac_w, p_dc_w) = (ac_wh, dc_wh)`` (Wh over one
+    hour == mean W) and build an eligible ratio: the DC must clear
+    INVERTER_CAL_MIN_LOAD_W and the hour must be UNCLIPPED (clip-headroom proxy:
+    the datasheet-derived AC sits below INVERTER_CAL_CLIP_HEADROOM_FRAC of the
+    summed group AC ceiling — gated on the INDEPENDENT DC side so a meter glitch
+    cannot both pass the gate and corrupt the ratio). The eligible ratios fold
+    into the EMA via ``inverter_cal.update`` (out-of-band ratios self-drop), and
+    the state is persisted only when it actually changed. A day with 0 eligible
+    (or only out-of-band) hours leaves the calibration untouched.
+    """
+    site = coord._site
+    ac_entity = getattr(site, "ac_actual_entity", None)
+    if not ac_entity:
+        return  # no whole-site AC meter -> calibration is a pure no-op
+    iso = day.isoformat()
+    # Summed per-module DC hourly actuals (already read + stored for the DC
+    # learners earlier in the sweep): {iso_hour: wh}. Absent -> nothing to
+    # calibrate against (a later catch-up re-runs the day once LTS is complete).
+    hourly_actuals = coord._store_hourly_actuals(iso)
+    dc_by_hour = coord._site_measured_hourly(iso, hourly_actuals)
+    if not dc_by_hour:
+        return
+    # Whole-site AC hourly energy from the meter (sign-corrected at the read
+    # boundary). A recorder read failure is contained HERE (defense-in-depth with
+    # the sweep-level guard) so an AC-read hiccup never aborts the DC nightly job.
+    try:
+        ac_by_hour = await coord._async_read_ac_actuals(day)
+    except Exception:  # pragma: no cover - recorder is best-effort
+        _LOGGER.warning(
+            "Inverter-cal AC-meter read failed for %s; calibration untouched",
+            iso, exc_info=True,
+        )
+        return
+    if not ac_by_hour:
+        return
+
+    ceiling = sum(g.ac_limit_w for g in site.groups)
+    ratios: list[float] = []
+    for hkey, dc_wh in dc_by_hour.items():
+        ac_wh = ac_by_hour.get(hkey)
+        if ac_wh is None:
+            continue
+        dc_w = float(dc_wh)  # Wh over 1 h == mean W
+        ac_w = float(ac_wh)
+        # Clip-headroom gate on the INDEPENDENT DC side: the inverter clips AC at
+        # ``ceiling``, so a datasheet-derived AC comfortably below it means the
+        # hour is unclipped and its ratio does not understate eta.
+        dc_derived_ac = DEFAULT_INVERTER_EFFICIENCY * dc_w
+        clip_headroom_ok = (
+            ceiling > 0.0
+            and dc_derived_ac < ceiling * INVERTER_CAL_CLIP_HEADROOM_FRAC
+        )
+        r = inverter_cal_mod.eligible_ratio(
+            ac_w, dc_w, clip_headroom_ok=clip_headroom_ok
+        )
+        if r is not None:
+            ratios.append(r)
+    if not ratios:
+        return
+    new_state = inverter_cal_mod.update(coord._inverter_cal_state, ratios)
+    if new_state is coord._inverter_cal_state:
+        return  # every ratio was out of band -> nothing folded, state unchanged
+    coord._inverter_cal_state = new_state
+    coord._persist_inverter_cal_state()
 
 
 def train_day_ahead(
