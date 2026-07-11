@@ -10,3 +10,4 @@ htmlcov/
 .vscode/
 *.log
 scratchpad/
+.ha-dev/
