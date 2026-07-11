@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-11
+
 ### Added
 - **Power-history card: day/week navigation + an archived forecast line for past
   days.** The bundled power-history card gains a header `◀ [label] ▶` to step the
