@@ -58,6 +58,7 @@ from .const import (
     CONF_COMPARISON_NAME,
     CONF_COMPARISON_SENSORS,
     CONF_DAY_AHEAD_BIAS_ENABLED,
+    CONF_ENSEMBLE_ENABLED,
     CONF_FAST_LEARNER_ENABLED,
     CONF_FETCH_INTERVAL,
     CONF_LATITUDE,
@@ -69,6 +70,7 @@ from .const import (
     CONF_SLOW_LEARNER_ENABLED,
     DEFAULT_COMPARISON_SENSORS,
     DEFAULT_DAY_AHEAD_BIAS_ENABLED,
+    DEFAULT_ENSEMBLE_ENABLED,
     DEFAULT_FAST_LEARNER_ENABLED,
     DEFAULT_QUANTILES_ENABLED,
     DEFAULT_SITE,
@@ -225,18 +227,20 @@ def _options_schema(
     slow_learner_enabled: bool = DEFAULT_SLOW_LEARNER_ENABLED,
     day_ahead_bias_enabled: bool = DEFAULT_DAY_AHEAD_BIAS_ENABLED,
     quantiles_enabled: bool = DEFAULT_QUANTILES_ENABLED,
+    ensemble_enabled: bool = DEFAULT_ENSEMBLE_ENABLED,
     comparison_sensors: list[dict] | None = None,
 ) -> vol.Schema:
     """Schema for the options step: RUNTIME TUNABLES only.
 
     Structural setup lives in the reconfigure flow (see the module docstring).
     What remains here are the three per-layer learner kill switches (SPEC §5),
-    the v0.4 quantile kill switch (SPEC §6) and the editable comparison-sensors
-    list (SPEC §9/§10). Every switch is a plain boolean toggle (no
-    NumberSelector, so the HA-2026 ``step >= 1e-3`` selector rule cannot bite
-    here) and defaults ON. The comparison list is Optional so an empty list
-    means "no comparisons" without a required-field error; the default is the
-    current value.
+    the v0.4 quantile kill switch (SPEC §6), the v0.16 ensemble-band kill switch
+    (SPEC §6, default OFF) and the editable comparison-sensors list (SPEC §9/§10).
+    Every switch is a plain boolean toggle (no NumberSelector, so the HA-2026
+    ``step >= 1e-3`` selector rule cannot bite here). The learner/quantile
+    switches default ON; the ensemble switch defaults OFF (opt-in). The comparison
+    list is Optional so an empty list means "no comparisons" without a
+    required-field error; the default is the current value.
     """
     return vol.Schema(
         {
@@ -251,6 +255,9 @@ def _options_schema(
             ): _bool_selector(),
             vol.Required(
                 CONF_QUANTILES_ENABLED, default=quantiles_enabled
+            ): _bool_selector(),
+            vol.Required(
+                CONF_ENSEMBLE_ENABLED, default=ensemble_enabled
             ): _bool_selector(),
             vol.Optional(
                 CONF_COMPARISON_SENSORS,
@@ -443,6 +450,12 @@ class BalconySolarForecastOptionsFlow(OptionsFlow):
                         CONF_QUANTILES_ENABLED, DEFAULT_QUANTILES_ENABLED
                     )
                 ),
+                # v0.16 ensemble-band kill switch (SPEC §6, default OFF/opt-in).
+                CONF_ENSEMBLE_ENABLED: bool(
+                    user_input.get(
+                        CONF_ENSEMBLE_ENABLED, DEFAULT_ENSEMBLE_ENABLED
+                    )
+                ),
                 CONF_COMPARISON_SENSORS: [
                     c.to_dict()
                     for c in ComparisonConfig.list_from_options(
@@ -463,6 +476,7 @@ class BalconySolarForecastOptionsFlow(OptionsFlow):
                 slow_learner_enabled=defaults["slow_learner_enabled"],
                 day_ahead_bias_enabled=defaults["day_ahead_bias_enabled"],
                 quantiles_enabled=defaults["quantiles_enabled"],
+                ensemble_enabled=defaults["ensemble_enabled"],
                 comparison_sensors=defaults["comparison_sensors"],
             ),
         )
@@ -552,6 +566,9 @@ def _current_values(
         ),
         "quantiles_enabled": _bool_default(
             CONF_QUANTILES_ENABLED, DEFAULT_QUANTILES_ENABLED
+        ),
+        "ensemble_enabled": _bool_default(
+            CONF_ENSEMBLE_ENABLED, DEFAULT_ENSEMBLE_ENABLED
         ),
         "comparison_sensors": _comparison_default(),
     }

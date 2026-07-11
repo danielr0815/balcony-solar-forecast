@@ -73,6 +73,7 @@ from .const import (
     ATTR_WH_PERIOD_P50,
     ATTR_WH_PERIOD_P90,
     CONF_COMPARISON_SENSORS,
+    DATA_KEY_BAND_SOURCE,
     DATA_KEY_DRIFT_MAE,
     DATA_KEY_INTRADAY_SCALAR,
     DATA_KEY_LEARNER_STATUS,
@@ -990,6 +991,19 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
             total_wh += float(wh)
             seen = True
         return round(total_wh / 1000.0, 3) if seen else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose which source shaped today's band (v0.16, SPEC §6).
+
+        ``band_source`` summarises today's slots: "learned" (residual ring only),
+        "ensemble" (learned collapsed everywhere and the ensemble supplied the
+        whole spread — the cold-start win) or "envelope" (the ensemble widened at
+        least one slot over the learned band). Defaults to "learned" when the
+        ensemble is off or contributed nothing today.
+        """
+        data = self.coordinator.data or {}
+        return {"band_source": data.get(DATA_KEY_BAND_SOURCE, "learned")}
 
 
 # ---------------------------------------------------------------------------

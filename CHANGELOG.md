@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Ensemble-weather uncertainty bands** (opt-in, default OFF; SPEC §6.1). When
+  enabled, today's Open-Meteo ensemble spread (`ensemble-api`, `icon_seamless`,
+  40 members) is folded into the learned P10/P90 bands by **envelope-max** — the
+  wider band wins per slot, never multiplied, so the climatological weather share
+  already inside the learned residuals is not double counted. Per-slot factors are
+  the 0.1/0.9 percentiles of `member_GHI / deterministic_GHI` (a documented
+  GHI-proportionality approximation — no per-member engine pass). The ensemble is
+  **never load-bearing**: P50, the headline, the scoreboard and the kill-gate are
+  untouched, and any fetch failure/absence degrades seamlessly to the learned
+  bands (its absence is not a degradation rung). Fetched on its own ~3 h cadence,
+  cached in memory only (no store-schema change). A new `band_source` attribute on
+  the P10/P90 sensors reports whether today's band came from `learned`, `envelope`
+  or the cold-start `ensemble` win; diagnostics gain an ensemble block.
+
 ## [0.15.0] - 2026-07-11
 
 ### Added

@@ -342,6 +342,49 @@ Offline-Job auf dem Dev-Rechner — füllt Bias-/Quantilspeicher vor dem
 ersten Live-Winter. Verbindlichkeit: **Pflicht zu versuchen, kein
 Blocker** — das System muss ohne diese API voll funktionieren.
 
+### 6.1 Ensemble-Wetter-Unsicherheitsbänder (v0.16, optional, Standard AUS)
+
+Die gelernten P10/P50/P90 (§14.2) kommen aus dem Residuenring je (Wolkenklasse ×
+Tagesabschnitt): pro Wetterklasse **im Mittel** gut kalibriert, aber **blind für
+die spezifische Unsicherheit von HEUTE**. Die Open-Meteo-**Ensemble-API**
+(`ensemble-api.open-meteo.com/v1/ensemble`, Modell `icon_seamless`, 40 Mitglieder
+= Kontrollmember unter dem nackten `shortwave_radiation`-Schlüssel + 39 gestörte
+`…_memberNN`, 72 Stundenstempel bei `forecast_days=3`) liefert gestörte Läufe,
+deren Streuung **die heutige Wetterunsicherheit IST**.
+
+**Formel (v1, bewusst approximiert).** Pro Stunde bildet der Parser aus jedem
+Member-GHI und dem deterministischen GHI (dem Stundenmittel der aktuellen
+`WeatherSeries`, gleich verschlüsselt — Stundenstempel markieren das Intervallende,
+also −1 h auf den Intervallstart) den **relativen** Faktor
+`f_m = clamp(GHI_member / GHI_det, 0…3)`; `(f10, f90)` sind die Typ-7-Perzentile
+0,1/0,9 dieser Faktoren. Das ist eine **per-Slot-RELATIVspreizung, KEIN voller
+Engine-Durchlauf je Member** — die Beam/Diffus-Rekomposition je Member ist
+zweitrangig und wird bewusst weggelassen (die Ensemble-Streuung liefert die FORM
+der Unsicherheit, nicht eine absolute Kurve). Ehrlich benannte Näherung: der
+GHI-Faktor wird auf das DC-Leistungsband angewandt, als skaliere Leistung linear
+mit GHI — nur in erster Ordnung wahr (Temperatur, IAM, Beam/Diffus-Split biegen es).
+
+**Fusion per ENVELOPE-MAX (nie multipliziert).** Pro Slot gewinnt das breitere
+Band: `p10 = min(gelernt.p10, f10)`, `p90 = max(gelernt.p90, f90)`, `p50` bleibt
+der gelernte Median. **Warum nicht multiplizieren:** der gelernte Residuenring
+enthält den Wetterfehler der Klasse bereits — ein Produkt würde den Wetteranteil
+**doppelt zählen**; die Hüllkurve addiert nur die zusätzliche Spreizung, die das
+Ensemble HEUTE über die Klimatologie hinaus sieht. **Cold-Start-Gewinn:** ist das
+gelernte Band noch die neutrale Identität (alle 1,0), liefert das Ensemble die
+ganze Spreizung um p50 = 1,0 — echte Wetterstreuung, bevor der Ring Evidenz hat.
+(Die Dispersions-Kalibrierung — die Ensemble-Spreizung vor der Fusion mit einem
+gelernten Reliabilitätsfaktor zu skalieren — bleibt ein dokumentierter Zukunftspfad.)
+
+**Nie tragend.** P50/Headline/Scoreboard/Kill-Gate bleiben **unberührt**; jeder
+Ausfall/jede Abwesenheit degradiert **nahtlos** auf die gelernten Bänder. Das
+Ensemble wird **nur im Speicher** gecacht (nicht persistiert, kein Store-Schema-
+Bump), auf eigener ~3-h-Kadenz gefetcht (Ensembles aktualisieren ~6-stündlich),
+und ist ein **Opt-in-Schalter, Standard AUS**. Eine Stunde mit < 10 nutzbaren
+Membern oder deterministischem GHI < 20 W/m² fällt auf das gelernte Band zurück.
+Ein `band_source`-Attribut auf den P10/P90-Sensoren fasst die heutigen Slots
+zusammen: `learned` (nur Ring), `envelope` (Ensemble hat irgendwo geweitet) oder
+`ensemble` (gelernt überall kollabiert, Ensemble lieferte die ganze Spreizung).
+
 ## 7. Degradationsleiter (nie still!)
 
 frische Prognose → Last-Good-Cache (Store, konfigurierbare Altersgrenze)
@@ -350,7 +393,9 @@ frische Prognose → Last-Good-Cache (Store, konfigurierbare Altersgrenze)
 hat seinen eigenen Staleness-Pfad). Jede Stufe sichtbar (binary_sensor
 „degraded" bzw. Repair-Issue). Die Sensoren gehen ehrlich auf
 `unavailable`, statt stille Altwerte zu halten (Lehre aus dem
-Fossibot-Verhalten).
+Fossibot-Verhalten). Das **Ensemble-Wetter** (§6.1) ist **keine Stufe dieser
+Leiter**: sein Fehlen weitet nur die Bänder nicht und ist nie ein
+Degradationsgrund — die Kurve läuft unverändert auf den gelernten Bändern weiter.
 
 ## 8. Schnittstellen für Konsumenten (Standard-HA, keine Kopplung)
 

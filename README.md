@@ -60,6 +60,9 @@ Nachträglich lassen sich über **Konfigurieren** (Optionen) anpassen:
 - die **Lernschalter** (schneller Bias-Lerner, langsamer Shademap-Lerner,
   Day-ahead-Bias),
 - die **Quantilbänder** (P10/P50/P90) an- oder abschalten,
+- die **Ensemble-Wetter-Unsicherheitsbänder** (Opt-in, Standard AUS) — weiten die
+  P10/P90-Bänder per Envelope-Max mit der heutigen Open-Meteo-Ensemble-Streuung,
+  ohne P50, Headline oder Scoreboard je zu berühren,
 - die **Vergleichssensoren** für das Skill-Scoreboard.
 
 **Strukturelle** Änderungen am Site-Objekt (Ebenen, Horizonte, WR-Gruppen,
