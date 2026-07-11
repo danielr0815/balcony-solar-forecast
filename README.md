@@ -5,7 +5,7 @@ Balkonkraftwerke mit mehreren Modulausrichtungen, starker
 Standortverschattung (Gelände, Bäume, Gebäude) und Mikrowechselrichtern
 mit Port-genauen Messwerten.
 
-**Status: v0.16.0** — selbstlernende PV-Prognose im Betrieb: Physik-Motor mit
+**Status: v0.16.1** — selbstlernende PV-Prognose im Betrieb: Physik-Motor mit
 lokaler Transposition, zwei Lernschichten (Intraday-Bias + Shademap),
 Drift-Überwachung, P10/P50/P90-Quantilbänder und ein Skill-Scoreboard.
 Versionshistorie in [CHANGELOG.md](CHANGELOG.md), vollständige Spezifikation in
