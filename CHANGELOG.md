@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Power-history card: day/week navigation + an archived forecast line for past
+  days.** The bundled power-history card gains a header `◀ [label] ▶` to step the
+  selected day (Today / Yesterday / the date; ▶ disabled at today) and a
+  **Day | Week** toggle. The **week view** charts seven stacked day-bars of daily
+  production per module from `period: "day"` mean statistics (mean W × 24 h). For
+  **past days** the dashed line is no longer the live curve but the forecast **as
+  it was issued** that day, read from the store's 90-day issued ring via a new
+  read-only action, `balcony_solar_forecast.get_issued_forecast`
+  (`SupportsResponse.ONLY`) — the frozen ~01:30 day-ahead stand with no hindsight,
+  so "issued vs. measured" stays an honest comparison; a day with no archived
+  snapshot returns `available: false` and the card draws no line (with a small
+  hint). The 5-min auto-refresh and day-roll handling apply only while viewing the
+  live window (today / current week); a past view is static. The selection is
+  card-local and never persisted. See SPEC §15.4 and docs/DASHBOARD.md §4c.
+- **Shade-profile card: confidence visualisation + a card-local comparison
+  date.** Each sun-path dot is now *sized* by the learned evidence behind its τ:
+  the sensor gains a per-sample `sample_n` attribute (the pooled shademap-bin
+  sample count, summed over the read pool via a new shared
+  `shademap.pooled_bin_n` helper so it can never diverge from the applied τ), and
+  the bundled card renders `n=0` as a small hollow ring and `n>0` as a filled dot
+  that grows to full size at `N_SAT` (12) samples (the hover readout adds
+  `· n=<count>`). The card also gains a header **"Compare"** date picker that
+  overlays a second date's sun path as a dashed line with hollow τ rings (its
+  shade horizon omitted for readability), a legend naming both dates, and a
+  crosshair readout that appends the comparison's shading at the same azimuth.
+  The overlay is fed by a new read-only action,
+  `balcony_solar_forecast.get_shade_profile` (`SupportsResponse.ONLY`), which
+  returns the diagram's curve arrays for any module/date (defaulting to the
+  current selection) without mutating the live selection or evicting the diagram
+  memo. `sample_n` is excluded from the recorder like the other curve arrays.
+  See SPEC §15 and docs/DASHBOARD.md §4b.
+
 ## [0.14.1] - 2026-07-11
 
 ### Fixed

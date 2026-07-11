@@ -15,6 +15,7 @@ from homeassistant.core import HomeAssistant, callback
 from .const import (
     ATTR_SP_AZIMUTH,
     ATTR_SP_HORIZON_AZIMUTH,
+    ATTR_SP_SAMPLE_N,
     ATTR_SP_SHADE_HORIZON,
     ATTR_SP_STATIC_HORIZON,
     ATTR_SP_SUN_ELEVATION,
@@ -42,6 +43,7 @@ def exclude_attributes(hass: HomeAssistant) -> set[str]:
         ATTR_SP_SUN_ELEVATION,
         ATTR_SP_TRANSMITTANCE,
         ATTR_SP_TRANSMITTANCE_INDIVIDUAL,
+        ATTR_SP_SAMPLE_N,
         ATTR_SP_HORIZON_AZIMUTH,
         ATTR_SP_STATIC_HORIZON,
         ATTR_SP_SHADE_HORIZON,

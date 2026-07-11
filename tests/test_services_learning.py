@@ -12,6 +12,7 @@ skipped on the plain-core path.
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import pytest
 
@@ -559,3 +560,244 @@ def test_suggest_shade_groups_unsupported_coordinator_raises():
     hass = _FakeHass({"e1": _Bare()})
     with pytest.raises(ServiceValidationError):
         svc._handle_suggest_shade_groups(hass, _Call({}))
+
+
+# --------------------------------------------------------------------------
+# get_shade_profile handler (SPEC §15): read-only module/date profile for the
+# card's comparison-date overlay. Defaults module/date to the coordinator's
+# current selection; NEVER mutates that selection.
+# --------------------------------------------------------------------------
+
+
+class _ShadeProfileCoordinator:
+    """Fake coordinator exposing the shade-profile diagram read surface."""
+
+    def __init__(self, *, names, module, day, profile=None):
+        self._names = list(names)
+        # Stored privately so the test can prove the handler never writes them.
+        self._module = module
+        self._day = day
+        self._profile = profile
+        self.calls: list[tuple[str, date]] = []
+
+    @property
+    def shade_profile_module(self):
+        return self._module
+
+    @property
+    def shade_profile_date(self):
+        return self._day
+
+    def shade_profile_plane_names(self):
+        return list(self._names)
+
+    def build_shade_profile_for(self, module, day):
+        self.calls.append((module, day))
+        if self._profile is not None:
+            return self._profile
+        return {
+            "module": module,
+            "date": day.isoformat(),
+            "sample_count": 2,
+            "sample_n": [0, 5],
+            "transmittance": [1.0, 0.6],
+        }
+
+
+def test_get_shade_profile_defaults_to_current_selection():
+    coord = _ShadeProfileCoordinator(
+        names=["M1", "M2"], module="M2", day=date(2026, 6, 21)
+    )
+    hass = _FakeHass({"e1": coord})
+    resp = svc._handle_get_shade_profile(hass, _Call({}))
+    # Built for the coordinator's CURRENT module + date (nothing supplied).
+    assert coord.calls == [("M2", date(2026, 6, 21))]
+    result = resp["result"]
+    assert result["module"] == "M2"
+    assert result["date"] == "2026-06-21"
+    # The response carries the per-sample evidence array (confidence viz).
+    assert result["sample_n"] == [0, 5]
+    # Read-only: the live selection is untouched.
+    assert coord.shade_profile_module == "M2"
+    assert coord.shade_profile_date == date(2026, 6, 21)
+
+
+def test_get_shade_profile_explicit_module_and_date():
+    coord = _ShadeProfileCoordinator(
+        names=["M1", "M2"], module="M2", day=date(2026, 6, 21)
+    )
+    hass = _FakeHass({"e1": coord})
+    resp = svc._handle_get_shade_profile(
+        hass, _Call({"module": "M1", "date": "2026-12-21"})
+    )
+    assert coord.calls == [("M1", date(2026, 12, 21))]
+    assert resp["result"]["module"] == "M1"
+    # Explicit query still does not mutate the coordinator's selection.
+    assert coord.shade_profile_module == "M2"
+    assert coord.shade_profile_date == date(2026, 6, 21)
+
+
+def test_get_shade_profile_bad_date_raises_and_builds_nothing():
+    coord = _ShadeProfileCoordinator(
+        names=["M1"], module="M1", day=date(2026, 6, 21)
+    )
+    hass = _FakeHass({"e1": coord})
+    with pytest.raises(ServiceValidationError):
+        svc._handle_get_shade_profile(hass, _Call({"date": "31.12.2026"}))
+    assert coord.calls == []
+
+
+def test_get_shade_profile_bad_module_lists_valid_names():
+    coord = _ShadeProfileCoordinator(
+        names=["M1", "M2"], module="M1", day=date(2026, 6, 21)
+    )
+    hass = _FakeHass({"e1": coord})
+    with pytest.raises(ServiceValidationError) as excinfo:
+        svc._handle_get_shade_profile(hass, _Call({"module": "M9"}))
+    msg = str(excinfo.value)
+    assert "M1" in msg and "M2" in msg
+    assert coord.calls == []
+
+
+def test_get_shade_profile_unsupported_coordinator_raises():
+    class _Bare:
+        pass
+
+    hass = _FakeHass({"e1": _Bare()})
+    with pytest.raises(ServiceValidationError):
+        svc._handle_get_shade_profile(hass, _Call({}))
+
+
+# --------------------------------------------------------------------------
+# get_issued_forecast handler (SPEC §15.4): read-only ISSUED day-ahead curve
+# from the store's 90-day ring for the power-history card's past-day line.
+# Found → curves sliced to the local day (same helper the nightly scorer uses);
+# missing → available:false (NOT an error); bad date → ServiceValidationError.
+# --------------------------------------------------------------------------
+
+
+class _IssuedStore:
+    """Minimal store stand-in exposing the issued ring's read accessor."""
+
+    def __init__(self, ring):
+        self._ring = dict(ring)  # {iso_date: snapshot dict}
+
+    def get_issued(self, iso_date):
+        return self._ring.get(iso_date)
+
+
+class _IssuedCoordinator:
+    """Fake coordinator carrying just the ``_store`` the handler reads."""
+
+    def __init__(self, ring):
+        self._store = _IssuedStore(ring)
+
+
+def _issued_snapshot():
+    """A v2 IssuedSnapshot spanning two local days (curves need re-slicing)."""
+    from balcony_solar_forecast.core.types import IssuedSnapshot
+
+    return IssuedSnapshot(
+        issued_at="2026-06-21T01:30:00+00:00",
+        status="fresh",
+        # Hours across 2026-06-20 and 2026-06-21 (UTC keys); the handler must
+        # keep only the requested local day's hours.
+        corrected_hourly_wh={
+            "2026-06-20T10:00:00+00:00": 111.1111,
+            "2026-06-21T09:00:00+00:00": 222.2222,
+            "2026-06-21T10:00:00+00:00": 333.33339,
+        },
+        raw_hourly_wh={
+            "2026-06-20T10:00:00+00:00": 100.0,
+            "2026-06-21T09:00:00+00:00": 200.0,
+            "2026-06-21T10:00:00+00:00": 300.0,
+        },
+    )
+
+
+def test_get_issued_forecast_found_slices_to_local_day():
+    from balcony_solar_forecast._glue_util import (
+        _filter_hourly_to_local_day,
+        _round3,
+    )
+
+    snap = _issued_snapshot()
+    iso = "2026-06-21"
+    coord = _IssuedCoordinator({iso: snap.to_dict()})
+    hass = _FakeHass({"e1": coord})
+    resp = svc._handle_get_issued_forecast(hass, _Call({"date": iso}))
+    result = resp["result"]
+    assert result["available"] is True
+    assert result["date"] == iso
+    assert result["issued_at"] == snap.issued_at
+    # hourly_wh == corrected curve sliced to the local day by the SAME helper the
+    # drift monitor uses, then rounded like the store (round to 3).
+    expected = {
+        k: _round3(v)
+        for k, v in _filter_hourly_to_local_day(
+            snap.corrected_hourly_wh, iso
+        ).items()
+    }
+    assert result["hourly_wh"] == expected
+    # The 2026-06-20 hour is dropped; only the requested day survives.
+    assert set(result["hourly_wh"]) == {
+        "2026-06-21T09:00:00+00:00",
+        "2026-06-21T10:00:00+00:00",
+    }
+    expected_raw = {
+        k: _round3(v)
+        for k, v in _filter_hourly_to_local_day(snap.raw_hourly_wh, iso).items()
+    }
+    assert result["raw_hourly_wh"] == expected_raw
+
+
+def test_get_issued_forecast_rounds_like_the_store():
+    snap = _issued_snapshot()
+    iso = "2026-06-21"
+    coord = _IssuedCoordinator({iso: snap.to_dict()})
+    hass = _FakeHass({"e1": coord})
+    resp = svc._handle_get_issued_forecast(hass, _Call({"date": iso}))
+    # 333.33339 → rounded to 3 decimals.
+    assert resp["result"]["hourly_wh"]["2026-06-21T10:00:00+00:00"] == 333.333
+
+
+def test_get_issued_forecast_missing_day_is_available_false():
+    coord = _IssuedCoordinator({})  # empty ring
+    hass = _FakeHass({"e1": coord})
+    resp = svc._handle_get_issued_forecast(
+        hass, _Call({"date": "2026-06-21"})
+    )
+    assert resp == {"result": {"date": "2026-06-21", "available": False}}
+
+
+def test_get_issued_forecast_bad_date_raises():
+    coord = _IssuedCoordinator({})
+    hass = _FakeHass({"e1": coord})
+    with pytest.raises(ServiceValidationError):
+        svc._handle_get_issued_forecast(hass, _Call({"date": "31.12.2026"}))
+
+
+def test_get_issued_forecast_corrected_falls_back_to_raw():
+    from balcony_solar_forecast.core.types import IssuedSnapshot
+
+    iso = "2026-06-21"
+    snap = IssuedSnapshot(
+        issued_at="2026-06-21T01:30:00+00:00",
+        status="fresh",
+        corrected_hourly_wh={},  # slow layer inactive → no corrected curve
+        raw_hourly_wh={"2026-06-21T10:00:00+00:00": 300.0},
+    )
+    coord = _IssuedCoordinator({iso: snap.to_dict()})
+    hass = _FakeHass({"e1": coord})
+    resp = svc._handle_get_issued_forecast(hass, _Call({"date": iso}))
+    # hourly_wh falls back to the raw curve (exactly the nightly scorer's rule).
+    assert resp["result"]["hourly_wh"] == {"2026-06-21T10:00:00+00:00": 300.0}
+
+
+def test_get_issued_forecast_unsupported_coordinator_raises():
+    class _Bare:
+        pass
+
+    hass = _FakeHass({"e1": _Bare()})
+    with pytest.raises(ServiceValidationError):
+        svc._handle_get_issued_forecast(hass, _Call({"date": "2026-06-21"}))

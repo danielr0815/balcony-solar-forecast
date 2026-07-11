@@ -39,6 +39,8 @@
     "dump_shademap": "mdi:map",
     "rollback_learners": "mdi:history",
     "install_dashboard": "mdi:view-dashboard",
-    "suggest_shade_groups": "mdi:group"
+    "suggest_shade_groups": "mdi:group",
+    "get_shade_profile": "mdi:chart-bell-curve",
+    "get_issued_forecast": "mdi:history"
   }
 }

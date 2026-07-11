@@ -671,7 +671,11 @@ Tageslicht-Sample der Sonnenbahn) — `transmittance` ist die **gepoolte**
 effektive τ; parallel dazu trägt `transmittance_individual` (v0.13) die τ des
 **eigenen** Kanals des Moduls allein, sodass der Betreiber die Einzel- gegen die
 Gruppensicht vergleichen kann (leere Liste bei ungruppierter Ebene, dann
-== gepoolte Sicht — formstabil) — und
+== gepoolte Sicht — formstabil); zusätzlich `sample_n` (v0.15) — je Sample die
+**gepoolte Shademap-Bin-Evidenz** (Sample-Zahl n) hinter der effektiven τ,
+0 = nur statischer Prior, aus derselben Read-Pool-Menge wie die τ summiert
+(`shademap.pooled_bin_n`, kann so nie von der gezeigten Transmittanz abweichen);
+die Karte skaliert jeden Punkt danach (Confidence-Visualisierung) — und
 `horizon_azimuth`/`static_horizon`/`shade_horizon` (Horizontlinien auf einem
 Azimut-Raster über die Tageslicht-Spanne). Zusammenfassung:
 `shaded_fraction`, `mean_transmittance`, `has_learned_data`/`learned_bins`
@@ -737,7 +741,25 @@ des Heute-Sensors); ein **Hover-Panel** zeigt je Stunde die Werte je Modul plus
 Gesamt und Prognose. Die Modulkanäle werden über die
 `sources`/`source_names`-Attribute von `measured_dc_power_total`
 **auto-discovered** (keine YAML-Konfiguration der Kanäle nötig); die Karte
-aktualisiert sich alle **5 min**.
+aktualisiert sich alle **5 min** — aber nur in der Live-Ansicht (Heute /
+aktuelle Woche); eine Vergangenheits-Ansicht ist statisch und wird nicht
+nachgeladen.
+
+Seit v0.15 bietet die Karte (karten-lokale, nicht persistierte) **Tages-/
+Wochennavigation**: eine Kopfzeile `◀ [Label] ▶` blättert den gewählten Tag
+(Heute / Gestern / lokales Datum; ▶ deaktiviert am heutigen Tag), ein
+**Tag|Woche**-Umschalter zeigt eine **Wochenansicht** mit sieben gestapelten
+Tagesbalken der Tagesproduktion je Modul (aus `period: "day"`-Mittelwert-
+statistiken, Mittel-W × 24 h = Tages-Wh; das Fenster endet am gewählten Tag und
+springt in 7-Tages-Schritten). Für **vergangene Tage** zeigt die gestrichelte
+Linie im Tagesmodus die Prognose **wie ausgegeben** aus dem 90-Tage-Ausgabe-Ring
+— gelesen über die schreibgeschützte Aktion `get_issued_forecast` (SPEC §9).
+Wichtig gegen Leakage: das ist der **eingefrorene ~01:30-Stand ohne Rückschau**
+(nie aus dem heutigen gelernten Zustand nachgerechnet), sodass ein direkter
+Vergleich „ausgegeben vs. gemessen" ehrlich bleibt; fehlt ein archivierter
+Snapshot, entfällt die Linie mit dezentem Hinweis. Die **Wochenansicht zeichnet
+bewusst keine Prognoselinie** (Mischung aus ausgegebener Vergangenheits- und
+Live-Heute-Kurve wäre irreführend).
 
 Seit v0.9 fixiert die Karte ihre x-Achse auf die **jahresstabile**
 Tageslicht-Azimutspanne (Minimum/Maximum aus beiden Sonnenwenden, Python-seitig
@@ -747,6 +769,23 @@ bleibt statt saisonal umzuskalieren. Zusätzlich zeigt ein **Hover-Cursor** (SVG
 Overlay über der Plot-Fläche, per Maus/Touch) am nächstgelegenen Bahn-Sample ein
 Fadenkreuz plus eine feste Ablese-Zeile mit Uhrzeit, Azimut samt Himmelsrichtung,
 Verschattung in % (τ) und Elevation.
+
+Seit v0.15 bietet die Karte zwei weitere Komforts. **Confidence:** jeder
+Bahn-Punkt wird nach `sample_n` skaliert — n=0 (nur statischer Prior) als kleiner
+**hohler** Ring in der τ-Farbe, n>0 als gefüllter Punkt, dessen Radius mit der
+Evidenz bis zur Sättigung bei `N_SAT` (12) Samples wächst; die Ablese-Zeile
+ergänzt `· n=<x>`. **Vergleichsdatum:** ein **karten-lokaler** Datumswähler
+(„Vergleich“, per × löschbar; ändert NIE die geteilte Datums-Entität) blendet
+eine ZWEITE Sonnenbahn desselben Moduls für ein anderes Datum als gestrichelte
+Linie mit hohlen τ-Ringen ein (deren Verschattungshorizont wird bewusst NICHT
+gezeichnet), mit Legendenzeile „── <Primärdatum>  - - <Vergleichsdatum>“; die
+Ablese-Zeile hängt das azimut-nächste Vergleichssample an
+(`· vs <Datum>: <%> (τ …)`). Die Vergleichsdaten liefert die neue, rein lesende
+Aktion `balcony_solar_forecast.get_shade_profile` (`SupportsResponse.ONLY`): sie
+berechnet das Profil für ein Modul/Datum (Vorgaben = aktuelle Diagrammauswahl)
+über `coordinator.build_shade_profile_for`, OHNE die Live-Auswahl zu ändern oder
+den Ein-Slot-Memo zu verdrängen (Ad-hoc-Abfrage, uncached). Die Karte ruft sie
+über das stabile Low-Level-Websocket-`call_service` mit `return_response` auf.
 
 ### 15.5 Dashboard-Installation per Aktion (Ein-Klick)
 

@@ -35,6 +35,7 @@ Frozen public contract (7 implementers depend on these exact signatures):
     update_bin(state, *, channel, sun_az, sun_el, doy, measured_t) -> ShademapState
     effective_tau(state, *, channel, sun_az, sun_el, doy, static_prior) -> float
     effective_tau_pooled(state, *, channels, sun_az, sun_el, doy, static_prior) -> float
+    pooled_bin_n(state, *, channels, sun_az, sun_el, doy) -> int
 
 Extra pure helpers the engine / store / diagnostics call (all owned here):
 
@@ -77,6 +78,7 @@ __all__ = [
     "update_bin",
     "effective_tau",
     "effective_tau_pooled",
+    "pooled_bin_n",
     "beam_referenced_t",
     "apply_shademap_to_beam",
     "dump_polar_table",
@@ -421,6 +423,38 @@ def effective_tau(
     return _clamp_tau(blended)
 
 
+def _pool_contributions(
+    state: ShademapState, key: str, channels: tuple[str, ...]
+) -> list[tuple[int, float]]:
+    """Valid ``(n, tau)`` contributions for one bin key over several channels.
+
+    The shared read-time-pooling primitive behind BOTH :func:`effective_tau_pooled`
+    (n-weighted pooled tau) and :func:`pooled_bin_n` (pooled evidence count), so
+    the pooled transmittance and the pooled sample count can NEVER disagree on
+    which bins count. The SAME bin key is looked up in every listed channel;
+    validate-and-clamp ethos: a malformed bin (missing / non-numeric / non-finite
+    tau or n, or ``n <= 0`` — no evidence) is skipped, never raised, so a corrupt
+    state degrades gracefully rather than throwing.
+    """
+    contributions: list[tuple[int, float]] = []
+    for channel in channels:
+        bins = state.channels.get(channel)
+        if not bins:
+            continue
+        binv = bins.get(key)
+        if binv is None:
+            continue
+        try:
+            n = int(binv.n)
+            tau = float(binv.tau)
+        except (AttributeError, TypeError, ValueError):
+            continue  # malformed bin: skip, never raise
+        if n <= 0 or not math.isfinite(tau):
+            continue
+        contributions.append((n, tau))
+    return contributions
+
+
 def effective_tau_pooled(
     state: ShademapState,
     *,
@@ -449,26 +483,13 @@ def effective_tau_pooled(
     :func:`effective_tau` for that channel (the single found bin contributes its
     own tau verbatim, so no multiply/divide rounding creeps in). Validate-and-
     clamp ethos: a malformed bin (missing / non-numeric / non-finite tau or n) is
-    skipped, never raised; a corrupt state degrades to the static prior.
+    skipped, never raised; a corrupt state degrades to the static prior. The
+    pooled ``n_pool`` here equals :func:`pooled_bin_n` for the same arguments
+    (both read :func:`_pool_contributions`).
     """
     prior = _clamp_tau(static_prior)
     key = shademap_bin_key(sun_az, sun_el, doy)
-    contributions: list[tuple[int, float]] = []
-    for channel in channels:
-        bins = state.channels.get(channel)
-        if not bins:
-            continue
-        binv = bins.get(key)
-        if binv is None:
-            continue
-        try:
-            n = int(binv.n)
-            tau = float(binv.tau)
-        except (AttributeError, TypeError, ValueError):
-            continue  # malformed bin: skip, never raise
-        if n <= 0 or not math.isfinite(tau):
-            continue
-        contributions.append((n, tau))
+    contributions = _pool_contributions(state, key, channels)
     if not contributions:
         return prior
     n_pool = sum(n for n, _ in contributions)
@@ -485,6 +506,30 @@ def effective_tau_pooled(
         return prior
     blended = w * tau_pool + (1.0 - w) * prior
     return _clamp_tau(blended)
+
+
+def pooled_bin_n(
+    state: ShademapState,
+    *,
+    channels: tuple[str, ...],
+    sun_az: float,
+    sun_el: float,
+    doy: int,
+) -> int:
+    """READ-TIME pooled sample count over several channels/one bin (SPEC §5).
+
+    The learned EVIDENCE behind :func:`effective_tau_pooled`: the SAME bin key is
+    looked up in every listed channel and the found bins' ``n`` are summed — the
+    pooled count that drives the shrinkage weight ``w = n_pool / (n_pool + K)``.
+    Returns 0 when no channel has the bin (empty pool, all channels
+    missing/unvisited, or only the static prior applies). Skips a malformed /
+    evidence-free bin exactly as :func:`effective_tau_pooled` does (both read
+    :func:`_pool_contributions`), so the recorded evidence and the applied tau can
+    never diverge. With a single channel this is that channel's own bin ``n``
+    (or 0). Never raises.
+    """
+    key = shademap_bin_key(sun_az, sun_el, doy)
+    return sum(n for n, _ in _pool_contributions(state, key, channels))
 
 
 def apply_shademap_to_beam(beam_w: float, *, tau: float) -> float:

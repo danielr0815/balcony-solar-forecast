@@ -163,6 +163,38 @@
           "description": "Mindestanzahl gemeinsam gelernter Sonnenstands-Bins, die zwei Ebenen aufweisen müssen, bevor ihre Ähnlichkeit als Beleg zählt; darunter gilt das Paar als unzureichend und wird nicht gruppiert."
         }
       }
+    },
+    "get_shade_profile": {
+      "name": "Verschattungsprofil abrufen",
+      "description": "Liefert die Sonnenbahn- und Verschattungs-Kurvenarrays für ein Modul an einem lokalen Datum, ohne die aktive Diagrammauswahl zu ändern. Wird vom Vergleichsdatum-Overlay der Verschattungsprofil-Karte genutzt.",
+      "fields": {
+        "entry_id": {
+          "name": "Konfigurationseintrag",
+          "description": "Ziel-Konfigurationseintrag. Nur weglassen, wenn genau eine Anlage konfiguriert ist."
+        },
+        "module": {
+          "name": "Modul",
+          "description": "Das zu profilierende Modul/die Ebene. Leer lassen, um das aktuell gewählte Modul des Diagramms zu verwenden."
+        },
+        "date": {
+          "name": "Datum",
+          "description": "Das darzustellende lokale Datum im ISO-Format JJJJ-MM-TT. Leer lassen, um das aktuell gewählte Datum des Diagramms zu verwenden."
+        }
+      }
+    },
+    "get_issued_forecast": {
+      "name": "Ausgegebene Prognose abrufen",
+      "description": "Liefert die Day-Ahead-Prognose so, wie sie für ein vergangenes lokales Datum ausgegeben wurde, aus dem 90-Tage-Ausgabe-Ring (der eingefrorene Stand, ohne Rückschau). Wird von der gestrichelten Prognoselinie der Power-History-Karte für vergangene Tage genutzt.",
+      "fields": {
+        "entry_id": {
+          "name": "Konfigurationseintrag",
+          "description": "Ziel-Konfigurationseintrag. Nur weglassen, wenn genau eine Anlage konfiguriert ist."
+        },
+        "date": {
+          "name": "Datum",
+          "description": "Das lokale Datum, dessen ausgegebene Prognose geliefert werden soll, im ISO-Format JJJJ-MM-TT."
+        }
+      }
     }
   },
   "config": {

@@ -506,6 +506,8 @@ SERVICE_DUMP_SHADEMAP = "dump_shademap"         # polar-table diagnostic export
 SERVICE_ROLLBACK_LEARNERS = "rollback_learners"  # restore learner state from the ring
 SERVICE_INSTALL_DASHBOARD = "install_dashboard"  # write the observability dashboard
 SERVICE_SUGGEST_SHADE_GROUPS = "suggest_shade_groups"  # data-driven shade-group suggestion
+SERVICE_GET_SHADE_PROFILE = "get_shade_profile"  # read-only shade profile for a module/date (card compare)
+SERVICE_GET_ISSUED_FORECAST = "get_issued_forecast"  # read-only issued day-ahead curve for a past date (card)
 
 # --- Bootstrap JSON schema (SPEC §6; scripts/backfill.py <-> store) ---------
 # The import service validates + clamps and REJECTS unknown schema versions.
@@ -763,6 +765,10 @@ ATTR_SP_TRANSMITTANCE = "transmittance"     # [0..1] effective beam tau per samp
 # against the pooled group view to decide groupings. Empty list when the module
 # is ungrouped (== the pooled view), so the attribute stays shape-stable.
 ATTR_SP_TRANSMITTANCE_INDIVIDUAL = "transmittance_individual"
+# Pooled shademap-bin sample count per sun-path sample (0 = static prior only):
+# the learned evidence behind that sample's effective tau, summed over the read
+# pool's channels (SPEC §5). The card sizes each dot by it (confidence viz).
+ATTR_SP_SAMPLE_N = "sample_n"
 ATTR_SP_TIME = "time"                       # [local ISO] time per sample
 ATTR_SP_HORIZON_AZIMUTH = "horizon_azimuth"  # [deg] azimuth grid for the horizon lines
 ATTR_SP_SHADE_HORIZON = "shade_horizon"     # [deg] learned shade horizon per grid azimuth

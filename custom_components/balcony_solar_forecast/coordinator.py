@@ -596,26 +596,56 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         cache = self._shade_profile_cache
         if cache is not None and cache[0] == key:
             return cache[1]
+        result = self._compute_shade_profile(module, plane, day, slow_active)
+        self._shade_profile_cache = (key, result)
+        return result
+
+    def build_shade_profile_for(self, module: str, day: date) -> dict[str, Any]:
+        """Sun-path + learned-shade profile for an EXPLICIT module/date pair.
+
+        The on-demand analysis path behind the ``get_shade_profile`` service (the
+        card's comparison-date overlay): the SAME pure compute + read-time pool
+        map as :meth:`build_shade_profile`, but for a module/date the operator
+        asks for WITHOUT changing the coordinator's current selection. Computed
+        UNCACHED — the primary diagram memo (:attr:`_shade_profile_cache`) is a
+        single slot, so an ad-hoc comparison query must never evict the live
+        selection's entry. Returns an empty dict when ``module`` is not a
+        configured plane. Never raises.
+        """
+        plane = self._site.plane_by_name(module)
+        if plane is None:
+            return {}
+        self._load_learner_states()
+        return self._compute_shade_profile(module, plane, day, self._slow_active())
+
+    def _compute_shade_profile(
+        self, module: str, plane: Any, day: date, slow_active: bool
+    ) -> dict[str, Any]:
+        """Pure (unmemoised) shade-profile compute for one module/date/plane.
+
+        Shared by :meth:`build_shade_profile` (memoised, current selection) and
+        :meth:`build_shade_profile_for` (uncached, ad-hoc query) so the two can
+        never diverge. The learned shademap is blended in only when the slow
+        learner is active (``slow_active``, computed by the caller); otherwise an
+        empty state yields the static-only shading the forecast applies. Storage
+        is per plane: the module's OWN channel is its name; the read POOL adds its
+        group siblings (+ any legacy group channel), so the main curve is the
+        pooled tau the forecast applies and the individual channel rides along as
+        a comparison view (SPEC §5).
+        """
         shademap = self._shademap_state if slow_active else ShademapState()
-        # Storage is per plane: the module's OWN channel is its name; the read
-        # POOL adds its group siblings (+ any legacy group channel). The diagram
-        # renders the pooled tau as the main curve (what the forecast applies) and
-        # the module's individual channel as a comparison view (SPEC §5).
-        channel = module
         pool = self._build_shade_pool_map(shademap).get(module, (module,))
         tz = dt_util.get_time_zone(self.hass.config.time_zone) or UTC
-        result = shadeprofile_mod.compute_shade_profile(
+        return shadeprofile_mod.compute_shade_profile(
             plane=plane,
             shademap=shademap,
-            channel=channel,
+            channel=module,
             pool=pool,
             latitude=self._site.latitude,
             longitude=self._site.longitude,
             day=day,
             tz=tz,
         )
-        self._shade_profile_cache = (key, result)
-        return result
 
     def _site_signature(self) -> str:
         """Stable lat/lon + plane-name digest (mirrors backfill.site_signature).

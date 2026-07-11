@@ -47,6 +47,7 @@ from ..const import (
     ATTR_SP_AXIS_AZ_MIN,
     ATTR_SP_AZIMUTH,
     ATTR_SP_HORIZON_AZIMUTH,
+    ATTR_SP_SAMPLE_N,
     ATTR_SP_SHADE_HORIZON,
     ATTR_SP_STATIC_HORIZON,
     ATTR_SP_SUN_ELEVATION,
@@ -292,6 +293,7 @@ def _empty_profile(
         ATTR_SP_SUN_ELEVATION: [],
         ATTR_SP_TRANSMITTANCE: [],
         ATTR_SP_TRANSMITTANCE_INDIVIDUAL: [],
+        ATTR_SP_SAMPLE_N: [],
         ATTR_SP_HORIZON_AZIMUTH: [],
         ATTR_SP_STATIC_HORIZON: [],
         ATTR_SP_SHADE_HORIZON: [],
@@ -359,6 +361,12 @@ def compute_shade_profile(
     azimuths: list[float] = []
     elevations: list[float] = []
     taus: list[float] = []
+    # Pooled shademap-bin evidence (n) behind each MAIN-curve sample: the learned
+    # sample count summed over the read pool at the sample's sun position (0 when
+    # only the static prior applies). Same length as the sun-path arrays; the card
+    # sizes each dot by it (confidence viz). Uses the SAME read pool as the tau, so
+    # it can never disagree with the shown transmittance (shademap.pooled_bin_n).
+    sample_ns: list[int] = []
     # The plane's OWN-channel curve, only when a wider pool is in play (else it
     # stays [] so the attribute is shape-stable — the group view IS the single).
     taus_individual: list[float] = []
@@ -383,6 +391,12 @@ def compute_shade_profile(
         azimuths.append(round(az, 2))
         elevations.append(round(el, 2))
         taus.append(round(tau, 3))
+        # Pooled evidence n behind this sample's tau (0 = static prior only).
+        sample_ns.append(
+            shademap_mod.pooled_bin_n(
+                shademap, channels=read_pool, sun_az=az, sun_el=el, doy=doy
+            )
+        )
         if pooled:
             # Comparison curve = this plane's own channel only (single-channel).
             tau_own = effective_tau_at(
@@ -464,6 +478,7 @@ def compute_shade_profile(
         ATTR_SP_SUN_ELEVATION: elevations,
         ATTR_SP_TRANSMITTANCE: taus,
         ATTR_SP_TRANSMITTANCE_INDIVIDUAL: taus_individual,
+        ATTR_SP_SAMPLE_N: sample_ns,
         ATTR_SP_HORIZON_AZIMUTH: horizon_az,
         ATTR_SP_STATIC_HORIZON: static_horizon,
         ATTR_SP_SHADE_HORIZON: shade_horizon,

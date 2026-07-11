@@ -425,6 +425,83 @@ def test_effective_tau_wall_bin_can_reach_full_occlusion():
 
 
 # ---------------------------------------------------------------------------
+# pooled_bin_n: read-time pooled EVIDENCE count (confidence viz, SPEC §5)
+# ---------------------------------------------------------------------------
+
+
+def test_pooled_bin_n_sums_channels_at_the_bin():
+    key = S.shademap_bin_key(150.0, 40.0, DOY_SPRING)
+    st = ShademapState(channels={
+        "A": {key: ShademapBin(tau=0.3, n=5)},
+        "B": {key: ShademapBin(tau=0.9, n=7)},
+    })
+    # Both channels have the bin -> pooled n is their sum.
+    assert S.pooled_bin_n(
+        st, channels=("A", "B"), sun_az=150.0, sun_el=40.0, doy=DOY_SPRING
+    ) == 12
+    # A single channel -> that channel's own bin n.
+    assert S.pooled_bin_n(
+        st, channels=("A",), sun_az=150.0, sun_el=40.0, doy=DOY_SPRING
+    ) == 5
+
+
+def test_pooled_bin_n_zero_when_no_evidence():
+    key = S.shademap_bin_key(150.0, 40.0, DOY_SPRING)
+    st = ShademapState(channels={"A": {key: ShademapBin(tau=0.3, n=5)}})
+    # An unvisited sun position -> no bin anywhere -> 0.
+    assert S.pooled_bin_n(
+        st, channels=("A",), sun_az=10.0, sun_el=5.0, doy=DOY_SPRING
+    ) == 0
+    # An absent / empty channel contributes nothing.
+    assert S.pooled_bin_n(
+        st, channels=("Z",), sun_az=150.0, sun_el=40.0, doy=DOY_SPRING
+    ) == 0
+    assert S.pooled_bin_n(
+        ShademapState(), channels=("A",), sun_az=150.0, sun_el=40.0,
+        doy=DOY_SPRING,
+    ) == 0
+
+
+def test_pooled_bin_n_skips_malformed_like_effective_tau_pooled():
+    # A malformed bin (non-finite tau) / an n<=0 bin is evidence-free: skipped by
+    # BOTH pooled_bin_n and effective_tau_pooled (they share _pool_contributions).
+    key = S.shademap_bin_key(150.0, 40.0, DOY_SPRING)
+    st = ShademapState(channels={
+        "A": {key: ShademapBin(tau=0.3, n=5)},
+        "B": {key: ShademapBin(tau=float("nan"), n=9)},  # non-finite -> skipped
+        "C": {key: ShademapBin(tau=0.7, n=0)},            # no evidence -> skipped
+    })
+    assert S.pooled_bin_n(
+        st, channels=("A", "B", "C"), sun_az=150.0, sun_el=40.0, doy=DOY_SPRING
+    ) == 5
+
+
+def test_pooled_bin_n_parity_with_effective_tau_pooled():
+    # The pooled n reported here is EXACTLY the n_pool effective_tau_pooled blends
+    # with (both read _pool_contributions): reconstruct the pooled shrinkage blend
+    # by hand from pooled_bin_n and assert it matches effective_tau_pooled.
+    key = S.shademap_bin_key(150.0, 40.0, DOY_SPRING)
+    ta, na, tb, nb = 0.3, 5, 0.9, 7
+    st = ShademapState(channels={
+        "A": {key: ShademapBin(tau=ta, n=na)},
+        "B": {key: ShademapBin(tau=tb, n=nb)},
+    })
+    prior = 0.8
+    n_pool = S.pooled_bin_n(
+        st, channels=("A", "B"), sun_az=150.0, sun_el=40.0, doy=DOY_SPRING
+    )
+    assert n_pool == na + nb
+    tau_pool = (na * ta + nb * tb) / (na + nb)
+    w = n_pool / (n_pool + SHADEMAP_SHRINKAGE_K)
+    expected = w * tau_pool + (1 - w) * prior
+    got = S.effective_tau_pooled(
+        st, channels=("A", "B"), sun_az=150.0, sun_el=40.0, doy=DOY_SPRING,
+        static_prior=prior,
+    )
+    assert got == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
 # apply_shademap_to_beam
 # ---------------------------------------------------------------------------
 

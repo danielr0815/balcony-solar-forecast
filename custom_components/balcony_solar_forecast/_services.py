@@ -1,6 +1,21 @@
 """Integration-wide services: ``get_forecast``, ``import_bootstrap``,
-``dump_shademap``, ``rollback_learners``, ``install_dashboard`` and
-``suggest_shade_groups``.
+``dump_shademap``, ``rollback_learners``, ``install_dashboard``,
+``suggest_shade_groups``, ``get_shade_profile`` and ``get_issued_forecast``.
+
+  * ``get_issued_forecast`` (SPEC §15.4, ``SupportsResponse.ONLY``): return the
+    forecast AS IT WAS ISSUED for one past LOCAL date, read straight from the
+    store's 90-day issued ring — the read-only source behind the power-history
+    card's dashed forecast line on PAST days. It never recomputes from today's
+    learned state (no hindsight); a date with no archived snapshot yields
+    ``available: False`` (the card draws no line) rather than an error.
+
+  * ``get_shade_profile`` (SPEC §15, ``SupportsResponse.ONLY``): compute the
+    sun-path + learned-shade profile for a given module/date WITHOUT changing the
+    coordinator's live diagram selection — the read-only source behind the
+    shade-profile card's comparison-date overlay. Defaults module/date to the
+    coordinator's current selection; the compute (``build_shade_profile_for``)
+    reuses the same pure geometry + read-time pool as the live diagram but bypasses
+    the single-slot memo so an ad-hoc query never evicts the primary entry.
 
   * ``suggest_shade_groups`` (SPEC §5, ``SupportsResponse.ONLY``): compare every
     plane's individually-learned shademap channel bin-wise and return a
@@ -51,6 +66,7 @@ an empty dump, never an unhandled traceback.
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any
 
 import voluptuous as vol
@@ -77,6 +93,8 @@ from .const import (
     SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX,
     SERVICE_DUMP_SHADEMAP,
     SERVICE_GET_FORECAST,
+    SERVICE_GET_ISSUED_FORECAST,
+    SERVICE_GET_SHADE_PROFILE,
     SERVICE_IMPORT_BOOTSTRAP,
     SERVICE_INSTALL_DASHBOARD,
     SERVICE_ROLLBACK_LEARNERS,
@@ -97,6 +115,8 @@ ATTR_DASHBOARD = "dashboard"
 ATTR_OVERWRITE = "overwrite"
 ATTR_MAX_DIFF = "max_diff"
 ATTR_MIN_COMMON_BINS = "min_common_bins"
+ATTR_MODULE = "module"
+ATTR_DATE = "date"
 
 # The default UI dashboard URL the operator is told to create (must contain a
 # hyphen — Home Assistant rejects single-word storage-dashboard url_paths).
@@ -129,6 +149,25 @@ SUGGEST_SHADE_GROUPS_SCHEMA = vol.Schema(
 )
 
 GET_FORECAST_SCHEMA = vol.Schema({vol.Optional(ATTR_ENTRY_ID): str})
+
+GET_SHADE_PROFILE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_ENTRY_ID): str,
+        # Module/plane to profile; defaults to the coordinator's current pick.
+        vol.Optional(ATTR_MODULE): str,
+        # Local date (ISO YYYY-MM-DD); defaults to the coordinator's current pick.
+        vol.Optional(ATTR_DATE): str,
+    }
+)
+
+GET_ISSUED_FORECAST_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_ENTRY_ID): str,
+        # Local date (ISO YYYY-MM-DD) whose ISSUED day-ahead curve to return;
+        # required (there is no meaningful default — the card always names a day).
+        vol.Required(ATTR_DATE): str,
+    }
+)
 
 ROLLBACK_LEARNERS_SCHEMA = vol.Schema(
     {
@@ -240,6 +279,32 @@ def async_register_services(hass: HomeAssistant) -> None:
             SERVICE_SUGGEST_SHADE_GROUPS,
             _suggest_shade_groups,
             schema=SUGGEST_SHADE_GROUPS_SCHEMA,
+            supports_response=SupportsResponse.ONLY,
+        )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_GET_SHADE_PROFILE):
+
+        async def _get_shade_profile(call: ServiceCall) -> ServiceResponse:
+            return _handle_get_shade_profile(hass, call)
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_GET_SHADE_PROFILE,
+            _get_shade_profile,
+            schema=GET_SHADE_PROFILE_SCHEMA,
+            supports_response=SupportsResponse.ONLY,
+        )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_GET_ISSUED_FORECAST):
+
+        async def _get_issued_forecast(call: ServiceCall) -> ServiceResponse:
+            return _handle_get_issued_forecast(hass, call)
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_GET_ISSUED_FORECAST,
+            _get_issued_forecast,
+            schema=GET_ISSUED_FORECAST_SCHEMA,
             supports_response=SupportsResponse.ONLY,
         )
 
@@ -605,6 +670,138 @@ def _handle_suggest_shade_groups(
     # response is directly comparable against the suggestion.
     result["current_groups"] = {plane.name: plane.shade_channel for plane in planes}
     return {"result": result}
+
+
+# ---------------------------------------------------------------------------
+# get_shade_profile
+# ---------------------------------------------------------------------------
+
+
+def _handle_get_shade_profile(
+    hass: HomeAssistant, call: ServiceCall
+) -> ServiceResponse:
+    """Return the sun-path + learned-shade profile for a module/date, read-only.
+
+    The on-demand analysis behind the shade-profile card's comparison-date
+    overlay (SPEC §15): resolve the single target coordinator, default ``module``
+    to its current shade-profile selection and ``date`` to its current selected
+    date, validate the module against the site's plane names, and compute the
+    profile via ``build_shade_profile_for`` WITHOUT mutating the coordinator's
+    live selection (an ad-hoc query must not evict the primary diagram memo). The
+    response is the same parallel-array + summary dict the sensor exposes (incl.
+    ``sample_n``), under ``result``.
+    """
+    coordinator = _resolve_single_coordinator(hass, call.data.get(ATTR_ENTRY_ID))
+    builder = getattr(coordinator, "build_shade_profile_for", None)
+    names_getter = getattr(coordinator, "shade_profile_plane_names", None)
+    if not callable(builder) or not callable(names_getter):
+        raise ServiceValidationError(
+            "This installation does not support the shade-profile diagram."
+        )
+
+    names = list(names_getter())
+    # module: default to the coordinator's current selection (always valid).
+    module = call.data.get(ATTR_MODULE)
+    if module is None:
+        module = coordinator.shade_profile_module
+    if module not in names:
+        valid = ", ".join(names) or "(none)"
+        raise ServiceValidationError(
+            f"Unknown module '{module}'. Valid modules: {valid}."
+        )
+
+    # date: default to the coordinator's current selection; ISO-parse otherwise,
+    # surfacing garbage as a clear ServiceValidationError (never a traceback).
+    raw_date = call.data.get(ATTR_DATE)
+    if raw_date is None:
+        day = coordinator.shade_profile_date
+    else:
+        try:
+            day = date.fromisoformat(str(raw_date))
+        except (ValueError, TypeError) as err:
+            raise ServiceValidationError(
+                f"Invalid date '{raw_date}'; expected ISO format YYYY-MM-DD."
+            ) from err
+
+    return {"result": builder(module, day)}
+
+
+# ---------------------------------------------------------------------------
+# get_issued_forecast
+# ---------------------------------------------------------------------------
+
+
+def _handle_get_issued_forecast(
+    hass: HomeAssistant, call: ServiceCall
+) -> ServiceResponse:
+    """Return the ISSUED day-ahead forecast curve for one past LOCAL date.
+
+    The read-only source behind the power-history card's dashed forecast line for
+    PAST days (part 2b): the card can only reconstruct today's line from the live
+    ``wh_period`` attribute, so a historical day reads back the forecast AS IT WAS
+    ISSUED from the store's 90-day issued ring — the frozen ~01:30 day-ahead stand,
+    with NO hindsight (this is the whole point: it must NOT be recomputed from
+    today's learned state).
+
+    Resolve the single target coordinator, ISO-parse ``date`` (garbage → a clear
+    ServiceValidationError, never a traceback), and look the snapshot up in the
+    ring by its LOCAL-date key (exactly how ``snapshot_issued`` records it). A date
+    with no snapshot is NOT an error — the card treats ``available: False`` as "no
+    archived forecast, draw no line". A hit slices BOTH curves to the requested
+    local day with :func:`_filter_hourly_to_local_day` — the SAME helper the drift
+    monitor / nightly scorer use — so the returned ``hourly_wh`` (the served, i.e.
+    corrected, curve; the raw physics curve rides along under ``raw_hourly_wh``) is
+    exactly the day the nightly job scored against measured actuals.
+    """
+    # Lazy imports: ``_glue_util`` pulls in ``.core.types`` (DriftState /
+    # ForecastResult), which would create an import cycle if done at module load —
+    # ``_services`` is imported from the package ``__init__`` before the coordinator
+    # concern-modules finish initialising. ``IssuedSnapshot`` is read straight from
+    # the ``.core.types`` submodule (not the ``.core`` package facade).
+    from ._glue_util import _filter_hourly_to_local_day, _round3
+    from .core.types import IssuedSnapshot
+
+    coordinator = _resolve_single_coordinator(hass, call.data.get(ATTR_ENTRY_ID))
+    store = getattr(coordinator, "_store", None)
+    getter = getattr(store, "get_issued", None)
+    if not callable(getter):
+        raise ServiceValidationError(
+            "This installation does not support issued-forecast lookup."
+        )
+
+    raw_date = call.data[ATTR_DATE]
+    try:
+        day = date.fromisoformat(str(raw_date))
+    except (ValueError, TypeError) as err:
+        raise ServiceValidationError(
+            f"Invalid date '{raw_date}'; expected ISO format YYYY-MM-DD."
+        ) from err
+    iso = day.isoformat()
+
+    stored = getter(iso)
+    if stored is None:
+        # Missing day: not an error — the card draws no forecast line.
+        return {"result": {"date": iso, "available": False}}
+
+    snap = IssuedSnapshot.from_dict(stored)
+    # corrected == the ISSUED (served) curve; fall back to raw exactly like the
+    # nightly scorer (``snap.corrected_hourly_wh or snap.raw_hourly_wh``). Both are
+    # re-sliced to the local day so a legacy full-horizon v1 entry is trimmed too.
+    corrected = _filter_hourly_to_local_day(
+        snap.corrected_hourly_wh or snap.raw_hourly_wh, iso
+    )
+    raw = _filter_hourly_to_local_day(
+        snap.raw_hourly_wh or snap.corrected_hourly_wh, iso
+    )
+    return {
+        "result": {
+            "date": iso,
+            "available": True,
+            "issued_at": snap.issued_at,
+            "hourly_wh": {k: _round3(v) for k, v in corrected.items()},
+            "raw_hourly_wh": {k: _round3(v) for k, v in raw.items()},
+        }
+    }
 
 
 # ---------------------------------------------------------------------------

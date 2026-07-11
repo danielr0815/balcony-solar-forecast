@@ -314,6 +314,17 @@ def test_js_card_file_sanity():
     # The hover crosshair wires a mousemove handler over the plot overlay.
     assert "mousemove" in text, "card JS has no hover crosshair (mousemove)"
 
+    # Card-LOCAL comparison date (SPEC §15): a second sun path overlaid from the
+    # read-only get_shade_profile service. Assert the compare-date input marker,
+    # the two-locale "Compare" label, and the reliable service-call-with-response
+    # variant (the low-level websocket call_service with return_response).
+    assert "compare-input" in text, "card JS has no comparison date input"
+    for label in ("Compare", "Vergleich"):
+        assert f'"{label}"' in text, f"card JS is missing compare label {label!r}"
+    assert "get_shade_profile" in text, "card JS does not call get_shade_profile"
+    assert "return_response" in text, "card JS does not request a service response"
+    assert "call_service" in text, "card JS does not use the WS call_service command"
+
     # No external-URL ES imports (self-contained module).
     assert re.search(r'from\s+["\']https?:', text) is None
 
@@ -338,6 +349,19 @@ def test_power_history_js_card_sanity():
 
     # The hover crosshair wires a mousemove handler over the plot overlay.
     assert "mousemove" in text, "power-history card JS has no mousemove hover"
+
+    # Day/Week navigation (part 2b): the ◀/▶ nav glyphs, the Day|Week toggle
+    # labels in both locales, and the week view's daily-statistics marker.
+    assert "◀" in text and "▶" in text, "power-history card JS has no nav arrows"
+    for label in ("Day", "Week", "Tag", "Woche"):
+        assert f'"{label}"' in text, f"power-history card JS missing toggle label {label!r}"
+    assert 'period: "day"' in text, "power-history card JS has no week (daily) statistics query"
+
+    # Past-day dashed line = the ISSUED archived forecast, read via the read-only
+    # get_issued_forecast action (the stable low-level websocket variant).
+    assert "get_issued_forecast" in text, "power-history card JS does not call get_issued_forecast"
+    assert "call_service" in text, "power-history card JS does not use the WS call_service command"
+    assert "return_response" in text, "power-history card JS does not request a service response"
 
     # Self-contained module: no external-URL ES imports, and it must NOT pull in
     # the sibling shade-profile card (each card stays independent).

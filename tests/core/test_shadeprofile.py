@@ -23,6 +23,7 @@ import pytest
 from balcony_solar_forecast.const import (
     ATTR_SP_AXIS_AZ_MAX,
     ATTR_SP_AXIS_AZ_MIN,
+    ATTR_SP_SAMPLE_N,
     ATTR_SP_TRANSMITTANCE_INDIVIDUAL,
     SHADE_PROFILE_TAU_THRESHOLD,
 )
@@ -381,6 +382,98 @@ def test_empty_profile_carries_individual_key():
     )
     assert p["sample_count"] == 0
     assert p[ATTR_SP_TRANSMITTANCE_INDIVIDUAL] == []
+
+
+# ---------------------------------------------------------------------------
+# Confidence evidence: per-sample pooled shademap-bin sample count (sample_n)
+# ---------------------------------------------------------------------------
+
+
+def test_sample_n_zero_on_prior_only_clear_plane():
+    # An empty shademap: every sample rides the static prior alone -> n = 0.
+    p = _profile(_south_wall_plane())
+    n = p["sample_count"]
+    assert len(p[ATTR_SP_SAMPLE_N]) == n
+    assert all(isinstance(x, int) for x in p[ATTR_SP_SAMPLE_N])
+    assert all(x == 0 for x in p[ATTR_SP_SAMPLE_N])
+
+
+def test_sample_n_empty_branch_shape():
+    # Polar night -> empty profile, sample_n present as an empty list (parallel
+    # to the other per-sample arrays).
+    plane = PlaneConfig(name="P", azimuth_deg=180.0, tilt_deg=90.0, wp=400.0)
+    p = shadeprofile.compute_shade_profile(
+        plane=plane,
+        shademap=ShademapState(),
+        channel="P",
+        latitude=80.0,
+        longitude=0.0,
+        day=WINTER,
+        tz=UTC,
+    )
+    assert p["sample_count"] == 0
+    assert p[ATTR_SP_SAMPLE_N] == []
+
+
+def test_sample_n_single_channel_is_own_bin_evidence():
+    # Darken exactly the noon bin with a known repeat count; that sample's
+    # sample_n is the channel's own bin n (single-channel, unpooled).
+    plane = _south_wall_plane()
+    clear = _profile(plane)
+    idx = clear["sun_elevation"].index(clear["max_elevation"])
+    noon_az = clear["azimuth"][idx]
+    noon_el = clear["sun_elevation"][idx]
+    doy = clear["doy"]
+
+    state = _seed_dark_bin(
+        plane, sun_az=noon_az, sun_el=noon_el, doy=doy, repeats=8
+    )
+    dark = _profile(plane, state)
+    assert len(dark[ATTR_SP_SAMPLE_N]) == dark["sample_count"]
+    # The noon sample carries the 8 seeded samples; only the darkened bin holds
+    # evidence, so every nonzero sample is exactly 8 (a few adjacent 5-min
+    # samples can share the coarse 5°x2.5° noon bin), the rest stay 0.
+    assert dark[ATTR_SP_SAMPLE_N][idx] == 8
+    assert all(x in (0, 8) for x in dark[ATTR_SP_SAMPLE_N])
+    assert any(x == 8 for x in dark[ATTR_SP_SAMPLE_N])
+
+
+def test_sample_n_is_pooled_two_channel_sum_and_matches_helper():
+    # A grouped plane: the MAIN curve pools its own channel with a sibling, so the
+    # per-sample sample_n is the POOLED evidence (exact two-channel sum) and equals
+    # shademap.pooled_bin_n for the same read pool at every sample.
+    plane = _south_wall_plane()
+    clear = _profile(plane)
+    idx = clear["sun_elevation"].index(clear["max_elevation"])
+    noon_az = clear["azimuth"][idx]
+    noon_el = clear["sun_elevation"][idx]
+    doy = clear["doy"]
+
+    state = ShademapState()
+    for _ in range(5):
+        state = shademap_mod.update_bin(
+            state, channel=plane.name, sun_az=noon_az, sun_el=noon_el, doy=doy,
+            measured_t=0.6,
+        )
+    for _ in range(7):
+        state = shademap_mod.update_bin(
+            state, channel="sibling", sun_az=noon_az, sun_el=noon_el, doy=doy,
+            measured_t=0.0,
+        )
+    pool = (plane.name, "sibling")
+    p = _pooled_profile(plane, state, pool)
+
+    n = p["sample_count"]
+    assert len(p[ATTR_SP_SAMPLE_N]) == n
+    # At noon: pooled evidence is the exact sum of the two channels' bin n.
+    assert p[ATTR_SP_SAMPLE_N][idx] == 12
+    # Every sample equals the shared read-time pooling helper for the read pool.
+    for az, el, sn in zip(
+        p["azimuth"], p["sun_elevation"], p[ATTR_SP_SAMPLE_N], strict=True
+    ):
+        assert sn == shademap_mod.pooled_bin_n(
+            state, channels=pool, sun_az=az, sun_el=el, doy=doy
+        )
 
 
 # ---------------------------------------------------------------------------
