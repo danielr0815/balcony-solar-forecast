@@ -64,6 +64,23 @@ SLOW learner can train the beam-referenced transmittance
 clamp is applied to the TOTAL, then split back proportionally so the reported
 beam/diffuse watts already respect the clamp.
 
+AC-side served curve (Phase 1, AC-side forecast)
+------------------------------------------------
+On top of the DC pipeline the engine additionally derives the served AC as a
+deterministic physical transform (``electrical.clamp_groups_ac``): per inverter
+group AC = min(eta_inv * factor * sum(DC_unclamped), ac_limit), clipping the DC
+at ac_limit/eta_inv (where the micro-inverter's AC clamp back-drives the MPP).
+This is emitted as the additive ``ac_watts`` / ``ac_hourly_wh`` /
+``ac_daily_kwh`` fields.
+
+Phase 1 keeps the served DC path byte-identical (``total_watts`` / ``hourly_wh``
+/ ``daily_kwh`` and every per-plane / band series are unchanged, so the
+self-learning, scoreboard and kill-gate stay the DC truth); AC is an ADDITIONAL
+physically-correct curve fed the corrected UNCLAMPED DC so the corrected clip
+point ac_limit/eta_inv is reflected only in the AC curve. A later phase may move
+the served DC clip point to ac_limit/eta_inv once the DC-learner impact is
+assessed. This is the safe incremental choice — flagged for review.
+
 Aggregation: the clamped site total (raw and corrected) is integrated to
 hourly Wh (keyed by ISO-8601 UTC hour) and daily kWh (keyed by ISO date in the
 ``tz`` calendar, UTC by default). The per-plane, per-slot beam_watts /
@@ -505,11 +522,17 @@ def compute_forecast(
     raw_daily_kwh: dict[str, float] = {}
     hourly_wh: dict[str, float] = {}
     daily_kwh: dict[str, float] = {}
+    # AC-side served curve (Phase 1): the served DC run through each group's
+    # eta_inv + AC clamp. Additive to the DC path, aligned to slot_starts.
+    ac_watts: list[float] = []
+    ac_hourly_wh: dict[str, float] = {}
+    ac_daily_kwh: dict[str, float] = {}
 
     def _append_zero_slot() -> None:
         raw_total_watts.append(0.0)
         total_watts.append(0.0)
         corrected_unclamped_watts.append(0.0)
+        ac_watts.append(0.0)
         kc_series.append(0.0)
         # No production => no ungrouped contribution; the group ceiling is the
         # slot's ceiling (band watts are zero here anyway, so this only keeps the
@@ -698,6 +721,25 @@ def compute_forecast(
         hourly_wh[hkey] = hourly_wh.get(hkey, 0.0) + cor_wh
         daily_kwh[day_key] = daily_kwh.get(day_key, 0.0) + cor_wh / 1000.0
 
+        # --- AC-side served curve (Phase 1) ---------------------------------
+        # Physical DC->AC transform: per group AC = min(eta_inv * factor *
+        # sum(DC_unclamped), ac_limit), with the DC clip point at ac_limit/eta.
+        # Fed the corrected UNCLAMPED per-plane DC scaled by the fast-learner
+        # factor (NOT cor_clamped): only the unclamped DC lets the inverter's own
+        # AC clamp bite, so the corrected clip point ac_limit/eta_inv is reflected
+        # in the AC curve. The DC path above (cor_final / total_watts / hourly_wh /
+        # daily_kwh) is left byte-identical — it stays the learner/scoreboard truth
+        # (see module docstring: a later phase may move the served DC clip point).
+        ac_input = {
+            name: watts * factor for name, watts in cor_unclamped.items()
+        }
+        _, ac_by_plane = electrical.clamp_groups_ac(ac_input, groups)
+        ac_slot_total = sum(ac_by_plane.values())
+        ac_watts.append(ac_slot_total)
+        ac_wh = ac_slot_total * _SLOT_HOURS
+        ac_hourly_wh[hkey] = ac_hourly_wh.get(hkey, 0.0) + ac_wh
+        ac_daily_kwh[day_key] = ac_daily_kwh.get(day_key, 0.0) + ac_wh / 1000.0
+
     plane_results = tuple(
         PlaneResult(
             name=plane.name,
@@ -768,6 +810,9 @@ def compute_forecast(
         plane_results=plane_results,
         hourly_wh=hourly_wh,
         daily_kwh=daily_kwh,
+        ac_watts=tuple(ac_watts),
+        ac_hourly_wh=ac_hourly_wh,
+        ac_daily_kwh=ac_daily_kwh,
         raw_total_watts=tuple(raw_total_watts),
         raw_hourly_wh=raw_hourly_wh,
         raw_daily_kwh=raw_daily_kwh,

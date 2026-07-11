@@ -62,6 +62,9 @@ CONF_SITE = "site"  # single object holding the full editable site config
 # --- Config-flow keys (inside the site object) ---
 CONF_PLANES = "planes"
 CONF_GROUPS = "groups"
+# Site-level TOTAL-AC meter behind all inverters (the only whole-site AC that is
+# actually measured); the AC calibration target in a later phase. Optional.
+CONF_AC_ACTUAL_ENTITY = "ac_actual_entity"
 # plane fields
 CONF_PLANE_NAME = "name"
 CONF_AZIMUTH = "azimuth_deg"  # 0=N clockwise
@@ -83,6 +86,7 @@ CONF_HZ_TAU_BARE = "tau_bare"  # winter transmittance when seasonal
 CONF_GROUP_NAME = "name"
 CONF_GROUP_PLANES = "plane_names"  # plane names feeding this AC clamp
 CONF_GROUP_AC_LIMIT = "ac_limit_w"  # AC clamp, VA/W
+CONF_GROUP_INVERTER_EFFICIENCY = "inverter_efficiency"  # optional: per-group DC->AC efficiency
 
 # --- Physics constants (SPEC §4 physics musts) ---
 ALBEDO_DEFAULT = 0.2
@@ -106,6 +110,13 @@ ROSS_COEFF = 0.0342  # Tcell = Tamb + ROSS_COEFF * POA
 TEMP_COEFF_PER_K = -0.0034  # power derate per K above 25 C (-0.34 %/K)
 TEMP_REF_C = 25.0
 DEFAULT_EFFICIENCY = 0.96
+# DC->AC micro-inverter conversion efficiency (HMS-800W-2T-class CEC/EU weighted
+# efficiency). DISTINCT from DEFAULT_EFFICIENCY above, which is the DC-side
+# system loss folded into dc_power(): this one is the inverter's DC->AC stage,
+# applied by electrical.clamp_groups_ac AFTER the DC model, per inverter group.
+DEFAULT_INVERTER_EFFICIENCY = 0.965
+INVERTER_EFFICIENCY_MIN = 0.80  # sane floor for a configured/loaded eta_inv
+INVERTER_EFFICIENCY_MAX = 1.0   # a real converter never gains power
 
 # Seasonal foliage ramp (SPEC §13: cosine ramp over April / November).
 # Day-of-year anchors for the leafed (summer) plateau; outside is bare.
