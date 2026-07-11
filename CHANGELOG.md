@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-07-11
+
 ### Fixed
 - **`energy_production_today` headline no longer understated on AC-clamped,
   up-corrected slots.** The day-ahead headline strips the transient intraday
