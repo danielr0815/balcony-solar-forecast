@@ -345,3 +345,55 @@ def test_smoothness_no_discontinuity_at_noon():
             step = abs(az - prev)
             assert step < 5.0, f"azimuth jumped {step:.2f} deg near noon"
         prev = az
+
+
+# ---------------------------------------------------------------------------
+# hours_from_solar_noon (v0.19 — the day-ahead bias's DST-robust bin coordinate)
+# ---------------------------------------------------------------------------
+
+hours_from_solar_noon = _solpos.hours_from_solar_noon
+
+
+def test_hours_from_solar_noon_zero_at_solar_noon():
+    """~0 at the day's max-elevation instant (that IS solar noon)."""
+    _elev, _az, noon = _scan_solar_noon(2025, 6, 21)
+    assert hours_from_solar_noon(noon, LON) == pytest.approx(0.0, abs=0.02)
+
+
+def test_hours_from_solar_noon_advances_one_per_hour():
+    """The coordinate is solar time: +1.0 per wall-clock hour, monotone."""
+    prev = None
+    for h in range(4, 20):
+        v = hours_from_solar_noon(_utc(2026, 7, 12, h), LON)
+        if prev is not None:
+            assert (v - prev) == pytest.approx(1.0, abs=0.01)
+        prev = v
+
+
+def test_hours_from_solar_noon_symmetric_and_signed():
+    """Negative before noon (morning), positive after (afternoon), symmetric."""
+    _e, _a, noon = _scan_solar_noon(2025, 6, 21)
+    for dh in (2, 3, 4):
+        assert hours_from_solar_noon(
+            noon - timedelta(hours=dh), LON
+        ) == pytest.approx(-dh, abs=0.02)
+        assert hours_from_solar_noon(
+            noon + timedelta(hours=dh), LON
+        ) == pytest.approx(dh, abs=0.02)
+
+
+def test_hours_from_solar_noon_is_dst_agnostic():
+    """Depends only on the UTC instant + longitude — no wall clock, so the same
+    instant yields the same value in summer and winter and never raises on a
+    naive-time guard (mirrors sun_position)."""
+    assert isinstance(hours_from_solar_noon(_utc(2025, 12, 21, 11), LON), float)
+    with pytest.raises(ValueError):
+        hours_from_solar_noon(datetime(2025, 7, 1, 12, 0), LON)  # naive
+
+
+def test_hours_from_solar_noon_in_range():
+    """Result stays in (-12, +12] all day."""
+    base = _utc(2025, 6, 21)
+    for m in range(0, 24 * 60, 7):
+        v = hours_from_solar_noon(base + timedelta(minutes=m), LON)
+        assert -12.0 < v <= 12.0

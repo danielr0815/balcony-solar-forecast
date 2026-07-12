@@ -37,7 +37,6 @@ from .const import (
     COLLAPSE_MEASURED_MAX_FRAC,
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_RAW_HOURLY_WH,
-    DAY_PART_MIDDAY,
     DEFAULT_INVERTER_EFFICIENCY,
     DRIFT_LOSS_MARGIN,
     DRIFT_LOSS_MIN_ABS_WH,
@@ -670,26 +669,22 @@ def day_ahead_samples(
 
 
 def day_part_for_hourkey(coord, hkey: str) -> str | None:
-    """Local day part for an ISO-UTC hour key, via core/bias.day_part_for_hour."""
+    """SOLAR day part for an ISO-UTC hour key (core/bias.day_part_for_solar).
+
+    Bins by APPARENT SOLAR time (solpos.hours_from_solar_noon at the hour
+    START, longitude from the site), NOT the wall clock — so training uses the
+    SAME solar boundary the coordinator applies (v0.19). If the site longitude
+    is somehow unavailable, falls back to the legacy local-clock binning so
+    training still runs rather than dropping every sample.
+    """
     dt = dt_util.parse_datetime(hkey)
     if dt is None:
         return None
-    local_hour = dt_util.as_local(dt).hour
-    try:
-        return bias_mod.day_part_for_hour(local_hour)
-    except NotImplementedError:
-        # Fall back to the const boundaries directly so training still runs.
-        from .const import (
-            DAY_PART_AFTERNOON,
-            DAY_PART_AFTERNOON_START_HOUR,
-            DAY_PART_MORNING,
-            DAY_PART_MORNING_END_HOUR,
-        )
-        if local_hour < DAY_PART_MORNING_END_HOUR:
-            return DAY_PART_MORNING
-        if local_hour < DAY_PART_AFTERNOON_START_HOUR:
-            return DAY_PART_MIDDAY
-        return DAY_PART_AFTERNOON
+    lon = getattr(getattr(coord, "_site", None), "longitude", None)
+    if lon is not None:
+        hfn = solpos.hours_from_solar_noon(dt_util.as_utc(dt), lon)
+        return bias_mod.day_part_for_solar(hfn)
+    return bias_mod.day_part_for_hour(dt_util.as_local(dt).hour)
 
 
 def train_shademap(

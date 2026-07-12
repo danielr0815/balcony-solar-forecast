@@ -54,6 +54,7 @@ from custom_components.balcony_solar_forecast.coordinator import (  # noqa: E402
 )
 from custom_components.balcony_solar_forecast.core import LearnerHooks  # noqa: E402
 from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
+    BiasCell,
     BiasState,
     DriftState,
     ForecastResult,
@@ -403,6 +404,47 @@ def test_day_ahead_training_moves_theta_up_not_to_min():
         c._train_day_ahead("2026-07-01", issued, actuals)
     theta = c._bias_state.cells[BiasState.cell_key("clear", DAY_PART_MIDDAY)].theta
     assert theta > DAY_AHEAD_BIAS_MIN + 0.2
+
+
+async def test_async_reset_day_ahead_bias_clears_persists_and_refreshes():
+    """The reset service backend clears every cell, persists the empty state and
+    requests a recompute so the correction disappears at once (v0.19)."""
+    store = _FakeStore()
+    c = _make_coordinator(store)
+    c._bias_state = BiasState(
+        cells={
+            BiasState.cell_key("clear", DAY_PART_MIDDAY): BiasCell(
+                theta=0.6, covariance=1.0, n=8
+            ),
+            BiasState.cell_key("clear", DAY_PART_MORNING): BiasCell(
+                theta=1.4, covariance=1.0, n=8
+            ),
+        }
+    )
+    refreshed: list[bool] = []
+
+    async def _fake_refresh() -> None:
+        refreshed.append(True)
+
+    c.async_request_refresh = _fake_refresh  # type: ignore[method-assign]
+
+    result = await c.async_reset_day_ahead_bias()
+
+    assert result == {"cleared_cells": 2}
+    assert c._bias_state.cells == {}
+    assert store.get_bias_state().cells == {}  # persisted empty
+    assert refreshed == [True]  # recompute requested once
+
+
+async def test_async_reset_day_ahead_bias_empty_is_safe():
+    """Resetting an already-empty state clears nothing and never raises."""
+    c = _make_coordinator()
+
+    async def _fake_refresh() -> None:
+        return None
+
+    c.async_request_refresh = _fake_refresh  # type: ignore[method-assign]
+    assert await c.async_reset_day_ahead_bias() == {"cleared_cells": 0}
 
 
 def test_day_ahead_samples_filtered_to_training_day():

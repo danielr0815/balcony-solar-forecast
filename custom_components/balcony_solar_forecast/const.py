@@ -445,6 +445,22 @@ DAY_PART_AFTERNOON_START_HOUR = 14  # [14:00, dusk) local; [10,14) = midday
 # cells are the anchors; the application interpolates between them.
 DAY_PART_BLEND_HALFWIDTH_MIN = 45
 
+# SOLAR day-part boundaries (v0.19): the coordinator bins each slot by its
+# APPARENT SOLAR time (solpos.hours_from_solar_noon), NOT the wall clock, so a
+# boundary tracks the sun instead of sitting on a fixed local hour like 10:00.
+# This removes the DST/seasonal drift of the clock boundaries above (a cell
+# learned at "10:00" in summer used to land ~1 h off in solar terms in winter)
+# and anchors morning/midday/afternoon symmetrically around solar noon:
+#   midday   = |hours_from_solar_noon| <  MIDDAY_SOLAR_HALFWIDTH_H
+#   morning  =  hours_from_solar_noon  <= -MIDDAY_SOLAR_HALFWIDTH_H
+#   afternoon=  hours_from_solar_noon  >= +MIDDAY_SOLAR_HALFWIDTH_H
+# 2.0 h reproduces the old summer intent (~10:00 / ~14:00 CEST) without the
+# clock dependence. The blend half-width is expressed in SOLAR hours so the
+# smooth transition also tracks the sun. Cell KEYS are unchanged
+# (cloud_class|day_part), so no persistence migration and no quantile ripple.
+MIDDAY_SOLAR_HALFWIDTH_H = 2.0
+DAY_PART_SOLAR_BLEND_HALFWIDTH_H = 0.75  # 45 min, in solar hours
+
 # --- SLOW learner: shademap (SPEC §5, §13) ---------------------------------
 # Per measurement channel (module/plane name), per bin
 # (sun azimuth SHADEMAP_AZ_BIN_DEG x elevation SHADEMAP_EL_BIN_DEG x half-year
@@ -569,6 +585,7 @@ SERVICE_INSTALL_DASHBOARD = "install_dashboard"  # write the observability dashb
 SERVICE_SUGGEST_SHADE_GROUPS = "suggest_shade_groups"  # data-driven shade-group suggestion
 SERVICE_GET_SHADE_PROFILE = "get_shade_profile"  # read-only shade profile for a module/date (card compare)
 SERVICE_GET_ISSUED_FORECAST = "get_issued_forecast"  # read-only issued day-ahead curve for a past date (card)
+SERVICE_RESET_DAY_AHEAD_BIAS = "reset_day_ahead_bias"  # clear the day-ahead RLS bias cells (retrain from scratch)
 
 # --- Bootstrap JSON schema (SPEC §6; scripts/backfill.py <-> store) ---------
 # The import service validates + clamps and REJECTS unknown schema versions.
@@ -598,6 +615,7 @@ DATA_KEY_RAW_HOURLY_WH = "raw_hourly_wh"          # {iso_hour: Wh} pure physics
 DATA_KEY_CORRECTED_HOURLY_WH = "corrected_hourly_wh"  # {iso_hour: Wh} served curve
 DATA_KEY_INTRADAY_SCALAR = "intraday_scalar"      # current applied scalar
 DATA_KEY_LEARNER_STATUS = "learner_status"        # dict: enabled/frozen/disabled per layer
+DATA_KEY_BIAS_CELLS = "bias_cells"                # dict: {"class|part": {theta, n, applied}} day-ahead RLS cells
 DATA_KEY_DRIFT_MAE = "drift_mae"                  # dict: {raw, corrected, baseline, +slow when attributed} rolling MAE
 DATA_KEY_CORRECTION_SOURCE = "correction_source"  # one of CORRECTION_SOURCE_*
 

@@ -90,6 +90,7 @@ from ..const import (
     DAY_PART_MIDDAY,
     DAY_PART_MORNING,
     DAY_PART_MORNING_END_HOUR,
+    DAY_PART_SOLAR_BLEND_HALFWIDTH_H,
     FOG_CLOUD_LOW_PCT,
     FOG_MONTHS,
     FOG_VISIBILITY_M,
@@ -101,6 +102,7 @@ from ..const import (
     INTRADAY_SCALAR_MIN,
     INTRADAY_TAU_MINUTES,
     INTRADAY_TRAILING_WINDOW_MINUTES,
+    MIDDAY_SOLAR_HALFWIDTH_H,
     RLS_FORGETTING_FACTOR,
     RLS_INIT_COVARIANCE,
 )
@@ -114,7 +116,9 @@ __all__ = [
     "intraday_factor_at",
     "classify_cloud",
     "day_part_for_hour",
+    "day_part_for_solar",
     "day_ahead_factor",
+    "day_ahead_factor_solar",
     "train_day_ahead_bias",
     "apply_day_ahead_bias",
 ]
@@ -455,6 +459,73 @@ def day_part_for_hour(local_hour: int) -> str:
     if h < DAY_PART_AFTERNOON_START_HOUR:
         return DAY_PART_MIDDAY
     return DAY_PART_AFTERNOON
+
+
+def day_part_for_solar(hours_from_noon: float) -> str:
+    """Map APPARENT SOLAR time to a day part (v0.19, SPEC §5).
+
+    ``hours_from_noon`` is the signed solar time relative to solar noon
+    (``solpos.hours_from_solar_noon``): negative = morning, 0 = noon,
+    positive = afternoon. Midday brackets solar noon symmetrically by
+    ``MIDDAY_SOLAR_HALFWIDTH_H``; outside it is morning (before) / afternoon
+    (after). Unlike :func:`day_part_for_hour` this is anchored to the SUN, so
+    the boundary does not drift with DST or the season. Non-finite input
+    coerces to midday (neutral-ish) so a stray value never raises.
+    """
+    try:
+        h = float(hours_from_noon)
+    except (TypeError, ValueError):
+        return DAY_PART_MIDDAY
+    if not _is_finite(h):
+        return DAY_PART_MIDDAY
+    if h <= -MIDDAY_SOLAR_HALFWIDTH_H:
+        return DAY_PART_MORNING
+    if h >= MIDDAY_SOLAR_HALFWIDTH_H:
+        return DAY_PART_AFTERNOON
+    return DAY_PART_MIDDAY
+
+
+def day_ahead_factor_solar(
+    state: BiasState,
+    *,
+    cloud_class: str,
+    hours_from_noon: float,
+) -> float:
+    """Applied day-ahead bias for one slot, binned by SOLAR time — CONTINUOUS.
+
+    The solar-time analogue of :func:`day_ahead_factor`: the learned per-part
+    cells are the anchors, and within ``DAY_PART_SOLAR_BLEND_HALFWIDTH_H`` (in
+    SOLAR hours) either side of an internal boundary (at
+    ``-/+MIDDAY_SOLAR_HALFWIDTH_H`` from solar noon) the two adjacent parts'
+    factors are linearly blended by the slot's solar time, so the served
+    correction ramps continuously instead of stepping. Because the coordinate
+    is the sun's own hour angle (``solpos.hours_from_solar_noon``), the
+    boundary tracks solar noon rather than a fixed wall-clock hour — no DST or
+    seasonal drift, and the morning/afternoon split stays symmetric about noon.
+
+    Both blended cells use the SAME ``cloud_class``; a convex combination of two
+    in-band factors stays in the clamp band. Never raises.
+    """
+    try:
+        h = float(hours_from_noon)
+    except (TypeError, ValueError):
+        h = 0.0
+    if not _is_finite(h):
+        h = 0.0
+
+    half = DAY_PART_SOLAR_BLEND_HALFWIDTH_H
+    if half > 0.0:
+        for boundary, lo_part, hi_part in (
+            (-MIDDAY_SOLAR_HALFWIDTH_H, DAY_PART_MORNING, DAY_PART_MIDDAY),
+            (MIDDAY_SOLAR_HALFWIDTH_H, DAY_PART_MIDDAY, DAY_PART_AFTERNOON),
+        ):
+            if boundary - half <= h < boundary + half:
+                weight = (h - (boundary - half)) / (2.0 * half)
+                lo = state.get_bias(cloud_class, lo_part)
+                hi = state.get_bias(cloud_class, hi_part)
+                return (1.0 - weight) * lo + weight * hi
+
+    return state.get_bias(cloud_class, day_part_for_solar(h))
 
 
 def day_ahead_factor(

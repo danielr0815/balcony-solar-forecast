@@ -36,6 +36,7 @@ from balcony_solar_forecast.const import (
     INTRADAY_SCALAR_MAX,
     INTRADAY_SCALAR_MIN,
     INTRADAY_TAU_MINUTES,
+    MIDDAY_SOLAR_HALFWIDTH_H,
     RLS_MIN_SAMPLES,
 )
 from balcony_solar_forecast.core.bias import (
@@ -46,7 +47,9 @@ from balcony_solar_forecast.core.bias import (
     classify_cloud,
     compute_intraday_scalar,
     day_ahead_factor,
+    day_ahead_factor_solar,
     day_part_for_hour,
+    day_part_for_solar,
     train_day_ahead_bias,
 )
 from balcony_solar_forecast.core.types import BiasCell, BiasState
@@ -882,3 +885,89 @@ def test_day_ahead_factor_stays_in_band_and_never_raises():
     ) == pytest.approx(day_ahead_factor(
         state, cloud_class=CLOUD_CLASS_MIXED, local_hour=3, local_minute=0
     ))
+
+
+# ===========================================================================
+# day_part_for_solar / day_ahead_factor_solar (v0.19: SOLAR-time binning)
+# ===========================================================================
+
+
+def test_day_part_for_solar_boundaries():
+    # Morning is inclusive of the negative boundary, afternoon of the positive;
+    # the open interval in between is midday. Symmetric about solar noon (0).
+    hw = MIDDAY_SOLAR_HALFWIDTH_H
+    assert day_part_for_solar(-hw - 1.0) == DAY_PART_MORNING
+    assert day_part_for_solar(-hw) == DAY_PART_MORNING
+    assert day_part_for_solar(-hw + 0.01) == DAY_PART_MIDDAY
+    assert day_part_for_solar(0.0) == DAY_PART_MIDDAY
+    assert day_part_for_solar(hw - 0.01) == DAY_PART_MIDDAY
+    assert day_part_for_solar(hw) == DAY_PART_AFTERNOON
+    assert day_part_for_solar(hw + 1.0) == DAY_PART_AFTERNOON
+
+
+def test_day_part_for_solar_non_finite_safe():
+    # NaN / bad input coerces to midday (neutral-ish), never raises.
+    assert day_part_for_solar(float("nan")) == DAY_PART_MIDDAY
+    assert day_part_for_solar("nope") == DAY_PART_MIDDAY  # type: ignore[arg-type]
+
+
+def test_day_ahead_factor_solar_pure_away_from_boundaries():
+    # Well inside a solar day part -> exactly the pure per-part get_bias.
+    state = _trained_state()
+    assert day_ahead_factor_solar(
+        state, cloud_class=CLOUD_CLASS_MIXED, hours_from_noon=-4.0
+    ) == pytest.approx(1.3)
+    assert day_ahead_factor_solar(
+        state, cloud_class=CLOUD_CLASS_MIXED, hours_from_noon=0.0
+    ) == pytest.approx(0.8)
+    assert day_ahead_factor_solar(
+        state, cloud_class=CLOUD_CLASS_MIXED, hours_from_noon=4.0
+    ) == pytest.approx(1.0)
+
+
+def test_day_ahead_factor_solar_blends_50_50_at_the_boundary():
+    # Exactly at the morning/midday boundary (-halfwidth) -> mean of the two.
+    state = _trained_state()
+    assert day_ahead_factor_solar(
+        state, cloud_class=CLOUD_CLASS_MIXED,
+        hours_from_noon=-MIDDAY_SOLAR_HALFWIDTH_H,
+    ) == pytest.approx(0.5 * (1.3 + 0.8))
+    assert day_ahead_factor_solar(
+        state, cloud_class=CLOUD_CLASS_MIXED,
+        hours_from_noon=MIDDAY_SOLAR_HALFWIDTH_H,
+    ) == pytest.approx(0.5 * (0.8 + 1.0))
+
+
+def test_day_ahead_factor_solar_has_no_hard_step_across_the_boundary():
+    # Sampling densely across the morning->midday boundary, no adjacent pair
+    # jumps by more than a small ramp increment (the whole point of the blend).
+    state = _trained_state()
+    xs = [-MIDDAY_SOLAR_HALFWIDTH_H - 1.0 + 0.05 * i for i in range(0, 60)]
+    factors = [
+        day_ahead_factor_solar(
+            state, cloud_class=CLOUD_CLASS_MIXED, hours_from_noon=x
+        )
+        for x in xs
+    ]
+    steps = [abs(factors[i + 1] - factors[i]) for i in range(len(factors) - 1)]
+    assert max(steps) < 0.05
+    # Monotone decreasing across the morning(1.3)->midday(0.8) ramp.
+    assert factors == sorted(factors, reverse=True)
+
+
+def test_day_ahead_factor_solar_neutral_and_in_band():
+    # Unseen cloud class -> neutral everywhere; a trained blend stays in band.
+    state = _trained_state()
+    for h in (-4.0, -MIDDAY_SOLAR_HALFWIDTH_H, 0.0, MIDDAY_SOLAR_HALFWIDTH_H, 4.0):
+        assert day_ahead_factor_solar(
+            state, cloud_class=CLOUD_CLASS_FOG, hours_from_noon=h
+        ) == pytest.approx(DAY_AHEAD_BIAS_NEUTRAL)
+    for i in range(-120, 121):
+        f = day_ahead_factor_solar(
+            state, cloud_class=CLOUD_CLASS_MIXED, hours_from_noon=i / 10.0
+        )
+        assert DAY_AHEAD_BIAS_MIN - 1e-9 <= f <= DAY_AHEAD_BIAS_MAX + 1e-9
+    # Non-finite input coerces (treated as solar noon), never raises.
+    assert day_ahead_factor_solar(
+        state, cloud_class=CLOUD_CLASS_MIXED, hours_from_noon=float("nan")
+    ) == pytest.approx(0.8)

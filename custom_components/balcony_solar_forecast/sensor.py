@@ -74,6 +74,7 @@ from .const import (
     ATTR_WH_PERIOD_P90,
     CONF_COMPARISON_SENSORS,
     DATA_KEY_BAND_SOURCE,
+    DATA_KEY_BIAS_CELLS,
     DATA_KEY_DRIFT_MAE,
     DATA_KEY_INTRADAY_SCALAR,
     DATA_KEY_LEARNER_STATUS,
@@ -1008,6 +1009,25 @@ class LearnerStatusSensor(_DiagnosticSensor):
         if value in LEARNER_STATUS_VALUES:
             return value
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Expose the learned day-ahead RLS bias cells (v0.19).
+
+        Only the day-ahead layer carries them: the currently-applied
+        multiplier per (cloud_class, solar day_part) plus the raw ``theta`` and
+        trained-day count ``n``, so the operator can see the bias the forecast
+        is using (and spot a mis-trained cell like the midday one) directly in
+        the UI instead of only in a diagnostics download. The other layers add
+        no attributes.
+        """
+        if self._layer != LEARNER_LAYER_DAY_AHEAD:
+            return None
+        data = self.coordinator.data or {}
+        cells = data.get(DATA_KEY_BIAS_CELLS)
+        if not isinstance(cells, dict) or not cells:
+            return None
+        return {"bias_cells": cells}
 
 
 # ---------------------------------------------------------------------------
