@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from datetime import UTC, datetime
 
-__all__ = ["sun_position"]
+__all__ = ["sun_position", "hours_from_solar_noon"]
 
 
 # Julian Day Number of the Unix epoch (1970-01-01T00:00:00Z). NOAA / Meeus
@@ -154,6 +154,68 @@ def sun_position(dt_utc: datetime, lat: float, lon: float) -> tuple[float, float
             azimuth = (540.0 - az_from_south) % 360.0
 
     return azimuth, elevation_corrected
+
+
+def hours_from_solar_noon(dt_utc: datetime, lon: float) -> float:
+    """Signed hours of APPARENT SOLAR time from local solar noon.
+
+    Returns ``true_solar_time - 12h`` in hours: negative before solar noon
+    (morning), 0 at solar noon, positive after (afternoon), wrapped to
+    (-12, +12]. This is the sun's hour angle expressed in hours
+    (hour_angle_deg / 15) and is the DST- and season-robust coordinate the
+    day-ahead bias uses to bin the day into morning / midday / afternoon:
+    it is anchored to the sun (equation of time + longitude), NOT the wall
+    clock, so a bin never drifts by an hour across the DST changeover and a
+    cell learned in summer applies at the same SOLAR position in winter.
+
+    Derivation mirrors :func:`sun_position`'s true-solar-time step (NOAA):
+    ``true_solar_time = minutes_of_day + eq_time + 4*lon`` (UTC, degrees East),
+    ``hour_angle = true_solar_time/4 - 180`` (deg), hours = hour_angle / 15.
+
+    Args:
+        dt_utc: tz-aware UTC datetime (use the 15-min slot midpoint / start).
+        lon: longitude, degrees east.
+
+    Returns:
+        Hours from solar noon in (-12, +12] (negative = morning).
+    """
+    if dt_utc.tzinfo is None:
+        raise ValueError("hours_from_solar_noon requires a tz-aware UTC datetime")
+    t = _julian_century(dt_utc)
+
+    geom_mean_long = (280.46646 + t * (36000.76983 + t * 0.0003032)) % 360.0
+    geom_mean_anom = 357.52911 + t * (35999.05029 - 0.0001537 * t)
+    anom_rad = math.radians(geom_mean_anom)
+
+    seconds = 21.448 - t * (46.8150 + t * (0.00059 - t * 0.001813))
+    mean_obliq = 23.0 + (26.0 + seconds / 60.0) / 60.0
+    omega = 125.04 - 1934.136 * t
+    obliq_corr = mean_obliq + 0.00256 * math.cos(math.radians(omega))
+    obliq_rad = math.radians(obliq_corr)
+
+    var_y = math.tan(obliq_rad / 2.0) ** 2
+    gml_rad = math.radians(geom_mean_long)
+    eccent = 0.016708634 - t * (0.000042037 + 0.0000001267 * t)
+    eq_time = 4.0 * math.degrees(
+        var_y * math.sin(2.0 * gml_rad)
+        - 2.0 * eccent * math.sin(anom_rad)
+        + 4.0 * eccent * var_y * math.sin(anom_rad) * math.cos(2.0 * gml_rad)
+        - 0.5 * var_y * var_y * math.sin(4.0 * gml_rad)
+        - 1.25 * eccent * eccent * math.sin(2.0 * anom_rad)
+    )
+
+    utc = dt_utc.astimezone(UTC)
+    minutes_of_day = (
+        utc.hour * 60.0
+        + utc.minute
+        + utc.second / 60.0
+        + utc.microsecond / 60_000_000.0
+    )
+    true_solar_time = (minutes_of_day + eq_time + 4.0 * lon) % 1440.0
+    hour_angle = true_solar_time / 4.0 - 180.0  # deg; 0 at local solar noon
+    if hour_angle <= -180.0:
+        hour_angle += 360.0
+    return hour_angle / 15.0  # deg -> hours (15 deg per hour)
 
 
 def _refraction_correction(elevation_deg: float) -> float:

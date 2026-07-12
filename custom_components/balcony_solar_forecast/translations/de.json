@@ -133,6 +133,16 @@
         }
       }
     },
+    "reset_day_ahead_bias": {
+      "name": "Day-Ahead-Bias zurücksetzen",
+      "description": "Löscht die gelernten Day-Ahead-Bias-Zellen, sodass die Prognose sofort auf reine Physik + Shademap zurückfällt und jede Zelle über die nächsten Nächte neu lernt. Shademap, Aktivierungsschalter und der Rollback-Ring bleiben unangetastet.",
+      "fields": {
+        "entry_id": {
+          "name": "Konfigurationseintrag",
+          "description": "Ziel-Konfigurationseintrag. Nur weglassen, wenn ein einziger Standort konfiguriert ist."
+        }
+      }
+    },
     "install_dashboard": {
       "name": "Observability-Dashboard installieren",
       "description": "Schreibt das vollständige Observability-Dashboard – verdrahtet mit den echten Entity-IDs dieser Installation – in ein Dashboard, das zuvor leer über die UI angelegt wurde (Einstellungen → Dashboards → Dashboard hinzufügen, URL \"balcony-solar\"). Jederzeit erneut ausführbar, um es nach einem Update zu aktualisieren.",

@@ -89,6 +89,7 @@ from .const import (
     CORRECTION_SOURCE_NONE,
     CORRECTION_SOURCE_SHADEMAP,
     DATA_KEY_BAND_SOURCE,
+    DATA_KEY_BIAS_CELLS,
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_CORRECTION_SOURCE,
     DATA_KEY_DRIFT_MAE,
@@ -850,6 +851,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # engine iterates). Neutral cells (n < RLS_MIN_SAMPLES) are omitted.
         day_factor: dict[datetime, float] = {}
         if day_ahead_active:
+            lon = self._site.longitude
             for slot in weather.slots:
                 local = dt_util.as_local(slot.start)
                 cc = bias_mod.classify_cloud(
@@ -857,14 +859,16 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     cloud_high=slot.cloud_high,
                     visibility_m=slot.visibility_m, month=local.month,
                 )
-                # Continuous across day-part boundaries (no hard step): the
-                # learned per-part cells are blended by local time of day near
-                # each internal boundary (bias.day_ahead_factor), so the served
-                # correction ramps smoothly instead of cliff-stepping at 10:00 /
-                # 14:00. Away from the boundaries this is the pure day-part factor.
-                f = bias_mod.day_ahead_factor(
-                    self._bias_state, cloud_class=cc,
-                    local_hour=local.hour, local_minute=local.minute,
+                # Bin by APPARENT SOLAR time, not the wall clock (v0.19): the
+                # day-part boundary tracks solar noon instead of a fixed local
+                # hour like 10:00, so it does not drift with DST / the season.
+                # Continuous across boundaries (no hard step): the learned
+                # per-part cells are blended by solar time near each internal
+                # boundary (bias.day_ahead_factor_solar), so the served
+                # correction ramps smoothly instead of cliff-stepping.
+                hfn = solpos.hours_from_solar_noon(slot.start, lon)
+                f = bias_mod.day_ahead_factor_solar(
+                    self._bias_state, cloud_class=cc, hours_from_noon=hfn,
                 )
                 if f != DAY_AHEAD_BIAS_NEUTRAL:
                     day_factor[slot.start] = f
@@ -904,7 +908,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         cloud_high=slot.cloud_high,
                         visibility_m=slot.visibility_m, month=local.month,
                     )
-                    dp = bias_mod.day_part_for_hour(local.hour)
+                    # Solar-time day part (v0.19), consistent with the day-ahead
+                    # bias binning above: the quantile bins share the day_part
+                    # key space, so both track solar noon rather than the clock.
+                    dp = bias_mod.day_part_for_solar(
+                        solpos.hours_from_solar_noon(slot.start, self._site.longitude)
+                    )
                     learned = quantiles_mod.bands_for_bin(
                         self._quantile_state, cloud_class=cc, day_part=dp
                     )
@@ -1601,6 +1610,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self, "_band_source", BAND_SOURCE_LEARNED
         )
         data[DATA_KEY_LEARNER_STATUS] = self._learner_status()
+        data[DATA_KEY_BIAS_CELLS] = self._bias_cells_summary()
         data[DATA_KEY_DRIFT_MAE] = self._latest_drift_mae()
         # --- v0.4 additive scoreboard keys (SPEC §9/§10) ---
         # The rolling-window aggregate view + the kill-gate verdict, derived from
@@ -1754,6 +1764,33 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return {}
         latest = max(self._drift_state.daily_mae)
         return dict(self._drift_state.daily_mae[latest])
+
+    def _bias_cells_summary(self) -> dict[str, Any]:
+        """Current day-ahead RLS bias cells, for the diagnostic sensor (v0.19).
+
+        One entry per learned ``cloud_class|day_part`` cell:
+          ``theta``   – the raw learned multiplier (clamped to the bias band),
+          ``n``       – trained days,
+          ``applied`` – the factor actually served for that cell right now
+                        (== ``theta`` once ``n >= RLS_MIN_SAMPLES``, else 1.0
+                        while the cell is still cold-starting and stays neutral).
+        Ratios are dimensionless (theta scales energy AND average power
+        identically), so a dashboard can render them directly or multiply a
+        per-part average-power baseline by ``applied`` to show the correction in
+        W. ``day_part`` is the SOLAR-time part (v0.19), not a clock hour.
+        """
+        state = self._bias_state
+        out: dict[str, dict[str, Any]] = {}
+        for key, cell in sorted(state.cells.items()):
+            cc, _, part = key.partition("|")
+            out[key] = {
+                "cloud_class": cc,
+                "day_part": part,
+                "theta": round(cell.clamped_theta(), 4),
+                "n": int(cell.n),
+                "applied": round(state.get_bias(cc, part), 4),
+            }
+        return out
 
     # ------------------------------------------------------------------
     # Nightly job (idempotent, date-keyed) — SPEC §4/§5
@@ -2007,6 +2044,28 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "snapshots_back": back,
             "ring_size": len(snaps),
         }
+
+    async def async_reset_day_ahead_bias(self) -> dict[str, Any]:
+        """Clear the day-ahead RLS bias state (service backend, v0.19).
+
+        Drops ALL learned (cloud_class, day_part) cells so the day-ahead layer
+        returns to neutral immediately and the served curve falls back to the
+        pure-physics + shademap curve; the nightly RLS then re-learns each cell
+        from scratch (cold-start neutral until RLS_MIN_SAMPLES days). Use after
+        a binning change or when a mis-trained cell is distorting the forecast.
+        Enable flags, the shademap, drift state and the rollback ring are all
+        untouched (this is a targeted reset, not a rollback). Persists the empty
+        state and triggers a recompute so the correction disappears at once.
+        """
+        cleared = len(self._bias_state.cells)
+        self._bias_state = BiasState()
+        self._persist_bias_state()
+        _LOGGER.info(
+            "Day-ahead bias state reset (%d cell(s) cleared); re-learns nightly",
+            cleared,
+        )
+        await self.async_request_refresh()
+        return {"cleared_cells": cleared}
 
     def _maybe_push_rollback_snapshot(self, iso: str) -> None:
         """Push a pre-training rollback snapshot into the ring (idempotent/day)."""

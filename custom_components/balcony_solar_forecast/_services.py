@@ -97,6 +97,7 @@ from .const import (
     SERVICE_GET_SHADE_PROFILE,
     SERVICE_IMPORT_BOOTSTRAP,
     SERVICE_INSTALL_DASHBOARD,
+    SERVICE_RESET_DAY_AHEAD_BIAS,
     SERVICE_ROLLBACK_LEARNERS,
     SERVICE_SUGGEST_SHADE_GROUPS,
     SHADE_SIM_MAX_MEAN_DIFF,
@@ -178,6 +179,8 @@ ROLLBACK_LEARNERS_SCHEMA = vol.Schema(
     }
 )
 
+RESET_DAY_AHEAD_BIAS_SCHEMA = vol.Schema({vol.Optional(ATTR_ENTRY_ID): str})
+
 INSTALL_DASHBOARD_SCHEMA = vol.Schema(
     {
         vol.Optional(ATTR_ENTRY_ID): str,
@@ -253,6 +256,19 @@ def async_register_services(hass: HomeAssistant) -> None:
             SERVICE_ROLLBACK_LEARNERS,
             _rollback_learners,
             schema=ROLLBACK_LEARNERS_SCHEMA,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_RESET_DAY_AHEAD_BIAS):
+
+        async def _reset_day_ahead_bias(call: ServiceCall) -> ServiceResponse:
+            return await _handle_reset_day_ahead_bias(hass, call)
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_RESET_DAY_AHEAD_BIAS,
+            _reset_day_ahead_bias,
+            schema=RESET_DAY_AHEAD_BIAS_SCHEMA,
             supports_response=SupportsResponse.OPTIONAL,
         )
 
@@ -434,6 +450,32 @@ async def _handle_rollback_learners(
     except ValueError as err:
         # Empty ring etc. — a user-visible condition, not a traceback.
         raise ServiceValidationError(f"Rollback rejected: {err}") from err
+    return {"result": result} if isinstance(result, dict) else {"result": {}}
+
+
+# ---------------------------------------------------------------------------
+# reset_day_ahead_bias
+# ---------------------------------------------------------------------------
+
+
+async def _handle_reset_day_ahead_bias(
+    hass: HomeAssistant, call: ServiceCall
+) -> ServiceResponse:
+    """Clear the target entry's day-ahead RLS bias cells (retrain from scratch).
+
+    Targeted, explicit reset for when a mis-trained (cloud_class, day_part) cell
+    is distorting the served curve — e.g. after the v0.19 clock->solar day-part
+    binning change. The served forecast drops back to pure physics + shademap at
+    once and the nightly RLS re-learns each cell cold. Does NOT touch the
+    shademap, enable flags or the rollback ring.
+    """
+    coordinator = _resolve_single_coordinator(hass, call.data.get(ATTR_ENTRY_ID))
+    resetter = getattr(coordinator, "async_reset_day_ahead_bias", None)
+    if not callable(resetter):
+        raise ServiceValidationError(
+            "This installation does not support day-ahead bias reset."
+        )
+    result = await resetter()
     return {"result": result} if isinstance(result, dict) else {"result": {}}
 
 

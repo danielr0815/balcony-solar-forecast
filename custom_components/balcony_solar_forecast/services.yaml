@@ -83,6 +83,25 @@ rollback_learners:
           max: 10
           mode: box
 
+reset_day_ahead_bias:
+  name: Reset day-ahead bias
+  description: >-
+    Clear the learned day-ahead bias cells so the forecast returns to pure
+    physics + shademap immediately, then re-learns each (cloud class x day part)
+    cell from scratch over the following nights. Use when a mis-trained cell is
+    distorting the served curve (e.g. after the solar day-part binning change).
+    Does not touch the shademap, the per-layer enable switches or the rollback
+    ring. Returns the number of cells cleared.
+  fields:
+    entry_id:
+      name: Config entry
+      description: >-
+        Target config entry. Omit only if a single site is configured.
+      example: "1234567890abcdef"
+      required: false
+      selector:
+        text:
+
 dump_shademap:
   name: Dump shademap
   description: >-

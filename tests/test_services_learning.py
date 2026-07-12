@@ -297,6 +297,33 @@ def test_dump_shademap_getter_raises_is_caught():
 
 
 # --------------------------------------------------------------------------
+# reset_day_ahead_bias
+# --------------------------------------------------------------------------
+
+
+async def test_reset_day_ahead_bias_forwards_and_returns():
+    class _Resettable:
+        def __init__(self):
+            self.called = False
+
+        async def async_reset_day_ahead_bias(self):
+            self.called = True
+            return {"cleared_cells": 3}
+
+    coord = _Resettable()
+    hass = _FakeHass({"e1": coord})
+    resp = await svc._handle_reset_day_ahead_bias(hass, _Call({}))
+    assert coord.called is True
+    assert resp == {"result": {"cleared_cells": 3}}
+
+
+async def test_reset_day_ahead_bias_unsupported_coordinator():
+    hass = _FakeHass({"e1": _LegacyCoordinator()})
+    with pytest.raises(ServiceValidationError):
+        await svc._handle_reset_day_ahead_bias(hass, _Call({}))
+
+
+# --------------------------------------------------------------------------
 # FIX-4: real-coordinator integration (import_bootstrap / dump_shademap must
 # work against the ACTUAL BalconySolarCoordinator, not just the fake).
 # --------------------------------------------------------------------------
