@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-12
+
+### Added
+
+- **Day-ahead bias cells are now visible in the UI.** The learned per-(cloud
+  class × day part) multipliers ride along as a `bias_cells` attribute on
+  `sensor.balcony_solar_forecast_day_ahead_bias_status` — each cell's raw
+  `theta`, trained-day count `n`, and the `applied` factor actually served — so a
+  mis-trained cell can be spotted directly in the UI instead of only in a
+  diagnostics download.
+- **New action `reset_day_ahead_bias`.** Clears all learned day-ahead bias cells
+  so the served forecast falls back to pure physics + shademap at once and
+  re-learns each cell from scratch over the following nights. Use it after a
+  binning change or when a cell is distorting the curve. Leaves the shademap, the
+  per-layer enable switches and the rollback ring untouched; returns the number
+  of cells cleared.
+
+### Changed
+
+- **Day-ahead bias is now binned by apparent SOLAR time, not the wall clock.**
+  The morning / midday / afternoon boundaries were fixed local hours (10:00 /
+  14:00): they drift against the sun across the DST changeover and the seasons,
+  and pin the correction's transition to a clock time rather than the sun. They
+  now bracket solar noon symmetrically (± 2 h) via the sun's hour angle
+  (`solpos.hours_from_solar_noon`), so a boundary tracks the sun instead of the
+  clock and a cell learned in summer applies at the same solar position in
+  winter. The quantile bands share the same solar day-part binning. Cell keys are
+  unchanged, so the upgrade resets no learner state — run the new
+  `reset_day_ahead_bias` action to retrain cleanly under the new binning if a
+  pre-existing cell is distorting the forecast.
+
 ## [0.18.1] - 2026-07-12
 
 ### Fixed
