@@ -647,11 +647,20 @@ def test_classify_cloud_fog_and_covers():
     assert bf._classify_cloud(overcast) == const.CLOUD_CLASS_OVERCAST
 
 
-def test_day_part_boundaries():
-    assert bf._day_part_for_hour(6) == const.DAY_PART_MORNING
-    assert bf._day_part_for_hour(const.DAY_PART_MORNING_END_HOUR) == const.DAY_PART_MIDDAY
-    assert bf._day_part_for_hour(
-        const.DAY_PART_AFTERNOON_START_HOUR
+def test_day_part_for_slot_solar_boundaries():
+    # v0.19: backfill bins the day-ahead bias by SOLAR time (matching the live
+    # coordinator), not the clock. At the operator site (lon 12.2) solar noon is
+    # ~11:15 UTC on 2026-07-01, so 08/12/16 UTC fall well inside morning / midday
+    # / afternoon — the SAME mapping the coordinator's _day_part_for_hourkey uses.
+    lon = 12.2
+    assert bf._day_part_for_slot(
+        datetime(2026, 7, 1, 8, tzinfo=UTC), lon
+    ) == const.DAY_PART_MORNING
+    assert bf._day_part_for_slot(
+        datetime(2026, 7, 1, 12, tzinfo=UTC), lon
+    ) == const.DAY_PART_MIDDAY
+    assert bf._day_part_for_slot(
+        datetime(2026, 7, 1, 16, tzinfo=UTC), lon
     ) == const.DAY_PART_AFTERNOON
 
 

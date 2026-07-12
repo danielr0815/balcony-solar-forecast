@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-07-12
+
+### Fixed
+
+- **Offline backfill now bins the day-ahead bias by solar time too.** The
+  bootstrap generator (`scripts/backfill.py`) still binned morning / midday /
+  afternoon by the clock hour while the live coordinator moved to apparent solar
+  time in 0.19.0 — so a bootstrapped cell and a live-trained cell for the same
+  `(cloud_class, day_part)` could mean slightly different sun positions near the
+  boundaries. Backfill now uses `solpos.hours_from_solar_noon` +
+  `bias.day_part_for_solar`, matching the live binning exactly.
+
 ## [0.19.0] - 2026-07-12
 
 ### Added

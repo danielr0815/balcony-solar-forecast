@@ -770,9 +770,8 @@ def _process_day_impl(
         measured_site = site_measured_hourly.get(hkey)
         if measured_site is None:
             continue
-        local_hour, _month = _local_hour(wx.start, tz)
         cloud_class = _classify_cloud(wx, tz)
-        day_part = _day_part_for_hour(local_hour, tz)
+        day_part = _day_part_for_slot(wx.start, lon)
         key = BiasState.cell_key(cloud_class, day_part)
         agg = cell_agg.setdefault(key, [0.0, 0.0])
         agg[0] += modeled_site
@@ -902,14 +901,18 @@ def _classify_cloud(wx: HourlyWeather, tz: timezone | None = None) -> str:
     )
 
 
-def _day_part_for_hour(utc_hour: int, tz: timezone | None = None) -> str:
-    """Day part via the live bias.day_part_for_hour (SPEC §5).
+def _day_part_for_slot(dt: datetime, lon: float) -> str:
+    """SOLAR day part for an hour-start datetime (v0.19, SPEC §5).
 
-    ``utc_hour`` is the hour start's UTC hour; the caller passes ``tz`` so it is
-    converted to the site-local hour first (backfill:842). Kept int-in for the
-    existing unit tests (tz=None => identity).
+    Bins by APPARENT SOLAR time (``bias.day_part_for_solar`` over
+    ``solpos.hours_from_solar_noon``), so the bootstrapped day-ahead bias cells
+    match the LIVE coordinator's solar binning — a bootstrapped and a
+    live-trained cell for the same ``(cloud_class, day_part)`` then mean the
+    same thing (before v0.19 the backfill binned on the clock hour and the live
+    path on solar time, a subtle seam near the boundaries). ``dt`` is the hour
+    START (tz-aware UTC); ``lon`` the site longitude, degrees East.
     """
-    return bias_mod.day_part_for_hour(utc_hour)
+    return bias_mod.day_part_for_solar(solpos.hours_from_solar_noon(dt, lon))
 
 
 # ===========================================================================
