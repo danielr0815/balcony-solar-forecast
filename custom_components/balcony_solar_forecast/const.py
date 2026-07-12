@@ -437,6 +437,13 @@ DAY_PART_AFTERNOON = "afternoon"
 DAY_PARTS = (DAY_PART_MORNING, DAY_PART_MIDDAY, DAY_PART_AFTERNOON)
 DAY_PART_MORNING_END_HOUR = 10     # [dawn, 10:00) local
 DAY_PART_AFTERNOON_START_HOUR = 14  # [14:00, dusk) local; [10,14) = midday
+# The day-ahead bias is LEARNED per day part but APPLIED continuously: within
+# this half-width (minutes) either side of a day-part boundary the two adjacent
+# parts' factors are linearly blended, so the served correction never steps
+# across the boundary (a bucketed step has no physical basis — the forecast
+# shape comes from weather x physics x shading, which is smooth). The learned
+# cells are the anchors; the application interpolates between them.
+DAY_PART_BLEND_HALFWIDTH_MIN = 45
 
 # --- SLOW learner: shademap (SPEC §5, §13) ---------------------------------
 # Per measurement channel (module/plane name), per bin

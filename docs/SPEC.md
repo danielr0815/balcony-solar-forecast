@@ -301,7 +301,13 @@ nächsten ~6 h abklingend angewandt, Clamp [0,25 … 2,5], nach HA-Neustart
 Re-Init auf 1,0 (nie alten Zustand laden). Rettet Nebelmorgen ohne
 falsche Geometrie. Day-ahead-Bias (seit v0.2.0 implementiert, per Default
 aktiv): 1 RLS-Bias-Skalar je (Wolkenklasse × Tagesabschnitt), nächtlich
-trainiert und über den Options-Flow abschaltbar.
+trainiert und über den Options-Flow abschaltbar. Die Zellen sind ge*lernt*
+je Abschnitt, werden aber **stetig angewandt**: nahe einer internen
+Abschnittsgrenze (10:00, 14:00) werden die beiden angrenzenden Faktoren
+zeitlich linear überblendet (± `DAY_PART_BLEND_HALFWIDTH_MIN`), damit die
+Korrektur nie als harte Stufe springt — die Prognoseform kommt aus
+Wetter × Physik × Verschattung (stetig), also muss auch der aufgesetzte
+Residual-Korrektor stetig sein (`bias.day_ahead_factor`).
 Alle Lerner-Korrekturen (Intraday-Skalar, Day-ahead-Bias) und die
 Quantilbänder (P10/P50/P90) werden als **letzte Stufe erneut auf das
 WR-AC-Limit geclampt** (`clamp_groups` läuft nach dem Slot-Faktor ein

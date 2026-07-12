@@ -45,6 +45,7 @@ from balcony_solar_forecast.core.bias import (
     apply_intraday_scalar,
     classify_cloud,
     compute_intraday_scalar,
+    day_ahead_factor,
     day_part_for_hour,
     train_day_ahead_bias,
 )
@@ -775,3 +776,109 @@ def test_intraday_has_no_persisted_state_type():
     assert fields == {"cells", "version"}
     assert "scalar" not in fields
     assert "intraday" not in fields
+
+
+# ---------------------------------------------------------------------------
+# day_ahead_factor: continuous (blended) application across day-part boundaries
+# ---------------------------------------------------------------------------
+
+
+def _trained_state():
+    """A bias state with DISTINCT trained cells for CLOUD_CLASS_MIXED.
+
+    morning 1.3, midday 0.8, afternoon 1.0 (all >= RLS_MIN_SAMPLES trained
+    days, so get_bias returns the clamped theta, not neutral).
+    """
+    key = BiasState.cell_key
+    return BiasState(
+        cells={
+            key(CLOUD_CLASS_MIXED, DAY_PART_MORNING): BiasCell(
+                theta=1.3, n=RLS_MIN_SAMPLES
+            ),
+            key(CLOUD_CLASS_MIXED, DAY_PART_MIDDAY): BiasCell(
+                theta=0.8, n=RLS_MIN_SAMPLES
+            ),
+            key(CLOUD_CLASS_MIXED, DAY_PART_AFTERNOON): BiasCell(
+                theta=1.0, n=RLS_MIN_SAMPLES
+            ),
+        }
+    )
+
+
+def test_day_ahead_factor_pure_away_from_boundaries():
+    # Well inside a day part -> exactly the pure per-part get_bias.
+    state = _trained_state()
+    assert day_ahead_factor(
+        state, cloud_class=CLOUD_CLASS_MIXED, local_hour=8, local_minute=0
+    ) == pytest.approx(1.3)
+    assert day_ahead_factor(
+        state, cloud_class=CLOUD_CLASS_MIXED, local_hour=12, local_minute=0
+    ) == pytest.approx(0.8)
+    assert day_ahead_factor(
+        state, cloud_class=CLOUD_CLASS_MIXED, local_hour=16, local_minute=0
+    ) == pytest.approx(1.0)
+
+
+def test_day_ahead_factor_blends_50_50_at_the_boundary():
+    # Exactly at 10:00 -> mean of the morning (1.3) and midday (0.8) cells.
+    state = _trained_state()
+    assert day_ahead_factor(
+        state, cloud_class=CLOUD_CLASS_MIXED, local_hour=10, local_minute=0
+    ) == pytest.approx(0.5 * (1.3 + 0.8))
+    # And at 14:00 -> mean of midday (0.8) and afternoon (1.0).
+    assert day_ahead_factor(
+        state, cloud_class=CLOUD_CLASS_MIXED, local_hour=14, local_minute=0
+    ) == pytest.approx(0.5 * (0.8 + 1.0))
+
+
+def test_day_ahead_factor_has_no_hard_step_across_the_boundary():
+    # The whole point: sampling every 15 min across the 10:00 boundary, no two
+    # adjacent slots jump by more than a small ramp increment (vs the 0.5 cliff
+    # the pure per-part step produced between 09:45 and 10:00).
+    state = _trained_state()
+    tod = []
+    for hour in (9, 10):
+        for minute in (0, 15, 30, 45):
+            tod.append((hour, minute))
+    factors = [
+        day_ahead_factor(
+            state, cloud_class=CLOUD_CLASS_MIXED,
+            local_hour=h, local_minute=m,
+        )
+        for h, m in tod
+    ]
+    steps = [abs(factors[i + 1] - factors[i]) for i in range(len(factors) - 1)]
+    # The ramp is (1.3-0.8) over the 90-min transition -> ~0.083 per 15 min;
+    # every adjacent step must stay well under the old 0.5 cliff.
+    assert max(steps) < 0.1
+    # Monotone decreasing across the morning->midday ramp (1.3 down to 0.8).
+    assert factors == sorted(factors, reverse=True)
+
+
+def test_day_ahead_factor_neutral_when_cells_untrained():
+    # An unseen cloud class -> both blended cells are neutral -> neutral, at a
+    # boundary and away from it alike (no fabricated correction).
+    state = _trained_state()
+    for hour in (8, 10, 12, 14, 16):
+        assert day_ahead_factor(
+            state, cloud_class=CLOUD_CLASS_FOG, local_hour=hour
+        ) == pytest.approx(DAY_AHEAD_BIAS_NEUTRAL)
+
+
+def test_day_ahead_factor_stays_in_band_and_never_raises():
+    # A convex blend of two in-band cells stays in [MIN, MAX]; junk inputs are
+    # coerced, never raise.
+    state = _trained_state()
+    for hour in range(0, 24):
+        for minute in (0, 30):
+            f = day_ahead_factor(
+                state, cloud_class=CLOUD_CLASS_MIXED,
+                local_hour=hour, local_minute=minute,
+            )
+            assert DAY_AHEAD_BIAS_MIN - 1e-9 <= f <= DAY_AHEAD_BIAS_MAX + 1e-9
+    # coercion of out-of-range / bad inputs
+    assert day_ahead_factor(
+        state, cloud_class=CLOUD_CLASS_MIXED, local_hour=99, local_minute=-5
+    ) == pytest.approx(day_ahead_factor(
+        state, cloud_class=CLOUD_CLASS_MIXED, local_hour=3, local_minute=0
+    ))
