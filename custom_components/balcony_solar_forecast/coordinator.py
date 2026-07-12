@@ -857,8 +857,15 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     cloud_high=slot.cloud_high,
                     visibility_m=slot.visibility_m, month=local.month,
                 )
-                dp = bias_mod.day_part_for_hour(local.hour)
-                f = self._bias_state.get_bias(cc, dp)
+                # Continuous across day-part boundaries (no hard step): the
+                # learned per-part cells are blended by local time of day near
+                # each internal boundary (bias.day_ahead_factor), so the served
+                # correction ramps smoothly instead of cliff-stepping at 10:00 /
+                # 14:00. Away from the boundaries this is the pure day-part factor.
+                f = bias_mod.day_ahead_factor(
+                    self._bias_state, cloud_class=cc,
+                    local_hour=local.hour, local_minute=local.minute,
+                )
                 if f != DAY_AHEAD_BIAS_NEUTRAL:
                     day_factor[slot.start] = f
 

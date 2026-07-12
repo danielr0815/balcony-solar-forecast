@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Day-ahead bias no longer steps at the day-part boundaries.** The learned
+  day-ahead correction is bucketed per (cloud class × day part), and it was
+  *applied* as a hard per-part step — producing an unphysical cliff in the
+  forecast exactly at 10:00 (morning→midday) and 14:00 (midday→afternoon), e.g.
+  a ~35 % drop from the 09:00 hour to the 10:00 hour on an otherwise smooth
+  morning ramp. The forecast shape comes from weather × physics × shading, which
+  is smooth, so the correction on top must be smooth too: the learned cells are
+  now the anchors and the applied factor is **linearly blended** between the two
+  adjacent parts within ±`DAY_PART_BLEND_HALFWIDTH_MIN` (45 min) of each
+  boundary (`bias.day_ahead_factor`). Away from the boundaries nothing changes;
+  the nightly training is unchanged.
+
 ## [0.18.0] - 2026-07-12
 
 ### Added

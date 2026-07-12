@@ -86,6 +86,7 @@ from ..const import (
     DAY_AHEAD_BIAS_NEUTRAL,
     DAY_PART_AFTERNOON,
     DAY_PART_AFTERNOON_START_HOUR,
+    DAY_PART_BLEND_HALFWIDTH_MIN,
     DAY_PART_MIDDAY,
     DAY_PART_MORNING,
     DAY_PART_MORNING_END_HOUR,
@@ -113,6 +114,7 @@ __all__ = [
     "intraday_factor_at",
     "classify_cloud",
     "day_part_for_hour",
+    "day_ahead_factor",
     "train_day_ahead_bias",
     "apply_day_ahead_bias",
 ]
@@ -453,6 +455,60 @@ def day_part_for_hour(local_hour: int) -> str:
     if h < DAY_PART_AFTERNOON_START_HOUR:
         return DAY_PART_MIDDAY
     return DAY_PART_AFTERNOON
+
+
+def day_ahead_factor(
+    state: BiasState,
+    *,
+    cloud_class: str,
+    local_hour: int,
+    local_minute: int = 0,
+) -> float:
+    """Applied day-ahead bias for one slot — CONTINUOUS across day-part edges.
+
+    The bias is LEARNED per (cloud class x day part), but a hard per-part step
+    has no physical basis: the forecast shape comes from weather x physics x
+    shading, which is smooth, so the correction on top must be smooth too. The
+    learned cells are the anchors; within DAY_PART_BLEND_HALFWIDTH_MIN either
+    side of an INTERNAL boundary (morning/midday at DAY_PART_MORNING_END_HOUR,
+    midday/afternoon at DAY_PART_AFTERNOON_START_HOUR) the two adjacent parts'
+    factors are LINEARLY BLENDED by the slot's local time of day, so the served
+    factor ramps continuously instead of stepping. Outside the transition zones
+    it is exactly the pure day-part factor (:func:`day_part_for_hour` +
+    ``state.get_bias``), so away from boundaries nothing changes.
+
+    Both blended cells use the SAME ``cloud_class`` (the slot's own class), so a
+    starved cell simply pulls the blend toward neutral near the boundary — a
+    convex combination of two in-band factors stays in the clamp band. Only the
+    two internal boundaries are smoothed (dawn/dusk carry ~no production, so the
+    first/last part edges are not blended). Never raises.
+    """
+    try:
+        h = int(local_hour) % 24
+    except (TypeError, ValueError):
+        h = 0
+    try:
+        m = int(local_minute)
+    except (TypeError, ValueError):
+        m = 0
+    m = 0 if m < 0 else (59 if m > 59 else m)
+    tod = h + m / 60.0  # continuous local time-of-day, hours
+
+    half = DAY_PART_BLEND_HALFWIDTH_MIN / 60.0
+    if half > 0.0:
+        for boundary, lo_part, hi_part in (
+            (DAY_PART_MORNING_END_HOUR, DAY_PART_MORNING, DAY_PART_MIDDAY),
+            (DAY_PART_AFTERNOON_START_HOUR, DAY_PART_MIDDAY, DAY_PART_AFTERNOON),
+        ):
+            if boundary - half <= tod < boundary + half:
+                # weight ramps 0 -> 1 across [boundary-half, boundary+half];
+                # 0.5 exactly at the boundary.
+                weight = (tod - (boundary - half)) / (2.0 * half)
+                lo = state.get_bias(cloud_class, lo_part)
+                hi = state.get_bias(cloud_class, hi_part)
+                return (1.0 - weight) * lo + weight * hi
+
+    return state.get_bias(cloud_class, day_part_for_hour(h))
 
 
 def _rls_step(cell: BiasCell, modeled_wh: float, measured_wh: float) -> BiasCell:
