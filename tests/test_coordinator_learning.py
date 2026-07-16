@@ -1138,6 +1138,24 @@ def test_learner_status_layer_strings():
     assert status[LEARNER_LAYER_SLOW] == LEARNER_STATUS_ACTIVE
 
 
+def test_learner_status_day_ahead_cold_start_without_cells():
+    """Day-ahead with NO learned cells reports cold_start, not active: the
+    correction hook is gated on ``bool(cells)`` and applies nothing, so
+    "active" would claim a correction that does not exist (v0.19.2). With a
+    trained cell present it flips to active."""
+    from custom_components.balcony_solar_forecast.const import (
+        LEARNER_STATUS_COLD_START,
+    )
+
+    c = _make_coordinator()  # _bias_state = BiasState() (no cells)
+    assert c._learner_status()["day_ahead"] == LEARNER_STATUS_COLD_START
+
+    c._bias_state = BiasState(
+        cells={BiasState.cell_key("clear", DAY_PART_MIDDAY): BiasCell(theta=0.9, n=5)}
+    )
+    assert c._learner_status()["day_ahead"] == LEARNER_STATUS_ACTIVE
+
+
 def test_learner_status_reflects_collapse_freeze():
     c = _make_coordinator()
     today = coord_mod.dt_util.as_local(coord_mod.dt_util.utcnow()).date().isoformat()
@@ -1177,6 +1195,77 @@ def test_actuals_from_stats_happy_path():
     assert set(daily) == {"M1", "M2"}
     assert daily["M1"] == pytest.approx(sum(w for _h, w in hours), abs=0.1)
     assert len(hourly["M1"]) == 12
+
+
+def test_actuals_from_stats_accepts_float_epoch_seconds_rows():
+    """REGRESSION (v0.19.2): the in-process ``statistics_during_period`` API
+    returns row ``start`` as float epoch SECONDS. Parsing them as epoch-ms
+    collapsed all 24 hourly rows of a day onto ONE 1970 hour key, so
+    ``covered_hours == 1`` and the completeness gate discarded EVERY day —
+    silently starving all nightly learning (live incident 2026-07-12..15:
+    "module M1 covers only 1 of ~16 daylight hours"). Float-seconds rows must
+    yield one distinct hour key per row and pass the gate."""
+    from custom_components.balcony_solar_forecast.coordinator import (
+        _actuals_from_stats,
+    )
+
+    hours = [(h, 100.0 + 10.0 * h) for h in range(6, 18)]  # 12 daylight hours
+    rows = [
+        {"mean": w, "start": datetime(2026, 6, 20, h, 0, tzinfo=UTC).timestamp()}
+        for h, w in hours
+    ]  # float SECONDS — the real in-process recorder format
+    daily, hourly = _actuals_from_stats(
+        {"sensor.m1": rows, "sensor.m2": rows},
+        {"M1": "sensor.m1", "M2": "sensor.m2"},
+        expected_daylight_hours=12,
+        day=datetime(2026, 6, 20).date(),
+    )
+    assert set(daily) == {"M1", "M2"}
+    assert len(hourly["M1"]) == 12  # 12 DISTINCT hour keys, not 1
+    # Keys are real 2026 hours, not 1970 artifacts.
+    assert all(k.startswith("2026-06-20T") for k in hourly["M1"])
+    assert daily["M1"] == pytest.approx(sum(w for _h, w in hours), abs=0.1)
+
+
+def test_actuals_from_stats_accepts_epoch_ms_rows():
+    """Epoch-MILLISECOND numeric rows (the WebSocket wire format) keep working
+    via the magnitude heuristic (> 1e11 ⇒ ms)."""
+    from custom_components.balcony_solar_forecast.coordinator import (
+        _actuals_from_stats,
+    )
+
+    hours = [(h, 100.0 + 10.0 * h) for h in range(6, 18)]
+    rows = [
+        {
+            "mean": w,
+            "start": datetime(2026, 6, 20, h, 0, tzinfo=UTC).timestamp() * 1000.0,
+        }
+        for h, w in hours
+    ]
+    daily, hourly = _actuals_from_stats(
+        {"sensor.m1": rows, "sensor.m2": rows},
+        {"M1": "sensor.m1", "M2": "sensor.m2"},
+        expected_daylight_hours=12,
+        day=datetime(2026, 6, 20).date(),
+    )
+    assert len(hourly["M1"]) == 12
+    assert all(k.startswith("2026-06-20T") for k in hourly["M1"])
+
+
+def test_stat_row_hour_key_seconds_ms_datetime_agree():
+    """One instant, three formats (aware datetime / float s / float ms) — all
+    must map to the SAME ISO-UTC hour key."""
+    from custom_components.balcony_solar_forecast._actuals import (
+        _stat_row_hour_key,
+    )
+
+    instant = datetime(2026, 6, 20, 9, 0, tzinfo=UTC)
+    expected = "2026-06-20T09:00:00+00:00"
+    assert _stat_row_hour_key(instant) == expected
+    assert _stat_row_hour_key(instant.timestamp()) == expected
+    assert _stat_row_hour_key(instant.timestamp() * 1000.0) == expected
+    assert _stat_row_hour_key(None) is None
+    assert _stat_row_hour_key("garbage") is None
 
 
 def test_actuals_from_stats_zero_row_module_discards_day():

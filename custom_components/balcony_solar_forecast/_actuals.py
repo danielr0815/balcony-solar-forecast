@@ -309,16 +309,33 @@ def _is_frozen_channel(means: list[float]) -> bool:
     return False
 
 
+# Numeric statistics-row ``start`` values above this are epoch-MILLISECONDS
+# (the recorder WebSocket wire format); at or below they are epoch-SECONDS
+# (the in-process ``statistics_during_period`` API returns ``start_ts`` float
+# seconds). 1e11 s ≈ year 5138, 1e11 ms ≈ 1973 — every real timestamp from
+# either API is unambiguously on one side of the threshold.
+_EPOCH_MS_THRESHOLD = 1e11
+
+
 def _stat_row_hour_key(start: object) -> str | None:
     """Normalise a statistics row ``start`` to an ISO-UTC hour key, or None.
 
-    HA recorder returns ``start`` as an epoch-ms number in modern cores or an
-    aware datetime; handle both (mirrors backfill._stat_row_hour).
+    The in-process recorder API (``statistics_during_period``) returns
+    ``start`` as a float of epoch SECONDS; the WebSocket layer multiplies to
+    epoch MILLISECONDS; older cores handed out aware datetimes. Disambiguate
+    numerics by magnitude (``_EPOCH_MS_THRESHOLD``) — treating seconds as ms
+    collapsed every hour of a day onto one 1970 key, which made the
+    day-completeness gate discard EVERY day ("covers only 1 of ~16 daylight
+    hours") and silently starved all nightly learning (bias / shademap /
+    scoreboard / quantiles / drift) since the gate landed.
     """
     if isinstance(start, datetime):
         dt = dt_util.as_utc(start)
     elif isinstance(start, (int, float)):
-        dt = datetime.fromtimestamp(start / 1000.0, tz=UTC)
+        ts = float(start)
+        if ts > _EPOCH_MS_THRESHOLD:
+            ts /= 1000.0
+        dt = datetime.fromtimestamp(ts, tz=UTC)
     elif isinstance(start, str):
         dt = dt_util.parse_datetime(start)
         if dt is None:
