@@ -42,6 +42,7 @@ from ..const import (
     CONF_PLANES,
     CONF_ROSS_COEFF,
     CONF_SHADE_GROUP,
+    CONF_SITE_ALBEDO,
     CONF_TILT,
     CONF_WP,
     DAY_AHEAD_BIAS_MAX,
@@ -57,6 +58,8 @@ from ..const import (
     RLS_INIT_COVARIANCE,
     SHADEMAP_TAU_MAX,
     SHADEMAP_TAU_MIN,
+    SITE_ALBEDO_MAX,
+    SITE_ALBEDO_MIN,
 )
 
 __all__ = [
@@ -298,6 +301,11 @@ class SiteConfig:
     ``ac_actual_invert`` (optional) negates that meter's reading at the read
     boundary — the operator's meter can report the fed-in balcony-solar AC as a
     NEGATED value; default False.
+
+    ``albedo`` (optional, v0.20) is the site's ground albedo for the
+    reflected-diffuse term; None == use ALBEDO_DEFAULT. Clamped to
+    [SITE_ALBEDO_MIN, SITE_ALBEDO_MAX] on load; snow days still override with
+    ALBEDO_SNOW (the engine's snow gate runs on top of this base value).
     """
 
     latitude: float
@@ -306,6 +314,7 @@ class SiteConfig:
     groups: tuple[InverterGroup, ...]
     ac_actual_entity: str | None = None
     ac_actual_invert: bool = False
+    albedo: float | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> SiteConfig:
@@ -315,6 +324,17 @@ class SiteConfig:
         ac_actual_entity = (
             raw_ac.strip() or None if isinstance(raw_ac, str) else None
         )
+        # Optional site albedo: non-numeric / absent -> None (ALBEDO_DEFAULT
+        # applies); a numeric value is clamped into the physical band so a
+        # hand-edited JSON can never push the diffuse floor to absurd values.
+        raw_albedo = d.get(CONF_SITE_ALBEDO)
+        albedo: float | None
+        try:
+            albedo = float(raw_albedo) if raw_albedo is not None else None
+        except (TypeError, ValueError):
+            albedo = None
+        if albedo is not None:
+            albedo = max(SITE_ALBEDO_MIN, min(SITE_ALBEDO_MAX, albedo))
         return cls(
             latitude=float(d[CONF_LATITUDE]),
             longitude=float(d[CONF_LONGITUDE]),
@@ -326,6 +346,7 @@ class SiteConfig:
             ),
             ac_actual_entity=ac_actual_entity,
             ac_actual_invert=bool(d.get(CONF_AC_ACTUAL_INVERT, False)),
+            albedo=albedo,
         )
 
     def to_dict(self) -> dict:
@@ -343,6 +364,9 @@ class SiteConfig:
         # without the new key (same only-when-set convention).
         if self.ac_actual_invert:
             d[CONF_AC_ACTUAL_INVERT] = self.ac_actual_invert
+        # Same only-when-set convention for the optional site albedo (v0.20).
+        if self.albedo is not None:
+            d[CONF_SITE_ALBEDO] = self.albedo
         return d
 
     def plane_by_name(self, name: str) -> PlaneConfig | None:

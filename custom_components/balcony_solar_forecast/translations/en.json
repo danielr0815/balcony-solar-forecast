@@ -278,14 +278,16 @@
           "recompute_interval_seconds": "Recompute interval (seconds)",
           "ac_actual_entity": "Total-AC meter (behind the inverters)",
           "ac_actual_invert": "Invert the AC meter sign",
-          "site": "Site configuration (planes, horizon, inverter groups)"
+          "site": "Site configuration (planes, horizon, inverter groups)",
+          "albedo": "Ground albedo (blank = 0.2)"
         },
         "data_description": {
           "name": "Unique name for this installation — one instance per name.",
           "fetch_interval_seconds": "How often Open-Meteo is polled (default 1800 = 30 min).",
           "recompute_interval_seconds": "How often the forecast is recomputed (default 900 = 15 min).",
           "ac_actual_entity": "Optional. The sensor metering total AC power behind all inverters — the target the learned inverter efficiency (η) is calibrated against, and the apples-to-apples AC-vs-AC dashboard comparison. Leave empty if you have no whole-site AC meter.",
-          "ac_actual_invert": "Enable if your AC meter reports the fed-in balcony-solar power as a negative value; the reading is negated once so measured AC reads positive."
+          "ac_actual_invert": "Enable if your AC meter reports the fed-in balcony-solar power as a negative value; the reading is negated once so measured AC reads positive.",
+          "albedo": "Reflectivity of the ground in front of the modules for the reflected-diffuse term. Dark courtyard/lawn ≈ 0.1, textbook default 0.2, light concrete ≈ 0.3. Matters most on steep balcony tilts. Leave blank for the default."
         }
       },
       "reconfigure": {
@@ -298,13 +300,15 @@
           "recompute_interval_seconds": "Recompute interval (seconds)",
           "ac_actual_entity": "Total-AC meter (behind the inverters)",
           "ac_actual_invert": "Invert the AC meter sign",
-          "site": "Site configuration (planes, horizon, inverter groups)"
+          "site": "Site configuration (planes, horizon, inverter groups)",
+          "albedo": "Ground albedo (blank = 0.2)"
         },
         "data_description": {
           "fetch_interval_seconds": "How often Open-Meteo is polled (default 1800 = 30 min).",
           "recompute_interval_seconds": "How often the forecast is recomputed (default 900 = 15 min).",
           "ac_actual_entity": "Optional. The sensor metering total AC power behind all inverters — the target the learned inverter efficiency (η) is calibrated against, and the apples-to-apples AC-vs-AC dashboard comparison. Leave empty if you have no whole-site AC meter.",
-          "ac_actual_invert": "Enable if your AC meter reports the fed-in balcony-solar power as a negative value; the reading is negated once so measured AC reads positive."
+          "ac_actual_invert": "Enable if your AC meter reports the fed-in balcony-solar power as a negative value; the reading is negated once so measured AC reads positive.",
+          "albedo": "Reflectivity of the ground in front of the modules for the reflected-diffuse term. Dark courtyard/lawn ≈ 0.1, textbook default 0.2, light concrete ≈ 0.3. Matters most on steep balcony tilts. Leave blank for the default."
         }
       }
     },

@@ -323,10 +323,13 @@ def _hour_midpoint(hour_start: datetime) -> datetime:
     return hour_start + timedelta(minutes=30)
 
 
-def _slot_albedo(snow_depth_m: float) -> float:
+def _slot_albedo(
+    snow_depth_m: float, base_albedo: float | None = None
+) -> float:
+    """Snow-aware ground albedo (v0.20: honours the optional site albedo)."""
     if snow_depth_m is not None and snow_depth_m > const.SNOW_DEPTH_THRESHOLD_M:
         return const.ALBEDO_SNOW
-    return const.ALBEDO_DEFAULT
+    return base_albedo if base_albedo is not None else const.ALBEDO_DEFAULT
 
 
 def reconstruct_plane_hour(
@@ -336,6 +339,7 @@ def reconstruct_plane_hour(
     *,
     latitude: float,
     longitude: float,
+    base_albedo: float | None = None,
 ) -> PlaneHourReconstruction:
     """Reconstruct one plane's modeled hour split using the repo's core/.
 
@@ -349,7 +353,7 @@ def reconstruct_plane_hour(
     midpoint = _hour_midpoint(wx.start)
     sun_az, sun_el = solpos.sun_position(midpoint, latitude, longitude)
     doy = midpoint.timetuple().tm_yday
-    albedo = _slot_albedo(wx.snow_depth_m)
+    albedo = _slot_albedo(wx.snow_depth_m, base_albedo)
     # THE shared hourly-kc reduction (clearsky.hourly_kc), same estimator the
     # live nightly trainer applies to its 15-min slots; at this hourly
     # resolution the single sample reduces exactly to clear_sky_index.
@@ -647,6 +651,7 @@ def _process_day_impl(
             r = reconstruct_plane_hour(
                 plane, _svf_for(plane, doy), wx,
                 latitude=lat, longitude=lon,
+                base_albedo=getattr(site, "albedo", None),
             )
             recon[plane.name][hkey] = r
             modeled_total_by_plane[plane.name][hkey] = r.gated_total_wh

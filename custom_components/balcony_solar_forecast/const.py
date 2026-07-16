@@ -16,7 +16,7 @@ from __future__ import annotations
 DOMAIN = "balcony_solar_forecast"
 
 INTEGRATION_NAME = "Balcony Solar Forecast"
-INTEGRATION_VERSION = "0.19.2"
+INTEGRATION_VERSION = "0.20.0"
 
 # --- Update behaviour (SPEC §4: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
@@ -70,6 +70,14 @@ CONF_AC_ACTUAL_ENTITY = "ac_actual_entity"
 # the read boundary so the measured sensor and the calibration reader are
 # sign-correct. Optional; default False.
 CONF_AC_ACTUAL_INVERT = "ac_actual_invert"
+# Site-level ground albedo for the reflected-diffuse term (v0.20). Optional;
+# absent => ALBEDO_DEFAULT. Matters disproportionately on steep balcony tilts
+# (70-90 deg), where the ground-view factor (1-cos(tilt))/2 reaches 0.4-0.5:
+# a dark courtyard/lawn (~0.1) vs the textbook 0.2 shifts the diffuse floor by
+# 10-20 %. Snow days still override with ALBEDO_SNOW.
+CONF_SITE_ALBEDO = "albedo"
+SITE_ALBEDO_MIN = 0.05
+SITE_ALBEDO_MAX = 0.9
 # plane fields
 CONF_PLANE_NAME = "name"
 CONF_AZIMUTH = "azimuth_deg"  # 0=N clockwise

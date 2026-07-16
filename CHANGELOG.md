@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-07-16
+
+### Added
+
+- **Configurable site ground albedo.** New optional "Ground albedo" field in
+  the setup/reconfigure flow (`site.albedo`, blank = the shipped 0.2). The
+  reflected-diffuse term matters disproportionately on steep balcony tilts
+  (70–90°), where the ground-view factor reaches 0.4–0.5 — a dark courtyard or
+  lawn (~0.1) vs the textbook 0.2 shifts the diffuse floor by 10–20 %. Snow
+  days still override with the snow albedo. Values are clamped to [0.05, 0.9];
+  pre-0.20 configs are untouched (absent key = default, bit-identical curve).
+  The offline backfill honours the same value.
+- **AC-calibration raw-ratio diagnostic.** The nightly inverter calibration now
+  records the measured AC/DC ratio summary BEFORE the plausibility band
+  (`raw: {date, median_ratio, n, in_band_n}` inside the
+  `inverter_efficiency_learned` attribute) — including when every sample is
+  out-of-band and the EMA folds nothing. A median far outside [0.90, 0.99]
+  with `in_band_n: 0` is the smoking gun for a mis-scaled DC sensor (or a
+  mis-wired AC meter): previously the calibration silently refused and the
+  operator never saw why.
+
 ## [0.19.2] - 2026-07-16
 
 ### Fixed
