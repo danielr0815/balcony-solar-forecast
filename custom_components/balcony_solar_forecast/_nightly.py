@@ -43,6 +43,8 @@ from .const import (
     DRIFT_LOSS_STREAK_DAYS,
     DRIFT_WINDOW_DAYS,
     INVERTER_CAL_CLIP_HEADROOM_FRAC,
+    INVERTER_CAL_MAX,
+    INVERTER_CAL_MIN,
     ISSUE_FAST_LEARNER_DISABLED,
     ISSUE_SLOW_LEARNER_DISABLED,
     LEARNER_LAYER_FAST,
@@ -532,6 +534,28 @@ async def train_inverter_cal(coord, day: date) -> None:
             ratios.append(r)
     if not ratios:
         return
+    # RAW-ratio diagnostic (v0.20): record the measured AC/DC ratio BEFORE the
+    # plausibility band, incl. out-of-band samples the EMA will drop. When the
+    # DC sensors themselves mis-scale (e.g. ports reading ~25 % high), the true
+    # ratio sits OUTSIDE [INVERTER_CAL_MIN, INVERTER_CAL_MAX] — the calibration
+    # then correctly refuses to fold it, but without this diagnostic the
+    # operator would never SEE the evidence (n stays 0, eta unknown). Kept
+    # transient on the coordinator (not persisted): it is evidence, not state,
+    # and the next nightly refreshes it.
+    srt = sorted(ratios)
+    mid = len(srt) // 2
+    raw_median = (
+        srt[mid] if len(srt) % 2 else (srt[mid - 1] + srt[mid]) / 2.0
+    )
+    in_band = sum(
+        1 for r in ratios if INVERTER_CAL_MIN <= r <= INVERTER_CAL_MAX
+    )
+    coord._inverter_cal_raw = {
+        "date": iso,
+        "median_ratio": round(raw_median, 4),
+        "n": len(ratios),
+        "in_band_n": in_band,
+    }
     new_state = inverter_cal_mod.update(coord._inverter_cal_state, ratios)
     if new_state is coord._inverter_cal_state:
         return  # every ratio was out of band -> nothing folded, state unchanged

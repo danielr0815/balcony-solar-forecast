@@ -69,6 +69,7 @@ from .const import (
     CONF_QUANTILES_ENABLED,
     CONF_RECOMPUTE_INTERVAL,
     CONF_SITE,
+    CONF_SITE_ALBEDO,
     CONF_SLOW_LEARNER_ENABLED,
     DEFAULT_COMPARISON_SENSORS,
     DEFAULT_DAY_AHEAD_BIAS_ENABLED,
@@ -80,6 +81,8 @@ from .const import (
     DOMAIN,
     FETCH_INTERVAL_SECONDS,
     RECOMPUTE_INTERVAL_SECONDS,
+    SITE_ALBEDO_MAX,
+    SITE_ALBEDO_MIN,
 )
 from .core.types import ComparisonConfig, SiteConfig
 
@@ -182,6 +185,7 @@ def _user_schema(
     site: dict[str, Any],
     ac_actual_entity: str = "",
     ac_actual_invert: bool = False,
+    albedo: float | None = None,
     include_name: bool = True,
 ) -> vol.Schema:
     """Schema for the user / reconfigure step: STRUCTURAL setup only.
@@ -238,6 +242,19 @@ def _user_schema(
             vol.Optional(
                 CONF_AC_ACTUAL_INVERT, default=bool(ac_actual_invert)
             ): _bool_selector(),
+            # Optional site ground albedo (v0.20) — same suggested_value pattern
+            # as the AC meter so a cleared field stays cleared (=> shipped
+            # default applies). Matters most on steep balcony tilts, where the
+            # ground-reflected diffuse is a large share of the floor.
+            vol.Optional(
+                CONF_SITE_ALBEDO,
+                description={"suggested_value": albedo},
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=SITE_ALBEDO_MIN, max=SITE_ALBEDO_MAX, step="any",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
             vol.Required(CONF_SITE, default=site): _site_selector(),
         }
     )
@@ -326,6 +343,19 @@ def _structural_data(site: SiteConfig, user_input: dict[str, Any]) -> dict[str, 
         site_dict[CONF_AC_ACTUAL_INVERT] = True
     else:
         site_dict.pop(CONF_AC_ACTUAL_INVERT, None)
+    # Optional site albedo (v0.20): same authoritative-field convention — a
+    # filled field is merged into the site dict, a cleared field removes any
+    # stored value so the shipped default applies again.
+    albedo_raw = user_input.get(CONF_SITE_ALBEDO)
+    albedo: float | None
+    try:
+        albedo = float(albedo_raw) if albedo_raw is not None else None
+    except (TypeError, ValueError):
+        albedo = None
+    if albedo is not None:
+        site_dict[CONF_SITE_ALBEDO] = albedo
+    else:
+        site_dict.pop(CONF_SITE_ALBEDO, None)
     return {
         CONF_LATITUDE: lat,
         CONF_LONGITUDE: lon,
@@ -385,6 +415,7 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
                 site=defaults["site"],
                 ac_actual_entity=defaults["ac_actual_entity"],
                 ac_actual_invert=defaults["ac_actual_invert"],
+                albedo=defaults["albedo"],
             ),
             errors=errors,
         )
@@ -438,6 +469,7 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
                 site=defaults["site"],
                 ac_actual_entity=defaults["ac_actual_entity"],
                 ac_actual_invert=defaults["ac_actual_invert"],
+                albedo=defaults["albedo"],
                 include_name=False,
             ),
             errors=errors,
@@ -566,10 +598,16 @@ def _current_values(
     # keeps the operator's in-progress edit).
     site_ac_entity = ""
     site_ac_invert = False
+    site_albedo: float | None = None
     if isinstance(default_site, dict):
         raw_ac = default_site.get(CONF_AC_ACTUAL_ENTITY)
         site_ac_entity = raw_ac if isinstance(raw_ac, str) else ""
         site_ac_invert = bool(default_site.get(CONF_AC_ACTUAL_INVERT, False))
+        raw_albedo = default_site.get(CONF_SITE_ALBEDO)
+        try:
+            site_albedo = float(raw_albedo) if raw_albedo is not None else None
+        except (TypeError, ValueError):
+            site_albedo = None
 
     def _bool_default(key: str, fallback: bool) -> bool:
         # Precedence mirrors the other fields: just-submitted edit > existing
@@ -615,6 +653,7 @@ def _current_values(
         "ac_actual_invert": bool(
             src.get(CONF_AC_ACTUAL_INVERT, site_ac_invert)
         ),
+        "albedo": src.get(CONF_SITE_ALBEDO, site_albedo),
         "fast_learner_enabled": _bool_default(
             CONF_FAST_LEARNER_ENABLED, DEFAULT_FAST_LEARNER_ENABLED
         ),

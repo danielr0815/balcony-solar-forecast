@@ -1901,16 +1901,27 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         Returns ``{"eta": <EMA>, "n": <folded samples>, "effective": <applied>}``
         where ``effective`` is None until the calibration is trusted (the config
         eta then stands). None when the state is unavailable (bare coordinator).
+
+        ``raw`` (v0.20, when last night's calibration produced gated samples):
+        the measured AC/DC ratio summary BEFORE the plausibility band —
+        ``{date, median_ratio, n, in_band_n}``. A median far outside
+        [INVERTER_CAL_MIN, INVERTER_CAL_MAX] with ``in_band_n == 0`` is the
+        smoking gun for a mis-scaled DC (or mis-wired AC) sensor: the EMA
+        rightly folds nothing, but the operator can SEE why.
         """
         cal = getattr(self, "_inverter_cal_state", None)
         if cal is None:
             return None
         eff = inverter_cal_mod.effective_eta(cal)
-        return {
+        out: dict[str, Any] = {
             "eta": round(float(cal.eta), 4),
             "n": int(cal.n),
             "effective": None if eff is None else round(eff, 4),
         }
+        raw = getattr(self, "_inverter_cal_raw", None)
+        if isinstance(raw, dict) and raw:
+            out["raw"] = dict(raw)
+        return out
 
     def _train_quantiles_day(self, day: date) -> None:
         """Sample one closed ``day`` into the quantile relative-error ring."""

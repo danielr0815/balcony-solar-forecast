@@ -597,7 +597,11 @@ class PowerNowSensor(BalconyForecastEntity, SensorEntity):
         if callable(getter):
             learned = getter()
         calibrated = learned is not None and learned.get("n", 0)
-        if calibrated:
+        # Shown once the calibration folded a sample OR produced raw gated
+        # ratios (v0.20): an all-out-of-band night (n stays 0) must still
+        # surface its ``raw`` evidence — that case is exactly the mis-scaled
+        # DC-sensor diagnosis the raw block exists for.
+        if calibrated or (learned is not None and learned.get("raw")):
             attrs["inverter_efficiency_learned"] = learned
         # Provenance label (v0.19.2 status honesty): without an AC meter the
         # per-group eta is a verbatim CONFIG echo that never changes — identical

@@ -625,3 +625,75 @@ class TestPerPlaneRossCoeff:
             self._warm_site(ROSS_COEFF), weather, now=_TEST_DATE
         )
         assert sum(none_res.total_watts) == pytest.approx(sum(eq_res.total_watts))
+
+
+class TestSiteAlbedo:
+    """Site-level ground albedo (v0.20): the reflected-diffuse knob.
+
+    Real physics (no patched transposition): a higher configured albedo feeds
+    a larger ground-reflected term, so daily energy must rise monotonically
+    with it — and ``albedo=None`` must be bit-identical to the shipped
+    ALBEDO_DEFAULT (backward compatibility for every pre-v0.20 site).
+    """
+
+    def _albedo_site(self, albedo):
+        from dataclasses import replace
+
+        return replace(_two_plane_site(), albedo=albedo)
+
+    def test_albedo_none_equals_default_constant(self):
+        from balcony_solar_forecast.const import ALBEDO_DEFAULT
+
+        weather = _clear_sky_series()
+        none_res = engine.compute_forecast(
+            self._albedo_site(None), weather, now=_TEST_DATE
+        )
+        eq_res = engine.compute_forecast(
+            self._albedo_site(ALBEDO_DEFAULT), weather, now=_TEST_DATE
+        )
+        assert sum(none_res.total_watts) == pytest.approx(
+            sum(eq_res.total_watts)
+        )
+
+    def test_energy_rises_with_albedo(self):
+        weather = _clear_sky_series()
+        dark = engine.compute_forecast(
+            self._albedo_site(0.05), weather, now=_TEST_DATE
+        )
+        default = engine.compute_forecast(
+            self._albedo_site(None), weather, now=_TEST_DATE
+        )
+        bright = engine.compute_forecast(
+            self._albedo_site(0.5), weather, now=_TEST_DATE
+        )
+        # Steep 70-deg planes see a lot of ground: more reflective ground ->
+        # strictly more energy, on both sides of the shipped default.
+        assert sum(dark.total_watts) < sum(default.total_watts)
+        assert sum(default.total_watts) < sum(bright.total_watts)
+
+    def test_siteconfig_albedo_roundtrip_and_clamp(self):
+        from dataclasses import replace
+
+        from balcony_solar_forecast.const import (
+            CONF_SITE_ALBEDO,
+            SITE_ALBEDO_MAX,
+            SITE_ALBEDO_MIN,
+        )
+
+        base = _two_plane_site()
+        # Set -> to_dict carries the key; from_dict round-trips the value.
+        d = replace(base, albedo=0.1).to_dict()
+        assert d[CONF_SITE_ALBEDO] == pytest.approx(0.1)
+        assert SiteConfig.from_dict(d).albedo == pytest.approx(0.1)
+        # Unset -> no key emitted (pre-v0.20 dict shape preserved), loads None.
+        d_none = base.to_dict()
+        assert CONF_SITE_ALBEDO not in d_none
+        assert SiteConfig.from_dict(d_none).albedo is None
+        # Hand-edited out-of-band values clamp into the physical band.
+        d_low = dict(d_none, **{CONF_SITE_ALBEDO: -1.0})
+        assert SiteConfig.from_dict(d_low).albedo == pytest.approx(SITE_ALBEDO_MIN)
+        d_high = dict(d_none, **{CONF_SITE_ALBEDO: 5.0})
+        assert SiteConfig.from_dict(d_high).albedo == pytest.approx(SITE_ALBEDO_MAX)
+        # Garbage degrades to None (default applies), never raises.
+        d_junk = dict(d_none, **{CONF_SITE_ALBEDO: "dark"})
+        assert SiteConfig.from_dict(d_junk).albedo is None

@@ -1927,6 +1927,44 @@ async def test_nightly_inverter_cal_noop_when_all_hours_ineligible():
     assert c._inverter_cal_state is before
 
 
+async def test_nightly_inverter_cal_records_raw_ratio_when_out_of_band():
+    """v0.20: gated but OUT-OF-BAND ratios (e.g. DC ports reading ~25 % high →
+    true AC/DC ≈ 0.77 < INVERTER_CAL_MIN) fold NOTHING into the EMA, but the
+    raw-ratio diagnostic records the evidence so the operator can see WHY the
+    calibration refuses — the mis-scaled-sensor smoking gun."""
+    c = _make_coordinator()
+    c._site = _ac_meter_site()
+    iso = "2026-07-05"
+    day = datetime(2026, 7, 5).date()
+    c._store.hourly_actuals[iso] = {
+        "M1": {
+            "2026-07-05T10:00:00+00:00": 500.0,
+            "2026-07-05T11:00:00+00:00": 520.0,
+        }
+    }
+
+    async def _fake_read(_day):
+        return {
+            "2026-07-05T10:00:00+00:00": 385.0,   # ratio 0.77
+            "2026-07-05T11:00:00+00:00": 400.4,   # ratio 0.77
+        }
+
+    c._async_read_ac_actuals = _fake_read
+    before = c._inverter_cal_state
+    await c._train_inverter_cal(day)
+    # EMA untouched (both ratios outside [INVERTER_CAL_MIN, INVERTER_CAL_MAX])...
+    assert c._inverter_cal_state is before
+    # ...but the raw evidence is recorded and rides the learned summary.
+    raw = c._inverter_cal_raw
+    assert raw["date"] == iso
+    assert raw["median_ratio"] == pytest.approx(0.77, abs=1e-3)
+    assert raw["n"] == 2
+    assert raw["in_band_n"] == 0
+    summ = c.inverter_efficiency_learned()
+    assert summ["n"] == 0
+    assert summ["raw"]["median_ratio"] == pytest.approx(0.77, abs=1e-3)
+
+
 async def test_nightly_inverter_cal_read_exception_is_contained():
     c = _make_coordinator()
     c._site = _ac_meter_site()

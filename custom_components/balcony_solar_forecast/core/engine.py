@@ -191,12 +191,18 @@ class LearnerHooks:
 _NEUTRAL_HOOKS = LearnerHooks()
 
 
-def _slot_albedo(slot: WeatherSlot) -> float:
-    """Snow-aware ground albedo for a slot (SPEC §4 physics musts)."""
+def _slot_albedo(slot: WeatherSlot, base_albedo: float = ALBEDO_DEFAULT) -> float:
+    """Snow-aware ground albedo for a slot (SPEC §4 physics musts).
+
+    ``base_albedo`` is the site's configured ground albedo (v0.20,
+    ``SiteConfig.albedo``; the shipped default when unset) — snow cover still
+    overrides it with ALBEDO_SNOW, because fresh snow reflects the same no
+    matter what the bare ground underneath looks like.
+    """
     depth = slot.snow_depth_m
     if depth is not None and depth > SNOW_DEPTH_THRESHOLD_M:
         return ALBEDO_SNOW
-    return ALBEDO_DEFAULT
+    return base_albedo
 
 
 def _slot_is_usable(slot: WeatherSlot) -> bool:
@@ -483,6 +489,12 @@ def compute_forecast(
     lon = site.longitude
     planes = site.planes
     groups = site.groups
+    # Site ground albedo (v0.20): configured value or the shipped default;
+    # ``getattr`` keeps analytic test fakes without the field working. Snow
+    # still overrides per slot inside ``_slot_albedo``.
+    base_albedo = getattr(site, "albedo", None)
+    if base_albedo is None:
+        base_albedo = ALBEDO_DEFAULT
 
     # Sky-view factor is a per-plane, per-day-of-year property (the horizon is
     # semi-transparent to the diffuse, so a seasonal foliage row ramps the SVF
@@ -612,7 +624,7 @@ def compute_forecast(
         midpoint = slot.midpoint
         sun_az, sun_el = solpos.sun_position(midpoint, lat, lon)
         doy = midpoint.timetuple().tm_yday
-        albedo = _slot_albedo(slot)
+        albedo = _slot_albedo(slot, base_albedo)
 
         # Below the horizon there is no beam, but the tilted plane still
         # receives the isotropic diffuse and the ground term while the sky is
