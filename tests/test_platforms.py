@@ -265,7 +265,10 @@ def test_power_now_exposes_inverter_efficiency():
 
     s = _bare(PowerNowSensor, _Coord())
     assert s.extra_state_attributes == {
-        "inverter_efficiency": {"WR1": 0.965, "WR2": 0.90}
+        "inverter_efficiency": {"WR1": 0.965, "WR2": 0.90},
+        # v0.19.2 status honesty: without an AC-meter calibration the eta map is
+        # a verbatim config echo and must say so.
+        "inverter_efficiency_source": "config",
     }
 
 
@@ -307,6 +310,30 @@ def test_energy_band_sensor_none_without_ac_band():
     coord = _FakeCoordinator({})
     s = _bare(EnergyBandSensor, coord, _band=FORECAST_RESP_KEY_P10)
     assert s.native_value is None
+    # v0.19.2 status honesty: with NO band there is no band SOURCE either —
+    # the old default labelled a non-existent band "learned".
+    assert s.extra_state_attributes is None
+
+
+def test_energy_band_sensor_band_source_present_with_band(monkeypatch):
+    """While a band exists, band_source rides along (default "learned")."""
+    from custom_components.balcony_solar_forecast.const import (
+        DATA_KEY_QUANTILE_CURVES_AC,
+        FORECAST_RESP_KEY_P90,
+    )
+
+    fixed = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(sensor_mod.dt_util, "now", lambda: fixed)
+    monkeypatch.setattr(sensor_mod.dt_util, "as_local", lambda d: d)
+    start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    coord = _FakeCoordinator({
+        DATA_KEY_QUANTILE_CURVES_AC: {
+            FORECAST_RESP_KEY_P90: {start.isoformat(): 300.0},
+        }
+    })
+    s = _bare(EnergyBandSensor, coord, _band=FORECAST_RESP_KEY_P90)
+    assert s.native_value == pytest.approx(0.3)
+    assert s.extra_state_attributes == {"band_source": "learned"}
 
 
 # --------------------------------------------------------------------------

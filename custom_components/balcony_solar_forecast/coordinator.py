@@ -126,6 +126,7 @@ from .const import (
     LEARNER_LAYER_FAST,
     LEARNER_LAYER_SLOW,
     LEARNER_STATUS_ACTIVE,
+    LEARNER_STATUS_COLD_START,
     LEARNER_STATUS_DISABLED_BY_DRIFT,
     LEARNER_STATUS_FROZEN,
     LEARNER_STATUS_OFF,
@@ -1736,6 +1737,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 return LEARNER_STATUS_DISABLED_BY_DRIFT
             if frozen:
                 return LEARNER_STATUS_FROZEN
+            # Enabled but NO learned cells (fresh install / after
+            # reset_day_ahead_bias): the correction hook is gated on
+            # ``bool(cells)`` and applies nothing — reporting "active" would
+            # claim a correction that does not exist (v0.19.2 status honesty).
+            if not self._bias_state.cells:
+                return LEARNER_STATUS_COLD_START
             return LEARNER_STATUS_ACTIVE
 
         return {

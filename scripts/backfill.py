@@ -1209,11 +1209,16 @@ def _parse_lts_result(
 def _stat_row_hour(start: object) -> str | None:
     """Normalise a statistics row ``start`` to an ISO-UTC hour key.
 
-    HA WebSocket returns ``start`` as epoch MILLISECONDS (number) in modern
-    cores; older/other paths may send an ISO string. Handle both.
+    HA WebSocket returns ``start`` as epoch MILLISECONDS; the in-process
+    recorder API returns epoch SECONDS. Disambiguate by magnitude (> 1e11 ⇒
+    ms) so the backfill can never repeat the live `_actuals` epoch bug, and
+    accept ISO strings from older/other paths.
     """
     if isinstance(start, (int, float)):
-        dt = datetime.fromtimestamp(start / 1000.0, tz=UTC)
+        ts = float(start)
+        if ts > 1e11:  # ms wire format; seconds stay < 1e11 until year 5138
+            ts /= 1000.0
+        dt = datetime.fromtimestamp(ts, tz=UTC)
     elif isinstance(start, str):
         try:
             dt = datetime.fromisoformat(start)

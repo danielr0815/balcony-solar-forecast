@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.2] - 2026-07-16
+
+### Fixed
+
+- **CRITICAL: nightly actuals reader parsed statistics timestamps as
+  milliseconds — every day was discarded, silently starving ALL nightly
+  learning since the completeness gate landed.** The in-process recorder API
+  (`statistics_during_period`) returns row `start` as float epoch **seconds**;
+  `_stat_row_hour_key` assumed epoch **milliseconds** (the WebSocket wire
+  format), so all 24 hourly rows of a day collapsed onto one 1970 hour key,
+  the per-module day-completeness gate saw `covers only 1 of ~16 daylight
+  hours` and discarded every day. Consequence in the field: day-ahead bias,
+  shademap training, scoreboard/kill-gate, quantile bands and drift monitoring
+  never received a single live training day (bootstrap-seeded state was the
+  only learned state). Numeric `start` values are now disambiguated by
+  magnitude (> 1e11 ⇒ ms, else seconds); regression tests feed the real
+  float-seconds format. The same guard was added to `scripts/backfill.py`.
+  After updating, the nightly catch-up refills the last
+  `NIGHTLY_CATCHUP_MAX_DAYS` days from long-term statistics automatically.
+
+### Changed
+
+- **Status honesty (operator-facing signals now say what is really
+  happening):**
+  - New learner status `cold_start`: the day-ahead bias reports it while it
+    has NO learned cells (fresh install / right after `reset_day_ahead_bias`)
+    instead of claiming `active` while applying nothing.
+  - The day-ahead status sensor keeps its `bias_cells` attribute present as
+    `{}` with `cells_n: 0` when empty — a deliberate reset is now
+    distinguishable from a broken attribute pipeline.
+  - `inverter_efficiency` on the power sensor carries an
+    `inverter_efficiency_source: config | learned` label — without an AC-meter
+    calibration the per-group eta is a verbatim config echo and now says so.
+  - The P10/P90 band sensors only expose `band_source` while a band actually
+    exists; a non-existent band is no longer labelled "learned".
+
 ## [0.19.1] - 2026-07-12
 
 ### Fixed

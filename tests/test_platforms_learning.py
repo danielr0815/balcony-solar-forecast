@@ -135,6 +135,37 @@ def test_learner_status_reads_layer():
     assert day.native_value == LEARNER_STATUS_OFF
 
 
+def test_learner_status_day_ahead_bias_cells_attrs_present_when_empty():
+    """v0.19.2: with NO learned cells the day-ahead status sensor still shows
+    ``bias_cells: {}`` + ``cells_n: 0`` — a deliberate reset must be
+    distinguishable from a broken attribute pipeline (the attribute used to
+    vanish entirely). With cells, they ride along verbatim + counted."""
+    from custom_components.balcony_solar_forecast.const import DATA_KEY_BIAS_CELLS
+
+    empty = _bare(
+        LearnerStatusSensor,
+        _FakeCoordinator({DATA_KEY_BIAS_CELLS: {}}),
+        _layer=LEARNER_LAYER_DAY_AHEAD,
+    )
+    assert empty.extra_state_attributes == {"bias_cells": {}, "cells_n": 0}
+
+    cells = {"clear|midday": {"theta": 0.9, "n": 4, "applied": 0.9}}
+    trained = _bare(
+        LearnerStatusSensor,
+        _FakeCoordinator({DATA_KEY_BIAS_CELLS: cells}),
+        _layer=LEARNER_LAYER_DAY_AHEAD,
+    )
+    assert trained.extra_state_attributes == {"bias_cells": cells, "cells_n": 1}
+
+    # Other layers stay attribute-free.
+    fast = _bare(
+        LearnerStatusSensor,
+        _FakeCoordinator({DATA_KEY_BIAS_CELLS: cells}),
+        _layer=LEARNER_LAYER_FAST,
+    )
+    assert fast.extra_state_attributes is None
+
+
 def test_learner_status_unknown_value_is_none():
     coord = _FakeCoordinator(
         {DATA_KEY_LEARNER_STATUS: {LEARNER_LAYER_FAST: "bogus"}}

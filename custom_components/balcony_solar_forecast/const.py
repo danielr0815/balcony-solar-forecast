@@ -16,7 +16,7 @@ from __future__ import annotations
 DOMAIN = "balcony_solar_forecast"
 
 INTEGRATION_NAME = "Balcony Solar Forecast"
-INTEGRATION_VERSION = "0.19.1"
+INTEGRATION_VERSION = "0.19.2"
 
 # --- Update behaviour (SPEC §4: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
@@ -636,11 +636,17 @@ LEARNER_STATUS_ACTIVE = "active"                 # enabled and shaping the curve
 LEARNER_STATUS_OFF = "off"                        # user kill switch off
 LEARNER_STATUS_DISABLED_BY_DRIFT = "disabled_by_drift"  # drift monitor auto-off
 LEARNER_STATUS_FROZEN = "frozen"                  # collapse detector froze it today
+# Enabled but holds NO learned state yet (e.g. right after reset_day_ahead_bias
+# or on a fresh install before the first nightly training): the layer applies
+# NOTHING to the served curve. Reporting "active" here misled the operator into
+# thinking a correction was in effect (v0.19.2 status honesty).
+LEARNER_STATUS_COLD_START = "cold_start"
 LEARNER_STATUS_VALUES = (
     LEARNER_STATUS_ACTIVE,
     LEARNER_STATUS_OFF,
     LEARNER_STATUS_DISABLED_BY_DRIFT,
     LEARNER_STATUS_FROZEN,
+    LEARNER_STATUS_COLD_START,
 )
 
 # --- Repair issue ids (SPEC §5/§7) -----------------------------------------

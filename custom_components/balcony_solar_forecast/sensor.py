@@ -590,13 +590,21 @@ class PowerNowSensor(BalconyForecastEntity, SensorEntity):
         # current EMA + folded-sample count, and the ``effective`` eta actually
         # applied to the AC curve (None until trusted -> the config eta stands).
         # Added only once the calibration has folded a sample (n > 0), so a site
-        # without an AC meter keeps the exact pre-Phase-3 attribute shape.
+        # without an AC meter keeps the pre-Phase-3 attribute shape (plus the
+        # source label below).
         learned = None
         getter = getattr(self.coordinator, "inverter_efficiency_learned", None)
         if callable(getter):
             learned = getter()
-        if learned is not None and learned.get("n", 0):
+        calibrated = learned is not None and learned.get("n", 0)
+        if calibrated:
             attrs["inverter_efficiency_learned"] = learned
+        # Provenance label (v0.19.2 status honesty): without an AC meter the
+        # per-group eta is a verbatim CONFIG echo that never changes — identical
+        # values across all groups misread as a learned calibration result.
+        attrs["inverter_efficiency_source"] = (
+            "learned" if calibrated else "config"
+        )
         return attrs
 
 
@@ -1018,16 +1026,20 @@ class LearnerStatusSensor(_DiagnosticSensor):
         multiplier per (cloud_class, solar day_part) plus the raw ``theta`` and
         trained-day count ``n``, so the operator can see the bias the forecast
         is using (and spot a mis-trained cell like the midday one) directly in
-        the UI instead of only in a diagnostics download. The other layers add
-        no attributes.
+        the UI instead of only in a diagnostics download. With NO learned cells
+        the attributes stay present as ``bias_cells: {}`` / ``cells_n: 0``
+        (v0.19.2): a deliberately reset or cold-starting learner must be
+        distinguishable from a broken attribute pipeline — a vanishing
+        attribute looked identical to a bug. The other layers add no
+        attributes.
         """
         if self._layer != LEARNER_LAYER_DAY_AHEAD:
             return None
         data = self.coordinator.data or {}
         cells = data.get(DATA_KEY_BIAS_CELLS)
-        if not isinstance(cells, dict) or not cells:
-            return None
-        return {"bias_cells": cells}
+        if not isinstance(cells, dict):
+            cells = {}
+        return {"bias_cells": cells, "cells_n": len(cells)}
 
 
 # ---------------------------------------------------------------------------
@@ -1223,7 +1235,7 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
         return round(total_wh / 1000.0, 3) if seen else None
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any]:
+    def extra_state_attributes(self) -> dict[str, Any] | None:
         """Expose which source shaped today's band (v0.16, SPEC §6).
 
         ``band_source`` summarises today's slots: "learned" (residual ring only),
@@ -1231,7 +1243,13 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
         whole spread — the cold-start win) or "envelope" (the ensemble widened at
         least one slot over the learned band). Defaults to "learned" when the
         ensemble is off or contributed nothing today.
+
+        Only present while a band actually EXISTS (state is not None): labelling
+        a non-existent band "learned" claimed a trained source on an unknown
+        sensor (v0.19.2 status honesty) — with no band there is no source.
         """
+        if self.native_value is None:
+            return None
         data = self.coordinator.data or {}
         return {"band_source": data.get(DATA_KEY_BAND_SOURCE, "learned")}
 
