@@ -555,7 +555,12 @@ class BalconyShadeProfileCard extends HTMLElement {
         min-height: 1.4em; line-height: 1.4em;
         padding: 0 0 8px; color: var(--primary-text-color);
         font-size: 0.9rem; font-variant-numeric: tabular-nums;
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        /* Wrap instead of ellipsis-clipping: the readout now carries the full
+           live/hover line (time · az · shading · elevation · shade-edge, plus
+           optional n / view / compare tags), which overflows one line on a
+           narrow card. Wrapping keeps every value visible; the block grows a
+           line rather than truncating. */
+        overflow-wrap: anywhere;
       }
       .readout.idle { color: var(--secondary-text-color); font-style: italic; }
       /* Live "current sun position" readout — tinted to match the on-chart
