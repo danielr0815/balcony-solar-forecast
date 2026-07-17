@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-07-17
+
+### Added
+
+- **Shade-profile diagram: the cursor tooltip now shows the shading-edge
+  elevation.** Alongside the sun's elevation at the hovered azimuth, the tooltip
+  reports the learned and configured horizon (obstruction) elevation there — the
+  angle below which the beam would be blocked ("unter welchem Winkel der Schatten
+  zuschlägt") — plus a free/shaded verdict. Interpolated live from the plotted
+  horizon series in `dashboards/shade_profile_apexcharts.yaml`, so it is a
+  card-only change (no integration/sensor update required).
+
 ## [0.20.0] - 2026-07-16
 
 ### Added

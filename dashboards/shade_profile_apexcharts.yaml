@@ -67,6 +67,50 @@ cards:
         show: true
       tooltip:
         enabled: true
+        # Cursor tooltip: alongside the sun elevation at the hovered azimuth,
+        # show the SHADING-EDGE elevation there — i.e. the angle below which the
+        # obstruction (tree / hill / wall) blocks the beam ("unter welchem Winkel
+        # der Schatten zuschlägt"). Interpolated live from the two horizon series
+        # (learned + static) at the hovered azimuth, so no sensor change needed.
+        custom: >
+          function ({ seriesIndex, dataPointIndex, w }) {
+            const g = w.globals;
+            const az = g.seriesX[seriesIndex][dataPointIndex];
+            const el = g.series[seriesIndex][dataPointIndex];
+            const names = g.seriesNames || [];
+            const interp = function (label) {
+              let si = -1;
+              for (let i = 0; i < names.length; i++) {
+                if (names[i] && names[i].indexOf(label) === 0) { si = i; break; }
+              }
+              if (si < 0) return null;
+              const xs = g.seriesX[si], ys = g.series[si];
+              if (!xs || xs.length < 2) return null;
+              if (az <= xs[0]) return ys[0];
+              if (az >= xs[xs.length - 1]) return ys[xs.length - 1];
+              for (let i = 0; i < xs.length - 1; i++) {
+                if (xs[i] <= az && az <= xs[i + 1]) {
+                  const fr = (xs[i + 1] === xs[i]) ? 0 : (az - xs[i]) / (xs[i + 1] - xs[i]);
+                  return ys[i] + (ys[i + 1] - ys[i]) * fr;
+                }
+              }
+              return null;
+            };
+            const learned = interp('Verschattungshorizont');
+            const stat = interp('Statischer');
+            const edge = (learned != null) ? learned : stat;
+            const shaded = (edge != null) && (el < edge);
+            const f = function (v) { return (v == null) ? '–' : (Math.round(v * 10) / 10).toFixed(1) + '°'; };
+            const col = shaded ? '#c0392b' : '#2ecc71';
+            return '<div style="padding:8px 11px;font-size:13px;line-height:1.6">'
+              + '<div style="font-weight:600;margin-bottom:3px">Azimut ' + Math.round(az) + '°</div>'
+              + '<div>Sonnenhöhe: <b>' + f(el) + '</b></div>'
+              + '<div>Schattenkante (gelernt): <b>' + f(learned) + '</b></div>'
+              + '<div>Schattenkante (Konfig): <b>' + f(stat) + '</b></div>'
+              + '<div style="margin-top:3px;color:' + col + ';font-weight:600">'
+              + (shaded ? 'im Schatten — Kante bei ' + f(edge) : 'frei — Sonne über Kante')
+              + '</div></div>';
+          }
     series:
       # Sun path (Sonnenstand): elevation over azimuth for the selected date.
       - entity: sensor.balcony_solar_forecast_shade_profile
