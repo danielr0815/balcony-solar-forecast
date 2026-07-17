@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-07-17
+
+### Added
+
+- **Shade-profile card (`shade_profile_card.js`): the cursor readout now shows
+  the shading-edge elevation.** The bundled custom card — the one the setup
+  guide ships and most installs actually use — gains the same feature that
+  0.20.1 added to the optional ApexCharts snippet: next to the sun's elevation
+  at the hovered azimuth, the hover line now appends the horizon (obstruction)
+  elevation there ("Schattenkante") — the angle below which the beam would be
+  blocked ("unter welchem Winkel der Schatten zuschlägt"). It is interpolated
+  live from the card's own horizon arrays (learned `shade_horizon`, falling back
+  to `static_horizon`), so no sensor/back-end change is required. Because the
+  card is cache-busted by `?v=<INTEGRATION_VERSION>`, a browser hard-reload
+  after the update picks up the new readout automatically.
+
 ## [0.20.1] - 2026-07-17
 
 ### Added

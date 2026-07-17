@@ -100,6 +100,7 @@ const I18N = {
     hoverIdle: "Hover the chart for details",
     hoverShading: "Shading",
     hoverElevation: "Elevation",
+    hoverEdge: "Shade edge",
     compass: ["N", "NE", "E", "SE", "S", "SW", "W", "NW"],
   },
   de: {
@@ -119,6 +120,7 @@ const I18N = {
     hoverIdle: "Über das Diagramm fahren für Details",
     hoverShading: "Verschattung",
     hoverElevation: "Elevation",
+    hoverEdge: "Schattenkante",
     compass: ["N", "NO", "O", "SO", "S", "SW", "W", "NW"],
   },
 };
@@ -902,6 +904,12 @@ class BalconyShadeProfileCard extends HTMLElement {
         viewSuffix,
         time,
         n: nSun,
+        // Horizon (obstruction) profile, for the hover readout's shade-edge:
+        // at the hovered azimuth, the elevation below which the beam is blocked.
+        horAz: nHor ? horAz : null,
+        shadeH: nHor && isArray(shadeH) ? shadeH : null,
+        staticH: nHor && isArray(staticH) ? staticH : null,
+        nHor,
         // Comparison overlay (nearest-in-azimuth readout), null when unloaded.
         cmpAz: nCmp ? cAz : null,
         cmpTau: nCmp ? cTau : null,
@@ -1042,6 +1050,30 @@ class BalconyShadeProfileCard extends HTMLElement {
     );
   }
 
+  /**
+   * Linear-interpolated horizon elevation at azimuth ``az`` from the parallel
+   * ``xs`` (azimuth) / ``ys`` (elevation) arrays — the shading-edge angle, i.e.
+   * the elevation below which the obstruction blocks the beam. Assumes ``xs``
+   * ascending (the sensor emits sorted horizon rows). Returns null when no
+   * usable grid is present. Clamps to the endpoints outside the covered range.
+   */
+  _horizonEdgeAt(xs, ys, az) {
+    if (!isArray(xs) || !isArray(ys) || xs.length < 1) return null;
+    if (xs.length === 1) return Number(ys[0]);
+    if (az <= Number(xs[0])) return Number(ys[0]);
+    if (az >= Number(xs[xs.length - 1])) return Number(ys[xs.length - 1]);
+    for (let k = 0; k < xs.length - 1; k++) {
+      const a0 = Number(xs[k]);
+      const a1 = Number(xs[k + 1]);
+      if (a0 <= az && az <= a1) {
+        const e0 = Number(ys[k]);
+        const e1 = Number(ys[k + 1]);
+        return a1 === a0 ? e0 : e0 + (e1 - e0) * ((az - a0) / (a1 - a0));
+      }
+    }
+    return null;
+  }
+
   /** Status readout string for the snapped sample (localized compass + τ). */
   _hoverText(ctx, i) {
     const t = ctx.t;
@@ -1072,10 +1104,25 @@ class BalconyShadeProfileCard extends HTMLElement {
       const cpct = Math.round((1 - ctau) * 100);
       cmpTag = ` · ${t.hoverVs} ${ctx.cmpDate}: ${cpct} % (τ ${ctau.toFixed(2)})`;
     }
+    // Shade-edge: the obstruction elevation at this azimuth (learned horizon,
+    // falling back to the static configured one) — the angle below which the
+    // beam is blocked. Appended as "· Schattenkante Y°" when a horizon grid is
+    // present, so the operator reads OFF the chart at what elevation the shadow
+    // would strike for the hovered sun azimuth.
+    let edgeTag = "";
+    if (ctx.horAz) {
+      let edge = this._horizonEdgeAt(ctx.horAz, ctx.shadeH, az);
+      if (edge == null || !isFinite(edge)) {
+        edge = this._horizonEdgeAt(ctx.horAz, ctx.staticH, az);
+      }
+      if (edge != null && isFinite(edge)) {
+        edgeTag = ` · ${t.hoverEdge} ${Math.round(edge)}°`;
+      }
+    }
     return (
       `${ctx.time[i]} · ${Math.round(az)}° ${compass} · ` +
       `${t.hoverShading} ${shadingPct} % (τ ${tau.toFixed(2)}) · ` +
-      `${t.hoverElevation} ${Math.round(el)}°${nTag}${suffix}${cmpTag}`
+      `${t.hoverElevation} ${Math.round(el)}°${edgeTag}${nTag}${suffix}${cmpTag}`
     );
   }
 
