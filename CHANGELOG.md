@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-07-17
+
+### Fixed
+
+- **Shade-profile card: the status readout no longer gets cut off.** With the
+  shade-edge and live "Jetzt" additions the readout line grew long enough to
+  overflow one line on a narrow card, where `text-overflow: ellipsis` clipped
+  the tail (e.g. "… Schattenkante 43° · …"). The line now wraps instead of
+  clipping, so every value stays visible; the block grows a line rather than
+  truncating.
+
 ## [0.20.2] - 2026-07-17
 
 ### Added
