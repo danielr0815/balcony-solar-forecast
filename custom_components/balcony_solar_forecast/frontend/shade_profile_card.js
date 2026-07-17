@@ -101,6 +101,7 @@ const I18N = {
     hoverShading: "Shading",
     hoverElevation: "Elevation",
     hoverEdge: "Shade edge",
+    now: "Now",
     compass: ["N", "NE", "E", "SE", "S", "SW", "W", "NW"],
   },
   de: {
@@ -121,6 +122,7 @@ const I18N = {
     hoverShading: "Verschattung",
     hoverElevation: "Elevation",
     hoverEdge: "Schattenkante",
+    now: "Jetzt",
     compass: ["N", "NO", "O", "SO", "S", "SW", "W", "NW"],
   },
 };
@@ -201,6 +203,34 @@ class BalconyShadeProfileCard extends HTMLElement {
     this._compareModule = null;
     this._compareError = false;
     this._compareLoading = false;
+    // Live "now" sun-position marker: the last plot's hover ctx (so a timer can
+    // re-place the marker without a full re-render), a ~minute refresh interval
+    // id (only while connected), and whether the pointer is currently over the
+    // plot (the timer must not fight an active hover).
+    this._lastCtx = null;
+    this._nowTimer = null;
+    this._hovering = false;
+  }
+
+  // Refresh the live "now" marker roughly once a minute while the card is on
+  // screen (the forecast sensor won't push a re-render for a fixed date, so the
+  // marker would otherwise freeze at render time and never clear at sunset). No
+  // work happens unless there is a plotted sun path; the interval is torn down
+  // when the element leaves the DOM, so there is no leak.
+  connectedCallback() {
+    this._stopNowTimer();
+    this._nowTimer = setInterval(() => this._refreshNow(), 60000);
+  }
+
+  disconnectedCallback() {
+    this._stopNowTimer();
+  }
+
+  _stopNowTimer() {
+    if (this._nowTimer) {
+      clearInterval(this._nowTimer);
+      this._nowTimer = null;
+    }
   }
 
   // --- Lovelace card API --------------------------------------------------
@@ -290,6 +320,13 @@ class BalconyShadeProfileCard extends HTMLElement {
     const t = this._t();
     const root = this.shadowRoot;
     root.textContent = "";
+    // The prior plot's SVG is now detached; drop the stale ctx so the "now"
+    // timer no-ops until _plot installs the new one (or leaves it null when
+    // there is no sun path to annotate). Also clear the hover flag: the fresh
+    // overlay has no active pointer yet, and a re-render mid-hover would
+    // otherwise leave it stuck true and freeze the timer.
+    this._lastCtx = null;
+    this._hovering = false;
     root.appendChild(this._style());
 
     const card = document.createElement("ha-card");
@@ -521,6 +558,10 @@ class BalconyShadeProfileCard extends HTMLElement {
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       }
       .readout.idle { color: var(--secondary-text-color); font-style: italic; }
+      /* Live "current sun position" readout — tinted to match the on-chart
+         now-marker (both in the theme accent) so the passive live state reads
+         distinctly from a hover readout. */
+      .readout.now { color: var(--primary-color); }
       .msg {
         padding: 24px 8px; text-align: center;
         color: var(--secondary-text-color);
@@ -903,6 +944,7 @@ class BalconyShadeProfileCard extends HTMLElement {
         sampleN: hasSampleN ? sampleN : null,
         viewSuffix,
         time,
+        date: a[A_DATE],
         n: nSun,
         // Horizon (obstruction) profile, for the hover readout's shade-edge:
         // at the hovered azimuth, the elevation below which the beam is blocked.
@@ -924,12 +966,28 @@ class BalconyShadeProfileCard extends HTMLElement {
         plotH,
         W,
       };
+
+      // (5b) live "now" marker + readout are installed AFTER the comparison
+      // overlay (see the post-(6) block) so the marker paints on top. Keep the
+      // ctx so the minute timer can re-place the marker as real time passes: the
+      // forecast sensor is time-of-day-invariant for a fixed date and pushes no
+      // mid-day re-render, so without the timer the marker would freeze at the
+      // render time and never clear at sunset.
+      this._lastCtx = ctx;
+
+      // Pointer Events unify mouse + touch and — crucially — avoid the
+      // synthesized "compat" mouse events a tap generates: those fire a
+      // mousemove AFTER the tap with no following mouseleave, which would
+      // re-hide the now-marker and leave _hovering stuck true (freezing the
+      // refresh timer). pointerleave fires on touch-end too (the touch pointer
+      // is destroyed), so a tap cleanly restores the resting now-state;
+      // pointercancel covers a touch that turns into a page scroll.
       const onMove = (ev) => this._hoverMove(ev, ctx);
       const onLeave = () => this._hoverLeave(ctx);
-      overlay.addEventListener("mousemove", onMove);
-      overlay.addEventListener("mouseleave", onLeave);
-      overlay.addEventListener("touchstart", onMove, { passive: true });
-      overlay.addEventListener("touchmove", onMove, { passive: true });
+      overlay.addEventListener("pointerdown", onMove);
+      overlay.addEventListener("pointermove", onMove);
+      overlay.addEventListener("pointerleave", onLeave);
+      overlay.addEventListener("pointercancel", onLeave);
     }
 
     // (6) card-local comparison overlay: a DASHED sun path (same yellow, 0.6
@@ -968,6 +1026,12 @@ class BalconyShadeProfileCard extends HTMLElement {
       }
     }
 
+    // (6b) install the live "now" marker LAST — after the comparison overlay —
+    // so it paints on top; the timer and _hoverLeave re-append it the same way,
+    // keeping the z-order stable. this._lastCtx is set (=ctx) only when a sun
+    // path was drawn; it is null on the no-samples path below.
+    if (this._lastCtx) this._applyNowState(this._lastCtx);
+
     // No sun-path samples but horizons drawn → annotate.
     if (!nSun) {
       const box = document.createElement("div");
@@ -981,7 +1045,152 @@ class BalconyShadeProfileCard extends HTMLElement {
     return el;
   }
 
+  // --- live "now" marker --------------------------------------------------
+
+  /**
+   * (Re)place the live "now" sun-position marker + readout on ``ctx`` from the
+   * CURRENT time: remove any prior marker, and if the sun is up on the plotted
+   * (today's) path, draw an accent halo + guide at the current sample and set
+   * the tinted live readout; otherwise clear it and fall back to the idle hint.
+   * Idempotent and driven off ctx alone, so both the initial render and the
+   * minute timer call it. Callers must not invoke it mid-hover (it writes the
+   * readout unconditionally); _refreshNow guards on ``_hovering``.
+   */
+  _applyNowState(ctx) {
+    if (ctx.nowMarker && ctx.nowMarker.parentNode) {
+      ctx.nowMarker.parentNode.removeChild(ctx.nowMarker);
+    }
+    ctx.nowMarker = null;
+    ctx.nowText = null;
+    const nowIdx = this._currentSunIndex(ctx.date, ctx.time, ctx.n);
+    if (nowIdx >= 0) {
+      const nx = ctx.X(ctx.sunAz[nowIdx]);
+      const ny = ctx.Y(ctx.sunEl[nowIdx]);
+      const g = svg("g", { class: "now-marker", "pointer-events": "none" });
+      // Faint SOLID guide down the plot — distinct from the dashed hover line.
+      g.appendChild(
+        svg("line", {
+          x1: nx,
+          y1: ctx.m.top,
+          x2: nx,
+          y2: ctx.m.top + ctx.plotH,
+          stroke: "var(--primary-color)",
+          "stroke-width": "1.5",
+          opacity: "0.45",
+        }),
+      );
+      // Accent halo ring + filled centre at the live sun position.
+      g.appendChild(
+        svg("circle", {
+          cx: nx,
+          cy: ny,
+          r: "8",
+          fill: "none",
+          stroke: "var(--primary-color)",
+          "stroke-width": "2",
+        }),
+      );
+      g.appendChild(
+        svg("circle", { cx: nx, cy: ny, r: "3.5", fill: "var(--primary-color)" }),
+      );
+      ctx.svgEl.appendChild(g);
+      ctx.nowMarker = g;
+      ctx.nowText = `${ctx.t.now} · ${this._hoverText(ctx, nowIdx)}`;
+    }
+    // Reflect the resting state in the readout (the caller guarantees we are not
+    // mid-hover): the live readout when the sun is up, else the idle hint.
+    if (ctx.nowText) {
+      ctx.readout.classList.remove("idle");
+      ctx.readout.classList.add("now");
+      ctx.readout.textContent = ctx.nowText;
+    } else {
+      ctx.readout.classList.add("idle");
+      ctx.readout.classList.remove("now");
+      ctx.readout.textContent = ctx.t.hoverIdle;
+    }
+  }
+
+  /**
+   * Minute-timer tick: re-place the live "now" marker on the current plot. No-op
+   * when there is no plotted sun path, when the pointer is hovering (the
+   * crosshair owns the readout), or when the stored ctx's SVG has been detached
+   * by a re-render (the next render installs a fresh ctx).
+   */
+  _refreshNow() {
+    const ctx = this._lastCtx;
+    if (!ctx || this._hovering) return;
+    if (!ctx.svgEl || !ctx.svgEl.isConnected) return;
+    this._applyNowState(ctx);
+  }
+
   // --- hover crosshair ----------------------------------------------------
+
+  /**
+   * Index of the sun-path sample nearest the CURRENT time — the live sun
+   * position — or -1 when it should not be shown: the plotted date is not
+   * today, or "now" is outside the daylight sweep (before the first / after the
+   * last sample, i.e. the sun is down). Sample times are "HH:MM" in the site's
+   * local timezone (shadeprofile emits ``local_dt``); "today"/"now" are resolved
+   * in that SAME timezone via ``Intl`` (from ``hass.config.time_zone``), so a
+   * browser in a different timezone than the HA server still lines up. Any
+   * parsing failure yields -1 (the card falls back to the idle hint).
+   */
+  _currentSunIndex(dateStr, time, n) {
+    if (!n || !isArray(time)) return -1;
+    if (typeof dateStr !== "string") return -1;
+    let ymd;
+    let nowMin;
+    try {
+      const tz =
+        this._hass && this._hass.config && this._hass.config.time_zone;
+      const opts = {
+        hour12: false,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      };
+      if (tz) opts.timeZone = tz;
+      const parts = new Intl.DateTimeFormat("en-GB", opts).formatToParts(
+        new Date(),
+      );
+      const get = (type) => {
+        const p = parts.find((x) => x.type === type);
+        return p ? p.value : "";
+      };
+      ymd = `${get("year")}-${get("month")}-${get("day")}`;
+      // Intl can emit "24" for midnight with hour12:false; normalise to "00".
+      const hh = get("hour") === "24" ? "00" : get("hour");
+      nowMin = Number(hh) * 60 + Number(get("minute"));
+    } catch (e) {
+      return -1;
+    }
+    if (ymd !== dateStr) return -1; // only annotate TODAY's path
+    if (!Number.isFinite(nowMin)) return -1;
+    const toMin = (s) => {
+      if (typeof s !== "string") return NaN;
+      const c = s.indexOf(":");
+      if (c < 0) return NaN;
+      return Number(s.slice(0, c)) * 60 + Number(s.slice(c + 1, c + 3));
+    };
+    const firstMin = toMin(time[0]);
+    const lastMin = toMin(time[n - 1]);
+    if (!Number.isFinite(firstMin) || !Number.isFinite(lastMin)) return -1;
+    if (nowMin < firstMin || nowMin > lastMin) return -1; // sun is down
+    let best = -1;
+    let bestD = Infinity;
+    for (let i = 0; i < n; i++) {
+      const mnt = toMin(time[i]);
+      if (!Number.isFinite(mnt)) continue;
+      const d = Math.abs(mnt - nowMin);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    return best;
+  }
 
   /** Pointer move over the plot → snap to the nearest sample, draw crosshair. */
   _hoverMove(ev, ctx) {
@@ -1005,17 +1214,31 @@ class BalconyShadeProfileCard extends HTMLElement {
         best = i;
       }
     }
+    // Active hover takes over: hide the live now-marker and its readout tint,
+    // and flag hovering so the minute timer does not fight the crosshair.
+    this._hovering = true;
+    if (ctx.nowMarker) ctx.nowMarker.style.display = "none";
     this._drawCrosshair(ctx, best);
     ctx.readout.classList.remove("idle");
+    ctx.readout.classList.remove("now");
     ctx.readout.textContent = this._hoverText(ctx, best);
   }
 
-  /** Pointer left the plot → drop the crosshair group + restore the idle hint. */
+  /**
+   * Pointer left the plot → drop the crosshair group and restore the resting
+   * readout: the live "now" position (marker + tinted readout) when we have one,
+   * else the idle hint.
+   */
   _hoverLeave(ctx) {
+    this._hovering = false;
     const g = ctx.crosshair;
     while (g.firstChild) g.removeChild(g.firstChild);
-    ctx.readout.classList.add("idle");
-    ctx.readout.textContent = ctx.t.hoverIdle;
+    // Recompute the resting state from the CURRENT time rather than restoring
+    // the values cached at hover-start: a long hover can outlast the sample the
+    // marker sat on, so rebuild a fresh marker + readout (and correctly fall
+    // back to the idle hint if the sun has since set). Writing the readout here
+    // is safe because hovering has just ended.
+    this._applyNowState(ctx);
   }
 
   /** (Re)build the crosshair group for the snapped sample index ``i``. */

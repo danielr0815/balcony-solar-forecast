@@ -22,6 +22,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to `static_horizon`), so no sensor/back-end change is required. Because the
   card is cache-busted by `?v=<INTEGRATION_VERSION>`, a browser hard-reload
   after the update picks up the new readout automatically.
+- **Shade-profile card: the current sun position is shown when idle.** Whenever
+  the pointer is NOT over the plot (so no hover crosshair is drawn), the card now
+  marks where the sun is *right now* on the plotted path — an accent halo on the
+  sun path plus a faint vertical guide — and the status line shows its live
+  readout ("Jetzt · HH:MM · az° · Verschattung … · Elevation … · Schattenkante
+  …") instead of the "hover for details" hint. It appears only when the plotted
+  date is today and the sun is currently up (between sunrise and sunset);
+  otherwise the idle hint is unchanged. The marker refreshes on a ~1-minute
+  timer (started/stopped with the element's lifecycle) so it tracks the sun and
+  clears itself at sunset without needing a page reload — the forecast sensor is
+  time-of-day-invariant for a fixed date and would not otherwise trigger an
+  update. Pointer Events drive the hover so a tap on a touchscreen cleanly hands
+  over to the crosshair and restores the live marker on release. "Today" and
+  "now" are resolved in the site's timezone (`hass.config.time_zone`) so the
+  marker lines up with the sensor's local-time samples even if the browser is
+  elsewhere.
+- **Power-history card (`power_history_card.js`): the hover tooltip is larger and
+  more legible.** The floating per-hour readout panel (time, per-module values,
+  total, forecast) drew its text at a fixed size in viewBox units, so on a narrow
+  card it shrank to roughly the axis-tick size and read as tiny next to the HTML
+  title and legend. The panel — font, row height, padding, colour swatches and
+  width — is now derived from one font-size constant, bumped ~45 %, so the whole
+  tooltip scales up as a unit while still flipping sides at the mid-line and
+  fitting within the plot.
 
 ## [0.20.1] - 2026-07-17
 
