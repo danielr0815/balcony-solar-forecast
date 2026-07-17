@@ -1627,11 +1627,19 @@ class BalconyPowerHistoryCard extends HTMLElement {
     const rows = this._readoutRows(ctx, i);
 
     // (d) panel geometry — anchored left/right of the crosshair, flip at midline
-    //     so it never clips the plot edge.
-    const rowH = 17;
-    const padX = 8;
-    const padY = 6;
-    const panelW = 176;
+    //     so it never clips the plot edge. Everything is derived from the readout
+    //     font `fs` so the box, rows and glyphs scale as one unit. The text is in
+    //     viewBox units (W=800) and so shrinks with the card width — at 11 it
+    //     rendered only ~7 px on a narrow card, dwarfed by the HTML title/legend;
+    //     `fs` lifts it to a legible size and the rest follows proportionally.
+    const fs = 16;
+    const rowH = Math.round(fs * 1.5);
+    const padX = Math.round(fs * 0.7);
+    const padY = Math.round(fs * 0.5);
+    const glyph = Math.round(fs * 0.85);
+    const nameX = padX + glyph + 6;
+    const base = Math.round(fs * 1.05);
+    const panelW = Math.round((176 * fs) / 11);
     const panelH = padY * 2 + rows.length * rowH;
     const rightSide = xc < ctx.W / 2;
     let px = rightSide ? xc + 10 : xc - 10 - panelW;
@@ -1649,7 +1657,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
         y: py,
         width: panelW,
         height: panelH,
-        rx: 6,
+        rx: 8,
         fill: "var(--card-background-color, #fff)",
         stroke: "var(--divider-color, #e0e0e0)",
         "stroke-width": "1",
@@ -1658,13 +1666,13 @@ class BalconyPowerHistoryCard extends HTMLElement {
     );
 
     rows.forEach((row, i) => {
-      const cy = py + padY + i * rowH + 12;
+      const cy = py + padY + i * rowH + base;
       if (row.kind === "title") {
         const tx = svg("text", {
           x: px + padX,
           y: cy,
           fill: "var(--primary-text-color)",
-          "font-size": "11",
+          "font-size": String(fs),
           "font-weight": "700",
         });
         tx.textContent = row.text;
@@ -1676,20 +1684,21 @@ class BalconyPowerHistoryCard extends HTMLElement {
         g.appendChild(
           svg("rect", {
             x: px + padX,
-            y: cy - 9,
-            width: 10,
-            height: 10,
+            y: cy - glyph + 2,
+            width: glyph,
+            height: glyph,
             rx: 2,
             fill: row.color,
           }),
         );
       } else if (row.kind === "forecast") {
+        const ty = cy - Math.round(glyph * 0.4);
         g.appendChild(
           svg("line", {
             x1: px + padX,
-            y1: cy - 4,
-            x2: px + padX + 10,
-            y2: cy - 4,
+            y1: ty,
+            x2: px + padX + glyph,
+            y2: ty,
             stroke: "var(--primary-text-color)",
             "stroke-width": "2",
             "stroke-dasharray": "3 2",
@@ -1699,10 +1708,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
       }
       const bold = row.kind === "total";
       const name = svg("text", {
-        x: px + padX + 16,
+        x: px + nameX,
         y: cy,
         fill: "var(--primary-text-color)",
-        "font-size": "11",
+        "font-size": String(fs),
         "font-weight": bold ? "700" : "400",
       });
       name.textContent = row.name;
@@ -1711,7 +1720,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
         x: px + panelW - padX,
         y: cy,
         fill: "var(--primary-text-color)",
-        "font-size": "11",
+        "font-size": String(fs),
         "font-weight": bold ? "700" : "400",
         "text-anchor": "end",
       });
