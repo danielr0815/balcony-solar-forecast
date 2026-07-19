@@ -189,14 +189,20 @@ views:
       # The forecast's per-plane curve is only in the get_forecast service
       # response; on the dashboard we compare the total energy forecast
       # against the measured per-module power grouped by plane (SPEC §2:
-      # front 115°, north 25°, south 205°). A statistics-graph gives daily
-      # measured energy per module from long-term statistics.
+      # front 115°, north 25°, south 205°). A statistics-graph gives the daily
+      # measured level per module from long-term statistics.
+      #
+      # NOTE: these are POWER sensors (W, state_class measurement), so the
+      # recorder keeps mean/min/max for them and has_sum is false — asking for
+      # `sum` here yields no series at all and the card renders empty. `mean`
+      # is the stat that actually exists; daily mean W x 24 h is the day's
+      # energy, so the bar shape is the same as an energy chart.
       # ----------------------------------------------------------------
       - type: statistics-graph
-        title: Measured daily energy per module (LTS)
+        title: Measured mean DC power per module (LTS)
         period: day
         stat_types:
-          - sum
+          - mean
         chart_type: bar
         days_to_show: 14
         entities:

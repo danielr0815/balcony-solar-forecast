@@ -445,15 +445,22 @@ def _add_measured_power(
 def _add_measured_lts(
     cards: list[dict[str, Any]], measured_entities: list[tuple[str, str]]
 ) -> None:
-    """Measured daily energy per module (LTS) statistics-graph (SPEC §14.3)."""
+    """Measured daily level per module (LTS) statistics-graph (SPEC §14.3).
+
+    ``measured_entities`` are the configured per-plane ``actual_entity`` POWER
+    sensors (W, state_class measurement). The recorder gives those mean/min/max
+    statistics and never a sum, so a ``stat_types: [sum]`` card has no series to
+    draw and renders empty. ``mean`` is the statistic that actually exists, and
+    daily mean W x 24 h is the day's energy — same bar shape, honest unit.
+    """
     if not measured_entities:
         return
     cards.append(
         {
             "type": "statistics-graph",
-            "title": "Measured daily energy per module (LTS)",
+            "title": "Measured mean DC power per module (LTS)",
             "period": "day",
-            "stat_types": ["sum"],
+            "stat_types": ["mean"],
             "chart_type": "bar",
             "days_to_show": 14,
             "entities": [eid for _name, eid in measured_entities],

@@ -222,8 +222,12 @@ without the bundled frontend resources.
   total** for that hour (§4c). It replaces the old messy 8-line measured-power
   history-graph. On a partial install where the measured-total sensor is absent it
   falls back to that per-module `history-graph` so a measured view still renders.
-- **Measured daily energy per module** (statistics-graph) — daily LTS sums per
-  representative module (bar), a best-effort per-plane view.
+- **Measured mean DC power per module** (statistics-graph) — the daily LTS
+  `mean` per representative module (bar), a best-effort per-plane view. The
+  configured `actual_entity` sensors are power sensors (W, `state_class:
+  measurement`), for which the recorder keeps mean/min/max and no sum — so the
+  card charts `mean`, not `sum`. Daily mean W × 24 h is that day's energy, so
+  the bars have the same shape an energy chart would.
 - **Today's forecast band** (entities) — P10 / P50 / P90 for today (SPEC §6).
 - **Learners, drift & degradation** (entities) — source status, degraded flag,
   weather-image age, each learner's status, the applied intraday scalar, and

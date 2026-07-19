@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.4] - 2026-07-19
+
+### Fixed
+
+- **"Measured daily energy per module (LTS)" rendered as an empty card.** The
+  statistics-graph asked for `stat_types: [sum]`, but the entities it charts are
+  the configured per-plane `actual_entity` POWER sensors (W, `state_class:
+  measurement`). The recorder keeps mean/min/max for those and reports
+  `has_sum: false`, so the card had no series to draw and showed an empty plot
+  area — the measured production looked "gone" even though 14 days of daily LTS
+  rows were present the whole time. The card now charts `mean` (the statistic
+  that actually exists) and is retitled "Measured mean DC power per module
+  (LTS)"; daily mean W × 24 h is the day's energy, so the bar shape is
+  unchanged. Fixed in both the shipped `dashboards/balcony_solar_forecast.yaml`
+  and the `install_dashboard` generator.
+
 ## [0.20.3] - 2026-07-17
 
 ### Fixed
