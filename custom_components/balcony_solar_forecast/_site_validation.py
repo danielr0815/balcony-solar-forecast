@@ -17,7 +17,7 @@ import math
 from dataclasses import replace
 from typing import Any
 
-from .const import CONF_ACTUAL_ENERGY_ENTITY, CONF_PLANES, CONF_SHADE_GROUP
+from .const import CONF_PLANES, CONF_SHADE_GROUP
 from .core.types import PlaneConfig, SiteConfig
 
 # Upper sanity bound for an inverter-group AC limit (W). Local guard only;
@@ -82,16 +82,6 @@ def validate_site(raw: Any) -> SiteConfig:
                 not isinstance(raw_group, str) or not raw_group.strip()
             ):
                 raise SiteValidationError("shade_group_empty")
-
-        # Same rule for the optional energy counter: present-but-blank is a
-        # fat-finger. Silently dropping it would leave the LTS card on the
-        # power-mean fallback with no hint why.
-        if isinstance(raw_plane, dict) and CONF_ACTUAL_ENERGY_ENTITY in raw_plane:
-            raw_energy = raw_plane.get(CONF_ACTUAL_ENERGY_ENTITY)
-            if raw_energy is not None and (
-                not isinstance(raw_energy, str) or not raw_energy.strip()
-            ):
-                raise SiteValidationError("actual_energy_entity_empty")
 
         if not 0.0 <= plane.azimuth_deg <= 360.0:
             raise SiteValidationError("bad_azimuth")

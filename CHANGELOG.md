@@ -7,31 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.20.5] - 2026-07-19
+## [0.20.6] - 2026-07-19
 
-### Added
+### Removed
 
-- **Optional per-plane `actual_energy_entity` — true daily energy on the LTS
-  card.** A plane may now name its DC energy counter (Wh/kWh, `state_class`
-  total/total_increasing) alongside its `actual_entity` power sensor. When set,
-  the *Measured daily energy per module* card charts `change` — real Wh per day,
-  with today's bar showing the energy so far instead of a mean-so-far — and
-  labels the rows M1…M8 instead of the per-port sensors' ambiguous own names.
-  Unset, the card keeps the v0.20.4 `mean` fallback. Dashboard-only: the engine
-  and every learner ignore the field, and a plane without it serialises to the
-  exact pre-0.20.5 dict.
+- **Withdrawn: the per-plane `actual_energy_entity` field from 0.20.5.** It
+  rested on a wrong premise. Measured on the live install, the inverter's
+  `*_dc_total_energy` counters do **not** report DC energy despite their name —
+  they track the **AC** output. Per-inverter over a full day: AC 1235 / 1586 /
+  1432 / 1679 Wh against counters 1229 / 1585 / 1430 / 1673 Wh, i.e. a ratio of
+  1.000–1.005. A 100 %-efficient inverter does not exist. Against the DC power
+  sensors the same day gives η = 0.9472 on all four units (identical to four
+  decimals), which is the plausible partial-load figure for these microinverters.
+  Charting those counters as "measured daily energy per module" therefore
+  labelled AC yield as DC energy, next to a DC dashboard, in a project whose
+  whole point is per-module attribution. The config field, its validation, the
+  translations and the generator wiring are reverted; existing entries that
+  carry the key are unaffected (unknown keys are ignored on load).
 
-  Deliberately **not** auto-discovered: both ports of an inverter share a device
-  *and* a `translation_key`, so nothing in the entity registry ties a per-port
-  counter to its power sibling. Discovery could only string-match entity ids and
-  would silently mis-attribute one module's energy to another — worse than no
-  chart, given that the shade learning rests on per-module attribution. Existing
-  entries therefore need the field added once under Reconfigure → Site
-  configuration; see `docs/DASHBOARD.md` §2c.
+- **The per-module LTS `statistics-graph` is no longer generated.** The bundled
+  power-history card charts daily Wh per module from the SAME daily `mean`
+  statistics of the SAME power sensors — stacked, with the forecast overlay and
+  a day/week toggle. A second grouped-bar view of identical data added nothing.
+  The shipped built-ins-only `dashboards/balcony_solar_forecast.yaml` **keeps**
+  it (there the bundled card does not exist, so it is the only per-module view),
+  with the 0.20.4 `sum` → `mean` fix intact and now guarded by a YAML test.
 
-  `DEFAULT_SITE` ships the eight counters for the reference install, each
-  verified against live data: same device as its power sibling, and daily
-  `change` matching that sensor's daily `mean` × 24 h.
+### Note
+
+The 0.20.4 fix stands and is unaffected: charting `sum` on a power sensor yields
+an empty card, and `mean × 24 h` is exact. That was verified three independent
+ways — time-weighted integration of 1420 raw states, the sum of hourly means,
+and daily-mean × 24 all give 858 Wh for the same module-day. The ~6 % gap to the
+counters is the inverter's conversion loss, not an error.
 
 ## [0.20.4] - 2026-07-19
 
@@ -47,9 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that actually exists) and is retitled "Measured mean DC power per module
   (LTS)"; daily mean W × 24 h is the day's energy, so the bar shape is
   unchanged. Fixed in both the shipped `dashboards/balcony_solar_forecast.yaml`
-  and the `install_dashboard` generator. Installs whose inverter also exposes
-  per-port `total_increasing` energy entities (Wh) can swap those in with
-  `stat_types: [change]` for true Wh bars — see `docs/DASHBOARD.md`.
+  and the `install_dashboard` generator.
 
 ## [0.20.3] - 2026-07-17
 

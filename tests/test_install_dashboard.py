@@ -75,17 +75,22 @@ def test_build_full_inventory_matches_shipped_yaml():
     views = config["views"]
     assert len(views) == 1
     assert views[0]["path"] == "forecast"
-    # 13 cards: the shipped YAML's built-in-card inventory MINUS the redundant
+    # 12 cards: the shipped YAML's built-in-card inventory MINUS the redundant
     # "Shade profile (per date & module)" entities card (its module/date/fraction
     # controls are embedded in the bundled diagram card) — apexcharts markdown ->
     # bundled shade card, and the measured-DC-power history-graph -> bundled
-    # power-history card (one card either way) — PLUS the Phase-4 "DC model &
-    # inverter calibration (diagnostic)" entities card.
+    # power-history card (one card either way) — MINUS the per-module LTS
+    # statistics-graph (the bundled power-history card charts the same daily
+    # means of the same sensors, stacked and with the forecast overlay) — PLUS
+    # the Phase-4 "DC model & inverter calibration (diagnostic)" entities card.
     cards = views[0]["cards"]
-    assert len(cards) == 13
+    assert len(cards) == 12
     types = _card_types(config)
-    for required in ("markdown", "gauge", "entities", "history-graph", "statistics-graph"):
+    for required in ("markdown", "gauge", "entities", "history-graph"):
         assert required in types
+    # The redundant per-module LTS card is not generated (still in the shipped
+    # built-ins-only YAML, where the bundled card does not exist).
+    assert "statistics-graph" not in types
     # The redundant shade-profile controls entities card is gone from the builder.
     assert not any(
         c.get("title") == "Shade profile (per date & module)" for c in cards
@@ -195,7 +200,7 @@ def test_build_omits_missing_entities():
     # Whole cards dropped.
     assert "gauge" not in types
     assert "custom:balcony-shade-profile-card" not in types
-    assert "statistics-graph" not in types  # no measured entities
+    assert "statistics-graph" not in types  # never generated at all
     assert types.count("history-graph") == 1  # forecast graph only; drift + measured gone
     # The kill-gate markdown is gone but the two static markdown cards remain.
     markdowns = [
@@ -254,32 +259,8 @@ def test_build_measured_cards_use_measured_entities():
     assert not any(
         c.get("title", "").startswith("Measured DC power") for c in cards
     )
-    # The LTS statistics-graph still takes bare entity ids (no per-row names)
-    # while no plane declares an energy counter.
-    stats = next(c for c in cards if c["type"] == "statistics-graph")
-    assert stats["entities"] == ["sensor.a", "sensor.b", "sensor.c"]
-
-
-def test_build_lts_card_uses_energy_counters_when_the_site_declares_them():
-    """Planes with an ``actual_energy_entity`` flip the LTS card to true daily
-    energy. See ``tests/core/test_measured_energy_entity.py`` for the card's own
-    contract; this guards the builder's wiring of the new argument."""
-    config = d.build_dashboard_config(
-        entity_map=_full_entity_map(),
-        comparison_slugs=[],
-        measured_entities=[("M1", "sensor.a"), ("M2", "sensor.b")],
-        measured_energy_entities=[("M1", "sensor.a_wh"), ("M2", "sensor.b_wh")],
-        version="0.0.0",
-    )
-    cards = config["views"][0]["cards"]
-    stats = next(c for c in cards if c["type"] == "statistics-graph")
-    assert stats["stat_types"] == ["change"]
-    assert stats["entities"] == [
-        {"entity": "sensor.a_wh", "name": "M1"},
-        {"entity": "sensor.b_wh", "name": "M2"},
-    ]
-    # Exactly one LTS card — the power fallback must not also be emitted.
-    assert sum(c["type"] == "statistics-graph" for c in cards) == 1
+    # No LTS statistics-graph alongside it: the bundled card supersedes it.
+    assert not any(c["type"] == "statistics-graph" for c in cards)
 
 
 def test_build_measured_power_falls_back_to_history_graph():
@@ -307,9 +288,8 @@ def test_build_measured_power_falls_back_to_history_graph():
         ("sensor.a", "M1"),
         ("sensor.b", "M2"),
     ]
-    # The LTS statistics-graph is unaffected by the fallback.
-    stats = next(c for c in cards if c["type"] == "statistics-graph")
-    assert stats["entities"] == ["sensor.a", "sensor.b"]
+    # Still no LTS statistics-graph on the fallback path either.
+    assert not any(c["type"] == "statistics-graph" for c in cards)
 
 
 def test_forecast_card_survives_without_measured_row():
