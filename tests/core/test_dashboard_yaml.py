@@ -265,3 +265,32 @@ def test_comparison_config_example_documented(dashboard):
     )
     assert "sensor.pv_prognose_heute_alle_module" in joined
     assert "sensor.energy_production_today_4" in joined
+
+
+def test_lts_card_never_asks_for_sum_on_power_sensors(dashboard):
+    """The per-module statistics-graph must chart `mean`, never `sum`.
+
+    Regression (0.20.4): it asked for ``stat_types: [sum]`` while charting the
+    per-port DC POWER sensors (W, ``state_class: measurement``). The recorder
+    keeps mean/min/max for such a sensor and reports ``has_sum: false``, so the
+    card had no series to draw and rendered as an empty plot area — the measured
+    production looked lost while 14 days of daily statistics were present.
+
+    This card lives ONLY in this built-ins-only YAML; the generated dashboard
+    drops it because the bundled power-history card charts the same daily means
+    of the same sensors, stacked and with the forecast overlay (0.20.6).
+    """
+    stats = [
+        c for c in _iter_cards(dashboard) if c["type"] == "statistics-graph"
+    ]
+    assert stats, "the built-ins-only YAML keeps a per-module statistics-graph"
+    for card in stats:
+        types = card.get("stat_types", [])
+        assert "sum" not in types, (
+            f"{card.get('title')!r} charts power sensors, which have no sum"
+        )
+        assert types == ["mean"]
+        # Every charted entity is one of the per-port DC power sensors.
+        for ent in card["entities"]:
+            eid = ent["entity"] if isinstance(ent, dict) else ent
+            assert "_dc_power" in eid

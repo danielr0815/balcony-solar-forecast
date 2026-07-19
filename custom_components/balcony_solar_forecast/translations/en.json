@@ -334,8 +334,7 @@
       "group_unknown_plane": "A group references an unknown plane.",
       "bad_ac_limit": "The AC limit must be greater than 0.",
       "shade_group_empty": "A shade group must be a non-empty name.",
-      "shade_group_collision": "A shade group must not equal the name of a plane that is not itself in that group.",
-      "actual_energy_entity_empty": "A plane's \"actual_energy_entity\" must be a non-empty entity id."
+      "shade_group_collision": "A shade group must not equal the name of a plane that is not itself in that group."
     },
     "abort": {
       "already_configured": "An installation with this name already exists."
@@ -385,8 +384,7 @@
       "group_unknown_plane": "A group references an unknown plane.",
       "bad_ac_limit": "The AC limit must be greater than 0.",
       "shade_group_empty": "A shade group must be a non-empty name.",
-      "shade_group_collision": "A shade group must not equal the name of a plane that is not itself in that group.",
-      "actual_energy_entity_empty": "A plane's \"actual_energy_entity\" must be a non-empty entity id."
+      "shade_group_collision": "A shade group must not equal the name of a plane that is not itself in that group."
     }
   }
 }

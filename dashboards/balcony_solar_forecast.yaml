@@ -196,10 +196,7 @@ views:
       # recorder keeps mean/min/max for them and has_sum is false — asking for
       # `sum` here yields no series at all and the card renders empty. `mean`
       # is the stat that actually exists; daily mean W x 24 h is the day's
-      # energy, so the bar shape is the same as an energy chart. If your
-      # inverter also exposes a per-port total_increasing energy entity (Wh),
-      # you can swap the entities for those and use `stat_types: [change]` to
-      # get true Wh bars.
+      # energy, so the bar shape is the same as an energy chart.
       # ----------------------------------------------------------------
       - type: statistics-graph
         title: Measured mean DC power per module (LTS)
