@@ -176,6 +176,7 @@ def build_dashboard_config(
     comparison_slugs: list[tuple[str, str]],
     measured_entities: list[tuple[str, str]],
     version: str,
+    measured_energy_entities: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Assemble the full Lovelace config, mirroring the shipped YAML.
 
@@ -186,6 +187,10 @@ def build_dashboard_config(
     ``plane_name`` becomes each row's label so the graph reads M1…M8 instead
     of the sensors' ambiguous own friendly names. ``version`` stamps the
     :data:`MANAGED_MARKER`.
+
+    ``measured_energy_entities`` is the same shape for the planes' optional
+    ``actual_energy_entity`` counters; when non-empty the LTS card charts true
+    daily energy instead of the power sensors' daily mean.
 
     A card referencing an entity missing from ``entity_map`` is omitted; an
     entities-card drops just that row. Returns
@@ -199,7 +204,7 @@ def build_dashboard_config(
     _add_forecast_history(cards, entity_map)
     _add_dc_diagnostics(cards, entity_map)
     _add_measured_power(cards, entity_map, measured_entities)
-    _add_measured_lts(cards, measured_entities)
+    _add_measured_lts(cards, measured_entities, measured_energy_entities or [])
     _add_forecast_band(cards, entity_map)
     _add_learners(cards, entity_map)
     _add_drift_trend(cards, entity_map)
@@ -443,16 +448,40 @@ def _add_measured_power(
 
 
 def _add_measured_lts(
-    cards: list[dict[str, Any]], measured_entities: list[tuple[str, str]]
+    cards: list[dict[str, Any]],
+    measured_entities: list[tuple[str, str]],
+    measured_energy_entities: list[tuple[str, str]],
 ) -> None:
     """Measured daily level per module (LTS) statistics-graph (SPEC §14.3).
 
-    ``measured_entities`` are the configured per-plane ``actual_entity`` POWER
-    sensors (W, state_class measurement). The recorder gives those mean/min/max
-    statistics and never a sum, so a ``stat_types: [sum]`` card has no series to
-    draw and renders empty. ``mean`` is the statistic that actually exists, and
-    daily mean W x 24 h is the day's energy — same bar shape, honest unit.
+    Prefers the planes' ``actual_energy_entity`` counters: those carry a sum, so
+    ``change`` gives the true energy produced per day and the running day's bar
+    is the energy so far.
+
+    Without them it falls back to ``measured_entities`` — the ``actual_entity``
+    POWER sensors (W, state_class measurement). The recorder gives those
+    mean/min/max and never a sum, so a ``stat_types: [sum]`` card has no series
+    to draw and renders empty; ``mean`` is the statistic that actually exists,
+    and daily mean W x 24 h is the day's energy, so the bars keep their shape.
+    Mind that on the RUNNING day a mean-so-far is not comparable to the full
+    previous days the way a ``change`` bar is.
     """
+    if measured_energy_entities:
+        cards.append(
+            {
+                "type": "statistics-graph",
+                "title": "Measured daily energy per module (LTS)",
+                "period": "day",
+                "stat_types": ["change"],
+                "chart_type": "bar",
+                "days_to_show": 14,
+                "entities": [
+                    {"entity": eid, "name": name}
+                    for name, eid in measured_energy_entities
+                ],
+            }
+        )
+        return
     if not measured_entities:
         return
     cards.append(

@@ -254,9 +254,32 @@ def test_build_measured_cards_use_measured_entities():
     assert not any(
         c.get("title", "").startswith("Measured DC power") for c in cards
     )
-    # The LTS statistics-graph still takes bare entity ids (no per-row names).
+    # The LTS statistics-graph still takes bare entity ids (no per-row names)
+    # while no plane declares an energy counter.
     stats = next(c for c in cards if c["type"] == "statistics-graph")
     assert stats["entities"] == ["sensor.a", "sensor.b", "sensor.c"]
+
+
+def test_build_lts_card_uses_energy_counters_when_the_site_declares_them():
+    """Planes with an ``actual_energy_entity`` flip the LTS card to true daily
+    energy. See ``tests/core/test_measured_energy_entity.py`` for the card's own
+    contract; this guards the builder's wiring of the new argument."""
+    config = d.build_dashboard_config(
+        entity_map=_full_entity_map(),
+        comparison_slugs=[],
+        measured_entities=[("M1", "sensor.a"), ("M2", "sensor.b")],
+        measured_energy_entities=[("M1", "sensor.a_wh"), ("M2", "sensor.b_wh")],
+        version="0.0.0",
+    )
+    cards = config["views"][0]["cards"]
+    stats = next(c for c in cards if c["type"] == "statistics-graph")
+    assert stats["stat_types"] == ["change"]
+    assert stats["entities"] == [
+        {"entity": "sensor.a_wh", "name": "M1"},
+        {"entity": "sensor.b_wh", "name": "M2"},
+    ]
+    # Exactly one LTS card — the power fallback must not also be emitted.
+    assert sum(c["type"] == "statistics-graph" for c in cards) == 1
 
 
 def test_build_measured_power_falls_back_to_history_graph():

@@ -334,7 +334,8 @@
       "group_unknown_plane": "Eine Gruppe verweist auf eine unbekannte Ebene.",
       "bad_ac_limit": "Das AC-Limit muss größer als 0 sein.",
       "shade_group_empty": "Eine Verschattungsgruppe muss ein nicht-leerer Name sein.",
-      "shade_group_collision": "Eine Verschattungsgruppe darf nicht dem Namen einer Ebene entsprechen, die nicht selbst zu dieser Gruppe gehört."
+      "shade_group_collision": "Eine Verschattungsgruppe darf nicht dem Namen einer Ebene entsprechen, die nicht selbst zu dieser Gruppe gehört.",
+      "actual_energy_entity_empty": "Der \"actual_energy_entity\" einer Ebene muss eine nicht-leere Entitäts-ID sein."
     },
     "abort": {
       "already_configured": "Eine Anlage mit diesem Namen ist bereits eingerichtet."
@@ -384,7 +385,8 @@
       "group_unknown_plane": "Eine Gruppe verweist auf eine unbekannte Ebene.",
       "bad_ac_limit": "Das AC-Limit muss größer als 0 sein.",
       "shade_group_empty": "Eine Verschattungsgruppe muss ein nicht-leerer Name sein.",
-      "shade_group_collision": "Eine Verschattungsgruppe darf nicht dem Namen einer Ebene entsprechen, die nicht selbst zu dieser Gruppe gehört."
+      "shade_group_collision": "Eine Verschattungsgruppe darf nicht dem Namen einer Ebene entsprechen, die nicht selbst zu dieser Gruppe gehört.",
+      "actual_energy_entity_empty": "Der \"actual_energy_entity\" einer Ebene muss eine nicht-leere Entitäts-ID sein."
     }
   }
 }

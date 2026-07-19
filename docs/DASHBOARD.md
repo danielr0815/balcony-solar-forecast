@@ -177,6 +177,39 @@ alternative is in a comment right below that card).
 
 ---
 
+## 2c. Per-module energy counters (optional, upgrades the LTS card)
+
+Each plane may declare an **`actual_energy_entity`** next to its `actual_entity`:
+the same module's DC **energy** counter (Wh/kWh, `state_class: total` or
+`total_increasing`). It is a dashboard-only field — the engine and every learner
+ignore it — and it upgrades the *Measured daily energy per module* card from the
+power sensors' daily mean to true daily energy (`change`).
+
+It has to be stated explicitly because **nothing in the entity registry ties a
+per-port energy counter to its power sibling**: both ports of one inverter share
+a device *and* a `translation_key`, so the port index lives only in the
+entity_id string, which is renameable and vendor-specific. Auto-discovery could
+therefore only string-match and would silently attribute one module's energy to
+another — a wrong-but-plausible chart is worse here than no chart, given the
+per-module attribution the shade learning depends on.
+
+Add it under **Reconfigure → Site configuration**, per plane:
+
+```json
+{
+  "name": "M1",
+  "azimuth_deg": 25.0,
+  "actual_entity": "sensor.inverter_port_1_dc_power",
+  "actual_energy_entity": "sensor.inverter_port_1_dc_total_energy"
+}
+```
+
+Then re-run `install_dashboard`. Verify a pairing before trusting it: the
+counter's daily `change` should match its power sibling's daily `mean` × 24 h on
+completed days (Developer tools → Statistics).
+
+---
+
 ## 3. What the dashboard shows
 
 This section describes the **generated** dashboard from the `install_dashboard`
@@ -222,12 +255,19 @@ without the bundled frontend resources.
   total** for that hour (§4c). It replaces the old messy 8-line measured-power
   history-graph. On a partial install where the measured-total sensor is absent it
   falls back to that per-module `history-graph` so a measured view still renders.
-- **Measured mean DC power per module** (statistics-graph) — the daily LTS
-  `mean` per representative module (bar), a best-effort per-plane view. The
-  configured `actual_entity` sensors are power sensors (W, `state_class:
-  measurement`), for which the recorder keeps mean/min/max and no sum — so the
-  card charts `mean`, not `sum`. Daily mean W × 24 h is that day's energy, so
-  the bars have the same shape an energy chart would.
+- **Measured daily energy per module** (statistics-graph) — daily energy per
+  module as bars, a best-effort per-plane view. Which statistic it charts
+  depends on your site config:
+  - Planes with an **`actual_energy_entity`** (see below) → `stat_types:
+    [change]`, i.e. true Wh produced per day, and today's bar is the energy so
+    far.
+  - Otherwise it falls back to the `actual_entity` **power** sensors with
+    `stat_types: [mean]` and the title "Measured mean DC power per module".
+    Power sensors (W, `state_class: measurement`) get mean/min/max from the
+    recorder and no sum, so charting `sum` there yields an empty card. Daily
+    mean W × 24 h is that day's energy, so the bars keep their shape — but note
+    that on the *running* day a mean-so-far is not comparable to the completed
+    previous days the way a `change` bar is.
 - **Today's forecast band** (entities) — P10 / P50 / P90 for today (SPEC §6).
 - **Learners, drift & degradation** (entities) — source status, degraded flag,
   weather-image age, each learner's status, the applied intraday scalar, and
