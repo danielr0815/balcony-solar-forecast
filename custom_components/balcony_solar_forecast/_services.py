@@ -538,11 +538,13 @@ async def _handle_install_dashboard(
     entity_map = collect_entity_map(entries, entry_id)
     comparison_slugs = _comparison_slugs(coordinator, entity_map)
     measured_entities = _measured_entities(coordinator)
+    measured_energy_entities = _measured_entities(coordinator, energy=True)
 
     config = build_dashboard_config(
         entity_map=entity_map,
         comparison_slugs=comparison_slugs,
         measured_entities=measured_entities,
+        measured_energy_entities=measured_energy_entities,
         version=INTEGRATION_VERSION,
     )
     try:
@@ -617,21 +619,28 @@ def _comparison_slugs(
     return out
 
 
-def _measured_entities(coordinator: Any) -> list[tuple[str, str]]:
-    """The planes' ``(name, measured DC-power entity id)`` pairs.
+def _measured_entities(
+    coordinator: Any, *, energy: bool = False
+) -> list[tuple[str, str]]:
+    """The planes' ``(name, measured entity id)`` pairs.
 
     Order-preserving and deduped on entity id; the plane NAME (M1…M8) labels
     the measured-power graph rows so they are not shown under the per-port
-    sensors' own ambiguous friendly names. Planes without an ``actual_entity``
-    are skipped.
+    sensors' own ambiguous friendly names. Planes without the attribute are
+    skipped, so a site where no plane declares an ``actual_energy_entity``
+    yields ``[]`` and the LTS card keeps its power-mean fallback.
+
+    ``energy=True`` reads the optional ``actual_energy_entity`` (the DC energy
+    counter) instead of the ``actual_entity`` power sensor.
     """
     site = getattr(coordinator, "_site", None)
     if site is None:
         return []
+    attr = "actual_energy_entity" if energy else "actual_entity"
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for plane in getattr(site, "planes", ()):
-        entity_id = getattr(plane, "actual_entity", None)
+        entity_id = getattr(plane, attr, None)
         if isinstance(entity_id, str) and entity_id and entity_id not in seen:
             seen.add(entity_id)
             name = getattr(plane, "name", None)

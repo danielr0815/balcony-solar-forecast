@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.5] - 2026-07-19
+
+### Added
+
+- **Optional per-plane `actual_energy_entity` — true daily energy on the LTS
+  card.** A plane may now name its DC energy counter (Wh/kWh, `state_class`
+  total/total_increasing) alongside its `actual_entity` power sensor. When set,
+  the *Measured daily energy per module* card charts `change` — real Wh per day,
+  with today's bar showing the energy so far instead of a mean-so-far — and
+  labels the rows M1…M8 instead of the per-port sensors' ambiguous own names.
+  Unset, the card keeps the v0.20.4 `mean` fallback. Dashboard-only: the engine
+  and every learner ignore the field, and a plane without it serialises to the
+  exact pre-0.20.5 dict.
+
+  Deliberately **not** auto-discovered: both ports of an inverter share a device
+  *and* a `translation_key`, so nothing in the entity registry ties a per-port
+  counter to its power sibling. Discovery could only string-match entity ids and
+  would silently mis-attribute one module's energy to another — worse than no
+  chart, given that the shade learning rests on per-module attribution. Existing
+  entries therefore need the field added once under Reconfigure → Site
+  configuration; see `docs/DASHBOARD.md` §2c.
+
+  `DEFAULT_SITE` ships the eight counters for the reference install, each
+  verified against live data: same device as its power sibling, and daily
+  `change` matching that sensor's daily `mean` × 24 h.
+
+## [0.20.4] - 2026-07-19
+
+### Fixed
+
+- **"Measured daily energy per module (LTS)" rendered as an empty card.** The
+  statistics-graph asked for `stat_types: [sum]`, but the entities it charts are
+  the configured per-plane `actual_entity` POWER sensors (W, `state_class:
+  measurement`). The recorder keeps mean/min/max for those and reports
+  `has_sum: false`, so the card had no series to draw and showed an empty plot
+  area — the measured production looked "gone" even though 14 days of daily LTS
+  rows were present the whole time. The card now charts `mean` (the statistic
+  that actually exists) and is retitled "Measured mean DC power per module
+  (LTS)"; daily mean W × 24 h is the day's energy, so the bar shape is
+  unchanged. Fixed in both the shipped `dashboards/balcony_solar_forecast.yaml`
+  and the `install_dashboard` generator. Installs whose inverter also exposes
+  per-port `total_increasing` energy entities (Wh) can swap those in with
+  `stat_types: [change]` for true Wh bars — see `docs/DASHBOARD.md`.
+
 ## [0.20.3] - 2026-07-17
 
 ### Fixed

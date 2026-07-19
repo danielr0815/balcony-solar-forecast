@@ -16,7 +16,7 @@ from __future__ import annotations
 DOMAIN = "balcony_solar_forecast"
 
 INTEGRATION_NAME = "Balcony Solar Forecast"
-INTEGRATION_VERSION = "0.20.3"
+INTEGRATION_VERSION = "0.20.5"
 
 # --- Update behaviour (SPEC §4: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
@@ -86,6 +86,15 @@ CONF_WP = "wp"  # module STC peak power, watts
 CONF_EFFICIENCY = "efficiency"  # system/DC efficiency, default 0.96
 CONF_HORIZON = "horizon"  # list of horizon rows (see below)
 CONF_ACTUAL_ENTITY = "actual_entity"  # HA entity id for measured DC power
+# Optional: HA entity id for this plane's measured DC ENERGY counter (Wh/kWh,
+# state_class total/total_increasing). Purely a dashboard concern — the LTS card
+# charts `change` (true daily energy) when it is set and falls back to the power
+# sensor's `mean` when it is not. It must be stated explicitly because nothing in
+# the entity registry ties a per-port energy counter to its power sibling: both
+# ports of one inverter share a device AND a translation_key, so auto-discovery
+# could only string-match entity ids and would silently mis-attribute per-module
+# energy on a rename.
+CONF_ACTUAL_ENERGY_ENTITY = "actual_energy_entity"
 CONF_SHADE_GROUP = "shade_group"  # optional: planes sharing this learn ONE shademap channel
 CONF_ROSS_COEFF = "ross_coeff"  # optional: per-plane Ross cell-temp coefficient (mounting-dependent)
 # horizon-row fields
@@ -317,8 +326,8 @@ def _default_horizon() -> list[dict]:
     return list(_FARFIELD_SLOPE)
 
 
-def _plane(name, az, tilt, wp, horizon, actual_entity):
-    return {
+def _plane(name, az, tilt, wp, horizon, actual_entity, actual_energy_entity=None):
+    plane = {
         CONF_PLANE_NAME: name,
         CONF_AZIMUTH: float(az),
         CONF_TILT: float(tilt),
@@ -327,6 +336,11 @@ def _plane(name, az, tilt, wp, horizon, actual_entity):
         CONF_HORIZON: horizon,
         CONF_ACTUAL_ENTITY: actual_entity,
     }
+    # Emit the optional energy counter only when given, so a plane without one
+    # round-trips to the exact pre-0.20.5 dict (same rule as shade_group).
+    if actual_energy_entity:
+        plane[CONF_ACTUAL_ENERGY_ENTITY] = actual_energy_entity
+    return plane
 
 
 DEFAULT_SITE = {
@@ -335,22 +349,30 @@ DEFAULT_SITE = {
     CONF_PLANES: [
         # --- lower balcony (70 deg tilt) ---
         _plane("M1", 25.0, 70.0, 370, _default_horizon(),
-               "sensor.inverter_port_1_dc_power"),
+               "sensor.inverter_port_1_dc_power",
+               "sensor.inverter_port_1_dc_total_energy"),
         _plane("M2", 115.0, 70.0, 370, _default_horizon(),
-               "sensor.inverter_port_2_dc_power"),
+               "sensor.inverter_port_2_dc_power",
+               "sensor.inverter_port_2_dc_total_energy"),
         _plane("M3", 115.0, 70.0, 370, _default_horizon(),
-               "sensor.inverter_port_1_dc_power_2"),
+               "sensor.inverter_port_1_dc_power_2",
+               "sensor.inverter_port_1_dc_total_energy_2"),
         _plane("M4", 205.0, 70.0, 430, _south_horizon(40.0),
-               "sensor.inverter_port_2_dc_power_2"),
+               "sensor.inverter_port_2_dc_power_2",
+               "sensor.inverter_port_2_dc_total_energy_2"),
         # --- upper balcony (80 deg tilt) ---
         _plane("M5", 25.0, 80.0, 430, _default_horizon(),
-               "sensor.inverter_port_1_dc_power_3"),
+               "sensor.inverter_port_1_dc_power_3",
+               "sensor.inverter_port_1_dc_total_energy_3"),
         _plane("M6", 115.0, 80.0, 430, _default_horizon(),
-               "sensor.inverter_port_2_dc_power_3"),
+               "sensor.inverter_port_2_dc_power_3",
+               "sensor.inverter_port_2_dc_total_energy_3"),
         _plane("M7", 115.0, 80.0, 430, _default_horizon(),
-               "sensor.inverter_port_1_dc_power_4"),
+               "sensor.inverter_port_1_dc_power_4",
+               "sensor.inverter_port_1_dc_total_energy_4"),
         _plane("M8", 205.0, 80.0, 430, _south_horizon(30.0),
-               "sensor.inverter_port_2_dc_power_4"),
+               "sensor.inverter_port_2_dc_power_4",
+               "sensor.inverter_port_2_dc_total_energy_4"),
     ],
     CONF_GROUPS: [
         {CONF_GROUP_NAME: "WR1", CONF_GROUP_PLANES: ["M1", "M2"],

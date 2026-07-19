@@ -21,6 +21,7 @@ from ..const import (
     ALBEDO_DEFAULT,
     CONF_AC_ACTUAL_ENTITY,
     CONF_AC_ACTUAL_INVERT,
+    CONF_ACTUAL_ENERGY_ENTITY,
     CONF_ACTUAL_ENTITY,
     CONF_AZIMUTH,
     CONF_EFFICIENCY,
@@ -167,6 +168,13 @@ class PlaneConfig:
     — a free-standing, well-ventilated module runs cooler (~0.02) than a
     facade-parallel one with poor back-ventilation (~0.056). Default None ==
     use the global default (backward compatible).
+
+    ``actual_energy_entity`` (optional) is this plane's measured DC ENERGY
+    counter (Wh/kWh, state_class total/total_increasing). It feeds ONLY the
+    observability dashboard's LTS card, which charts true daily energy
+    (``change``) when it is set; without it the card falls back to the power
+    sensor's daily ``mean``. It is never used by the engine or the learners.
+    Default None (backward compatible).
     """
 
     name: str
@@ -176,6 +184,7 @@ class PlaneConfig:
     efficiency: float = DEFAULT_EFFICIENCY
     horizon: tuple[HorizonRow, ...] = ()
     actual_entity: str | None = None
+    actual_energy_entity: str | None = None
     shade_group: str | None = None
     ross_coeff: float | None = None
 
@@ -208,6 +217,7 @@ class PlaneConfig:
             efficiency=float(d.get(CONF_EFFICIENCY, DEFAULT_EFFICIENCY)),
             horizon=horizon,
             actual_entity=d.get(CONF_ACTUAL_ENTITY),
+            actual_energy_entity=d.get(CONF_ACTUAL_ENERGY_ENTITY),
             shade_group=shade_group,
             ross_coeff=(
                 None if d.get(CONF_ROSS_COEFF) is None
@@ -225,6 +235,10 @@ class PlaneConfig:
             CONF_HORIZON: [r.to_dict() for r in self.horizon],
             CONF_ACTUAL_ENTITY: self.actual_entity,
         }
+        # Same for the optional energy counter: a plane without one round-trips
+        # to the exact pre-0.20.5 dict.
+        if self.actual_energy_entity:
+            d[CONF_ACTUAL_ENERGY_ENTITY] = self.actual_energy_entity
         # Write the group only when set, so an ungrouped plane round-trips to the
         # exact v0.10 dict (no new key) — backward compatible.
         if self.shade_group:
