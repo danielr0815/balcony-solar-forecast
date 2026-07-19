@@ -615,11 +615,21 @@ async def test_empty_dashboard_saved_with_counts(monkeypatch):
     assert result["views"] == 1
     assert result["cards"] > 0
     assert result["missing_entities"] == []  # all keys registered
-    # The configured comparison + the measured planes made it into the config.
+    # The configured comparison made it into the config.
     cards = dash.saved["views"][0]["cards"]
     all_ids = _all_entity_ids(cards)
     assert "sensor.cmp_8_entry_baseline" in all_ids
-    assert "sensor.inv_1" in all_ids and "sensor.inv_2" in all_ids
+    # The per-plane ids are NOT enumerated anywhere on this path (0.20.6): the
+    # bundled power-history card resolves its module list at runtime from the
+    # measured-total sensor's `sources`, and the LTS statistics-graph that used
+    # to list them is no longer generated. They are still spelled out on the
+    # history-graph fallback path — see
+    # test_build_measured_power_falls_back_to_history_graph.
+    assert "sensor.inv_1" not in all_ids and "sensor.inv_2" not in all_ids
+    power_hist = next(
+        c for c in cards if c["type"] == "custom:balcony-power-history-card"
+    )
+    assert power_hist["total_sensor"] == "sensor.measured_dc_power_total"
 
 
 async def test_empty_dashboard_reports_missing_keys(monkeypatch):
