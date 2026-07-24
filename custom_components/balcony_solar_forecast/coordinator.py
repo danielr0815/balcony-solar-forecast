@@ -75,6 +75,7 @@ from .const import (
     BAND_SOURCE_ENSEMBLE,
     BAND_SOURCE_ENVELOPE,
     BAND_SOURCE_LEARNED,
+    CLASSIFIER_VERSION,
     CONF_COMPARISON_SENSORS,
     CONF_ENSEMBLE_ENABLED,
     CONF_FETCH_INTERVAL,
@@ -745,12 +746,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         Covers exactly the config the day-ahead bias cells are conditioned on:
         each plane's azimuth / tilt / wp / efficiency / ross_coeff / horizon
-        profile, the site albedo, and every inverter group's AC limit. A change
-        to any of these makes the learned theta fit a now-stale geometry, so a
-        differing fingerprint triggers a bias re-seed. Fields that do NOT change
-        the modeled curve (entity ids, shade grouping, meter sign) are excluded
-        so a benign edit never resets learning. Rounded so float re-serialisation
-        can never spuriously flip the hash.
+        profile, the site albedo, every inverter group's AC limit, and the cloud-
+        classification taxonomy version (CLASSIFIER_VERSION, A5) — a change to any
+        of these makes the learned theta fit a now-stale geometry or class
+        meaning, so a differing fingerprint triggers a bias re-seed. Fields that
+        do NOT change the modeled curve (entity ids, shade grouping, meter sign)
+        are excluded so a benign edit never resets learning. Rounded so float
+        re-serialisation can never spuriously flip the hash.
         """
         import hashlib
 
@@ -770,6 +772,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             *[_plane_sig(p) for p in self._site.planes],
             f"albedo={albedo}",
             *[f"grp:{g.name}:ac{round(g.ac_limit_w, 2)}" for g in self._site.groups],
+            # Cloud-classification taxonomy version (A5): a change to the class
+            # boundaries (layer-cover -> k_c) makes every learned theta cell fit a
+            # now-stale class meaning, so bump == fingerprint change == re-seed.
+            f"clsver={CLASSIFIER_VERSION}",
         ]
         raw = "|".join(parts).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()[:16]
@@ -952,12 +958,19 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         day_factor: dict[datetime, float] = {}
         if day_ahead_active:
             lon = self._site.longitude
+            lat = self._site.latitude
             for slot in weather.slots:
                 local = dt_util.as_local(slot.start)
+                # Clear-sky-index classification (A5): pass the slot GHI and the
+                # sun elevation (at slot start, same convention as the
+                # hours_from_solar_noon binning below) so classify_cloud keys the
+                # class on realised irradiance, not the raw cloud layers.
+                _az, elev = solpos.sun_position(slot.start, lat, lon)
                 cc = bias_mod.classify_cloud(
                     cloud_low=slot.cloud_low, cloud_mid=slot.cloud_mid,
                     cloud_high=slot.cloud_high,
                     visibility_m=slot.visibility_m, month=local.month,
+                    ghi=slot.ghi, elevation_deg=elev,
                 )
                 # Bin by APPARENT SOLAR time, not the wall clock (v0.19): the
                 # day-part boundary tracks solar noon instead of a fixed local
@@ -1007,13 +1020,19 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             today = dt_util.as_local(now).date()
             ens_today = False           # ensemble covered >= 1 of today's slots
             learned_spread_today = False  # learned band had spread on a today slot
+            lon = self._site.longitude
+            lat = self._site.latitude
             for slot in weather.slots:
                 local = dt_util.as_local(slot.start)
                 if have_bins:
+                    # Same clear-sky-index classification as the day-ahead loop
+                    # (A5) so the quantile bins share the day-ahead cell taxonomy.
+                    _az, elev = solpos.sun_position(slot.start, lat, lon)
                     cc = bias_mod.classify_cloud(
                         cloud_low=slot.cloud_low, cloud_mid=slot.cloud_mid,
                         cloud_high=slot.cloud_high,
                         visibility_m=slot.visibility_m, month=local.month,
+                        ghi=slot.ghi, elevation_deg=elev,
                     )
                     # Solar-time day part (v0.19), consistent with the day-ahead
                     # bias binning above: the quantile bins share the day_part

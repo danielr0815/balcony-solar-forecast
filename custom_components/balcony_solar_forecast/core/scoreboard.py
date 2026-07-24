@@ -61,6 +61,7 @@ from ..const import (
     SCOREBOARD_MAX_STALENESS_DAYS,
     SCOREBOARD_MIN_PAIRED_DAYS,
     SCOREBOARD_MIN_WINDOW_DAYS,
+    SCOREBOARD_STRATUM_MIN_N,
 )
 from .types import DayScore, ScoreboardState
 
@@ -436,10 +437,14 @@ def stratified_breakdown(
       * ``"n"``: scored days in this stratum;
       * ``"engine_daily_kwh_mae"``: engine daily-kWh MAE within the stratum;
       * ``"comparison_daily_kwh_mae"``: ``{name: mae}`` within the stratum;
-      * ``"engine_vs_best_baseline_pct"``: within-stratum percent (or None).
+      * ``"engine_vs_best_baseline_pct"``: within-stratum percent (None when the
+        stratum has fewer than SCOREBOARD_STRATUM_MIN_N scored days, C1/SPEC-5);
+      * ``"low_n"``: True when the stratum is below that floor (the percent is
+        then suppressed — a single mismatched pair produced absurd figures such
+        as -480 % on n=2; consumers hide the row instead of rendering it).
     A class with no scored days is ABSENT (not a zero-filled row). Backs the
     diagnostics stratum breakdown; the coordinator surfaces it under
-    DATA_KEY_SCOREBOARD for the dashboard markdown.
+    DATA_KEY_SCOREBOARD for the dashboard markdown (which tolerates the null).
     """
     days = _window_days_list(state, window_days)
     by_class: dict[str, list[DayScore]] = {}
@@ -452,6 +457,7 @@ def stratified_breakdown(
         stratum = by_class.get(cls)
         if not stratum:
             continue
+        low_n = len(stratum) < SCOREBOARD_STRATUM_MIN_N
         out[cls] = {
             "n": len(stratum),
             "engine_daily_kwh_mae": _engine_daily_kwh_mae_for_days(stratum),
@@ -465,7 +471,10 @@ def stratified_breakdown(
             "comparison_daily_kwh_mae": _comparison_daily_kwh_mae_for_days(
                 stratum
             ),
-            "engine_vs_best_baseline_pct": _stratum_pct(stratum),
+            # Suppressed below the min-n floor: the informational percent is
+            # meaningless on a tiny paired sample (C1/SPEC-5).
+            "engine_vs_best_baseline_pct": None if low_n else _stratum_pct(stratum),
+            "low_n": low_n,
         }
     return out
 

@@ -231,16 +231,22 @@ def cloud_class_by_hour(coord, iso: str) -> dict[str, str]:
     weather = coord._cached_weather()
     if weather is None:
         return {}
+    lat = coord._site.latitude
+    lon = coord._site.longitude
     out: dict[str, str] = {}
     for slot in weather.slots:
         start = dt_util.as_utc(slot.start)
         if dt_util.as_local(start).date().isoformat() != iso:
             continue
         local = dt_util.as_local(start)
+        # Clear-sky-index classification (A5), consistent with the live coordinator
+        # loops: the nightly RLS must train the same (class x part) cell it serves.
+        _az, elev = solpos.sun_position(start, lat, lon)
         cc = bias_mod.classify_cloud(
             cloud_low=slot.cloud_low, cloud_mid=slot.cloud_mid,
             cloud_high=slot.cloud_high,
             visibility_m=slot.visibility_m, month=local.month,
+            ghi=slot.ghi, elevation_deg=elev,
         )
         hkey = _hour_key(start)
         # First writer per hour wins (slots within an hour share cloud data).

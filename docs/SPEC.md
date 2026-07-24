@@ -316,6 +316,19 @@ zeitlich linear überblendet (± `DAY_PART_BLEND_HALFWIDTH_MIN`), damit die
 Korrektur nie als harte Stufe springt — die Prognoseform kommt aus
 Wetter × Physik × Verschattung (stetig), also muss auch der aufgesetzte
 Residual-Korrektor stetig sein (`bias.day_ahead_factor`).
+Die **Wolkenklasse** eines Slots (`bias.classify_cloud`, gemeinsame Taxonomie
+für Day-ahead-Bias, Quantilbins und Scoreboard-Strata) wird — nach der stets
+vorrangigen Nebel-Regel — über den **Clear-Sky-Index** k_c = GHI /
+Haurwitz(Elevation) bestimmt: k_c ≥ `CLOUD_KC_CLEAR_MIN` → clear,
+k_c ≤ `CLOUD_KC_OVERCAST_MAX` → overcast, sonst mixed. k_c spiegelt die real
+ankommende Einstrahlung; die frühere Random-Overlap-Gesamtbedeckung wertete
+Mittel-/Hochwolken voll und routete sonnige Nachmittagsstunden in die
+overcast-Zelle (A5). Unterhalb `CLOUD_KC_MIN_ELEVATION_DEG` (Haurwitz-Referenz
+zu grob) oder ohne GHI fällt die Klassifikation auf die
+Random-Overlap-Schichtbedeckung zurück. Die Klassen-**Bedeutung** trägt eine
+Versionsnummer (`CLASSIFIER_VERSION`); ihre Änderung (Schichtbedeckung → k_c)
+gilt als Fingerprint-Änderung (s.u.) und veraltet die je Klasse gelernten
+Zellinhalte semantisch — Re-Bootstrap/Reset empfohlen.
 Die **modellierte Seite** des nächtlichen Day-ahead-Trainings ist die
 **Slow-only-Kurve** (Schattenkarte ∘ Physik, ohne Day-ahead-Faktor;
 `snap.slow_only_hourly_wh`), Fallback Roh (dann Korrigiert) bei inaktiver
@@ -325,8 +338,9 @@ denselben Verschattungsfehler doppelt korrigieren, sobald die Schattenkarte
 lernt.
 Die Bias-Zellen werden gegen eine bestimmte **prognoserelevante Konfiguration**
 gelernt; ein `config_fingerprint` (SHA-256-Kurzhash über je Ebene Azimut /
-Neigung / Wp / Wirkungsgrad / Ross-Koeffizient / Horizont, die Albedo und die
-AC-Grenzen der WR-Gruppen) wird neben dem Bias-State persistiert. Weicht der
+Neigung / Wp / Wirkungsgrad / Ross-Koeffizient / Horizont, die Albedo, die
+AC-Grenzen der WR-Gruppen und `CLASSIFIER_VERSION`) wird neben dem Bias-State
+persistiert. Weicht der
 Fingerprint beim Setup/Options-Reload vom gespeicherten ab, passt das gelernte θ
 nicht mehr zur Geometrie und würde bei RLS-Steady-State (λ = `RLS_FORGETTING_FACTOR`,
 n ≈ 100) nur ~0,001/Tag nachziehen; daher werden **alle** Zellen neu angesät
@@ -717,7 +731,11 @@ externen **Vergleichsprognose**, jeweils gegen die **gemessene** Ist-Summe des
 Standorts, plus die **Stunden-MAE** des Motors — **stratifiziert** nach der
 dominanten Wetterklasse des Vortags (clear/mixed/overcast/fog; der Koordinator
 klassifiziert diese bereits, wird wiederverwendet). Rollierendes Fenster
-(Default **14 Tage**, konfigurierbar).
+(Default **14 Tage**, konfigurierbar). Der **informative** Within-Stratum-Prozent
+`engine_vs_best_baseline_pct` wird bei weniger als `SCOREBOARD_STRATUM_MIN_N`
+gewerteten Tagen **nicht** ausgegeben (`null`) und die Zeile trägt `low_n: true`
+— ein einzelnes fehlgepaartes Paar erzeugte sonst absurde Werte (z. B. −480 %
+bei n = 2); Konsumenten blenden die Zeile aus (C1).
 
 **Fairness / kein Leakage (kritisch):**
 - die **Motor**-Zahl kommt aus der **as issued**-Prognose des Vortags (im

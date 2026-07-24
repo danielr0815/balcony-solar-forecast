@@ -437,14 +437,35 @@ CLOUD_CLASSES = (
     CLOUD_CLASS_OVERCAST,
     CLOUD_CLASS_FOG,
 )
-# Total-cloud-cover thresholds (%) separating clear / mixed / overcast when
-# the fog test does not fire. Mean of the three cloud layers.
+# Total-cloud-cover thresholds (%) separating clear / mixed / overcast — the
+# FALLBACK layer-cover split used only at low sun / when GHI is unavailable
+# (see the k_c thresholds below). Random-overlap total of the three layers.
 CLOUD_CLEAR_MAX_PCT = 25.0
 CLOUD_OVERCAST_MIN_PCT = 75.0
+# Clear-sky-index (k_c) classification (A5/SCT-1). When a slot carries a usable
+# GHI and the sun is high enough, the class is decided by
+# k_c = ghi / haurwitz_ghi(elevation) rather than the forecast cloud layers: the
+# layer cover counted mid/high decks at full random-overlap weight and routed
+# genuinely sunny afternoon hours into the overcast cell (11/20 h in the sunny
+# week), poisoning the day-ahead theta, the quantile bins and the scoreboard
+# strata alike. k_c reflects the irradiance that actually reaches the horizontal,
+# so all three consumers see a consistent class. Below CLOUD_KC_MIN_ELEVATION_DEG
+# the Haurwitz reference is too coarse and the classifier falls back to the layer
+# cover; the fog rule is unchanged and still tested FIRST.
+CLOUD_KC_CLEAR_MIN = 0.65        # k_c >= this => clear
+CLOUD_KC_OVERCAST_MAX = 0.30     # k_c <= this => overcast; between => mixed
+CLOUD_KC_MIN_ELEVATION_DEG = 5.0  # below this the k_c reference is unreliable
 # Fog-class parameters.
 FOG_VISIBILITY_M = 1000.0
 FOG_CLOUD_LOW_PCT = 85.0
 FOG_MONTHS = (10, 11, 12, 1, 2)   # Oct-Feb
+# Cloud-classification taxonomy version. Bumped whenever the MEANING of the
+# class labels changes (v1 layer-cover -> v2 k_c-based, A5). Folded into the
+# day-ahead config fingerprint (coordinator._config_fingerprint) so a change
+# re-seeds the RLS bias cells, whose learned theta was conditioned on the old
+# class boundaries; a re-bootstrap of the quantile bins / scoreboard strata is
+# likewise advised (their stored per-class content is now semantically stale).
+CLASSIFIER_VERSION = 2
 
 # Day parts (SPEC §5). Boundaries in local solar/clock hours (coordinator maps
 # a slot's local hour to a part). Midday brackets solar noon.
@@ -720,6 +741,12 @@ SCOREBOARD_MIN_PAIRED_DAYS = 1
 # (None) — a ring whose scoring stopped weeks ago must not keep publishing a
 # live-looking pass/fail. The coordinator passes the current local date in.
 SCOREBOARD_MAX_STALENESS_DAYS = 3
+# Minimum scored days in a weather stratum before its informational
+# within-stratum vs-best-baseline percent is emitted (C1/SPEC-5). With fewer
+# days a single mismatched pair produced absurd figures (a -480 % row on n=2);
+# below this the percent is published as None and the row carries low_n=True so
+# the dashboard/diagnostics can hide it rather than render a meaningless number.
+SCOREBOARD_STRATUM_MIN_N = 3
 
 # --- Comparison forecast sensors (GENERIC + CONFIGURABLE; ship EMPTY) -------
 # CONF_COMPARISON_SENSORS is an editable list of objects, each:

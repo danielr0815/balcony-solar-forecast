@@ -1154,6 +1154,7 @@ def test_build_learner_hooks_caches_day_factor(monkeypatch):
 
     class _Slot:
         start = slot_start
+        ghi = 500.0
         cloud_low = cloud_mid = cloud_high = 0.0
         visibility_m = 20000.0
 

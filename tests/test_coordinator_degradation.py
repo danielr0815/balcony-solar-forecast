@@ -45,6 +45,9 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
 from custom_components.balcony_solar_forecast.core import (  # noqa: E402
     bias as bias_mod,
 )
+from custom_components.balcony_solar_forecast.core import (  # noqa: E402
+    solpos,
+)
 from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     BiasCell,
     BiasState,
@@ -324,15 +327,26 @@ def _weather_two_slots() -> WeatherSeries:
     return WeatherSeries(slots=(mk(NOW - timedelta(hours=1)), mk(NOW + timedelta(hours=1))))
 
 
-def _trained_bias_for(weather: WeatherSeries) -> BiasState:
+def _slot_cloud_class(slot, c) -> str:
+    """Classify a slot exactly as the coordinator does (A5: k_c-based).
+
+    The live loops pass the slot GHI and the sun elevation, so a test that seeds a
+    matching cell must classify with the same inputs or the class (and hence the
+    cell key) diverges.
+    """
+    _az, elev = solpos.sun_position(slot.start, c._site.latitude, c._site.longitude)
+    return bias_mod.classify_cloud(
+        cloud_low=slot.cloud_low, cloud_mid=slot.cloud_mid,
+        cloud_high=slot.cloud_high, visibility_m=slot.visibility_m,
+        month=slot.start.month, ghi=slot.ghi, elevation_deg=elev,
+    )
+
+
+def _trained_bias_for(weather: WeatherSeries, c) -> BiasState:
     """A BiasState whose cell matches every slot of ``weather`` (factor 1.2)."""
     cells: dict[str, BiasCell] = {}
     for slot in weather.slots:
-        cc = bias_mod.classify_cloud(
-            cloud_low=slot.cloud_low, cloud_mid=slot.cloud_mid,
-            cloud_high=slot.cloud_high, visibility_m=slot.visibility_m,
-            month=slot.start.month,
-        )
+        cc = _slot_cloud_class(slot, c)
         dp = bias_mod.day_part_for_hour(slot.start.hour)
         cells[BiasState.cell_key(cc, dp)] = BiasCell(theta=1.2, covariance=1.0, n=10)
     return BiasState(cells=cells)
@@ -347,7 +361,7 @@ def test_hooks_day_factor_and_intraday_boundary(monkeypatch):
     c._learner_config = LearnerConfig(
         fast_enabled=True, slow_enabled=False, day_ahead_enabled=True
     )
-    c._bias_state = _trained_bias_for(weather)
+    c._bias_state = _trained_bias_for(weather, c)
     c._intraday_scalar = 1.5  # fast learner active (non-neutral)
 
     hooks = c._build_learner_hooks(weather, NOW)
@@ -400,11 +414,7 @@ def test_hooks_band_by_slot_presence(monkeypatch):
     # A trained (non-neutral) bin for every slot -> bands keyed by slot start.
     bins: dict[str, list[float]] = {}
     for slot in weather.slots:
-        cc = bias_mod.classify_cloud(
-            cloud_low=slot.cloud_low, cloud_mid=slot.cloud_mid,
-            cloud_high=slot.cloud_high, visibility_m=slot.visibility_m,
-            month=slot.start.month,
-        )
+        cc = _slot_cloud_class(slot, c)
         dp = bias_mod.day_part_for_hour(slot.start.hour)
         bins[QuantileState.bin_key(cc, dp)] = [0.8] * 60
     c._quantile_state = QuantileState(bins=bins)

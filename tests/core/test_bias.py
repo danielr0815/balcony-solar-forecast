@@ -517,6 +517,68 @@ def test_classify_fog_still_overrides_single_full_deck():
                           visibility_m=500, month=6) == CLOUD_CLASS_FOG
 
 
+# ---------------------------------------------------------------------------
+# classify_cloud — clear-sky-index (k_c) split (A5). haurwitz_ghi(50 deg) ~= 779
+# W/m^2, so kc = ghi/779; thresholds 0.65 (clear) / 0.30 (overcast).
+# ---------------------------------------------------------------------------
+
+
+def test_classify_kc_clear_overrides_high_cirrus_cover():
+    # High cirrus deck (60%) that the OLD layer-cover rule would call mixed, but a
+    # near-clear-sky GHI => kc ~= 0.90 => clear. Proves the class follows realised
+    # irradiance, not the raw cloud layers.
+    assert classify_cloud(cloud_low=0, cloud_mid=0, cloud_high=60,
+                          visibility_m=20000, month=6,
+                          ghi=700.0, elevation_deg=50.0) == CLOUD_CLASS_CLEAR
+
+
+def test_classify_kc_overcast_at_midday_despite_clear_layers():
+    # Cloud-cover fields say clear (0/0/0) but the midday GHI collapsed
+    # (kc ~= 0.19) => overcast. kc overrides the layer cover.
+    assert classify_cloud(cloud_low=0, cloud_mid=0, cloud_high=0,
+                          visibility_m=20000, month=6,
+                          ghi=150.0, elevation_deg=50.0) == CLOUD_CLASS_OVERCAST
+
+
+def test_classify_kc_mixed_between_thresholds():
+    # kc ~= 0.50 (between 0.30 and 0.65) => mixed regardless of the layer fields.
+    assert classify_cloud(cloud_low=0, cloud_mid=0, cloud_high=0,
+                          visibility_m=20000, month=6,
+                          ghi=390.0, elevation_deg=50.0) == CLOUD_CLASS_MIXED
+
+
+def test_classify_kc_twilight_falls_back_to_layer_cover():
+    # Below CLOUD_KC_MIN_ELEVATION_DEG the Haurwitz reference is unreliable, so a
+    # low-sun slot ignores kc and uses the layer cover. An overcast layer deck
+    # (100/0/0) classifies overcast even though its tiny dawn GHI would give a
+    # spuriously clear-ish kc against the near-zero reference.
+    assert classify_cloud(cloud_low=100, cloud_mid=0, cloud_high=0,
+                          visibility_m=20000, month=6,
+                          ghi=20.0, elevation_deg=3.0) == CLOUD_CLASS_OVERCAST
+
+
+def test_classify_kc_missing_ghi_falls_back_to_layer_cover():
+    # A usable elevation but no GHI (None) => layer-cover fallback (10/5/5 -> clear).
+    assert classify_cloud(cloud_low=10, cloud_mid=5, cloud_high=5,
+                          visibility_m=20000, month=6,
+                          ghi=None, elevation_deg=50.0) == CLOUD_CLASS_CLEAR
+
+
+def test_classify_kc_nonfinite_ghi_falls_back_to_layer_cover():
+    # Non-finite GHI degrades to the layer cover rather than the kc split.
+    assert classify_cloud(cloud_low=100, cloud_mid=0, cloud_high=0,
+                          visibility_m=20000, month=6,
+                          ghi=float("nan"), elevation_deg=50.0) == CLOUD_CLASS_OVERCAST
+
+
+def test_classify_kc_fog_still_takes_precedence():
+    # Fog is tested BEFORE the kc split: a clear-sky GHI with collapsed visibility
+    # still classifies fog.
+    assert classify_cloud(cloud_low=0, cloud_mid=0, cloud_high=0,
+                          visibility_m=500, month=6,
+                          ghi=700.0, elevation_deg=50.0) == CLOUD_CLASS_FOG
+
+
 # ===========================================================================
 # day_part_for_hour
 # ===========================================================================
