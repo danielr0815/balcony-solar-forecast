@@ -349,6 +349,15 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Last computed ForecastResult (for the nightly per-plane snapshot).
         self._last_result: ForecastResult | None = None
 
+        # Per-slot day-ahead (RLS θ) factor of the LAST engine pass, keyed by the
+        # slot.start datetimes ``_last_result`` is aligned to. Cached so the
+        # intraday sampler can reference the θ-corrected modeled curve (the served
+        # curve minus the intraday scalar), not pure raw — otherwise θ and the
+        # intraday scalar would double-correct the same morning error (A2). Empty
+        # when the day-ahead layer is inactive => the sampler falls back to raw,
+        # matching the served curve (which then carries no θ either).
+        self._day_factor: dict[datetime, float] = {}
+
         # --- Shade-profile diagram selection (SPEC §15) ---------------------
         # Which module/plane + local date the shade-profile sensor renders. The
         # select entity owns the persisted module (RestoreEntity) and pushes it
@@ -875,6 +884,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 if f != DAY_AHEAD_BIAS_NEUTRAL:
                     day_factor[slot.start] = f
 
+        # Cache θ for the intraday sampler (A2): it references the θ-corrected
+        # modeled curve so θ and the intraday scalar don't double-correct. Keyed
+        # by the identical slot.start datetimes the resulting ForecastResult is
+        # aligned to. This pass builds the very result that becomes _last_result,
+        # so the cache and _last_result stay in lockstep across ticks.
+        self._day_factor = day_factor
+
         # Per-slot quantile bands (SPEC §6/§10): keyed by the identical
         # slot.start datetimes the engine iterates. Each slot's LEARNED band is
         # the empirical P10/P50/P90 of its (forecast cloud class x local day part)
@@ -1332,27 +1348,41 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     def _modeled_power_for_planes(
         self, result: ForecastResult, now: datetime, plane_names: set[str]
     ) -> float:
-        """RAW modeled site power at ``now`` restricted to the given plane names.
+        """θ-referenced modeled site power at ``now`` restricted to the given
+        plane names.
 
-        Uses the RAW per-plane curve (labels must not depend on the applied
-        correction). Scaling the modeled side to exactly the planes that reported
-        a usable measurement makes the intraday ratio a pure weather error even
-        under a partial DTU dropout (SPEC §5). Falls back to the full-site RAW
-        power when the per-plane breakdown is unavailable (empty plane_results).
+        The RAW per-plane curve (``pr.raw_watts``) is scaled by the slot's
+        nightly-frozen day-ahead θ factor (``_day_factor``), so the modeled side
+        equals the SERVED curve minus the transient intraday scalar (A2, IRC-2).
+        Sampling against pure raw let θ (the day-ahead bias, 1.36–1.49 on this
+        site's mornings) and the intraday scalar correct the SAME error twice —
+        served/actual reached ×1.9 at 07–09Z. θ is site-level (one factor per
+        slot, applied to every plane equally) and frozen within a day, so it
+        cannot drift with the scalar it references — no circularity. The intraday
+        factor itself is deliberately NOT folded in here.
+
+        Scaling the modeled side to exactly the planes that reported a usable
+        measurement keeps the intraday ratio a pure weather error even under a
+        partial DTU dropout (SPEC §5). Falls back to the full-site RAW power
+        (still θ-scaled) when the per-plane breakdown is unavailable (empty
+        plane_results). When θ is inactive for the slot (day-ahead layer off /
+        starved cell) the factor is 1.0, so the served curve carries no θ and the
+        modeled side is pure raw — self-consistent.
         """
         idx = _slot_index_at(result.slot_starts, now)
         if idx is None:
             return 0.0
+        theta = getattr(self, "_day_factor", {}).get(result.slot_starts[idx], 1.0)
         planes = [pr for pr in result.plane_results if pr.name in plane_names]
         if not planes:
             # No per-plane breakdown to restrict to: use the raw site total.
-            return _raw_power_now(result, now)
+            return _raw_power_now(result, now) * theta
         total = 0.0
         for pr in planes:
             series = pr.raw_watts or pr.watts
             if idx < len(series):
                 total += series[idx]
-        return total
+        return total * theta
 
     def _clear_sky_ref_wh(self, now: datetime) -> float:
         """Haurwitz clear-sky GHI energy proxy (Wh/m^2) for the current slot.

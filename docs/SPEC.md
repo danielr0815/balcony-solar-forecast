@@ -299,7 +299,15 @@ Verhältnis (τ ≈ 90 min) gemessen/prognostiziert der letzten 2–4 h,
 **im k_c-Raum konditioniert** (Geometrie/Saison herausnormiert), auf die
 nächsten ~6 h abklingend angewandt, Clamp [0,25 … 2,5], nach HA-Neustart
 Re-Init auf 1,0 (nie alten Zustand laden). Rettet Nebelmorgen ohne
-falsche Geometrie. Day-ahead-Bias (seit v0.2.0 implementiert, per Default
+falsche Geometrie. Die **modellierte (prognostizierte) Seite** des Samples ist
+die **bias-referenzierte** Kurve — Roh-Watt × nächtlich eingefrorenem
+θ-Zellfaktor des Slots (`_day_factor`) —, **nicht** die reine Roh-Kurve: die
+ausgelieferte Kurve ist Roh × θ × Skalar, also würden θ (Day-ahead-Bias) und
+der Intraday-Skalar sonst denselben Fehler doppelt korrigieren. Der
+Intraday-Faktor selbst geht **nie** in die modellierte Seite ein (θ ist
+nächtlich eingefroren → keine Zirkularität); ist θ für den Slot inaktiv, ist
+der Faktor 1,0 und die modellierte Seite gleich der Roh-Kurve (die
+ausgelieferte Kurve trägt dann ebenfalls kein θ). Day-ahead-Bias (seit v0.2.0 implementiert, per Default
 aktiv): 1 RLS-Bias-Skalar je (Wolkenklasse × Tagesabschnitt), nächtlich
 trainiert und über den Options-Flow abschaltbar. Die Zellen sind ge*lernt*
 je Abschnitt, werden aber **stetig angewandt**: nahe einer internen

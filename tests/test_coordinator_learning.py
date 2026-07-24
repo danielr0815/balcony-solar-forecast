@@ -762,7 +762,11 @@ def test_build_intraday_sample_returns_kc_space_ratio():
 
 
 def test_intraday_sample_uses_raw_curve():
-    """The sample's modeled_kc derives from the RAW curve, not the corrected."""
+    """The sample's modeled_kc derives from the RAW curve, not the served one.
+
+    With θ neutral (no ``_day_factor``) the modeled side is pure raw: it must
+    NEVER read the served ``watts`` (which already carries beam_tau + the scalar).
+    """
     c = _make_coordinator()
     # corrected 800 W, raw 400 W at noon; measured 400 W.
     result, start = _forecast_at_noon(800.0, raw_watts=400.0)
@@ -772,6 +776,40 @@ def test_intraday_sample_uses_raw_curve():
     assert sample is not None
     # ratio == measured/raw == 400/400 == 1.0 (NOT 400/800 == 0.5).
     assert sample.measured_kc / sample.modeled_kc == pytest.approx(1.0, rel=1e-6)
+
+
+def test_intraday_sample_theta_referenced_no_double_correction():
+    """A2: when the day-ahead θ fully explains the error (measured == raw × θ),
+    the intraday ratio stays ~1.0 — θ and the scalar must not double-correct.
+
+    Raw 400 W, θ 1.4 for the slot, measured 560 W == raw × θ. The modeled side is
+    raw × θ == 560, so the ratio (the scalar's numerator/denominator) is 1.0. With
+    the pre-A2 raw-only modeled side it would have been 560/400 == 1.4, stacking a
+    second 1.4 on top of the θ already in the served curve.
+    """
+    c = _make_coordinator()
+    result, start = _forecast_at_noon(400.0, raw_watts=400.0)
+    c._day_factor = {start: 1.4}
+    c.hass.states.set("sensor.m1", 560.0, last_updated=start)  # == 400 × 1.4
+    c.hass.states.set("sensor.m2", 0.0, last_updated=start)
+    sample = c._build_intraday_sample(result, start)
+    assert sample is not None
+    assert sample.measured_kc / sample.modeled_kc == pytest.approx(1.0, rel=1e-6)
+
+
+def test_intraday_sample_theta_referenced_keeps_real_weather_signal():
+    """A2: a REAL deviation on top of θ survives — measured == 1.4 × raw × θ makes
+    the ratio 1.4, so a genuine under-forecast (e.g. 21.07.) is still caught.
+    """
+    c = _make_coordinator()
+    result, start = _forecast_at_noon(400.0, raw_watts=400.0)
+    c._day_factor = {start: 1.4}
+    # measured = 1.4 × (raw 400 × θ 1.4) = 784 W.
+    c.hass.states.set("sensor.m1", 784.0, last_updated=start)
+    c.hass.states.set("sensor.m2", 0.0, last_updated=start)
+    sample = c._build_intraday_sample(result, start)
+    assert sample is not None
+    assert sample.measured_kc / sample.modeled_kc == pytest.approx(1.4, rel=1e-6)
 
 
 def test_intraday_sample_scales_modeled_to_usable_planes():
@@ -934,6 +972,46 @@ def test_hooks_shademap_silenced_by_drift_disable():
     now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
     hooks = c._build_learner_hooks(_W(), now)
     assert hooks.beam_tau is None
+
+
+def test_build_learner_hooks_caches_day_factor(monkeypatch):
+    """A2: the per-slot θ factor is cached on ``_day_factor`` (keyed by slot.start)
+    so the intraday sampler can reference the θ-corrected modeled curve.
+    """
+    c = _make_coordinator()
+    c._bias_state = BiasState(cells={"clear|midday": BiasCell(theta=1.4, n=99)})
+    monkeypatch.setattr(
+        coord_mod.bias_mod, "classify_cloud", lambda **kw: CLOUD_CLASS_CLEAR
+    )
+    monkeypatch.setattr(
+        coord_mod.bias_mod, "day_ahead_factor_solar", lambda *a, **kw: 1.4
+    )
+    slot_start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+
+    class _Slot:
+        start = slot_start
+        cloud_low = cloud_mid = cloud_high = 0.0
+        visibility_m = 20000.0
+
+    class _W:
+        slots = (_Slot(),)
+
+    c._build_learner_hooks(_W(), slot_start)
+    assert c._day_factor.get(slot_start) == pytest.approx(1.4)
+
+
+def test_build_learner_hooks_day_factor_empty_when_inactive():
+    """No bias cells -> day-ahead layer inactive -> cached θ is empty (sampler
+    then falls back to raw, matching the served curve)."""
+    c = _make_coordinator()
+    c._day_factor = {datetime(2026, 1, 1, tzinfo=UTC): 9.9}  # stale, must clear
+
+    class _W:
+        slots = ()
+
+    now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    c._build_learner_hooks(_W(), now)
+    assert c._day_factor == {}
 
 
 # ---------------------------------------------------------------------------

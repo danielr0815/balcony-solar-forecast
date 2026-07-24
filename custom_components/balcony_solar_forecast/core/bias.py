@@ -212,10 +212,13 @@ def compute_intraday_scalar(
 
     Robustness: samples in the future or older than the trailing window are
     dropped; a clock jump that leaves every sample out-of-window collapses to
-    neutral rather than acting on stale data. The ratio is a ratio-of-sums
-    (energy-weighted) so the plane mix cancels; divide-by-near-zero is guarded
-    by the modeled-Wh gate plus a floor on the weighted modeled-k_c
-    denominator.
+    neutral rather than acting on stale data. The ratio is a ratio-of-sums of
+    the per-slot site k_c weighted ONLY by the exp(-age/tau) time decay — each
+    in-window sample counts with EQUAL energy weight (a low-production slot
+    weighs as much as a high-production one); it is not energy-weighted. The
+    plane mix cancels because measured and modeled are both site sums normalised
+    by the same clear-sky reference. Divide-by-near-zero is guarded by the
+    modeled-Wh gate plus a floor on the weighted modeled-k_c denominator.
     """
     if not samples:
         return INTRADAY_NEUTRAL
