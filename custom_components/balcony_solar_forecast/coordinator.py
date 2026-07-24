@@ -48,6 +48,7 @@ from . import _actuals, _nightly, _scoreboard_glue
 from ._actuals import (
     _actuals_from_stats,  # noqa: F401  re-exported for tests
     _is_frozen_channel,  # noqa: F401  re-exported for tests
+    _stat_row_datetime,
 )
 
 # Pure helpers moved to _glue_util; imported for the coordinator's own use AND
@@ -137,6 +138,7 @@ from .const import (
     MAX_PAYLOAD_AGE_HOURS,
     MAX_PHYSICS_FALLBACK_AGE_HOURS,
     RECOMPUTE_INTERVAL_SECONDS,
+    SENSOR_MEASURED_DC_TOTAL,
     STATUS_CACHED,
     STATUS_FRESH,
     STATUS_PHYSICS_FALLBACK,
@@ -206,6 +208,27 @@ class _IntradaySample:
     measured_kc: float
     modeled_kc: float
     modeled_wh: float
+
+
+def _measured_power_rows(rows: list[dict] | None) -> list[tuple[datetime, float]]:
+    """Reduce one entity's short-term stat rows to ``[(utc_time, mean_w)]`` (pure).
+
+    Used by the A7 intraday ring re-arm: ``start`` is disambiguated via
+    ``_stat_row_datetime`` (epoch SECONDS from the in-process
+    ``statistics_during_period`` API vs. MS from the WebSocket layer — the
+    historical epoch bug, mirrored from ``_actuals``). Rows without a usable
+    ``mean`` or an unparseable ``start`` are dropped. Never raises.
+    """
+    out: list[tuple[datetime, float]] = []
+    for row in rows or ():
+        mean = row.get("mean")
+        if mean is None:
+            continue
+        ts = _stat_row_datetime(row.get("start"))
+        if ts is None:
+            continue
+        out.append((ts, float(mean)))
+    return out
 
 
 class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
@@ -326,6 +349,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Trailing ring of measured-vs-modeled samples (k_c space), one per
         # tick where a usable measurement + non-trivial modeled energy exist.
         self._intraday_samples: deque[_IntradaySample] = deque()
+        # One-shot guard for the A7 ring re-arm: after a restart/reload the ring
+        # is empty, so the scalar would stay neutral for the whole trailing
+        # window (>=2 h correction blackout, SCT-2). We reconstruct the ring once
+        # from recorder stats + the last forecast curve on the first tick that
+        # has a curve to reference; the flag stops any refill after that (the
+        # samples are re-derivable raw data, but re-armed exactly once).
+        self._intraday_rearmed: bool = False
         # Correction source shaping the served curve this cycle.
         self._correction_source: str = CORRECTION_SOURCE_NONE
 
@@ -899,6 +929,27 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             await self._async_update_ensemble(now, weather)
         else:
             self._ensemble_factors = None
+
+        # A7/SCT-2: one-shot re-arm of the intraday sample ring after a
+        # restart/reload so the scalar does not spend the whole trailing window
+        # neutral. The modeled side is read off the PREVIOUS tick's forecast
+        # curve, so this fires on the first tick that has one (the second update),
+        # BEFORE the live sampler below adds the current slot. The one-shot is
+        # only SPENT once a real attempt is possible (fast learner on, weather
+        # FRESH/CACHED), so a restart landing in a stale-weather window defers the
+        # re-arm to the first fresh tick instead of wasting it. Best-effort: no
+        # recorder stats => degrade to the previous neutral behaviour.
+        fast_on = (self._learner_config.fast_enabled
+                   and not self._drift_state.fast_disabled)
+        if (not getattr(self, "_intraday_rearmed", False)
+                and self._last_result is not None
+                and fast_on
+                and status in (STATUS_FRESH, STATUS_CACHED)):
+            self._intraday_rearmed = True
+            try:
+                await self._async_rearm_intraday_ring(now, status)
+            except Exception:  # pragma: no cover - best-effort, never fatal
+                _LOGGER.debug("Intraday ring re-arm failed", exc_info=True)
 
         # FAST learner: refresh the intraday scalar from live actuals BEFORE the
         # engine pass; the engine applies it via hooks.slot_factor so the 15-min,
@@ -1541,6 +1592,150 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         cutoff = now - timedelta(minutes=INTRADAY_TRAILING_WINDOW_MINUTES)
         while self._intraday_samples and self._intraday_samples[0].at < cutoff:
             self._intraday_samples.popleft()
+
+    # ------------------------------------------------------------------
+    # FAST learner: one-shot ring re-arm after a restart/reload (A7/SCT-2)
+    # ------------------------------------------------------------------
+
+    async def _async_rearm_intraday_ring(
+        self, now: datetime, status: str
+    ) -> None:
+        """Reconstruct the trailing intraday sample ring after a restart/reload.
+
+        The scalar itself is never persisted (SPEC §5), but the raw samples it is
+        derived from are re-derivable measurements: rebuild them from the
+        recorder's 5-min statistics of the site-total measured DC power sensor
+        (measured side) and the last forecast curve (θ-corrected modeled side —
+        the SAME basis the live sampler uses: bias-corrected, WITHOUT the intraday
+        scalar), so ``compute_intraday_scalar`` has >= INTRADAY_MIN_TRAILING_MINUTES
+        of history immediately instead of sitting neutral for hours (A7/SCT-2).
+
+        Guards (any miss => leave the ring empty, i.e. neutral, as before):
+          * fast learner enabled and not drift-disabled;
+          * the ring still empty (never double-fill a running ring);
+          * the served weather image FRESH/CACHED (a physics-fallback or
+            unavailable image would reconstruct against an untrustworthy curve);
+          * the site-total sensor + its recorder stats resolve.
+        The site-total sensor carries no per-plane breakdown, so the live path's
+        partial-channel-dropout guard cannot apply here; the full modeled site is
+        used (best-effort re-arm), which the organic live sampler then supersedes.
+        """
+        result = self._last_result
+        if result is None:
+            return
+        if not (self._learner_config.fast_enabled
+                and not self._drift_state.fast_disabled):
+            return
+        if self._intraday_samples:
+            return
+        if status not in (STATUS_FRESH, STATUS_CACHED):
+            return
+        entity_id = self._measured_total_stat_id()
+        if entity_id is None:
+            return
+        rows = await self._async_read_measured_total_stats(entity_id, now)
+        if not rows:
+            return
+        for sample in self._rearm_samples_from_rows(result, rows, now):
+            self._intraday_samples.append(sample)
+        self._trim_intraday_ring(now)
+
+    def _measured_total_stat_id(self) -> str | None:
+        """Entity/statistic id of the site-total measured DC power sensor.
+
+        Resolved from the entity registry by the sensor's unique_id
+        (``{entry_id}_measured_dc_power_total``); a MEASUREMENT sensor's statistic
+        id equals its entity id. None when the sensor is not registered (e.g. no
+        plane has an ``actual_entity`` configured, so the sensor is never built).
+        """
+        try:
+            from homeassistant.helpers import entity_registry as er
+
+            registry = er.async_get(self.hass)
+            return registry.async_get_entity_id(
+                "sensor", DOMAIN,
+                f"{self.entry.entry_id}_{SENSOR_MEASURED_DC_TOTAL}",
+            )
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    async def _async_read_measured_total_stats(
+        self, entity_id: str, now: datetime
+    ) -> list[tuple[datetime, float]]:
+        """5-min mean site-total DC power over the trailing window (executor).
+
+        Returns ``[(utc_time, mean_watts)]`` from the recorder short-term
+        statistics; ``start`` is disambiguated via ``_stat_row_datetime`` (the
+        in-process API hands out epoch SECONDS — the historical epoch bug, mirrors
+        _actuals). Any failure yields ``[]`` so the caller degrades to neutral.
+        """
+        start = now - timedelta(minutes=INTRADAY_TRAILING_WINDOW_MINUTES)
+        try:
+            from homeassistant.components.recorder import get_instance
+
+            def _read() -> list[tuple[datetime, float]]:
+                from homeassistant.components.recorder.statistics import (
+                    statistics_during_period,
+                )
+
+                stats = statistics_during_period(
+                    self.hass, start, now, {entity_id}, "5minute", None, {"mean"},
+                )
+                return _measured_power_rows(stats.get(entity_id))
+
+            return await get_instance(self.hass).async_add_executor_job(_read)
+        except Exception:  # pragma: no cover - recorder may be unavailable
+            _LOGGER.debug("Intraday re-arm stats read failed", exc_info=True)
+            return []
+
+    def _rearm_samples_from_rows(
+        self,
+        result: ForecastResult,
+        rows: list[tuple[datetime, float]],
+        now: datetime,
+    ) -> list[_IntradaySample]:
+        """Group 5-min site-total rows into engine 15-min slots and build one
+        ``_IntradaySample`` per PAST slot (k_c space), mirroring the live sampler.
+
+        The 5-min means of each slot are averaged into that slot's mean power; the
+        modeled side is the θ-scaled full-site power at the slot, both normalised
+        by the Haurwitz clear-sky reference so geometry/season cancel. The slot
+        CONTAINING ``now`` is skipped so the reconstruction never collides with
+        the live sample the caller adds for the current tick (no double-samples).
+        Slots below INTRADAY_MIN_MODELED_WH or with no clear-sky reference (sun
+        down) are dropped, exactly as :meth:`_build_intraday_sample` gates them.
+        """
+        all_planes = {p.name for p in self._site.planes}
+        now_idx = _slot_index_at(result.slot_starts, now)
+        by_slot: dict[int, list[float]] = {}
+        for ts, mean_w in rows:
+            idx = _slot_index_at(result.slot_starts, ts)
+            if idx is None or idx == now_idx:
+                continue
+            by_slot.setdefault(idx, []).append(mean_w)
+
+        samples: list[_IntradaySample] = []
+        for idx in sorted(by_slot):
+            slot_start = dt_util.as_utc(result.slot_starts[idx])
+            means = by_slot[idx]
+            measured_w = sum(means) / len(means)
+
+            modeled_w = self._modeled_power_for_planes(
+                result, slot_start, all_planes)
+            modeled_wh = modeled_w * 0.25
+            if modeled_wh < INTRADAY_MIN_MODELED_WH:
+                continue
+            cs_ref_wh = self._clear_sky_ref_wh(slot_start)
+            if cs_ref_wh <= 0.0:
+                continue
+            measured_wh = measured_w * 0.25
+            samples.append(_IntradaySample(
+                at=slot_start,
+                measured_kc=measured_wh / cs_ref_wh,
+                modeled_kc=modeled_wh / cs_ref_wh,
+                modeled_wh=modeled_wh,
+            ))
+        return samples
 
     # ------------------------------------------------------------------
     # Output assembly (the contract every platform reads)

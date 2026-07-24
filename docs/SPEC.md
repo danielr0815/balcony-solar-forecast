@@ -309,7 +309,14 @@ Matrix, Vorschlag und die **aktuelle Gruppierung** zum direkten Abgleich.
 Verhältnis (τ ≈ 90 min) gemessen/prognostiziert der letzten 2–4 h,
 **im k_c-Raum konditioniert** (Geometrie/Saison herausnormiert), auf die
 nächsten ~6 h abklingend angewandt, Clamp [0,25 … 2,5], nach HA-Neustart
-Re-Init auf 1,0 (nie alten Zustand laden). Rettet Nebelmorgen ohne
+Re-Init auf 1,0 (nie alten Zustand laden). Verboten ist allein die Persistenz
+des **Skalars** als Zustand; die Trailing-**Samples** sind neu bewertbare
+Rohdaten und dürfen beim Setup einmalig aus vorhandenen Quellen rekonstruiert
+werden (A7): 5-min-Recorder-Statistik des Gesamt-DC-Sensors als gemessene Seite,
+die zwischengespeicherte θ-korrigierte Kurve (ohne Intraday-Anteil) als
+modellierte Seite — nur bei frischem (FRESH/CACHED) Wetter-Cache, sonst sauberer
+Abfall auf neutral. So läuft `compute_intraday_scalar` sofort organisch weiter,
+statt den Trailing-Fenster-Vorlauf neutral zu verbringen. Rettet Nebelmorgen ohne
 falsche Geometrie. Die **modellierte (prognostizierte) Seite** des Samples ist
 die **bias-referenzierte** Kurve — Roh-Watt × nächtlich eingefrorenem
 θ-Zellfaktor des Slots (`_day_factor`) —, **nicht** die reine Roh-Kurve: die

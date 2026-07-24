@@ -13,6 +13,7 @@ package), so HA must be installed; the whole module is skipped otherwise.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -37,7 +38,9 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     DAY_PART_MIDDAY,
     DAY_PART_MORNING,
     DRIFT_LOSS_STREAK_DAYS,
+    INTRADAY_MIN_TRAILING_MINUTES,
     INTRADAY_NEUTRAL,
+    INTRADAY_TRAILING_WINDOW_MINUTES,
     INVERTER_CAL_MIN_SAMPLES,
     ISSUE_CONFIG_CHANGED_BIAS_RESEED,
     ISSUE_FAST_LEARNER_DISABLED,
@@ -49,13 +52,19 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     LEARNER_STATUS_FROZEN,
     RLS_INIT_COVARIANCE,
     RLS_MIN_SAMPLES,
+    STATUS_FRESH,
+    STATUS_PHYSICS_FALLBACK,
 )
 from custom_components.balcony_solar_forecast.coordinator import (  # noqa: E402
     BalconySolarCoordinator,
     _is_frozen_channel,
+    _measured_power_rows,
     _usable_power,
 )
 from custom_components.balcony_solar_forecast.core import LearnerHooks  # noqa: E402
+from custom_components.balcony_solar_forecast.core.bias import (  # noqa: E402
+    compute_intraday_scalar,
+)
 from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     BiasCell,
     BiasState,
@@ -1039,6 +1048,239 @@ def test_update_intraday_scalar_survives_notimplemented(monkeypatch):
     monkeypatch.setattr(coord_mod.bias_mod, "compute_intraday_scalar", _boom)
     c._update_intraday_scalar(start)
     assert c._intraday_scalar == INTRADAY_NEUTRAL
+
+
+# ---------------------------------------------------------------------------
+# A7/SCT-2: intraday sample-ring re-arm after a restart/reload
+# ---------------------------------------------------------------------------
+
+
+def _forecast_window(now: datetime, n_slots: int, raw_w_per_plane: float):
+    """A ForecastResult with ``n_slots`` back-to-back 15-min slots ending at
+    ``now`` (the last slot starts at ``now``), each plane holding a constant raw
+    watt curve so the modeled site total per slot is ``2 * raw_w_per_plane``.
+    """
+    slot = timedelta(minutes=15)
+    starts = tuple(now - slot * (n_slots - 1 - i) for i in range(n_slots))
+    m1 = tuple(raw_w_per_plane for _ in starts)
+    m2 = tuple(raw_w_per_plane for _ in starts)
+    total = tuple(a + b for a, b in zip(m1, m2, strict=True))
+    result = ForecastResult(
+        slot_starts=starts,
+        total_watts=total,
+        plane_results=(
+            PlaneResult(name="M1", watts=m1, raw_watts=m1),
+            PlaneResult(name="M2", watts=m2, raw_watts=m2),
+        ),
+        hourly_wh={},
+        raw_total_watts=total,
+        raw_hourly_wh={},
+    )
+    return result
+
+
+def _stat_rows_seconds_epoch(start: datetime, end: datetime, mean_w: float):
+    """Synthetic 5-min recorder stat rows with SECONDS-epoch ``start`` floats —
+    exactly what the in-process ``statistics_during_period`` API returns (the
+    historical epoch bug is seconds vs. milliseconds)."""
+    rows = []
+    step = timedelta(minutes=5)
+    t = start
+    while t < end:
+        rows.append({"start": t.timestamp(), "mean": mean_w})  # epoch SECONDS
+        t += step
+    return rows
+
+
+def test_measured_power_rows_parses_seconds_epoch():
+    """The re-arm stat parser must read epoch SECONDS (not treat them as ms)."""
+    t0 = datetime(2026, 7, 1, 9, 0, tzinfo=UTC)
+    rows = _stat_rows_seconds_epoch(t0, t0 + timedelta(minutes=15), 500.0)
+    parsed = _measured_power_rows(rows)
+    assert [w for _, w in parsed] == [500.0, 500.0, 500.0]
+    # Timestamps land in 2026, not 1970 (the seconds-as-ms collapse bug).
+    assert parsed[0][0] == t0
+    assert all(dt.year == 2026 for dt, _ in parsed)
+
+
+def test_measured_power_rows_skips_unusable():
+    t0 = datetime(2026, 7, 1, 9, 0, tzinfo=UTC)
+    rows = [
+        {"start": t0.timestamp(), "mean": None},          # no mean
+        {"start": None, "mean": 100.0},                    # unparseable start
+        {"start": t0.timestamp(), "mean": 250.0},          # good
+    ]
+    assert _measured_power_rows(rows) == [(t0, 250.0)]
+
+
+def test_rearm_samples_from_seconds_epoch_rows_fill_ring_nonneutral():
+    """Reconstruction from synthetic SECONDS-epoch stat rows fills the ring and
+    yields an immediate NON-neutral scalar (measured == 1.5 × modeled)."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    # 17 slots => 08:00..11:00; modeled site total per slot = 2 × 400 = 800 W.
+    result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._last_result = result
+    # Measured site total = 1200 W == 1.5 × 800 across the whole window.
+    stat_rows = _stat_rows_seconds_epoch(
+        now - timedelta(minutes=INTRADAY_TRAILING_WINDOW_MINUTES), now, 1200.0,
+    )
+    rows = _measured_power_rows(stat_rows)
+    samples = c._rearm_samples_from_rows(result, rows, now)
+    assert samples, "expected reconstructed samples"
+    # Coverage spans at least the minimum trailing window (else scalar is gated).
+    span = (max(s.at for s in samples) - min(s.at for s in samples))
+    assert span.total_seconds() / 60.0 >= INTRADAY_MIN_TRAILING_MINUTES
+    for s in samples:
+        c._intraday_samples.append(s)
+    scalar = compute_intraday_scalar(list(c._intraday_samples), now=now)
+    assert scalar != INTRADAY_NEUTRAL
+    assert scalar == pytest.approx(1.5, rel=1e-6)
+
+
+def test_rearm_skips_current_slot_no_double_sample():
+    """The slot CONTAINING ``now`` is not reconstructed, so a subsequent live
+    tick (which samples ``now``) never duplicates it — all sample times unique."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._last_result = result
+    rows = _measured_power_rows(
+        _stat_rows_seconds_epoch(
+            now - timedelta(minutes=INTRADAY_TRAILING_WINDOW_MINUTES), now, 1200.0,
+        )
+    )
+    samples = c._rearm_samples_from_rows(result, rows, now)
+    # No reconstructed sample carries the current slot's start.
+    assert now not in {s.at for s in samples}
+    for s in samples:
+        c._intraday_samples.append(s)
+    # A live tick then appends the current slot exactly once.
+    c.hass.states.set("sensor.m1", 600.0, last_updated=now)
+    c.hass.states.set("sensor.m2", 600.0, last_updated=now)
+    c._update_intraday_scalar(now)
+    ats = [s.at for s in c._intraday_samples]
+    assert len(ats) == len(set(ats)), "duplicate sample timestamps after re-arm"
+    assert ats.count(now) == 1
+
+
+def test_async_rearm_fills_ring_from_stubs():
+    """End-to-end orchestration: fresh weather + resolvable sensor + stats ->
+    ring populated (recorder/registry IO stubbed)."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._last_result = result
+    c._measured_total_stat_id = lambda: "sensor.total"
+
+    async def _fake_read(entity_id, when):
+        assert entity_id == "sensor.total"
+        return _measured_power_rows(
+            _stat_rows_seconds_epoch(
+                when - timedelta(minutes=INTRADAY_TRAILING_WINDOW_MINUTES),
+                when, 1200.0,
+            )
+        )
+
+    c._async_read_measured_total_stats = _fake_read
+    asyncio.run(c._async_rearm_intraday_ring(now, STATUS_FRESH))
+    assert c._intraday_samples
+    scalar = compute_intraday_scalar(list(c._intraday_samples), now=now)
+    assert scalar == pytest.approx(1.5, rel=1e-6)
+
+
+def test_async_rearm_neutral_when_no_stats():
+    """Missing recorder data -> ring stays empty -> scalar stays neutral."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    c._last_result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._measured_total_stat_id = lambda: "sensor.total"
+
+    async def _empty(entity_id, when):
+        return []
+
+    c._async_read_measured_total_stats = _empty
+    asyncio.run(c._async_rearm_intraday_ring(now, STATUS_FRESH))
+    assert not c._intraday_samples
+    assert compute_intraday_scalar(list(c._intraday_samples), now=now) == (
+        INTRADAY_NEUTRAL
+    )
+
+
+def test_async_rearm_neutral_when_sensor_missing():
+    """No site-total sensor registered -> no reconstruction."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    c._last_result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._measured_total_stat_id = lambda: None
+    called = {"read": False}
+
+    async def _read(entity_id, when):
+        called["read"] = True
+        return []
+
+    c._async_read_measured_total_stats = _read
+    asyncio.run(c._async_rearm_intraday_ring(now, STATUS_FRESH))
+    assert not c._intraday_samples
+    assert called["read"] is False
+
+
+def test_async_rearm_skipped_when_weather_stale():
+    """A physics-fallback (stale) weather image blocks reconstruction."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    c._last_result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    called = {"stat_id": False}
+
+    def _stat_id():
+        called["stat_id"] = True
+        return "sensor.total"
+
+    c._measured_total_stat_id = _stat_id
+    asyncio.run(c._async_rearm_intraday_ring(now, STATUS_PHYSICS_FALLBACK))
+    assert not c._intraday_samples
+    assert called["stat_id"] is False
+
+
+def test_async_rearm_skipped_when_fast_disabled():
+    """Fast learner off (drift-disabled) -> no reconstruction."""
+    c = _make_coordinator()
+    c._drift_state = DriftState(fast_disabled=True)
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    c._last_result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._measured_total_stat_id = lambda: "sensor.total"
+    asyncio.run(c._async_rearm_intraday_ring(now, STATUS_FRESH))
+    assert not c._intraday_samples
+
+
+def test_async_rearm_skipped_when_ring_already_primed():
+    """A ring already carrying live samples is never re-filled (no double-fill)."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    c._last_result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._measured_total_stat_id = lambda: "sensor.total"
+    existing = _IntradaySampleForTest(now - timedelta(minutes=30))
+    c._intraday_samples.append(existing)
+    called = {"read": False}
+
+    async def _read(entity_id, when):
+        called["read"] = True
+        return []
+
+    c._async_read_measured_total_stats = _read
+    asyncio.run(c._async_rearm_intraday_ring(now, STATUS_FRESH))
+    assert list(c._intraday_samples) == [existing]
+    assert called["read"] is False
+
+
+class _IntradaySampleForTest:
+    """Minimal stand-in with the attributes the ring/scalar read."""
+
+    def __init__(self, at: datetime) -> None:
+        self.at = at
+        self.measured_kc = 1.0
+        self.modeled_kc = 1.0
+        self.modeled_wh = 100.0
 
 
 # ---------------------------------------------------------------------------

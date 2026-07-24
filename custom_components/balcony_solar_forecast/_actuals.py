@@ -317,8 +317,8 @@ def _is_frozen_channel(means: list[float]) -> bool:
 _EPOCH_MS_THRESHOLD = 1e11
 
 
-def _stat_row_hour_key(start: object) -> str | None:
-    """Normalise a statistics row ``start`` to an ISO-UTC hour key, or None.
+def _stat_row_datetime(start: object) -> datetime | None:
+    """Normalise a statistics row ``start`` to an aware UTC datetime, or None.
 
     The in-process recorder API (``statistics_during_period``) returns
     ``start`` as a float of epoch SECONDS; the WebSocket layer multiplies to
@@ -327,20 +327,32 @@ def _stat_row_hour_key(start: object) -> str | None:
     collapsed every hour of a day onto one 1970 key, which made the
     day-completeness gate discard EVERY day ("covers only 1 of ~16 daylight
     hours") and silently starved all nightly learning (bias / shademap /
-    scoreboard / quantiles / drift) since the gate landed.
+    scoreboard / quantiles / drift) since the gate landed. The intraday
+    ring re-arm (A7) reuses this to place reconstructed samples at their true
+    minute-resolution timestamps.
     """
     if isinstance(start, datetime):
-        dt = dt_util.as_utc(start)
-    elif isinstance(start, (int, float)):
+        return dt_util.as_utc(start)
+    if isinstance(start, (int, float)):
         ts = float(start)
         if ts > _EPOCH_MS_THRESHOLD:
             ts /= 1000.0
-        dt = datetime.fromtimestamp(ts, tz=UTC)
-    elif isinstance(start, str):
+        return datetime.fromtimestamp(ts, tz=UTC)
+    if isinstance(start, str):
         dt = dt_util.parse_datetime(start)
         if dt is None:
             return None
-        dt = dt_util.as_utc(dt)
-    else:
+        return dt_util.as_utc(dt)
+    return None
+
+
+def _stat_row_hour_key(start: object) -> str | None:
+    """Normalise a statistics row ``start`` to an ISO-UTC hour key, or None.
+
+    Thin wrapper over :func:`_stat_row_datetime` that truncates to the hour;
+    the epoch-seconds-vs-milliseconds disambiguation lives in that helper.
+    """
+    dt = _stat_row_datetime(start)
+    if dt is None:
         return None
     return dt.replace(minute=0, second=0, microsecond=0).isoformat()
