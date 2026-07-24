@@ -1164,6 +1164,42 @@ def test_rearm_skips_current_slot_no_double_sample():
     assert ats.count(now) == 1
 
 
+def test_rearm_scales_modeled_to_metered_planes_only():
+    """On a PARTIALLY metered site the reconstructed modeled side must match the
+    metered subset the site-total sensor actually sums. M1 metered, M2 not; a
+    PERFECT forecast (measured == M1's modeled) must yield scalar 1.0, not 0.5
+    (the whole-site modeled would halve it, floored at INTRADAY_SCALAR_MIN and
+    served for hours after every reload)."""
+    c = _make_coordinator()
+    c._site = SiteConfig(
+        latitude=48.5,
+        longitude=12.2,
+        planes=(
+            PlaneConfig(name="M1", azimuth_deg=115.0, tilt_deg=70.0, wp=370.0,
+                        actual_entity="sensor.m1"),
+            PlaneConfig(name="M2", azimuth_deg=205.0, tilt_deg=70.0, wp=430.0,
+                        actual_entity=None),  # NOT metered
+        ),
+        groups=(),
+    )
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    # Each plane models 400 W; only M1 is metered, so a perfect forecast means
+    # the site-total sensor reads M1's 400 W (not both planes' 800 W).
+    result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._last_result = result
+    rows = _measured_power_rows(
+        _stat_rows_seconds_epoch(
+            now - timedelta(minutes=INTRADAY_TRAILING_WINDOW_MINUTES), now, 400.0,
+        )
+    )
+    samples = c._rearm_samples_from_rows(result, rows, now)
+    assert samples, "expected reconstructed samples"
+    for s in samples:
+        c._intraday_samples.append(s)
+    scalar = compute_intraday_scalar(list(c._intraday_samples), now=now)
+    assert scalar == pytest.approx(1.0, rel=1e-6)
+
+
 def test_async_rearm_fills_ring_from_stubs():
     """End-to-end orchestration: fresh weather + resolvable sensor + stats ->
     ring populated (recorder/registry IO stubbed)."""

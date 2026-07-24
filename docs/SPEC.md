@@ -314,7 +314,11 @@ des **Skalars** als Zustand; die Trailing-**Samples** sind neu bewertbare
 Rohdaten und dürfen beim Setup einmalig aus vorhandenen Quellen rekonstruiert
 werden (A7): 5-min-Recorder-Statistik des Gesamt-DC-Sensors als gemessene Seite,
 die zwischengespeicherte θ-korrigierte Kurve (ohne Intraday-Anteil) als
-modellierte Seite — nur bei frischem (FRESH/CACHED) Wetter-Cache, sonst sauberer
+modellierte Seite — **modellierte Seite auf die gemeterten Ebenen beschränkt**
+(nur Ebenen mit `actual_entity`, exakt die Teilmenge, die der Gesamt-DC-Sensor
+summiert; auf teilgemeterten Sites würde die volle Kurve die modellierte Seite
+sonst überhöhen und den Skalar nach jedem Reload auf den Clamp-Boden halbieren).
+Nur bei frischem (FRESH/CACHED) Wetter-Cache, sonst sauberer
 Abfall auf neutral. So läuft `compute_intraday_scalar` sofort organisch weiter,
 statt den Trailing-Fenster-Vorlauf neutral zu verbringen. Rettet Nebelmorgen ohne
 falsche Geometrie. Die **modellierte (prognostizierte) Seite** des Samples ist

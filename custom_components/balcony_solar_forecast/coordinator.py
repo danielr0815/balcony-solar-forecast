@@ -1617,8 +1617,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             unavailable image would reconstruct against an untrustworthy curve);
           * the site-total sensor + its recorder stats resolve.
         The site-total sensor carries no per-plane breakdown, so the live path's
-        partial-channel-dropout guard cannot apply here; the full modeled site is
-        used (best-effort re-arm), which the organic live sampler then supersedes.
+        guard against TRANSIENT channel dropout cannot apply here; the modeled
+        side is instead restricted to the statically METERED planes (those with
+        an ``actual_entity`` — exactly what the site-total sensor sums), a
+        best-effort re-arm the organic live sampler then supersedes.
         """
         result = self._last_result
         if result is None:
@@ -1698,14 +1700,17 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         ``_IntradaySample`` per PAST slot (k_c space), mirroring the live sampler.
 
         The 5-min means of each slot are averaged into that slot's mean power; the
-        modeled side is the θ-scaled full-site power at the slot, both normalised
-        by the Haurwitz clear-sky reference so geometry/season cancel. The slot
+        modeled side is the θ-scaled power of the METERED planes (those with an
+        ``actual_entity`` — the subset the site-total sensor sums; an unmetered
+        plane would otherwise inflate the modeled side and halve the scalar),
+        both normalised by the Haurwitz clear-sky reference so geometry/season
+        cancel. The slot
         CONTAINING ``now`` is skipped so the reconstruction never collides with
         the live sample the caller adds for the current tick (no double-samples).
         Slots below INTRADAY_MIN_MODELED_WH or with no clear-sky reference (sun
         down) are dropped, exactly as :meth:`_build_intraday_sample` gates them.
         """
-        all_planes = {p.name for p in self._site.planes}
+        metered_planes = {p.name for p in self._site.planes if p.actual_entity}
         now_idx = _slot_index_at(result.slot_starts, now)
         by_slot: dict[int, list[float]] = {}
         for ts, mean_w in rows:
@@ -1721,7 +1726,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             measured_w = sum(means) / len(means)
 
             modeled_w = self._modeled_power_for_planes(
-                result, slot_start, all_planes)
+                result, slot_start, metered_planes)
             modeled_wh = modeled_w * 0.25
             if modeled_wh < INTRADAY_MIN_MODELED_WH:
                 continue
