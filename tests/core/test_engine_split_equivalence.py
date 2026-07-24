@@ -161,7 +161,11 @@ class _RefComps:
     static_tau: float
 
 
-def _ref_components(plane, svf, slot, sun_az, sun_el, albedo, doy):
+def _ref_components(plane, svf, slot, sun_az, sun_el, albedo, doy, beam_gain=1.0):
+    # ``beam_gain`` (forensik T6) is accepted for signature parity with the
+    # engine's call, but the frozen monolith is the PRE-T6 physics, so the proof
+    # only holds at the identity gain (the sites here leave it unset => 1.0).
+    assert beam_gain == 1.0
     return _RefComps(
         plane, svf, slot, sun_az, sun_el, albedo, doy,
         _frozen_static_tau(plane, sun_az, sun_el, doy),

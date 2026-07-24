@@ -283,7 +283,8 @@
           "ac_actual_entity": "Gesamt-AC-Zähler (hinter den Wechselrichtern)",
           "ac_actual_invert": "Vorzeichen des AC-Zählers invertieren",
           "site": "Standort-Konfiguration (Ebenen, Horizont, WR-Gruppen)",
-          "albedo": "Boden-Albedo (leer = 0,2)"
+          "albedo": "Boden-Albedo (leer = 0,2)",
+          "bifacial_beam_gain": "Beam-Gain (leer = 1,0)"
         },
         "data_description": {
           "name": "Eindeutiger Name dieser Anlage – nur eine Instanz je Name.",
@@ -291,7 +292,8 @@
           "recompute_interval_seconds": "Wie oft die Prognose neu gerechnet wird (Standard 900 = 15 min).",
           "ac_actual_entity": "Optional. Der Sensor, der die Gesamt-AC-Leistung hinter allen Wechselrichtern misst — das Kalibrierungsziel für den gelernten Wechselrichter-Wirkungsgrad (η) und den gleichwertigen AC-gegen-AC-Vergleich im Dashboard. Leer lassen, wenn kein Gesamt-AC-Zähler vorhanden ist.",
           "ac_actual_invert": "Aktivieren, wenn der AC-Zähler die eingespeiste Balkon-Solar-Leistung als negativen Wert meldet; der Messwert wird einmal negiert, damit die gemessene AC-Leistung positiv angezeigt wird.",
-          "albedo": "Reflexionsgrad des Bodens vor den Modulen für den Bodenreflex-Anteil. Dunkler Hof/Rasen ≈ 0,1, Lehrbuch-Standard 0,2, heller Beton ≈ 0,3. Wirkt am stärksten bei steiler Balkonmontage. Leer lassen für den Standard."
+          "albedo": "Reflexionsgrad des Bodens vor den Modulen für den Bodenreflex-Anteil. Dunkler Hof/Rasen ≈ 0,1, Lehrbuch-Standard 0,2, heller Beton ≈ 0,3. Wirkt am stärksten bei steiler Balkonmontage. Leer lassen für den Standard.",
+          "bifacial_beam_gain": "Faktor nur auf den direkten Anteil (Beam+Zirkumsolar), um den ehrlich unterschätzten Direktstrahl an klaren Morgen anzuheben (bifaziale Rückseite, steile Ost-Geometrie). Bereich 1,0–1,6; der Referenzstandort validierte ≈ 1,23. Leer lassen für 1,0 (keine Änderung)."
         }
       },
       "reconfigure": {
@@ -305,14 +307,16 @@
           "ac_actual_entity": "Gesamt-AC-Zähler (hinter den Wechselrichtern)",
           "ac_actual_invert": "Vorzeichen des AC-Zählers invertieren",
           "site": "Standort-Konfiguration (Ebenen, Horizont, WR-Gruppen)",
-          "albedo": "Boden-Albedo (leer = 0,2)"
+          "albedo": "Boden-Albedo (leer = 0,2)",
+          "bifacial_beam_gain": "Beam-Gain (leer = 1,0)"
         },
         "data_description": {
           "fetch_interval_seconds": "Wie oft Open-Meteo abgefragt wird (Standard 1800 = 30 min).",
           "recompute_interval_seconds": "Wie oft die Prognose neu gerechnet wird (Standard 900 = 15 min).",
           "ac_actual_entity": "Optional. Der Sensor, der die Gesamt-AC-Leistung hinter allen Wechselrichtern misst — das Kalibrierungsziel für den gelernten Wechselrichter-Wirkungsgrad (η) und den gleichwertigen AC-gegen-AC-Vergleich im Dashboard. Leer lassen, wenn kein Gesamt-AC-Zähler vorhanden ist.",
           "ac_actual_invert": "Aktivieren, wenn der AC-Zähler die eingespeiste Balkon-Solar-Leistung als negativen Wert meldet; der Messwert wird einmal negiert, damit die gemessene AC-Leistung positiv angezeigt wird.",
-          "albedo": "Reflexionsgrad des Bodens vor den Modulen für den Bodenreflex-Anteil. Dunkler Hof/Rasen ≈ 0,1, Lehrbuch-Standard 0,2, heller Beton ≈ 0,3. Wirkt am stärksten bei steiler Balkonmontage. Leer lassen für den Standard."
+          "albedo": "Reflexionsgrad des Bodens vor den Modulen für den Bodenreflex-Anteil. Dunkler Hof/Rasen ≈ 0,1, Lehrbuch-Standard 0,2, heller Beton ≈ 0,3. Wirkt am stärksten bei steiler Balkonmontage. Leer lassen für den Standard.",
+          "bifacial_beam_gain": "Faktor nur auf den direkten Anteil (Beam+Zirkumsolar), um den ehrlich unterschätzten Direktstrahl an klaren Morgen anzuheben (bifaziale Rückseite, steile Ost-Geometrie). Bereich 1,0–1,6; der Referenzstandort validierte ≈ 1,23. Leer lassen für 1,0 (keine Änderung)."
         }
       }
     },

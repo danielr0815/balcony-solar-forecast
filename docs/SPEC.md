@@ -166,6 +166,17 @@ Pipeline (reine Funktionen über 15-min-Slots × N Ebenen, <50 ms/Lauf):
    ungegateten Trainer-Referenz, sonst absorbiert die Shademap den
    Glasreflexionsverlust (5–15 % bei AOI > 60°; auf den 70–80°-Fassaden
    großer Tagesanteil) als AOI-förmige Phantom-Verschattung.
+   **Bifazialer Beam-Gain (forensik T6):** optionaler Site-Faktor
+   `bifacial_beam_gain` (Default 1,0 = Identität; auf [1,0; 1,6] geklemmt) auf
+   **nur** die Beam+Zirkumsolar-POA (der direkte Anteil), angewandt in der
+   Engine **nach** dem IAM und **vor** der ungegateten Trainer-Referenz und dem
+   τ-Gate — wirkt damit identisch auf die RAW- und die korrigierte Kurve und
+   hebt den an klaren Morgen ehrlich unterschätzten Direktstrahl (bifaziale
+   Rückseite + steile Ost-Geometrie) in die Rohphysik, statt dass gedeckelte
+   Lerner (Transmittanz ≤ 1, Day-Ahead-Bias-Zellen) das Defizit als >1-Korrektur
+   auszudrücken versuchen. Iso-Diffus und Bodenreflex bleiben unberührt. Für den
+   Referenzstandort ≈ 1,23 validiert (Backtest 16.07.); Default 1,0 lässt das
+   Verhalten für Bestandsnutzer unverändert. Backfill rechnet denselben Faktor.
 5. **horizon.py** — je Ebene Tabelle `(Azimut, Elevation, Transmittanz)`
    in 10°-Schritten, linear interpoliert: Fernfeld aus PVGIS + Betreiber-
    Profil; Nahfeld je Ebene differenziert (Gebäudekante hart bei

@@ -100,6 +100,7 @@ from datetime import UTC, datetime, tzinfo
 from ..const import (
     ALBEDO_DEFAULT,
     ALBEDO_SNOW,
+    BEAM_GAIN_DEFAULT,
     CORRECTION_SOURCE_NONE,
     DEFAULT_INVERTER_EFFICIENCY,
     SLOT_MINUTES,
@@ -268,6 +269,7 @@ def _plane_poa_components(
     sun_el: float,
     albedo: float,
     doy: int,
+    beam_gain: float = BEAM_GAIN_DEFAULT,
 ) -> _PlanePoaComponents:
     """Tau-independent Hay-Davies POA decomposition (W/m^2) for one plane/slot.
 
@@ -280,6 +282,10 @@ def _plane_poa_components(
     is always scaled by the plane's static sky-view factor and the ground
     reflection is never touched by the beam gate, so a fully occluding wall bin
     (tau=0) kills the beam but keeps the diffuse floor.
+
+    ``beam_gain`` (forensik T6) multiplies the beam+circumsolar POA (the direct
+    share only) BEFORE the ungated-reference capture and the tau gate — 1.0 is
+    the identity default. The diffuse/ground floor is deliberately excluded.
     """
     comps = transpose.hay_davies_poa(
         ghi=slot.ghi,
@@ -311,6 +317,17 @@ def _plane_poa_components(
         f_iam = transpose.ashrae_iam(cos_theta)
         beam *= f_iam
         circ *= f_iam
+
+    # Site bifacial beam gain (forensik T6 / A1): lift the honestly under-modeled
+    # DIRECT share (beam+circumsolar only) by the configured factor BEFORE the
+    # ungated-reference capture and the tau gate, so it feeds BOTH the RAW and the
+    # CORRECTED curve identically and both the SLOW-learner beam reference and the
+    # day-ahead-bias cells (clamped, unable to express a >1 correction) get the
+    # honest physics instead of absorbing the deficit. Default 1.0 => no-op. The
+    # isotropic-diffuse and ground-reflected shares are deliberately untouched.
+    if beam_gain != 1.0:
+        beam *= beam_gain
+        circ *= beam_gain
 
     # Static horizon beam prior: only when the sun is actually behind the horizon
     # line for this azimuth does the static tau attenuate the direct components.
@@ -495,6 +512,12 @@ def compute_forecast(
     base_albedo = getattr(site, "albedo", None)
     if base_albedo is None:
         base_albedo = ALBEDO_DEFAULT
+    # Site bifacial beam gain (forensik T6): configured factor or the shipped
+    # identity default; ``getattr`` keeps analytic test fakes without the field
+    # working. Applied to the beam+circumsolar POA in ``_plane_poa_components``.
+    base_beam_gain = getattr(site, "bifacial_beam_gain", None)
+    if base_beam_gain is None:
+        base_beam_gain = BEAM_GAIN_DEFAULT
 
     # Sky-view factor is a per-plane, per-day-of-year property (the horizon is
     # semi-transparent to the diffuse, so a seasonal foliage row ramps the SVF
@@ -654,7 +677,7 @@ def compute_forecast(
             # transposition, IAM, horizon interpolation and diffuse floor are
             # shared here instead of being redone for each curve (audit #9).
             comps = _plane_poa_components(
-                plane, svf, slot, sun_az, sun_el, albedo, doy
+                plane, svf, slot, sun_az, sun_el, albedo, doy, base_beam_gain
             )
 
             # RAW: the static horizon tau gates the beam.

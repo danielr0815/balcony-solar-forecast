@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Configurable bifacial beam gain.** New optional "Beam gain" field in the
+  setup/reconfigure flow (`site.bifacial_beam_gain`, blank = the shipped 1.0 =
+  identity, no change for existing users). It multiplies **only** the direct
+  (beam + circumsolar) share of the plane-of-array irradiance, applied in the
+  engine after the IAM and before the ungated learner reference and the horizon
+  gate, so it feeds the RAW and the corrected curve identically and lifts the
+  honestly under-modeled direct beam on clear mornings (bifacial rear-side gain,
+  steep east-facing geometry) into the raw physics instead of leaving the
+  clamped learners (transmittance ≤ 1, day-ahead-bias cells) to absorb the
+  deficit. Values are clamped to [1.0, 1.6]; the offline `scripts/backfill.py`
+  bootstrap reconstructs the same physics. For the reference site ≈ 1.23 was
+  validated (backtest 2026-07-16).
+
 ## [0.20.6] - 2026-07-19
 
 ### Removed

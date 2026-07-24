@@ -697,3 +697,136 @@ class TestSiteAlbedo:
         # Garbage degrades to None (default applies), never raises.
         d_junk = dict(d_none, **{CONF_SITE_ALBEDO: "dark"})
         assert SiteConfig.from_dict(d_junk).albedo is None
+
+
+class TestBifacialBeamGain:
+    """Site-level bifacial beam gain (forensik T6): the direct-share knob.
+
+    The gain multiplies ONLY the beam+circumsolar POA, applied in
+    ``_plane_poa_components`` before the ungated reference and the tau gate, so a
+    beam-only slot scales exactly with it while a diffuse-only slot is untouched.
+    ``bifacial_beam_gain=None`` must be bit-identical to the shipped identity
+    default (backward compatibility for every existing site).
+    """
+
+    def _south_plane(self):
+        return PlaneConfig(name="S", azimuth_deg=180.0, tilt_deg=30.0, wp=430.0)
+
+    def _slot(self, ghi, dni, dhi):
+        return WeatherSlot(
+            start=_TEST_DATE + timedelta(hours=12),
+            ghi=ghi, dni=dni, dhi=dhi, temp_c=20.0,
+        )
+
+    def test_beam_only_slot_scales_with_gain(self):
+        # Sun on the plane normal (az 180, el 45): a strong direct beam, real
+        # Hay-Davies physics (no patched transposition).
+        plane = self._south_plane()
+        slot = self._slot(ghi=900.0, dni=800.0, dhi=120.0)
+        base = engine._plane_poa_components(
+            plane, 1.0, slot, 180.0, 45.0, 0.2, 172,
+            beam_gain=1.0,
+        )
+        gained = engine._plane_poa_components(
+            plane, 1.0, slot, 180.0, 45.0, 0.2, 172,
+            beam_gain=1.3,
+        )
+        # The direct share (beam + circumsolar + the ungated reference) scales
+        # exactly by the gain; the diffuse floor is byte-for-byte unchanged.
+        assert base.beam > 0.0
+        assert gained.beam == pytest.approx(base.beam * 1.3)
+        assert gained.circ == pytest.approx(base.circ * 1.3)
+        assert gained.beam_poa_ungated == pytest.approx(
+            base.beam_poa_ungated * 1.3
+        )
+        assert gained.diffuse_poa == pytest.approx(base.diffuse_poa)
+        assert gained.diffuse_poa == base.diffuse_poa
+        # The gated POA split scales with the gain too (static tau = 1 here).
+        base_split = engine._gate_split(base, base.static_tau)
+        gained_split = engine._gate_split(gained, gained.static_tau)
+        assert gained_split.beam_poa == pytest.approx(base_split.beam_poa * 1.3)
+        assert gained_split.diffuse_poa == base_split.diffuse_poa
+
+    def test_diffuse_only_slot_unchanged_by_gain(self):
+        # No DNI => no beam/circumsolar: a pure diffuse+ground slot. The gain has
+        # nothing to act on, so every component is identical for any gain.
+        plane = self._south_plane()
+        slot = self._slot(ghi=200.0, dni=0.0, dhi=200.0)
+        base = engine._plane_poa_components(
+            plane, 1.0, slot, 180.0, 45.0, 0.2, 172,
+            beam_gain=1.0,
+        )
+        gained = engine._plane_poa_components(
+            plane, 1.0, slot, 180.0, 45.0, 0.2, 172,
+            beam_gain=1.6,
+        )
+        assert base.beam == pytest.approx(0.0)
+        assert gained.beam == pytest.approx(0.0)
+        assert gained.beam_poa_ungated == base.beam_poa_ungated
+        assert gained.diffuse_poa == base.diffuse_poa
+        assert gained.diffuse_poa > 0.0
+
+    def _gain_site(self, gain):
+        from dataclasses import replace
+
+        return replace(_two_plane_site(), bifacial_beam_gain=gain)
+
+    def test_beam_gain_none_equals_identity_default(self):
+        # Default roundtrip: a site WITHOUT the field is bit-identical to gain 1.0
+        # (no behaviour change for existing users).
+        weather = _clear_sky_series()
+        none_res = engine.compute_forecast(
+            self._gain_site(None), weather, now=_TEST_DATE
+        )
+        one_res = engine.compute_forecast(
+            self._gain_site(1.0), weather, now=_TEST_DATE
+        )
+        assert sum(none_res.total_watts) == pytest.approx(
+            sum(one_res.total_watts)
+        )
+        assert none_res.total_watts == one_res.total_watts
+
+    def test_beam_gain_raises_clear_day_energy(self):
+        # A clear beam-dominated day: lifting the direct share strictly raises the
+        # daily energy (but by less than the gain, since diffuse is untouched).
+        weather = _clear_sky_series()
+        default = engine.compute_forecast(
+            self._gain_site(None), weather, now=_TEST_DATE
+        )
+        gained = engine.compute_forecast(
+            self._gain_site(1.3), weather, now=_TEST_DATE
+        )
+        assert sum(gained.total_watts) > sum(default.total_watts)
+        assert sum(gained.total_watts) < sum(default.total_watts) * 1.3
+
+    def test_siteconfig_beam_gain_roundtrip_and_clamp(self):
+        from dataclasses import replace
+
+        from balcony_solar_forecast.const import (
+            CONF_SITE_BEAM_GAIN,
+            SITE_BEAM_GAIN_MAX,
+            SITE_BEAM_GAIN_MIN,
+        )
+
+        base = _two_plane_site()
+        # Set -> to_dict carries the key; from_dict round-trips the value.
+        d = replace(base, bifacial_beam_gain=1.23).to_dict()
+        assert d[CONF_SITE_BEAM_GAIN] == pytest.approx(1.23)
+        assert SiteConfig.from_dict(d).bifacial_beam_gain == pytest.approx(1.23)
+        # Unset -> no key emitted (pre-T6 dict shape preserved), loads None.
+        d_none = base.to_dict()
+        assert CONF_SITE_BEAM_GAIN not in d_none
+        assert SiteConfig.from_dict(d_none).bifacial_beam_gain is None
+        # Hand-edited out-of-band values clamp into the physical band [1.0, 1.6];
+        # values < 1 (use efficiency instead) clamp up to the identity floor.
+        d_low = dict(d_none, **{CONF_SITE_BEAM_GAIN: 0.5})
+        assert SiteConfig.from_dict(d_low).bifacial_beam_gain == pytest.approx(
+            SITE_BEAM_GAIN_MIN
+        )
+        d_high = dict(d_none, **{CONF_SITE_BEAM_GAIN: 5.0})
+        assert SiteConfig.from_dict(d_high).bifacial_beam_gain == pytest.approx(
+            SITE_BEAM_GAIN_MAX
+        )
+        # Garbage degrades to None (default applies), never raises.
+        d_junk = dict(d_none, **{CONF_SITE_BEAM_GAIN: "lots"})
+        assert SiteConfig.from_dict(d_junk).bifacial_beam_gain is None

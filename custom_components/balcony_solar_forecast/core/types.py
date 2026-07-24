@@ -43,6 +43,7 @@ from ..const import (
     CONF_ROSS_COEFF,
     CONF_SHADE_GROUP,
     CONF_SITE_ALBEDO,
+    CONF_SITE_BEAM_GAIN,
     CONF_TILT,
     CONF_WP,
     DAY_AHEAD_BIAS_MAX,
@@ -60,6 +61,8 @@ from ..const import (
     SHADEMAP_TAU_MIN,
     SITE_ALBEDO_MAX,
     SITE_ALBEDO_MIN,
+    SITE_BEAM_GAIN_MAX,
+    SITE_BEAM_GAIN_MIN,
 )
 
 __all__ = [
@@ -306,6 +309,15 @@ class SiteConfig:
     reflected-diffuse term; None == use ALBEDO_DEFAULT. Clamped to
     [SITE_ALBEDO_MIN, SITE_ALBEDO_MAX] on load; snow days still override with
     ALBEDO_SNOW (the engine's snow gate runs on top of this base value).
+
+    ``bifacial_beam_gain`` (optional, forensik T6) is a multiplicative factor on
+    the beam+circumsolar POA (the DIRECT share only); None == use
+    BEAM_GAIN_DEFAULT (1.0, identity => no behaviour change for existing users).
+    Clamped to [SITE_BEAM_GAIN_MIN, SITE_BEAM_GAIN_MAX] on load. It lifts the
+    honestly under-modeled direct beam on clear mornings into the RAW physics
+    (the reference site validated ~1.23), so the learned transmittance and
+    day-ahead-bias cells — both clamped and unable to express a >1 correction —
+    stop absorbing the deficit.
     """
 
     latitude: float
@@ -315,6 +327,7 @@ class SiteConfig:
     ac_actual_entity: str | None = None
     ac_actual_invert: bool = False
     albedo: float | None = None
+    bifacial_beam_gain: float | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> SiteConfig:
@@ -335,6 +348,21 @@ class SiteConfig:
             albedo = None
         if albedo is not None:
             albedo = max(SITE_ALBEDO_MIN, min(SITE_ALBEDO_MAX, albedo))
+        # Optional beam gain (forensik T6): same only-when-set + clamp convention
+        # as the albedo above; a hand-edited JSON can never push the direct share
+        # outside the physical band [1.0, 1.6].
+        raw_beam_gain = d.get(CONF_SITE_BEAM_GAIN)
+        beam_gain: float | None
+        try:
+            beam_gain = (
+                float(raw_beam_gain) if raw_beam_gain is not None else None
+            )
+        except (TypeError, ValueError):
+            beam_gain = None
+        if beam_gain is not None:
+            beam_gain = max(
+                SITE_BEAM_GAIN_MIN, min(SITE_BEAM_GAIN_MAX, beam_gain)
+            )
         return cls(
             latitude=float(d[CONF_LATITUDE]),
             longitude=float(d[CONF_LONGITUDE]),
@@ -347,6 +375,7 @@ class SiteConfig:
             ac_actual_entity=ac_actual_entity,
             ac_actual_invert=bool(d.get(CONF_AC_ACTUAL_INVERT, False)),
             albedo=albedo,
+            bifacial_beam_gain=beam_gain,
         )
 
     def to_dict(self) -> dict:
@@ -367,6 +396,9 @@ class SiteConfig:
         # Same only-when-set convention for the optional site albedo (v0.20).
         if self.albedo is not None:
             d[CONF_SITE_ALBEDO] = self.albedo
+        # Same only-when-set convention for the optional beam gain (forensik T6).
+        if self.bifacial_beam_gain is not None:
+            d[CONF_SITE_BEAM_GAIN] = self.bifacial_beam_gain
         return d
 
     def plane_by_name(self, name: str) -> PlaneConfig | None:

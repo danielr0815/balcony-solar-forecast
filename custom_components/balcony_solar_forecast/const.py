@@ -78,6 +78,18 @@ CONF_AC_ACTUAL_INVERT = "ac_actual_invert"
 CONF_SITE_ALBEDO = "albedo"
 SITE_ALBEDO_MIN = 0.05
 SITE_ALBEDO_MAX = 0.9
+# Site-level bifacial beam gain (forensik T6 / A1). Optional multiplicative
+# factor on the beam+circumsolar POA (the DIRECT share), absent => 1.0 =
+# identity (no behaviour change for existing users). Lifts the honestly
+# under-modeled direct beam on clear mornings (bifacial rear-side gain + the
+# steep east-facing geometry) so the RAW physics stops leaking the deficit into
+# the learned transmittance / day-ahead-bias cells (which are clamped and cannot
+# express a >1 correction). For the reference site ~1.23 was validated
+# (backtest 2026-07-16). Values <1 are pointless (use ``efficiency`` instead),
+# so the band starts at 1.0.
+CONF_SITE_BEAM_GAIN = "bifacial_beam_gain"
+SITE_BEAM_GAIN_MIN = 1.0
+SITE_BEAM_GAIN_MAX = 1.6
 # plane fields
 CONF_PLANE_NAME = "name"
 CONF_AZIMUTH = "azimuth_deg"  # 0=N clockwise
@@ -103,6 +115,7 @@ CONF_GROUP_INVERTER_EFFICIENCY = "inverter_efficiency"  # optional: per-group DC
 
 # --- Physics constants (SPEC §4 physics musts) ---
 ALBEDO_DEFAULT = 0.2
+BEAM_GAIN_DEFAULT = 1.0  # identity beam+circumsolar gain when site leaves it unset
 ALBEDO_SNOW = 0.5  # applied when snow_depth > SNOW_DEPTH_THRESHOLD_M
 SNOW_DEPTH_THRESHOLD_M = 0.01
 RB_CAP = 10.0  # geometric beam-ratio cap (low-sun explosion guard)

@@ -356,6 +356,7 @@ def reconstruct_plane_hour(
     latitude: float,
     longitude: float,
     base_albedo: float | None = None,
+    beam_gain: float = 1.0,
 ) -> PlaneHourReconstruction:
     """Reconstruct one plane's modeled hour split using the repo's core/.
 
@@ -399,6 +400,14 @@ def reconstruct_plane_hour(
         f_iam = transpose.ashrae_iam(cos_theta)
         beam *= f_iam
         circ *= f_iam
+
+    # Site bifacial beam gain (forensik T6) — byte-identical to
+    # engine._plane_poa_components: applied to beam+circumsolar BEFORE the ungated
+    # reference so future bootstraps reconstruct the SAME direct-share physics the
+    # live engine issues. Default 1.0 => no-op.
+    if beam_gain != 1.0:
+        beam *= beam_gain
+        circ *= beam_gain
 
     # UNGATED beam+circumsolar POA (static tau = 1): the counterfactual clear-
     # horizon beam the shademap references, so a shaded bin still has a non-zero
@@ -672,6 +681,7 @@ def _process_day_impl(
                 plane, _svf_for(plane, doy), wx,
                 latitude=lat, longitude=lon,
                 base_albedo=getattr(site, "albedo", None),
+                beam_gain=getattr(site, "bifacial_beam_gain", None) or 1.0,
             )
             recon[plane.name][hkey] = r
             modeled_total_by_plane[plane.name][hkey] = r.gated_total_wh
