@@ -510,7 +510,12 @@ Ergänzend (SCT-4) liefert dasselbe Sensor-Attribut sowie die
 Slots je Herkunft (`bin`/`envelope`/`ensemble`/`neutral`) — so ist sichtbar,
 welche Prognosetage tatsächlich ein trainiertes Band tragen, ohne eine
 384-Einträge-Slot-Karte in den Recorder zu schreiben (das Attribut ist per
-`_unrecorded_attributes` von der Historie ausgenommen).
+`_unrecorded_attributes` von der Historie ausgenommen). In der
+`get_forecast`-Antwort sind `band_source` **und** `band_source_by_day` an das
+Vorhandensein eines Band-Blocks (p10/p50/p90) gekoppelt: Ein
+quantiles-off-/Cold-Start-Zyklus liefert **weder** Band-Kurven **noch** ein
+`band_source` — die Antwort behauptet also keine Bandherkunft ohne begleitendes
+Band (kein Status-Widerspruch, analog zur Gatung des P10/P90-Sensors).
 
 ## 7. Degradationsleiter (nie still!)
 

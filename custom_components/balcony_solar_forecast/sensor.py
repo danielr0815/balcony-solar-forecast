@@ -371,14 +371,16 @@ def _build_forecast_response(
         bands = _band_blocks(data)
         if bands:
             entry_resp.update(bands)
-        # Band provenance (SCT-4): the today-level source label + the compact
-        # per-local-day count breakdown, so a consumer of the raw curves can tell
-        # which days actually carry a trained band. Both absent when no band
-        # exists (quantiles off / cold start).
-        entry_resp["band_source"] = data.get(DATA_KEY_BAND_SOURCE, "learned")
-        by_day = data.get(DATA_KEY_BAND_SOURCE_BY_DAY)
-        if isinstance(by_day, dict) and by_day:
-            entry_resp["band_source_by_day"] = dict(by_day)
+            # Band provenance (SCT-4): the today-level source label + the compact
+            # per-local-day count breakdown, so a consumer of the raw curves can
+            # tell which days actually carry a trained band. Gated on ``bands``
+            # like the curve blocks above: a quantiles-off / cold-start response
+            # carries no band block at all, so it must not claim a band_source
+            # either (would be a status lie — cf. EnergyBandSensor gating).
+            entry_resp["band_source"] = data.get(DATA_KEY_BAND_SOURCE, "learned")
+            by_day = data.get(DATA_KEY_BAND_SOURCE_BY_DAY)
+            if isinstance(by_day, dict) and by_day:
+                entry_resp["band_source_by_day"] = dict(by_day)
         entries[eid] = entry_resp
     return {"entries": entries}
 
