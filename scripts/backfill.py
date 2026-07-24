@@ -18,11 +18,15 @@ face its first live winter cold:
      statistics via the **WebSocket API** (``recorder/statistics_during_period``;
      ``--ha-url`` + ``--token`` CLI args).
   4. Compute:
-       * day-ahead RLS bias states per (cloud class x day part), and
+       * day-ahead RLS bias states per (cloud class x day part),
        * shademap bins (beam-referenced transmittance EMA), with the backfilled
          sample count **n capped at BOOTSTRAP_MAX_BIN_N** — hourly smearing
          makes backfilled bins less trustworthy, so live 15-min data overrides
-         quickly (SPEC §6).
+         quickly (SPEC §6), and
+       * quantile relative-error rings per (cloud class x day part): one
+         ``measured / theta-corrected`` sample per daylight hour, folded through
+         the SAME ``quantiles.train_quantiles`` the live nightly path uses so the
+         seeded ring is byte-identical to a live-trained one (A6 / SPEC §6).
   5. Emit a bootstrap JSON matching the frozen contract schema; the
      ``balcony_solar_forecast.import_bootstrap`` service ingests it
      (validate + clamp, rejects unknown schema).
@@ -94,12 +98,16 @@ from balcony_solar_forecast.core import (  # noqa: E402
     transpose,
 )
 from balcony_solar_forecast.core import (  # noqa: E402
+    quantiles as quantiles_mod,
+)
+from balcony_solar_forecast.core import (  # noqa: E402
     shademap as shademap_mod,
 )
 from balcony_solar_forecast.core.types import (  # noqa: E402
     BiasCell,
     BiasState,
     PlaneConfig,
+    QuantileState,
     ShademapBin,
     ShademapState,
     SiteConfig,
@@ -204,10 +212,18 @@ class BootstrapAccumulator:
     # Day-ahead RLS: {cell_key: BiasCell}. Trained by a scalar RLS step per
     # (day x cell) aggregated Wh pair.
     bias: dict[str, BiasCell] = field(default_factory=dict)
+    # Quantile relerr ring (SPEC §6): accumulated ACROSS days via the LIVE
+    # quantiles.train_quantiles, so the seeded rings are byte-identical to a
+    # live-trained state (date-windowed, count-capped). ``last_iso_date`` is the
+    # newest processed day, used to re-window the ring at emit time relative to
+    # the last backfill day.
+    quantile_state: QuantileState = field(default_factory=QuantileState)
+    last_iso_date: str = ""
     days_used: int = 0
     days_skipped: int = 0
     shade_samples: int = 0
     bias_samples: int = 0
+    quantile_samples: int = 0
 
 
 # ===========================================================================
@@ -628,6 +644,10 @@ def _process_day_impl(
     # kc per hour (site-level, taken from the GHI which is shared) for the
     # neighbour-stability gate.
     kc_by_hour: dict[str, float] = {}
+    # Sun elevation per hour (site-level, hour midpoint) for the k_c cloud
+    # classification — the classifier needs it to key on the clear-sky index
+    # (A5), matching the live path.
+    el_by_hour: dict[str, float] = {}
 
     # SVF is now doy-dependent (the horizon is semi-transparent to the diffuse,
     # so a seasonal foliage row ramps it with the day). Recompute it per (plane,
@@ -659,6 +679,7 @@ def _process_day_impl(
         any_r = recon[planes[0].name][hkey] if planes else None
         if any_r is not None:
             kc_by_hour[hkey] = any_r.kc
+            el_by_hour[hkey] = any_r.sun_el
 
     hours_sorted = sorted(kc_by_hour.keys())
 
@@ -775,7 +796,7 @@ def _process_day_impl(
         measured_site = site_measured_hourly.get(hkey)
         if measured_site is None:
             continue
-        cloud_class = _classify_cloud(wx, tz)
+        cloud_class = _classify_cloud(wx, tz, elevation_deg=el_by_hour.get(hkey))
         day_part = _day_part_for_slot(wx.start, lon)
         key = BiasState.cell_key(cloud_class, day_part)
         agg = cell_agg.setdefault(key, [0.0, 0.0])
@@ -788,6 +809,61 @@ def _process_day_impl(
         cell = acc.bias.get(key, BiasCell())
         acc.bias[key] = _rls_step(cell, modeled_wh, measured_wh)
         acc.bias_samples += 1
+        contributed = True
+
+    # --- 4) QUANTILE SEED (SPEC §6): per-hour relerr against the theta-CORRECTED
+    # gated forecast, mirroring the live train_quantiles_day path so the day-0
+    # bands are not cold (only overcast bins were ever trained before A6). Per
+    # hour: corrected = clamp(theta_cell) x gated_modeled_site (theta AFTER this
+    # day's RLS step above), relerr = measured_site / corrected. Fed through the
+    # LIVE quantiles.train_quantiles so the seeded ring is byte-identical to a
+    # live-trained one — same (cloud_class x day_part) taxonomy, same clamp
+    # [QUANTILE_REL_ERR_MIN, MAX], same >QUANTILE_MIN_FORECAST_WH gate, same
+    # date-window (QUANTILE_RING_DAYS) + count-cap. The per-day-per-bin cap
+    # (QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN) is enforced here so correlated hours
+    # of a single day do not over-weight a bin (the coarse hourly backfill).
+    iso_date = day_weather[0].start.date().isoformat()
+    if iso_date > acc.last_iso_date:
+        acc.last_iso_date = iso_date
+    per_bin_today: dict[str, int] = {}
+    q_samples: list[quantiles_mod.QuantileSample] = []
+    for wx in day_weather:
+        hkey = wx.start.isoformat()
+        modeled_site = sum(
+            modeled_total_by_plane[p.name].get(hkey, 0.0) for p in planes
+        )
+        if modeled_site <= 0.0:
+            continue
+        measured_site = site_measured_hourly.get(hkey)
+        if measured_site is None:
+            continue
+        cloud_class = _classify_cloud(wx, tz, elevation_deg=el_by_hour.get(hkey))
+        day_part = _day_part_for_slot(wx.start, lon)
+        key = QuantileState.bin_key(cloud_class, day_part)
+        cell = acc.bias.get(key)
+        theta = (
+            cell.clamped_theta() if cell is not None
+            else const.DAY_AHEAD_BIAS_NEUTRAL
+        )
+        corrected = theta * modeled_site
+        if corrected <= const.QUANTILE_MIN_FORECAST_WH:
+            continue  # below-threshold hour never enters the ring (live parity)
+        if per_bin_today.get(key, 0) >= const.QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN:
+            continue  # cap correlated hours per bin per day (SPEC §6)
+        q_samples.append(
+            quantiles_mod.QuantileSample(
+                cloud_class=cloud_class,
+                day_part=day_part,
+                measured_wh=measured_site,
+                corrected_wh=corrected,
+            )
+        )
+        per_bin_today[key] = per_bin_today.get(key, 0) + 1
+    if q_samples:
+        acc.quantile_state = quantiles_mod.train_quantiles(
+            acc.quantile_state, q_samples, training_date=iso_date
+        )
+        acc.quantile_samples += len(q_samples)
         contributed = True
 
     return contributed
@@ -890,11 +966,21 @@ def _local_hour(dt: datetime, tz: timezone | None) -> tuple[int, int]:
     return local.hour, local.month
 
 
-def _classify_cloud(wx: HourlyWeather, tz: timezone | None = None) -> str:
-    """Cloud class via the live bias.classify_cloud (SPEC §5).
+def _classify_cloud(
+    wx: HourlyWeather,
+    tz: timezone | None = None,
+    *,
+    elevation_deg: float | None = None,
+) -> str:
+    """Cloud class via the live bias.classify_cloud (SPEC §5/§6, A5).
 
-    The fog-month test uses the LOCAL month (``tz``) so a late-evening UTC hour
-    does not fall into the wrong month near a boundary.
+    Passes the hour's GHI and sun ``elevation_deg`` so the classifier keys on the
+    CLEAR-SKY INDEX (k_c = GHI / Haurwitz(elevation)) — the SAME taxonomy the live
+    coordinator/nightly path uses since A5 — instead of the random-overlap layer
+    cover; without the elevation (twilight / not supplied) it falls back to the
+    layer cover exactly as live does. The fog-month test uses the LOCAL month
+    (``tz``) so a late-evening UTC hour does not fall into the wrong month near a
+    boundary.
     """
     _hr, month = _local_hour(wx.start, tz)
     return bias_mod.classify_cloud(
@@ -903,6 +989,8 @@ def _classify_cloud(wx: HourlyWeather, tz: timezone | None = None) -> str:
         cloud_high=wx.cloud_high,
         visibility_m=wx.visibility_m if wx.visibility_m > 0.0 else float("inf"),
         month=month,
+        ghi=wx.ghi,
+        elevation_deg=elevation_deg,
     )
 
 
@@ -957,12 +1045,28 @@ def build_bootstrap_json(
     )
     bias_state = BiasState(cells=dict(acc.bias))
 
+    # Quantile: re-window every ring to QUANTILE_RING_DAYS RELATIVE TO THE LAST
+    # backfill day (a bin last touched early in a multi-year range must not keep
+    # samples older than the window measured from the newest day) and enforce the
+    # count-cap backstop — reusing the LIVE trim so the seeded ring is
+    # byte-identical to a live-trained one (SPEC §6).
+    cutoff = quantiles_mod._window_cutoff(acc.last_iso_date)
+    quant_bins: dict[str, list] = {}
+    for bk, ring in acc.quantile_state.bins.items():
+        trimmed = quantiles_mod._trim_ring(list(ring), cutoff=cutoff)
+        if trimmed:
+            quant_bins[bk] = trimmed
+    quantile_state = QuantileState(
+        bins=quant_bins, version=acc.quantile_state.version
+    )
+
     return {
         const.BOOTSTRAP_KEY_SCHEMA: const.BOOTSTRAP_SCHEMA_VERSION,
         const.BOOTSTRAP_KEY_GENERATED_AT: gen.isoformat(),
         const.BOOTSTRAP_KEY_SITE_SIGNATURE: site_signature(site),
         const.BOOTSTRAP_KEY_BIAS: bias_state.to_dict(),
         const.BOOTSTRAP_KEY_SHADEMAP: shade_state.to_dict(),
+        const.BOOTSTRAP_KEY_QUANTILE: quantile_state.to_dict(),
     }
 
 
@@ -1391,7 +1495,8 @@ def _summarise(acc: BootstrapAccumulator, as_issued: bool) -> None:
     n_bins = sum(len(b) for b in acc.shade.values())
     _LOGGER.info(
         "Bootstrap summary: %d days used, %d skipped | shademap: %d channels, "
-        "%d bins, %d samples | day-ahead: %d cells, %d RLS steps | source: %s",
+        "%d bins, %d samples | day-ahead: %d cells, %d RLS steps | quantile: "
+        "%d bins, %d samples | source: %s",
         acc.days_used,
         acc.days_skipped,
         len(acc.shade),
@@ -1399,6 +1504,8 @@ def _summarise(acc: BootstrapAccumulator, as_issued: bool) -> None:
         acc.shade_samples,
         len(acc.bias),
         acc.bias_samples,
+        len(acc.quantile_state.bins),
+        acc.quantile_samples,
         "as-issued" if as_issued else "ANALYSIS (degraded)",
     )
 

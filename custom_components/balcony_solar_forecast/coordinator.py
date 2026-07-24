@@ -531,12 +531,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )  # may raise ValueError
         self._bias_state = self._store.get_bias_state()
         self._shademap_state = self._store.get_shademap_state()
+        self._quantile_state = self._store.get_quantile_state()
         summary = {
             "bias_cells": len(self._bias_state.cells),
             "shademap_channels": len(self._shademap_state.channels),
             "shademap_bins": sum(
                 len(b) for b in self._shademap_state.channels.values()
             ),
+            "quantile_bins": len(self._quantile_state.bins),
         }
         await self.async_request_refresh()
         return summary
@@ -2248,10 +2250,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     async def async_rollback_learners(
         self, snapshots_back: int = 1
     ) -> dict[str, Any]:
-        """Restore BOTH learner states from the rollback ring (service backend).
+        """Restore the learner states from the rollback ring (service backend).
 
-        ``snapshots_back`` = 1 restores the newest snapshot, 2 the one before,
-        capped at the ring length. Enable flags and drift state are untouched:
+        Restores bias + shademap + quantile together (a legacy snapshot without a
+        quantile section restores an empty ring). ``snapshots_back`` = 1 restores
+        the newest snapshot, 2 the one before, capped at the ring length. Enable
+        flags and drift state are untouched:
         re-enabling after an auto-disable stays an explicit operator action in
         the options flow (SPEC §5).
         """
@@ -2262,8 +2266,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         snap = snaps[len(snaps) - back]
         self._bias_state = snap.bias
         self._shademap_state = snap.shademap
+        self._quantile_state = snap.quantile
         self._persist_bias_state()
         self._persist_shademap_state()
+        self._persist_quantile_state()
         _LOGGER.info(
             "Learner states rolled back %d snapshot(s) to %s", back, snap.taken_at
         )

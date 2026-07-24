@@ -1032,15 +1032,21 @@ class DriftState:
 class LearnerSnapshot:
     """One rollback snapshot of the persisted learner state (SPEC §5).
 
-    A date-stamped copy of BiasState + ShademapState taken by the nightly job
-    BEFORE it applies that night's training, so a drifting layer can be rolled
-    back to a prior good state. The coordinator keeps the last
-    DRIFT_ROLLBACK_SNAPSHOTS of these in a ring.
+    A date-stamped copy of BiasState + ShademapState + QuantileState taken by the
+    nightly job (and the bootstrap import) BEFORE it applies that night's
+    training, so a drifting/unwanted layer can be rolled back to a prior good
+    state. The coordinator keeps the last DRIFT_ROLLBACK_SNAPSHOTS in a ring.
+
+    The ``quantile`` field is ADDITIVE (SPEC §6): a legacy snapshot dict without
+    it loads with an empty QuantileState, so pre-existing rollback rings and
+    stored snapshots keep working, and ``rollback_learners`` restores the
+    quantile ring in step with the other two learners.
     """
 
     taken_at: str  # iso utc
     bias: BiasState
     shademap: ShademapState
+    quantile: QuantileState = field(default_factory=lambda: QuantileState())
 
     @classmethod
     def from_dict(cls, d: dict) -> LearnerSnapshot:
@@ -1050,14 +1056,23 @@ class LearnerSnapshot:
             taken_at=str(d.get("taken_at", "")),
             bias=BiasState.from_dict(d.get("bias", {})),
             shademap=ShademapState.from_dict(d.get("shademap", {})),
+            quantile=QuantileState.from_dict(d.get("quantile", {})),
         )
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "taken_at": self.taken_at,
             "bias": self.bias.to_dict(),
             "shademap": self.shademap.to_dict(),
         }
+        # Emit the quantile section ONLY when it carries data, so a legacy
+        # snapshot (or a snapshot taken while the ring was empty) round-trips
+        # BYTE-FAITHFUL through from_dict/to_dict — the v2->v3 store migration
+        # requires the learner_snapshots ring to be carried through unchanged
+        # (SPEC §14.4). A restored empty section is the pre-quantile behaviour.
+        if self.quantile.bins:
+            out["quantile"] = self.quantile.to_dict()
+        return out
 
 
 # ---------------------------------------------------------------------------

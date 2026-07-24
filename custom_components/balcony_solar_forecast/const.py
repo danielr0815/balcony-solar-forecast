@@ -633,6 +633,7 @@ BOOTSTRAP_KEY_GENERATED_AT = "generated_at"     # iso utc
 BOOTSTRAP_KEY_SITE_SIGNATURE = "site_signature" # lat/lon+plane-name digest sanity check
 BOOTSTRAP_KEY_BIAS = "bias_state"               # day-ahead RLS cells
 BOOTSTRAP_KEY_SHADEMAP = "shademap_state"       # per-channel bins
+BOOTSTRAP_KEY_QUANTILE = "quantile_state"       # per-(class x part) relerr rings
 # Backfill n-credit cap: hourly-smeared backfilled bins are less trustworthy,
 # so their initial EMA sample count is capped so live 15-min data overrides
 # quickly (SPEC §6).

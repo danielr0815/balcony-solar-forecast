@@ -853,3 +853,192 @@ def test_process_day_drops_frozen_module_only(site: SiteConfig):
 
     assert acc.shade_samples > 0, "healthy modules must still train"
     assert "M2" not in acc.shade, "the frozen module-day must be dropped"
+
+
+# ---------------------------------------------------------------------------
+# Quantile bootstrap seeding (A6 / SPEC §6) — the F7 cold-start fix
+# ---------------------------------------------------------------------------
+
+
+def _clear_afternoon(day, hours=(14, 15, 16, 17)) -> list[bf.HourlyWeather]:
+    """Clear high-sun AFTERNOON UTC hours on ``day`` at the reference site.
+
+    14..17 UTC fall solidly in the SOLAR afternoon part at lon 12.2 (solar noon
+    ~11:15 UTC), so every produced hour lands in the SAME (clear x afternoon)
+    quantile bin — letting a single bin accumulate across days.
+    """
+    from datetime import datetime as _dt
+
+    out = []
+    for h in hours:
+        out.append(
+            bf.HourlyWeather(
+                start=_dt(day.year, day.month, day.day, h, 0, tzinfo=UTC),
+                ghi=780.0, dni=820.0, dhi=120.0, temp_c=24.0,
+            )
+        )
+    return out
+
+
+def test_backfill_seeds_quantile_ring_yields_real_bands(site: SiteConfig):
+    """>= QUANTILE_MIN_SAMPLES samples from >= QUANTILE_MIN_DAYS days -> a REAL
+    band (not the neutral 1/1/1 collapse). This is the whole point of A6: before
+    it, the backfill left the quantile store empty and day-0 bands collapsed for
+    weeks."""
+    from datetime import date, timedelta
+
+    from balcony_solar_forecast.core import quantiles as q
+
+    acc = bf.BootstrapAccumulator()
+    svf = _svf(site)
+    start = date(2025, 6, 16)
+    n_days = 7
+    for i in range(n_days):
+        d = start + timedelta(days=i)
+        weather = _clear_afternoon(d)
+        # Spread the measured/corrected ratio across days so the band has a real
+        # empirical spread (otherwise every relerr ~ 1 and the band is flat).
+        actuals = _tracked_actuals(site, weather, svf, factor=0.7 + 0.08 * i)
+        bf.process_day_hourly(acc, site, weather, actuals, svf_by_plane=svf)
+
+    key = q.QuantileState.bin_key(
+        const.CLOUD_CLASS_CLEAR, const.DAY_PART_AFTERNOON
+    )
+    ring = acc.quantile_state.bins.get(key)
+    assert ring is not None, "clear|afternoon bin must be seeded"
+    assert len(ring) >= const.QUANTILE_MIN_SAMPLES
+    distinct = {e[0] for e in ring}
+    assert len(distinct) >= const.QUANTILE_MIN_DAYS
+    bands = q.bands_for_bin(
+        acc.quantile_state,
+        cloud_class=const.CLOUD_CLASS_CLEAR,
+        day_part=const.DAY_PART_AFTERNOON,
+    )
+    assert bands.n >= const.QUANTILE_MIN_SAMPLES
+    assert bands.p10 < bands.p90, "a well-fed bin must emit a genuine spread"
+
+
+def test_thin_quantile_bin_stays_neutral(site: SiteConfig):
+    """A bin below the sample/day floor collapses to the neutral band (no fake
+    spread) — only the seeded well-fed bins get real bands."""
+    from datetime import date, timedelta
+
+    from balcony_solar_forecast.core import quantiles as q
+
+    acc = bf.BootstrapAccumulator()
+    svf = _svf(site)
+    for i in range(2):  # far below QUANTILE_MIN_DAYS
+        d = date(2025, 6, 16) + timedelta(days=i)
+        weather = _clear_afternoon(d)
+        actuals = _tracked_actuals(site, weather, svf, factor=0.7 + 0.2 * i)
+        bf.process_day_hourly(acc, site, weather, actuals, svf_by_plane=svf)
+
+    bands = q.bands_for_bin(
+        acc.quantile_state,
+        cloud_class=const.CLOUD_CLASS_CLEAR,
+        day_part=const.DAY_PART_AFTERNOON,
+    )
+    assert (bands.p10, bands.p50, bands.p90) == (1.0, 1.0, 1.0)
+
+
+def _highlat_single_plane_site() -> SiteConfig:
+    """A near-horizontal single plane far north, so the SOLAR afternoon has more
+    than QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN sunlit hours in one day (impossible
+    at the reference latitude) — the only way to actually exercise the per-day
+    cap with real physics."""
+    return SiteConfig.from_dict({
+        const.CONF_LATITUDE: 69.0,
+        const.CONF_LONGITUDE: 25.0,
+        "planes": [{
+            "name": "P1", "azimuth_deg": 180.0, "tilt_deg": 5.0,
+            "wp": 400.0, "efficiency": 0.96, "horizon": [],
+            "actual_entity": "sensor.p1",
+        }],
+        "groups": [],
+    })
+
+
+def test_quantile_per_day_cap_bounds_correlated_hours():
+    """A single (class x part) bin never takes more than
+    QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN samples from ONE day (SPEC §6): the
+    hourly backfill's within-day hours are strongly correlated."""
+    from datetime import date
+    from datetime import datetime as _dt
+
+    hs = _highlat_single_plane_site()
+    svf = _svf(hs)
+    # 10 sunlit SOLAR-afternoon UTC hours on the solstice (13..22 UTC) — verified
+    # > the cap of 8.
+    day = date(2025, 6, 21)
+    weather = [
+        bf.HourlyWeather(
+            start=_dt(day.year, day.month, day.day, h, 0, tzinfo=UTC),
+            ghi=600.0, dni=650.0, dhi=110.0, temp_c=15.0,
+        )
+        for h in range(13, 23)
+    ]
+    actuals = _tracked_actuals(hs, weather, svf, factor=1.0)
+    acc = bf.BootstrapAccumulator()
+    bf.process_day_hourly(acc, hs, weather, actuals, svf_by_plane=svf)
+
+    afternoon = [
+        v for k, v in acc.quantile_state.bins.items()
+        if k.endswith(f"|{const.DAY_PART_AFTERNOON}")
+    ]
+    assert afternoon, "expected an afternoon bin to be seeded"
+    for ring in afternoon:
+        assert len(ring) <= const.QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN
+
+
+def test_build_bootstrap_windows_and_caps_quantile_ring(site: SiteConfig):
+    """build_bootstrap_json re-windows every ring to QUANTILE_RING_DAYS relative
+    to the LAST backfill day and enforces the count-cap backstop (SPEC §6)."""
+    from balcony_solar_forecast.core import quantiles as q
+    from balcony_solar_forecast.core.types import QuantileState
+
+    acc = bf.BootstrapAccumulator()
+    acc.last_iso_date = "2025-06-30"
+    key = "clear|afternoon"
+    # One in-window sample, one stale sample (> 90 days before the last day).
+    ring = [["2025-06-20", 1.1], ["2025-01-01", 0.9]]
+    # Pad past the count cap with in-window dated samples.
+    ring += [["2025-06-25", 1.0] for _ in range(q._BIN_RING_CAP + 5)]
+    acc.quantile_state = QuantileState(bins={key: ring})
+
+    js = bf.build_bootstrap_json(acc, site)
+    emitted = js[const.BOOTSTRAP_KEY_QUANTILE]["bins"][key]
+    # Stale sample dropped by the date window.
+    assert ["2025-01-01", 0.9] not in emitted
+    # Count cap enforced.
+    assert len(emitted) <= q._BIN_RING_CAP
+
+
+def test_bootstrap_json_includes_quantile_key(site: SiteConfig):
+    """The bootstrap contract now carries the quantile section (round-trips
+    through QuantileState.from_dict) so store.import_bootstrap can seed it."""
+    from balcony_solar_forecast.core.types import QuantileState
+
+    acc = bf.BootstrapAccumulator()
+    js = bf.build_bootstrap_json(acc, site)
+    assert const.BOOTSTRAP_KEY_QUANTILE in js
+    # Empty ring round-trips to an empty (valid) QuantileState.
+    qs = QuantileState.from_dict(js[const.BOOTSTRAP_KEY_QUANTILE])
+    assert qs.bins == {}
+
+
+def test_backfill_classifies_by_kc_when_elevation_supplied():
+    """With the sun elevation supplied, _classify_cloud keys on the clear-sky
+    index (A5), matching the live path — a low-GHI high-sun hour is overcast even
+    with zero reported cloud cover; without elevation it falls back to the layer
+    cover (clear)."""
+    from datetime import datetime as _dt
+
+    dim = bf.HourlyWeather(
+        start=_dt(2025, 6, 21, 10, tzinfo=UTC),
+        ghi=120.0, dni=0.0, dhi=120.0, temp_c=15.0,
+        cloud_low=0.0, cloud_mid=0.0, cloud_high=0.0, visibility_m=30000.0,
+    )
+    # kc path (sun high, GHI far below clear-sky) -> overcast.
+    assert bf._classify_cloud(dim, elevation_deg=45.0) == const.CLOUD_CLASS_OVERCAST
+    # No elevation -> layer-cover fallback -> clear (all covers zero).
+    assert bf._classify_cloud(dim) == const.CLOUD_CLASS_CLEAR

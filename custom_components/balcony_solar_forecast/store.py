@@ -91,6 +91,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import (
     BOOTSTRAP_KEY_BIAS,
+    BOOTSTRAP_KEY_QUANTILE,
     BOOTSTRAP_KEY_SCHEMA,
     BOOTSTRAP_KEY_SHADEMAP,
     BOOTSTRAP_KEY_SITE_SIGNATURE,
@@ -868,12 +869,17 @@ class ForecastStore:
     ) -> None:
         """Validate + clamp a backfill bootstrap and REPLACE the learner state.
 
-        Snapshots the prior (bias, shademap) into the rollback ring first, so an
-        unwanted import can be rolled back, then swaps in the clamped, n-capped
-        bootstrap. Raises ``ValueError`` on a schema mismatch / non-dict payload
-        / site-signature mismatch (the import service surfaces it to the
-        operator); all values inside a well-formed payload are clamped, never
-        rejected (SPEC §6).
+        Snapshots the prior (bias, shademap, quantile) into the rollback ring
+        first, so an unwanted import can be rolled back, then swaps in the
+        clamped, n-capped bootstrap. Raises ``ValueError`` on a schema mismatch /
+        non-dict payload / site-signature mismatch (the import service surfaces it
+        to the operator); all values inside a well-formed payload are clamped,
+        never rejected (SPEC §6).
+
+        The quantile ring is handled ADDITIVELY: a payload carrying
+        ``BOOTSTRAP_KEY_QUANTILE`` (a v0.20.7+ seeding backfill) REPLACES the ring
+        like the other two learners; a payload WITHOUT it (an older backfill file)
+        leaves the live quantile ring untouched — never wipe learned bands.
         """
         from homeassistant.util import dt as dt_util
 
@@ -883,16 +889,27 @@ class ForecastStore:
             payload,
             expected_signature=expected_signature,
         )
-        # Rollback point BEFORE the swap.
+        # Quantile ring: additive + backward-compatible (payload already
+        # validated as a dict by ingest_bootstrap above). Absent key -> keep the
+        # live ring; present key -> validate/clamp via the dataclass and replace.
+        if isinstance(payload, dict) and BOOTSTRAP_KEY_QUANTILE in payload:
+            quantile = QuantileState.from_dict(
+                payload.get(BOOTSTRAP_KEY_QUANTILE) or {}
+            )
+        else:
+            quantile = self.get_quantile_state()
+        # Rollback point BEFORE the swap (captures all three learner states).
         self.push_snapshot(
             LearnerSnapshot(
                 taken_at=dt_util.utcnow().isoformat(),
                 bias=self.get_bias_state(),
                 shademap=self.get_shademap_state(),
+                quantile=self.get_quantile_state(),
             )
         )
         self._data[STORE_KEY_BIAS_STATE] = bias.to_dict()
         self._data[STORE_KEY_SHADEMAP_STATE] = shademap.to_dict()
+        self._data[STORE_KEY_QUANTILE_STATE] = quantile.to_dict()
         self._schedule_save()
 
     # ------------------------------------------------------------------

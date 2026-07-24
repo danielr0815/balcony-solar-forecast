@@ -27,6 +27,7 @@ pytest.importorskip("homeassistant")
 
 from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     BOOTSTRAP_KEY_BIAS,
+    BOOTSTRAP_KEY_QUANTILE,
     BOOTSTRAP_KEY_SCHEMA,
     BOOTSTRAP_KEY_SHADEMAP,
     BOOTSTRAP_MAX_BIN_N,
@@ -54,6 +55,7 @@ from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     BiasState,
     DriftState,
     LearnerSnapshot,
+    QuantileState,
     ShademapBin,
     ShademapState,
 )
@@ -549,6 +551,80 @@ def test_import_bootstrap_raises_on_bad_schema_no_mutation():
     # State untouched, no snapshot pushed.
     assert "M1" in store.get_shademap_state().channels
     assert store.get_snapshots() == []
+
+
+def test_import_bootstrap_with_quantile_key_replaces_ring():
+    """A bootstrap carrying the quantile section REPLACES the live ring (A6)."""
+    store = _store()
+    # Prime a different live quantile ring so we can prove the replace.
+    store.set_quantile_state(
+        QuantileState(bins={"overcast|midday": [["2026-04-01", 1.2]]})
+    )
+    payload = _bootstrap()
+    payload[BOOTSTRAP_KEY_QUANTILE] = {
+        "version": 1,
+        "bins": {"clear|midday": [["2026-07-01", 0.9], ["2026-07-02", 1.1]]},
+    }
+    store.import_bootstrap(payload)
+
+    q = store.get_quantile_state()
+    assert "clear|midday" in q.bins
+    assert "overcast|midday" not in q.bins  # replaced, not merged
+    # The rollback snapshot captured the PRIOR quantile ring.
+    rolled = store.latest_snapshot()
+    assert rolled is not None
+    assert "overcast|midday" in rolled.quantile.bins
+
+
+def test_import_bootstrap_without_quantile_key_preserves_ring():
+    """A legacy backfill file (no quantile key) must NOT wipe the live ring."""
+    store = _store()
+    store.set_quantile_state(
+        QuantileState(bins={"clear|morning": [["2026-06-01", 1.05]]})
+    )
+    payload = _bootstrap(
+        bias_cells={"fog|midday": {"theta": 0.9, "covariance": 2.0, "n": 4}}
+    )
+    assert BOOTSTRAP_KEY_QUANTILE not in payload  # older backfill shape
+    store.import_bootstrap(payload)
+
+    # Bias/shademap swapped as usual, but the quantile ring is untouched.
+    assert store.get_bias_state().cells  # bootstrap bias applied
+    q = store.get_quantile_state()
+    assert q.bins == {"clear|morning": [["2026-06-01", 1.05]]}
+
+
+def test_rollback_snapshot_roundtrips_quantile_state():
+    """LearnerSnapshot persists + restores the quantile ring through the store."""
+    store = _store()
+    snap = LearnerSnapshot(
+        taken_at="2026-07-10T01:30:00+00:00",
+        bias=BiasState(),
+        shademap=ShademapState(),
+        quantile=QuantileState(bins={"clear|afternoon": [["2026-07-09", 0.8]]}),
+    )
+    store.push_snapshot(snap)
+    read = store.latest_snapshot()
+    assert read is not None
+    assert read.quantile.bins == {"clear|afternoon": [["2026-07-09", 0.8]]}
+
+
+def test_learner_snapshot_empty_quantile_is_byte_faithful():
+    """An empty quantile ring is omitted from to_dict (v2->v3 migration parity)."""
+    d = LearnerSnapshot(
+        taken_at="2026-07-10T01:30:00+00:00",
+        bias=BiasState(),
+        shademap=ShademapState(),
+    ).to_dict()
+    assert "quantile" not in d
+    # A populated ring IS emitted.
+    d2 = LearnerSnapshot(
+        taken_at="2026-07-10T01:30:00+00:00",
+        bias=BiasState(),
+        shademap=ShademapState(),
+        quantile=QuantileState(bins={"clear|midday": [["2026-07-09", 1.0]]}),
+    ).to_dict()
+    assert "quantile" in d2
 
 
 def test_cap_shademap_credit_pure():

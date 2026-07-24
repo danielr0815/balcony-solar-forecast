@@ -1137,6 +1137,7 @@ def maybe_push_rollback_snapshot(coord, iso: str) -> None:
         taken_at=now.isoformat(),
         bias=coord._bias_state,
         shademap=coord._shademap_state,
+        quantile=coord._quantile_state,
     )
     try:
         coord._store.push_snapshot(snapshot)

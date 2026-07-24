@@ -427,6 +427,19 @@ Forecasts as-issued ab 01/2024 gegen LTS-Ist-Werte — einmaliger
 Offline-Job auf dem Dev-Rechner — füllt Bias-/Quantilspeicher vor dem
 ersten Live-Winter. Verbindlichkeit: **Pflicht zu versuchen, kein
 Blocker** — das System muss ohne diese API voll funktionieren.
+Der **Quantilspeicher** wird dabei über **denselben** `quantiles.train_quantiles`
+befüllt wie live: pro Stunde `relerr = gemessen / korrigiert` mit
+`korrigiert = clamp(θ_Zelle) · gegatetes-modelliertes-Wh` (θ nach dem Tages-RLS-
+Schritt) in die **(Wolkenklasse × Tagesabschnitt)**-Ringe (gleiche k_c-Taxonomie
+wie Bias/Scoreboard), datumsgefenstert auf `QUANTILE_RING_DAYS` relativ zum
+**letzten Backfill-Tag**, Ring-Cap und Per-Tag-Cap
+(`QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN`) wie live. Ohne dieses Seeding blieben am
+Tag 0 nur die overcast-Bins trainiert und alle anderen Bänder wochenlang auf P50
+kollabiert. Der Import (`store.import_bootstrap`) ist **additiv**: ein Payload
+ohne `quantile_state`-Schlüssel (Alt-Backfill) lässt den Live-Quantilring
+unangetastet, ein Payload mit dem Schlüssel ersetzt ihn wie die anderen beiden
+Lerner; der Rollback-Ring (`LearnerSnapshot`) trägt den Quantilzustand mit, damit
+`rollback_learners` alle drei Lerner konsistent zurücksetzt.
 
 ### 6.1 Ensemble-Wetter-Unsicherheitsbänder (v0.16, optional, Standard AUS)
 
