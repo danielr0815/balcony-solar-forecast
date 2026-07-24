@@ -102,6 +102,7 @@ from .const import (
     DATA_KEY_RAW_HOURLY_WH,
     DATA_KEY_SCOREBOARD,
     DAY_AHEAD_BIAS_NEUTRAL,
+    DAY_AHEAD_BIAS_RESEED_N,
     DEFAULT_ENSEMBLE_ENABLED,
     DEFAULT_QUANTILES_ENABLED,
     DEFAULT_SCOREBOARD_ENABLED,
@@ -121,6 +122,7 @@ from .const import (
     INTRADAY_MIN_MODELED_WH,
     INTRADAY_NEUTRAL,
     INTRADAY_TRAILING_WINDOW_MINUTES,
+    ISSUE_CONFIG_CHANGED_BIAS_RESEED,
     ISSUE_FAST_LEARNER_DISABLED,
     ISSUE_SLOW_LEARNER_DISABLED,
     LEARNER_LAYER_DAY_AHEAD,
@@ -401,6 +403,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # real OFF->ON option transition inside rebuild_learner_config (a plain
         # restart with the option untouched keeps the flag, SPEC §5).
         self.rebuild_learner_config()
+        # A forecast-relevant config change (planes/albedo/AC limits) invalidates
+        # the geometry the day-ahead bias cells were learned against: re-open them
+        # for fast re-adaptation (A4/FOR-4). Runs on every setup AND options reload
+        # (both re-enter this method); a first start just records the fingerprint.
+        self._reconcile_config_fingerprint()
 
         last = self._store.get_last_payload()
         if not last:
@@ -732,6 +739,88 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         ]
         raw = "|".join(parts).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()[:16]
+
+    def _config_fingerprint(self) -> str:
+        """Stable digest of the forecast-relevant site fields (A4/FOR-4).
+
+        Covers exactly the config the day-ahead bias cells are conditioned on:
+        each plane's azimuth / tilt / wp / efficiency / ross_coeff / horizon
+        profile, the site albedo, and every inverter group's AC limit. A change
+        to any of these makes the learned theta fit a now-stale geometry, so a
+        differing fingerprint triggers a bias re-seed. Fields that do NOT change
+        the modeled curve (entity ids, shade grouping, meter sign) are excluded
+        so a benign edit never resets learning. Rounded so float re-serialisation
+        can never spuriously flip the hash.
+        """
+        import hashlib
+
+        def _plane_sig(p) -> str:
+            hz = ";".join(
+                f"{round(r.azimuth_deg, 2)},{round(r.elevation_deg, 2)}"
+                for r in p.horizon
+            )
+            ross = "-" if p.ross_coeff is None else f"{round(p.ross_coeff, 4)}"
+            return (
+                f"{p.name}:az{round(p.azimuth_deg, 2)}:tl{round(p.tilt_deg, 2)}"
+                f":wp{round(p.wp, 2)}:ef{round(p.efficiency, 4)}:ro{ross}:hz[{hz}]"
+            )
+
+        albedo = "-" if self._site.albedo is None else f"{round(self._site.albedo, 4)}"
+        parts = [
+            *[_plane_sig(p) for p in self._site.planes],
+            f"albedo={albedo}",
+            *[f"grp:{g.name}:ac{round(g.ac_limit_w, 2)}" for g in self._site.groups],
+        ]
+        raw = "|".join(parts).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()[:16]
+
+    def _reconcile_config_fingerprint(self) -> None:
+        """Re-seed the day-ahead bias when the forecast-relevant config changed.
+
+        Compares the live :meth:`_config_fingerprint` against the one stored when
+        the cells were last learned. A store without a fingerprint (fresh install
+        or the first run after this feature landed) just records the current one —
+        an existing install is NOT punished by the feature's introduction (the
+        cells were legitimately learned against the current config). A DIFFERING
+        fingerprint re-opens every cell for fast re-adaptation
+        (:func:`bias.reseed_day_ahead_bias`, cap DAY_AHEAD_BIAS_RESEED_N),
+        persists the new fingerprint, logs INFO and raises a repair issue so the
+        operator can re-run the offline bootstrap or reset. Best-effort: a store
+        lacking the fingerprint getter/setter (older schema in flight) is skipped.
+        """
+        getter = getattr(self._store, "get_config_fingerprint", None)
+        setter = getattr(self._store, "set_config_fingerprint", None)
+        if getter is None or setter is None:
+            return
+        try:
+            stored = getter()
+            current = self._config_fingerprint()
+        except Exception:  # pragma: no cover - defensive, never crash setup
+            _LOGGER.debug("Config fingerprint reconcile failed", exc_info=True)
+            return
+        if stored is None:
+            # First start / pre-fingerprint store: record, never re-seed.
+            setter(current)
+            return
+        if stored == current:
+            return
+        # Config changed: re-open the bias cells so learning re-accelerates.
+        cells_before = len(self._bias_state.cells)
+        self._bias_state = bias_mod.reseed_day_ahead_bias(
+            self._bias_state, n_cap=DAY_AHEAD_BIAS_RESEED_N
+        )
+        self._persist_bias_state()
+        setter(current)
+        _LOGGER.info(
+            "Forecast-relevant config changed (fingerprint %s -> %s); re-seeded "
+            "%d day-ahead bias cell(s) (n capped at %d, covariance re-opened) so "
+            "learning re-accelerates against the new geometry",
+            stored,
+            current,
+            cells_before,
+            DAY_AHEAD_BIAS_RESEED_N,
+        )
+        self._raise_repair_issue(ISSUE_CONFIG_CHANGED_BIAS_RESEED)
 
     @callback
     def async_start_nightly_job(self) -> None:

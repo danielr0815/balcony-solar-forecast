@@ -633,3 +633,40 @@ async def test_store_inverter_cal_get_set_roundtrip():
     got = store.get_inverter_cal_state()
     assert got.eta == pytest.approx(0.935)
     assert got.n == 25
+
+
+def test_v2_migrates_with_none_config_fingerprint():
+    """A v2 store (no fingerprint key) migrates to a None fingerprint so the first
+    reconcile just records the live one — an existing install is not re-seeded."""
+    from custom_components.balcony_solar_forecast.const import (
+        STORE_KEY_CONFIG_FINGERPRINT,
+    )
+
+    state = validate_state(_populated_v2_store())
+    assert state[STORE_KEY_CONFIG_FINGERPRINT] is None
+
+
+def test_config_fingerprint_survives_validate_and_roundtrips():
+    """A stored fingerprint string is carried through validate byte-faithful."""
+    from custom_components.balcony_solar_forecast.const import (
+        STORE_KEY_CONFIG_FINGERPRINT,
+    )
+
+    base = copy.deepcopy(validate_state(_populated_v2_store()))
+    base[STORE_KEY_CONFIG_FINGERPRINT] = "abc123def456abcd"
+    state = validate_state(base)
+    assert state[STORE_KEY_CONFIG_FINGERPRINT] == "abc123def456abcd"
+    # A non-string blob degrades to None (never raises).
+    base[STORE_KEY_CONFIG_FINGERPRINT] = {"bad": 1}
+    assert validate_state(base)[STORE_KEY_CONFIG_FINGERPRINT] is None
+
+
+async def test_store_config_fingerprint_get_set_roundtrip():
+    """ForecastStore.get/set_config_fingerprint round-trips; absent -> None."""
+    store = _store(_populated_v2_store())
+    await store.async_load()
+    assert store.get_config_fingerprint() is None
+    store.set_config_fingerprint("deadbeefdeadbeef")
+    assert store.get_config_fingerprint() == "deadbeefdeadbeef"
+    store.set_config_fingerprint(None)
+    assert store.get_config_fingerprint() is None

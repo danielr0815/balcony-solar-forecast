@@ -415,6 +415,15 @@ DAY_AHEAD_BIAS_NEUTRAL = 1.0
 RLS_FORGETTING_FACTOR = 0.98    # lambda: <1 discounts old days
 RLS_INIT_COVARIANCE = 1000.0    # P0: large => fast initial adaptation
 RLS_MIN_SAMPLES = 3             # cells with fewer trained days stay neutral
+# When the forecast-relevant site config changes, the day-ahead bias cells were
+# learned against a now-stale geometry and re-adapt at only ~lambda's steady-
+# state gain (~0.001/day at n~100). On a fingerprint change every cell's RLS
+# covariance is re-opened to RLS_INIT_COVARIANCE (the actual learning-rate lever
+# — the gain depends on P, not n) and its effective sample count is capped to
+# this value so the estimator adapts quickly again without discarding the
+# current theta (A4/FOR-4). Strictly gentler than reset_day_ahead_bias, which
+# clears theta to neutral.
+DAY_AHEAD_BIAS_RESEED_N = 20
 
 # Cloud classes (SPEC §5/§6). "fog" = forecast visibility < FOG_VISIBILITY_M
 # OR (cloud_cover_low > FOG_CLOUD_LOW_PCT AND month in FOG_MONTHS).
@@ -660,6 +669,10 @@ LEARNER_STATUS_VALUES = (
 # --- Repair issue ids (SPEC §5/§7) -----------------------------------------
 ISSUE_FAST_LEARNER_DISABLED = "fast_learner_auto_disabled"
 ISSUE_SLOW_LEARNER_DISABLED = "slow_learner_auto_disabled"
+# Raised when the forecast-relevant site config changed and the day-ahead bias
+# cells were re-seeded against the new geometry (A4/FOR-4): the operator may want
+# to re-run the offline backfill bootstrap or reset_day_ahead_bias.
+ISSUE_CONFIG_CHANGED_BIAS_RESEED = "config_changed_bias_reseed"
 
 
 # ===========================================================================
@@ -803,6 +816,13 @@ STORE_KEY_COMPARISON_RING = "comparison_ring"  # {iso_date: {comparison_name: da
 # top-level learner section that does NOT ride the bias/shademap rollback ring
 # (it is self-gating + never load-bearing, so a rollback need not touch it).
 STORE_KEY_INVERTER_CAL_STATE = "inverter_cal_state"  # InverterCalState (learned eta_inv)
+# Config fingerprint of the forecast-relevant site fields the day-ahead bias
+# cells were learned against (A4/FOR-4). Added ADDITIVELY within v3 (no version
+# bump): _empty_state injects None and a store lacking the key reads back None,
+# so an existing v3 store stays byte-faithful. When the stored fingerprint
+# differs from the live config the bias cells are re-seeded (see
+# DAY_AHEAD_BIAS_RESEED_N) so learning re-accelerates against the new geometry.
+STORE_KEY_CONFIG_FINGERPRINT = "config_fingerprint"  # str | None
 
 # --- New diagnostic sensors / binary sensors (SPEC §8/§10) -----------------
 # Entity object_ids are unprefixed: the device slug already carries

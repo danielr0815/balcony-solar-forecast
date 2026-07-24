@@ -121,6 +121,7 @@ __all__ = [
     "day_ahead_factor_solar",
     "train_day_ahead_bias",
     "apply_day_ahead_bias",
+    "reseed_day_ahead_bias",
 ]
 
 
@@ -674,6 +675,36 @@ def train_day_ahead_bias(
         if updated is not cell:
             cells[key] = updated
 
+    return BiasState(cells=cells, version=state.version)
+
+
+def reseed_day_ahead_bias(state: BiasState, *, n_cap: int) -> BiasState:
+    """Re-open every day-ahead bias cell for fast re-adaptation (A4/FOR-4).
+
+    Called when the forecast-relevant site config changed: the learned theta of
+    each cell still fits the OLD geometry and, at RLS steady state (n ~ 100,
+    lambda RLS_FORGETTING_FACTOR), the gain has decayed so far that live days
+    only nudge theta ~0.001/day — months to re-converge. The learning-rate lever
+    is the RLS covariance P (the gain K = P*x/(lambda + x*P*x) depends on P, NOT
+    on n), so this resets every cell's ``covariance`` to RLS_INIT_COVARIANCE (the
+    same "large P0 => fast initial adaptation" seed a cold cell starts from) and
+    caps its effective sample count ``n`` at ``n_cap`` — keeping the current
+    theta as the starting point (strictly gentler than reset_day_ahead_bias,
+    which clears theta to neutral). A cell already at or below the cap keeps its
+    n; its covariance is re-opened regardless. Returns a NEW state; input
+    untouched. Empty input round-trips unchanged.
+    """
+    from dataclasses import replace
+
+    cap = max(0, int(n_cap))
+    cells: dict[str, BiasCell] = {}
+    src = state.cells if isinstance(state.cells, dict) else {}
+    for key, cell in src.items():
+        cells[key] = replace(
+            cell,
+            covariance=RLS_INIT_COVARIANCE,
+            n=min(int(cell.n), cap),
+        )
     return BiasState(cells=cells, version=state.version)
 
 

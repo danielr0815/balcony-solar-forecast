@@ -131,6 +131,10 @@
     "slow_learner_auto_disabled": {
       "title": "Shademap learner auto-disabled",
       "description": "The shademap (slow) learner lost to pure physics for seven days in a row and was automatically disabled to protect the forecast. To re-enable it, toggle \"Shademap learner (per-channel shade map)\" off and then on again in the integration options."
+    },
+    "config_changed_bias_reseed": {
+      "title": "Day-ahead bias re-seeded after config change",
+      "description": "A forecast-relevant setting changed (a plane's azimuth/tilt/peak power/efficiency/Ross coefficient/horizon, the site albedo, or an inverter AC limit), so the day-ahead bias cells were re-opened to re-learn against the new geometry. For the fastest reset, re-run the offline backfill bootstrap or call the \"Reset day-ahead bias\" service. Dismiss this issue once done."
     }
   },
   "services": {

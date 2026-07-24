@@ -131,6 +131,10 @@
     "slow_learner_auto_disabled": {
       "title": "Shademap-Lerner automatisch deaktiviert",
       "description": "Der Shademap-Lerner war sieben Tage in Folge schlechter als die reine Physik und wurde zum Schutz der Prognose automatisch deaktiviert. Zum Wiederaktivieren \"Shademap-Lerner (kanalweise Verschattungskarte)\" in den Integrationsoptionen einmal aus- und wieder einschalten."
+    },
+    "config_changed_bias_reseed": {
+      "title": "Day-ahead-Bias nach Konfigurationsänderung neu angelernt",
+      "description": "Eine prognoserelevante Einstellung wurde geändert (Azimut/Neigung/Spitzenleistung/Wirkungsgrad/Ross-Koeffizient/Horizont einer Ebene, die Albedo oder eine Wechselrichter-AC-Grenze), daher wurden die Day-ahead-Bias-Zellen zum Neulernen gegen die neue Geometrie wieder geöffnet. Für den schnellsten Neustart den Offline-Backfill-Bootstrap erneut ausführen oder den Dienst \"Day-ahead-Bias zurücksetzen\" aufrufen. Diese Meldung danach schließen."
     }
   },
   "services": {

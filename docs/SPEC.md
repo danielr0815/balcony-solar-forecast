@@ -316,6 +316,28 @@ zeitlich linear überblendet (± `DAY_PART_BLEND_HALFWIDTH_MIN`), damit die
 Korrektur nie als harte Stufe springt — die Prognoseform kommt aus
 Wetter × Physik × Verschattung (stetig), also muss auch der aufgesetzte
 Residual-Korrektor stetig sein (`bias.day_ahead_factor`).
+Die **modellierte Seite** des nächtlichen Day-ahead-Trainings ist die
+**Slow-only-Kurve** (Schattenkarte ∘ Physik, ohne Day-ahead-Faktor;
+`snap.slow_only_hourly_wh`), Fallback Roh (dann Korrigiert) bei inaktiver
+Slow-Schicht oder Alt-Snapshot: θ wird **auf** die schattenkarten-korrigierte
+Kurve aufgesetzt, also würde ein Training gegen die **reine** Roh-Kurve
+denselben Verschattungsfehler doppelt korrigieren, sobald die Schattenkarte
+lernt.
+Die Bias-Zellen werden gegen eine bestimmte **prognoserelevante Konfiguration**
+gelernt; ein `config_fingerprint` (SHA-256-Kurzhash über je Ebene Azimut /
+Neigung / Wp / Wirkungsgrad / Ross-Koeffizient / Horizont, die Albedo und die
+AC-Grenzen der WR-Gruppen) wird neben dem Bias-State persistiert. Weicht der
+Fingerprint beim Setup/Options-Reload vom gespeicherten ab, passt das gelernte θ
+nicht mehr zur Geometrie und würde bei RLS-Steady-State (λ = `RLS_FORGETTING_FACTOR`,
+n ≈ 100) nur ~0,001/Tag nachziehen; daher werden **alle** Zellen neu angesät
+(`bias.reseed_day_ahead_bias`): die RLS-Kovarianz jeder Zelle wird auf
+`RLS_INIT_COVARIANCE` **wieder geöffnet** (der eigentliche Lernraten-Hebel — die
+Verstärkung hängt an P, **nicht** an n) und ihr effektives n auf
+`DAY_AHEAD_BIAS_RESEED_N` gedeckelt, das aktuelle θ bleibt als Startwert erhalten
+(sanfter als `reset_day_ahead_bias`, das θ auf neutral löscht). Zusätzlich
+INFO-Log + HA-Repair-Issue (Re-Bootstrap/Reset empfohlen). Ein **Erststart** ohne
+gespeicherten Fingerprint (frische Installation oder erster Lauf nach Einführung
+des Features) speichert nur den aktuellen Fingerprint — nichts wird angesät.
 Alle Lerner-Korrekturen (Intraday-Skalar, Day-ahead-Bias) und die
 Quantilbänder (P10/P50/P90) werden als **letzte Stufe erneut auf das
 WR-AC-Limit geclampt** (`clamp_groups` läuft nach dem Slot-Faktor ein

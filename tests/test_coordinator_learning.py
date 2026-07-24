@@ -32,12 +32,14 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_RAW_HOURLY_WH,
     DAY_AHEAD_BIAS_MIN,
+    DAY_AHEAD_BIAS_RESEED_N,
     DAY_PART_AFTERNOON,
     DAY_PART_MIDDAY,
     DAY_PART_MORNING,
     DRIFT_LOSS_STREAK_DAYS,
     INTRADAY_NEUTRAL,
     INVERTER_CAL_MIN_SAMPLES,
+    ISSUE_CONFIG_CHANGED_BIAS_RESEED,
     ISSUE_FAST_LEARNER_DISABLED,
     LABEL_FROZEN_STALE_SECONDS,
     LEARNER_LAYER_FAST,
@@ -45,6 +47,7 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     LEARNER_SNAPSHOT_RING,
     LEARNER_STATUS_ACTIVE,
     LEARNER_STATUS_FROZEN,
+    RLS_INIT_COVARIANCE,
     RLS_MIN_SAMPLES,
 )
 from custom_components.balcony_solar_forecast.coordinator import (  # noqa: E402
@@ -135,6 +138,13 @@ class _FakeStore:
 
     def set_inverter_cal_state(self, state) -> None:
         self.inverter_cal = state.to_dict()
+
+    # config fingerprint the day-ahead bias was learned against (A4)
+    def get_config_fingerprint(self):
+        return getattr(self, "config_fingerprint", None)
+
+    def set_config_fingerprint(self, fp) -> None:
+        self.config_fingerprint = fp
 
     # rollback ring (real ForecastStore API)
     def get_snapshots(self):
@@ -404,6 +414,160 @@ def test_day_ahead_training_moves_theta_up_not_to_min():
         c._train_day_ahead("2026-07-01", issued, actuals)
     theta = c._bias_state.cells[BiasState.cell_key("clear", DAY_PART_MIDDAY)].theta
     assert theta > DAY_AHEAD_BIAS_MIN + 0.2
+
+
+# ---------------------------------------------------------------------------
+# B2 (SCT-3): day-ahead trains on the SLOW-ONLY curve (fallback raw)
+# ---------------------------------------------------------------------------
+
+
+def test_day_ahead_trains_on_slow_only_not_raw():
+    """The modeled side of the RLS is snap.slow_only_hourly_wh, not raw: a first
+    RLS step from P0 lands theta ≈ measured/modeled, so measured==slow_only pins
+    theta to ~1.0 (using raw 1000 would land it near 0.8)."""
+    c = _make_coordinator()
+    h = "2026-07-01T11:00:00+00:00"
+    issued = IssuedSnapshot(
+        issued_at="x", status="fresh",
+        raw_hourly_wh={h: 1000.0},
+        slow_only_hourly_wh={h: 800.0},  # shademap trimmed the raw curve
+    ).to_dict()
+    c._train_day_ahead("2026-07-01", issued, {"M1": 800.0})
+    cell = next(iter(c._bias_state.cells.values()))
+    assert cell.theta == pytest.approx(1.0, abs=0.05)
+
+
+def test_day_ahead_falls_back_to_raw_when_slow_only_absent():
+    """A legacy / slow-inactive snapshot has no slow_only curve -> raw is used, so
+    the same measured 800 vs raw 1000 lands theta near 0.8."""
+    c = _make_coordinator()
+    h = "2026-07-01T11:00:00+00:00"
+    issued = IssuedSnapshot(
+        issued_at="x", status="fresh",
+        raw_hourly_wh={h: 1000.0},
+        slow_only_hourly_wh={},  # slow layer inactive / old snapshot
+    ).to_dict()
+    c._train_day_ahead("2026-07-01", issued, {"M1": 800.0})
+    cell = next(iter(c._bias_state.cells.values()))
+    assert cell.theta == pytest.approx(0.8, abs=0.05)
+
+
+# ---------------------------------------------------------------------------
+# A4 (FOR-4): config-fingerprint re-seed of the day-ahead bias cells
+# ---------------------------------------------------------------------------
+
+
+def _learned_bias_state() -> BiasState:
+    """A bias state that looks steady-state: high n, tiny (converged) covariance."""
+    return BiasState(
+        cells={
+            BiasState.cell_key("clear", DAY_PART_MIDDAY): BiasCell(
+                theta=0.7, covariance=2e-8, n=100
+            ),
+            BiasState.cell_key("clear", DAY_PART_MORNING): BiasCell(
+                theta=1.4, covariance=2e-8, n=90
+            ),
+        }
+    )
+
+
+def test_config_fingerprint_change_reseeds_cells(monkeypatch):
+    """A differing stored fingerprint caps every cell's n, re-opens covariance to
+    P0 and keeps theta; the new fingerprint is persisted and a repair issue fires."""
+    store = _FakeStore()
+    store.config_fingerprint = "stale000000000000"
+    c = _make_coordinator(store)
+    c._bias_state = _learned_bias_state()
+    raised: list[str] = []
+    monkeypatch.setattr(c, "_raise_repair_issue", lambda i: raised.append(i))
+
+    c._reconcile_config_fingerprint()
+
+    for cell in c._bias_state.cells.values():
+        assert cell.n <= DAY_AHEAD_BIAS_RESEED_N
+        assert cell.covariance == pytest.approx(RLS_INIT_COVARIANCE)
+    # theta (the learned estimate) is preserved as the re-adaptation start point.
+    mid = c._bias_state.cells[BiasState.cell_key("clear", DAY_PART_MIDDAY)]
+    assert mid.theta == pytest.approx(0.7)
+    # New fingerprint persisted; matches the live config.
+    assert store.config_fingerprint == c._config_fingerprint()
+    assert ISSUE_CONFIG_CHANGED_BIAS_RESEED in raised
+
+
+def test_config_fingerprint_first_start_records_without_reseed(monkeypatch):
+    """No stored fingerprint (fresh install / feature just landed): record the live
+    one, DO NOT touch the cells, DO NOT raise an issue."""
+    store = _FakeStore()  # config_fingerprint attribute absent -> getter None
+    c = _make_coordinator(store)
+    c._bias_state = _learned_bias_state()
+    raised: list[str] = []
+    monkeypatch.setattr(c, "_raise_repair_issue", lambda i: raised.append(i))
+
+    c._reconcile_config_fingerprint()
+
+    mid = c._bias_state.cells[BiasState.cell_key("clear", DAY_PART_MIDDAY)]
+    assert mid.n == 100  # untouched
+    assert mid.covariance == pytest.approx(2e-8)  # untouched
+    assert store.config_fingerprint == c._config_fingerprint()
+    assert raised == []
+
+
+def test_config_fingerprint_unchanged_is_noop(monkeypatch):
+    """A matching stored fingerprint leaves the cells and the store alone."""
+    store = _FakeStore()
+    c = _make_coordinator(store)
+    store.config_fingerprint = c._config_fingerprint()
+    c._bias_state = _learned_bias_state()
+    raised: list[str] = []
+    monkeypatch.setattr(c, "_raise_repair_issue", lambda i: raised.append(i))
+
+    c._reconcile_config_fingerprint()
+
+    mid = c._bias_state.cells[BiasState.cell_key("clear", DAY_PART_MIDDAY)]
+    assert mid.n == 100
+    assert mid.covariance == pytest.approx(2e-8)
+    assert raised == []
+
+
+def test_config_fingerprint_tracks_relevant_fields_only():
+    """The fingerprint moves for a forecast-relevant edit (azimuth, albedo, AC
+    limit) but is INVARIANT to benign edits (entity id, shade group)."""
+    from dataclasses import replace
+
+    c = _make_coordinator()
+    base = c._config_fingerprint()
+
+    # Azimuth change -> different geometry -> different fingerprint.
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], azimuth_deg=118.0), c._site.planes[1]),
+    )
+    assert c._config_fingerprint() != base
+
+    # Albedo change -> different diffuse term -> different fingerprint.
+    c._site = _site()
+    c._site = replace(c._site, albedo=0.3)
+    assert c._config_fingerprint() != base
+
+    # AC-limit change (a group) -> different clamp -> different fingerprint.
+    c._site = _site()
+    c._site = replace(
+        c._site,
+        groups=(InverterGroup(name="g1", plane_names=("M1", "M2"), ac_limit_w=800.0),),
+    )
+    assert c._config_fingerprint() != base
+
+    # Benign edits (measured entity id, shade grouping) do NOT move it.
+    c._site = _site()
+    c._site = replace(
+        c._site,
+        planes=(
+            replace(c._site.planes[0], actual_entity="sensor.renamed",
+                    shade_group="balcony"),
+            replace(c._site.planes[1], shade_group="balcony"),
+        ),
+    )
+    assert c._config_fingerprint() == base
 
 
 async def test_async_reset_day_ahead_bias_clears_persists_and_refreshes():
