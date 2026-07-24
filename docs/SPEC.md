@@ -360,7 +360,12 @@ denselben Verschattungsfehler doppelt korrigieren, sobald die Schattenkarte
 lernt.
 Die Bias-Zellen werden gegen eine bestimmte **prognoserelevante Konfiguration**
 gelernt; ein `config_fingerprint` (SHA-256-Kurzhash über je Ebene Azimut /
-Neigung / Wp / Wirkungsgrad / Ross-Koeffizient / Horizont, die Albedo, die
+Neigung / Wp / Wirkungsgrad / Ross-Koeffizient / Horizont — je Zeile Azimut,
+Elevation UND die Transmittanzfelder `tau` / `seasonal` / `tau_leafed` /
+`tau_bare`, denn die Horizontzeilen SIND die τ-tragenden „Screens“ dieser
+Konfiguration (eine τ-Änderung 0→0,4 formt den Direktstrahl um) —, die Albedo,
+den bifazialen Beam-Gain (`bifacial_beam_gain`, T6 — der A1-Rollout 1,0→1,25
+skaliert den Direkt-POA-Anteil standortweit), die
 AC-Grenzen der WR-Gruppen und `CLASSIFIER_VERSION`) wird neben dem Bias-State
 persistiert. Weicht der
 Fingerprint beim Setup/Options-Reload vom gespeicherten ab, passt das gelernte θ

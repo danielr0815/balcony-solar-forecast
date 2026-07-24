@@ -81,8 +81,11 @@ right baseline, seeded from the bootstrap, and observable.
   the taxonomy change re-seeds the bias cells.
 
 - **Day-ahead bias hygiene (forensik A4/B2).** A `config_fingerprint` (a hash over
-  each plane's azimuth/tilt/Wp/efficiency/Ross/horizon, the albedo, the group AC
-  limit and `CLASSIFIER_VERSION`) is persisted next to the bias state; on a change
+  each plane's azimuth/tilt/Wp/efficiency/Ross/horizon — every horizon row's
+  elevation AND its transmittance fields `tau`/`seasonal`/`tau_leafed`/`tau_bare`,
+  since those rows are the τ-carrying screens —, the albedo, the bifacial beam gain
+  (T6), the group AC limit and `CLASSIFIER_VERSION`) is persisted next to the bias
+  state; on a change
   every cell is re-seeded (`bias.reseed_day_ahead_bias`) by re-opening its RLS
   covariance to `RLS_INIT_COVARIANCE` and capping `n` at
   `DAY_AHEAD_BIAS_RESEED_N`, so learning re-accelerates instead of crawling

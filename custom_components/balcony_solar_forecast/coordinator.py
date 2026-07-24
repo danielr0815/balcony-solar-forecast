@@ -785,21 +785,31 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         Covers exactly the config the day-ahead bias cells are conditioned on:
         each plane's azimuth / tilt / wp / efficiency / ross_coeff / horizon
-        profile, the site albedo, every inverter group's AC limit, and the cloud-
-        classification taxonomy version (CLASSIFIER_VERSION, A5) — a change to any
-        of these makes the learned theta fit a now-stale geometry or class
-        meaning, so a differing fingerprint triggers a bias re-seed. Fields that
-        do NOT change the modeled curve (entity ids, shade grouping, meter sign)
-        are excluded so a benign edit never resets learning. Rounded so float
-        re-serialisation can never spuriously flip the hash.
+        profile (per row: elevation AND the transmittance fields tau / seasonal /
+        tau_leafed / tau_bare — the horizon rows ARE the tau-carrying "screens" of
+        SPEC §5, so a τ 0→0.4 edit reshapes the modeled beam and MUST re-seed),
+        the site albedo, the bifacial beam gain (T6 — the A1 1.0→1.25 rollout runs
+        through here and changes the direct-POA share site-wide), every inverter
+        group's AC limit, and the cloud-classification taxonomy version
+        (CLASSIFIER_VERSION, A5) — a change to any of these makes the learned theta
+        fit a now-stale geometry or class meaning, so a differing fingerprint
+        triggers a bias re-seed. Fields that do NOT change the modeled curve
+        (entity ids, shade grouping, meter sign) are excluded so a benign edit
+        never resets learning. Rounded so float re-serialisation can never
+        spuriously flip the hash.
         """
         import hashlib
 
-        def _plane_sig(p) -> str:
-            hz = ";".join(
+        def _hz_row(r) -> str:
+            tl = "-" if r.tau_leafed is None else f"{round(r.tau_leafed, 4)}"
+            tb = "-" if r.tau_bare is None else f"{round(r.tau_bare, 4)}"
+            return (
                 f"{round(r.azimuth_deg, 2)},{round(r.elevation_deg, 2)}"
-                for r in p.horizon
+                f",t{round(r.tau, 4)},s{int(r.seasonal)},tl{tl},tb{tb}"
             )
+
+        def _plane_sig(p) -> str:
+            hz = ";".join(_hz_row(r) for r in p.horizon)
             ross = "-" if p.ross_coeff is None else f"{round(p.ross_coeff, 4)}"
             return (
                 f"{p.name}:az{round(p.azimuth_deg, 2)}:tl{round(p.tilt_deg, 2)}"
@@ -807,9 +817,15 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
 
         albedo = "-" if self._site.albedo is None else f"{round(self._site.albedo, 4)}"
+        beam_gain = (
+            "-"
+            if self._site.bifacial_beam_gain is None
+            else f"{round(self._site.bifacial_beam_gain, 4)}"
+        )
         parts = [
             *[_plane_sig(p) for p in self._site.planes],
             f"albedo={albedo}",
+            f"beam_gain={beam_gain}",
             *[f"grp:{g.name}:ac{round(g.ac_limit_w, 2)}" for g in self._site.groups],
             # Cloud-classification taxonomy version (A5): a change to the class
             # boundaries (layer-cover -> k_c) makes every learned theta cell fit a

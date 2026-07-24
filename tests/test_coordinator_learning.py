@@ -70,6 +70,7 @@ from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     BiasState,
     DriftState,
     ForecastResult,
+    HorizonRow,
     InverterCalState,
     InverterGroup,
     IssuedSnapshot,
@@ -564,6 +565,32 @@ def test_config_fingerprint_tracks_relevant_fields_only():
         c._site,
         groups=(InverterGroup(name="g1", plane_names=("M1", "M2"), ac_limit_w=800.0),),
     )
+    assert c._config_fingerprint() != base
+
+    # tau-only horizon edit (the operator's commonest A1 action: raise a screen's
+    # transmittance instead of lowering elevation) reshapes the modeled beam and
+    # MUST move the fingerprint even though az/elevation are unchanged.
+    c._site = _site()
+    hz_row = HorizonRow(azimuth_deg=150.0, elevation_deg=20.0, tau=0.0)
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(hz_row,)), c._site.planes[1]),
+    )
+    tau0 = c._config_fingerprint()
+    assert tau0 != base
+    c._site = replace(
+        c._site,
+        planes=(
+            replace(c._site.planes[0], horizon=(replace(hz_row, tau=0.4),)),
+            c._site.planes[1],
+        ),
+    )
+    assert c._config_fingerprint() != tau0
+
+    # bifacial beam-gain change (the A1 1.0->1.25 rollout via the options flow)
+    # scales the direct-POA share site-wide -> different fingerprint.
+    c._site = _site()
+    c._site = replace(c._site, bifacial_beam_gain=1.25)
     assert c._config_fingerprint() != base
 
     # Benign edits (measured entity id, shade grouping) do NOT move it.
