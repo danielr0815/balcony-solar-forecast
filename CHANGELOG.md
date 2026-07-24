@@ -5,22 +5,137 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.21.0] - 2026-07-25
+
+7-day forensic pass (17.–24.07.2026, the first week with working nightly
+learning) turned into a coherent fix tranche. The dominant defect was
+**double-correction**: the day-ahead bias (θ), the intraday scalar and, on clear
+mornings, the honest physics deficit all pulled on the same error, so the served
+curve overshot by up to ×1.9 at 07–09 h local while the day-ahead headline
+ballooned by the full scalar headroom. Each layer is now referenced against the
+right baseline, seeded from the bootstrap, and observable.
 
 ### Added
 
-- **Configurable bifacial beam gain.** New optional "Beam gain" field in the
-  setup/reconfigure flow (`site.bifacial_beam_gain`, blank = the shipped 1.0 =
-  identity, no change for existing users). It multiplies **only** the direct
-  (beam + circumsolar) share of the plane-of-array irradiance, applied in the
-  engine after the IAM and before the ungated learner reference and the horizon
-  gate, so it feeds the RAW and the corrected curve identically and lifts the
-  honestly under-modeled direct beam on clear mornings (bifacial rear-side gain,
-  steep east-facing geometry) into the raw physics instead of leaving the
+- **Configurable bifacial beam gain (forensik T6/A1).** New optional "Beam gain"
+  field in the setup/reconfigure flow (`site.bifacial_beam_gain`, blank = the
+  shipped 1.0 = identity, no change for existing users). It multiplies **only**
+  the direct (beam + circumsolar) share of the plane-of-array irradiance, applied
+  in the engine after the IAM and before the ungated learner reference and the
+  horizon gate, so it feeds the RAW and the corrected curve identically and lifts
+  the honestly under-modeled direct beam on clear mornings (bifacial rear-side
+  gain, steep east-facing geometry) into the raw physics instead of leaving the
   clamped learners (transmittance ≤ 1, day-ahead-bias cells) to absorb the
   deficit. Values are clamped to [1.0, 1.6]; the offline `scripts/backfill.py`
   bootstrap reconstructs the same physics. For the reference site ≈ 1.23 was
   validated (backtest 2026-07-16).
+
+- **Quantile bands seeded from the offline bootstrap (forensik A6).**
+  `scripts/backfill.py` now folds each daylight hour's `measured / θ-corrected`
+  relative error into per-(cloud class × day part) quantile rings through the
+  **live** `quantiles.train_quantiles` (identical taxonomy, clamps, date window
+  and caps), and `build_bootstrap_json` emits a `quantile_state` section.
+  `store.import_bootstrap` / `coordinator.async_import_bootstrap` ingest it
+  **additively** — a payload without the key leaves the live ring untouched — and
+  the rollback snapshot now carries the quantile state so all three learners roll
+  back together. Without it only the overcast bins were trained on day 0 and every
+  other band collapsed to P50 for weeks (delivers on SPEC §6's promise; the real
+  fix behind the day-0 band collapse).
+
+- **Intraday scalar ring re-armed after restart/reload (forensik A7/SCT-2).** The
+  sample ring is purely in-memory, so every reload/restart left
+  `compute_intraday_scalar` neutral for the whole trailing window (a ≥ 2 h
+  correction blackout — costly at the observed release cadence). It is now
+  reconstructed once at the first fresh tick from the recorder's 5-min site-total
+  measured-DC statistics (seconds-epoch, mirroring `_actuals`) plus the last
+  θ-corrected forecast curve, and degrades cleanly to neutral when stats/cache are
+  missing. The modeled side is restricted to the **metered** planes (only those
+  with an `actual_entity`, exactly the subset the site-total DC sensor sums) —
+  otherwise a partially-metered site halved the reconstructed scalar to the clamp
+  floor after every reload despite a perfect forecast. Only the scalar must never
+  persist; the samples are re-derivable raw data (SPEC §5 clarified).
+
+- **Consumer observability (forensik B3/B4/B5/SCT-4).** `get_issued_forecast`
+  now returns `hourly_wh_ac` (DC × the DC→AC efficiency frozen into each snapshot
+  at issue time; legacy snapshots fall back to the current learned η and flag
+  `eta_source`), plus `cloud_class_by_hour` and `applied_factor_by_hour`; the DC
+  curves are now documented as DC (the DC semantics had quietly flattered every
+  issued ratio by ~8 %). The P10/P90 sensors and `get_forecast` gained a
+  per-local-day `band_source_by_day` count (Recorder-excluded), and each
+  `day_ahead_bias_status` cell reports `clamped: true` at the θ band edge.
+  Config-entry **diagnostics** stop lying: `store_stats()` and
+  `learner_state_summary()` are implemented (no more `available: false`), the
+  quantile `trained` flag now gates on `n` **and** `effective_days` (and reports
+  `days`), and the forecast block splits `daily_kwh_dc` vs `daily_kwh_ac`.
+
+### Changed
+
+- **Cloud classification keyed on the clear-sky index (forensik A5).**
+  `classify_cloud` now derives clear/mixed/overcast from `kc = ghi /
+  haurwitz(elevation)` whenever a slot has a usable GHI and the sun is above
+  `CLOUD_KC_MIN_ELEVATION_DEG`, falling back to the old random-overlap layer cover
+  at twilight or when GHI is missing (the fog rule is unchanged and still first).
+  The layer cover counted mid/high cloud in full and routed sunny afternoon hours
+  into the overcast cell, poisoning θ, the quantile bins and the scoreboard strata
+  alike. `CLASSIFIER_VERSION` is folded into the day-ahead config fingerprint so
+  the taxonomy change re-seeds the bias cells.
+
+- **Day-ahead bias hygiene (forensik A4/B2).** A `config_fingerprint` (a hash over
+  each plane's azimuth/tilt/Wp/efficiency/Ross/horizon, the albedo, the group AC
+  limit and `CLASSIFIER_VERSION`) is persisted next to the bias state; on a change
+  every cell is re-seeded (`bias.reseed_day_ahead_bias`) by re-opening its RLS
+  covariance to `RLS_INIT_COVARIANCE` and capping `n` at
+  `DAY_AHEAD_BIAS_RESEED_N`, so learning re-accelerates instead of crawling
+  ~0.001/day from RLS steady state, with an INFO log and a repair issue. A first
+  start with no stored fingerprint only records it. The day-ahead RLS now trains
+  on `snap.slow_only_hourly_wh` (shademap ∘ physics, raw fallback) rather than pure
+  raw, so it will not double-correct the shading error once the shademap learns.
+
+- **Intraday scalar sampled against the θ-corrected curve (forensik A2/IRC-2).**
+  The sampler modeled against pure raw while the served curve is raw × θ × scalar,
+  so θ (1.36–1.49 in the morning) and the scalar double-corrected the same error.
+  The modeled side is now scaled by the nightly-frozen θ (a new `_day_factor`
+  cache); the intraday factor is never folded in (θ is frozen → no circularity).
+  The genuine under-forecast day (21.07.) still yields a legitimate 1.49, so the
+  weather signal survives — no hard scalar clamp.
+
+### Fixed
+
+- **Day-ahead headline no longer balloons under the intraday scalar (forensik
+  A3/IRC-4).** The keep-ceiling headline path leaked: a re-clamped slot kept the
+  served (scalar-inflated) ceiling, inflating the day-ahead-stable "today"
+  headline by the full factor headroom (20.07.: +3.27 kWh at scalar 2.355). The
+  clamped slot now contributes `min(prereclamp / factor, ceiling)`, i.e. the exact
+  scalar-free served value capped at the physical ceiling — stable by design, with
+  a synthetic 2.35-scalar unit test.
+
+- **Daily P10 no longer rides a spike above the actual (forensik B1/FOR-7).** The
+  daily P10 sensor scaled the whole band with the scalar, so a transient spike
+  lifted P10 above the end-of-day actual on 3 of 6 days. The daily P10 now strips
+  the transient factor asymmetrically (`min(1, scalar_free / served)` per slot);
+  the daily P90 keeps it (an upward correction may widen the optimistic flank).
+
+- **`get_forecast` band provenance coupled to the band (forensik SCT-4).** The
+  response wrote `band_source` unconditionally, so a quantiles-off / cold-start
+  cycle carried a `band_source` with no band block. `band_source` and
+  `band_source_by_day` now ship only inside the `if bands:` block — no
+  provenance without an accompanying band.
+
+- **Scoreboard strata low-n guard (forensik C1).** `stratified_breakdown`
+  suppresses `engine_vs_best_baseline_pct` (null) and sets `low_n: true` below
+  `SCOREBOARD_STRATUM_MIN_N` scored days, killing absurd figures from a single
+  mispaired day (e.g. −480 % at n = 2).
+
+### Note — scoreboard catch-up window (forensik C3)
+
+The kill-gate needs a **full** 14-day window of scored days. After the
+`_actuals` epoch fix (0.19.2) only ~3 days of catch-up were recoverable; **06.–
+12.07.2026 stay permanently unscorable** (no archived issued snapshots survive
+for those days), so the rolling window first fills — and `kill_gate_passed`
+first returns a verdict rather than `None` — around **27.07.2026**. An optional
+one-off re-score service for the salvageable issued days was considered and
+deferred (the issued ring holds the data). Until then `kill_gate_passed` stays
+`None`, which is correct, not a failure.
 
 ## [0.20.6] - 2026-07-19
 

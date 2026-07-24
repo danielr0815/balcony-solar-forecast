@@ -813,6 +813,15 @@ dagegen die `engine_*`-Form). Dazu `binary_sensor.kill_gate_passed` (Motor ≥
 **volles** Fenster; `None`, solange das Fenster nicht voll ist), plus eine
 **Diagnose-Aufschlüsselung je Wetterstratum**.
 
+**Erst-Urteil des Kill-Gates (forensik C3):** Das Gate braucht ein **volles**
+14-Tage-Fenster gewerteter Tage. Nach dem `_actuals`-Epoch-Fix (0.19.2) waren nur
+~3 Tage Catch-up nachholbar; **06.–12.07.2026 bleiben dauerhaft unscorebar** (für
+diese Tage existiert kein archivierter Issued-Snapshot mehr), daher füllt sich das
+rollierende Fenster erst danach und `kill_gate_passed` liefert erstmals **um den
+27.07.2026** ein Urteil statt `None`. Ein einmaliger Re-Score-Service für die
+rettbaren Issued-Tage wurde erwogen und zurückgestellt (der Issued-Ring hält die
+Daten). Bis dahin ist `kill_gate_passed = None` **korrekt**, kein Fehlschlag.
+
 **Vergleichs-Sensoren generisch + konfigurierbar** (`CONF_COMPARISON_SENSORS`:
 Liste von `{name, daily_entity}`), **leer** ausgeliefert (D-P9). Die zwei
 Vergleiche des Betreibers sind in `docs/DASHBOARD.md` + einem Config-Beispiel
