@@ -76,6 +76,7 @@ from .const import (
     DATA_KEY_BAND_SOURCE,
     DATA_KEY_BIAS_CELLS,
     DATA_KEY_DRIFT_MAE,
+    DATA_KEY_ENERGY_TODAY_AC_P10,
     DATA_KEY_INTRADAY_SCALAR,
     DATA_KEY_LEARNER_STATUS,
     DATA_KEY_QUANTILE_CURVES,
@@ -1224,6 +1225,12 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
     @property
     def native_value(self) -> float | None:
         data = self.coordinator.data or {}
+        # P10 day aggregate: the coordinator strips the transient intraday scalar
+        # asymmetrically (FOR-7) so a spike does not lift the daily P10 above the
+        # end-of-day actual. Its value is authoritative (None == no band today);
+        # only fall back to the served-curve sum on older data without the key.
+        if self._band == _Q_P10 and DATA_KEY_ENERGY_TODAY_AC_P10 in data:
+            return data[DATA_KEY_ENERGY_TODAY_AC_P10]
         curves = data.get(DATA_KEY_QUANTILE_CURVES_AC)
         curve = curves.get(self._band) if isinstance(curves, dict) else None
         if not isinstance(curve, dict) or not curve:

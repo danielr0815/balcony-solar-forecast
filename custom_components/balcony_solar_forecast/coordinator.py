@@ -93,6 +93,7 @@ from .const import (
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_CORRECTION_SOURCE,
     DATA_KEY_DRIFT_MAE,
+    DATA_KEY_ENERGY_TODAY_AC_P10,
     DATA_KEY_INTRADAY_SCALAR,
     DATA_KEY_KILL_GATE_PASSED,
     DATA_KEY_LEARNER_STATUS,
@@ -1436,19 +1437,23 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         never applied and understates the headline (up to the full factor). We
         detect such a slot from ``result.corrected_unclamped_watts`` (the
         pre-re-clamp corrected total): ``prereclamp - watts > 1e-6`` means the
-        re-clamp bit. On a clamped slot we keep ``watts`` UNCHANGED (the ceiling
-        — the true day-ahead value lies between ceiling/factor and the ceiling,
-        and equals the ceiling whenever the day-ahead curve alone would also
-        clamp, the typical clear-midday case); on an unclamped slot we divide the
-        factor out exactly as before. A site with NO inverter groups never clamps
-        (prereclamp == watts every slot) so its headline is bit-identical to the
-        pre-MED-1 divide-always path. When ``corrected_unclamped_watts`` is empty
-        (a v0.1 / older cached result) we cannot tell clamped from unclamped, so
-        we fall back to divide-always (SPEC §8).
+        re-clamp bit. On a clamped slot the SCALAR-FREE served value is
+        ``prereclamp[i] / factor`` (``corrected_unclamped == first-clamped *
+        factor``, engine.py:723-726 — the factor divides out EXACTLY), capped at
+        the physical ``slot_ceilings[i]`` so a day-ahead curve that clamps on its
+        own still contributes the ceiling (the typical clear-midday case). Keeping
+        the served ceiling instead (the pre-IRC-4 code) ballooned the headline by
+        the full factor headroom under a large intraday scalar (20.07.: +3.27 kWh
+        at scalar 2.355). On an unclamped slot we divide the factor out as before.
+        A site with NO inverter groups never clamps (prereclamp == watts every
+        slot) so its headline is bit-identical to the divide-always path. When
+        ``corrected_unclamped_watts`` or ``slot_ceilings`` is empty (a v0.1 /
+        older cached result) a clamped slot keeps the served ceiling unchanged
+        (SPEC §8).
         """
         return self._dayahead_today_kwh_over(
             now, result.slot_starts, result.total_watts,
-            result.corrected_unclamped_watts,
+            result.corrected_unclamped_watts, result.slot_ceilings,
         )
 
     def _dayahead_today_kwh_ac(
@@ -1457,15 +1462,60 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """AC-side analogue of :meth:`_dayahead_today_kwh` over the served AC curve.
 
         Identical day-ahead headline logic — strip the transient intraday factor,
-        but keep a CLAMPED slot's served ceiling (the factor never reached it) —
-        applied to ``ac_watts`` with the AC re-clamp detected from
-        ``ac_corrected_unclamped_watts``. See :meth:`_dayahead_today_kwh` for the
-        full MED-1 rationale; the only change is DC->AC on both series.
+        and on a CLAMPED slot cap the scalar-free value at the physical AC ceiling
+        (``ac_slot_ceilings``) — applied to ``ac_watts`` with the AC re-clamp
+        detected from ``ac_corrected_unclamped_watts``. See
+        :meth:`_dayahead_today_kwh` for the full rationale; the only change is
+        DC->AC on all three series.
         """
         return self._dayahead_today_kwh_over(
             now, result.slot_starts, result.ac_watts,
-            result.ac_corrected_unclamped_watts,
+            result.ac_corrected_unclamped_watts, result.ac_slot_ceilings,
         )
+
+    def _dayahead_slot_strips(
+        self,
+        now: datetime,
+        slot_starts,
+        watts_series,
+        prereclamp,
+        ceilings,
+    ):
+        """Yield ``(index, served_watts, scalar_free_watts)`` per local-today slot.
+
+        ``scalar_free_watts`` is the day-ahead-stable served value with the
+        transient intraday factor removed: divided out on an UNclamped slot; on a
+        re-clamped slot (``prereclamp[i] - served > 1e-6``) the pre-factor served
+        value ``prereclamp[i] / factor`` capped at the physical ``ceilings[i]``
+        (``corrected_unclamped == first-clamped * factor``, so ``prereclamp/factor``
+        is EXACTLY scalar-free; the cap keeps a day-ahead curve that clamps on its
+        own at the ceiling). When ``prereclamp`` or ``ceilings`` is unavailable
+        (older cached result) a clamped slot keeps the served ceiling unchanged
+        (legacy divide-else path). The per-slot factor is reconstructed by
+        :meth:`_intraday_factor_for_slot` so every strip shares ONE copy of the
+        factor math.
+        """
+        have_prereclamp = len(prereclamp) == len(watts_series)
+        have_ceilings = len(ceilings) == len(watts_series)
+        local_today = dt_util.as_local(now).date()
+        for i, (start, watts) in enumerate(
+            zip(slot_starts, watts_series, strict=False)
+        ):
+            start_utc = dt_util.as_utc(start)
+            if dt_util.as_local(start_utc).date() != local_today:
+                continue
+            factor = self._intraday_factor_for_slot(start_utc, now)
+            if have_prereclamp and prereclamp[i] - watts > 1e-6:
+                # Re-clamp bit: recover the scalar-free served value from the
+                # pre-re-clamp total and cap it at the physical ceiling. Without a
+                # ceiling series (older result) keep the served ceiling unchanged.
+                if have_ceilings:
+                    scalar_free = min(prereclamp[i] / factor, ceilings[i])
+                else:
+                    scalar_free = watts
+            else:
+                scalar_free = watts / factor
+            yield i, watts, scalar_free
 
     def _dayahead_today_kwh_over(
         self,
@@ -1473,35 +1523,52 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         slot_starts,
         watts_series,
         prereclamp,
+        ceilings,
     ) -> float | None:
         """Shared scalar-stripping headline roll-up for one served curve.
 
-        Sums today's local-day slots of ``watts_series``, dividing the transient
-        intraday factor back out on an UNclamped slot and keeping the served
-        ceiling on a clamped one (``prereclamp[i] - watts > 1e-6``). The per-slot
-        intraday factor is reconstructed by :meth:`_intraday_factor_for_slot` so
-        the DC and AC strips share ONE copy of the factor math. Returns None when
-        no slot falls on the local today.
+        Sums today's local-day slots of the scalar-free per-slot values from
+        :meth:`_dayahead_slot_strips`. Returns None when no slot falls on the
+        local today.
         """
-        have_prereclamp = len(prereclamp) == len(watts_series)
-        local_today = dt_util.as_local(now).date()
         total_wh = 0.0
         seen = False
-        for i, (start, watts) in enumerate(
-            zip(slot_starts, watts_series, strict=False)
+        for _i, _served, scalar_free in self._dayahead_slot_strips(
+            now, slot_starts, watts_series, prereclamp, ceilings
         ):
-            start_utc = dt_util.as_utc(start)
-            if dt_util.as_local(start_utc).date() != local_today:
+            seen = True
+            total_wh += scalar_free * 0.25
+        return round(total_wh / 1000.0, 3) if seen else None
+
+    def _dayahead_today_kwh_ac_p10(
+        self, result: ForecastResult, now: datetime
+    ) -> float | None:
+        """Today's AC P10 headline with the intraday scalar stripped ASYMMETRICALLY.
+
+        Under a large intraday scalar the served band scales up as one, so a spike
+        lifted the DAILY P10 above the end-of-day actual (FOR-7: p10 > Ist on 3/6
+        days). The P90 daily sensor keeps the scalar (an up-correction may widen
+        the optimistic tail); the P10 must not RISE from a high scalar. Per
+        local-today slot the served P10 band watts (``result.ac_p10_watts``) are
+        scaled by ``min(1, scalar_free/served)`` of the CENTRAL AC strip: a factor
+        > 1 divides out (band drops toward its day-ahead value), a factor <= 1
+        keeps the served (down-corrected) band. Returns None when no AC band was
+        issued this cycle (``ac_p10_watts`` empty) or no slot is today.
+        """
+        p10w = result.ac_p10_watts
+        if not p10w:
+            return None
+        total_wh = 0.0
+        seen = False
+        for i, served, scalar_free in self._dayahead_slot_strips(
+            now, result.slot_starts, result.ac_watts,
+            result.ac_corrected_unclamped_watts, result.ac_slot_ceilings,
+        ):
+            if i >= len(p10w):
                 continue
             seen = True
-            factor = self._intraday_factor_for_slot(start_utc, now)
-            # A clamped slot's served ``watts`` is the AC ceiling the factor never
-            # reached, so dividing it out understates the day-ahead value — keep
-            # the ceiling. Otherwise recover the pre-factor value by dividing.
-            if have_prereclamp and prereclamp[i] - watts > 1e-6:
-                total_wh += watts * 0.25
-            else:
-                total_wh += (watts / factor) * 0.25
+            ratio = scalar_free / served if served > 1e-9 else 1.0
+            total_wh += p10w[i] * min(1.0, ratio) * 0.25
         return round(total_wh / 1000.0, 3) if seen else None
 
     def _intraday_factor_for_slot(
@@ -1651,6 +1718,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         quantile_curves_ac = self._quantile_curves_ac(result)
         if quantile_curves_ac:
             data[DATA_KEY_QUANTILE_CURVES_AC] = quantile_curves_ac
+        # Daily AC P10 headline with the intraday scalar stripped asymmetrically
+        # (FOR-7): the served band curve above keeps the scalar, but the P10 day
+        # aggregate must not balloon under a spike. None when no AC band issued.
+        data[DATA_KEY_ENERGY_TODAY_AC_P10] = self._dayahead_today_kwh_ac_p10(
+            result, now
+        )
         return data
 
     def _quantile_curves(self, result: ForecastResult) -> dict[str, dict[str, float]]:

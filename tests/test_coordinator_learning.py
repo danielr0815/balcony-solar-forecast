@@ -963,12 +963,18 @@ def test_build_data_carries_learner_keys():
 
 
 def _one_slot_result(
-    *, total_w: float, prereclamp_w: float | None, start: datetime
+    *,
+    total_w: float,
+    prereclamp_w: float | None,
+    start: datetime,
+    ceiling_w: float | None = None,
 ) -> ForecastResult:
     """A single-slot ForecastResult with an explicit pre-re-clamp total.
 
     ``prereclamp_w`` is ``corrected_unclamped_watts[0]``; pass None to leave the
-    field empty (the legacy / older-cached case).
+    field empty (the legacy / older-cached case). ``ceiling_w`` is
+    ``slot_ceilings[0]``; None leaves it empty (older result -> a clamped slot
+    keeps the served ceiling).
     """
     return ForecastResult(
         slot_starts=(start,),
@@ -976,6 +982,7 @@ def _one_slot_result(
         plane_results=(PlaneResult(name="M1", watts=(total_w,)),),
         hourly_wh={start.isoformat(): total_w * 0.25},
         corrected_unclamped_watts=() if prereclamp_w is None else (prereclamp_w,),
+        slot_ceilings=() if ceiling_w is None else (ceiling_w,),
     )
 
 
@@ -1042,18 +1049,60 @@ def test_dayahead_today_no_groups_bit_identical_to_legacy():
     assert energy == pytest.approx(round(served / 1.3 * 0.25 / 1000.0, 3))
 
 
+def test_dayahead_today_clamped_high_scalar_uses_prereclamp_not_ceiling():
+    """IRC-4/FOR-7: a re-clamped slot under a LARGE scalar whose day-ahead value
+    lies BELOW the ceiling contributes ``prereclamp/factor``, not the served
+    ceiling — the pre-fix keep-ceiling path ballooned the headline by the whole
+    factor headroom (20.07. +3.27 kWh at scalar 2.355)."""
+    c = _make_coordinator()
+    c._intraday_scalar = 2.355  # factor at age 0 == 2.355 (within band)
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    # Day-ahead (scalar-free) power 500 W; the 2.355x scalar lifted it to 1177.5
+    # W, re-clamped to the 800 W ceiling. The true day-ahead value is 500 W.
+    result = _one_slot_result(
+        total_w=800.0, prereclamp_w=1177.5, start=start, ceiling_w=800.0,
+    )
+    energy = c._dayahead_today_kwh(result, now=start)
+    # Uses prereclamp/factor == 500 W -> 0.125 kWh (NOT the ballooned 0.2 kWh).
+    assert energy == pytest.approx(round(500.0 * 0.25 / 1000.0, 3))
+    assert energy != pytest.approx(0.2)
+
+
+def test_dayahead_today_clamped_dayahead_curve_still_delivers_ceiling():
+    """When the day-ahead curve ALONE would clamp (prereclamp/factor >= ceiling),
+    the re-clamped slot still contributes the ceiling — the scalar-free value is
+    capped there, so a genuinely clamped clear midday is unchanged."""
+    c = _make_coordinator()
+    c._intraday_scalar = 2.355
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    # Day-ahead value 800 W == the ceiling; scalar lifted it to 1884 W.
+    # prereclamp/factor == 800 == ceiling -> min() keeps the ceiling.
+    result = _one_slot_result(
+        total_w=800.0, prereclamp_w=1884.0, start=start, ceiling_w=800.0,
+    )
+    energy = c._dayahead_today_kwh(result, now=start)
+    assert energy == pytest.approx(round(800.0 * 0.25 / 1000.0, 3))  # 0.2
+
+
 # ---------------------------------------------------------------------------
 # AC-side headline: _dayahead_today_kwh_ac strips the factor identically
 # ---------------------------------------------------------------------------
 
 
 def _one_slot_ac_result(
-    *, ac_w: float, ac_prereclamp_w: float | None, start: datetime
+    *,
+    ac_w: float,
+    ac_prereclamp_w: float | None,
+    start: datetime,
+    ac_ceiling_w: float | None = None,
+    ac_p10_w: float | None = None,
 ) -> ForecastResult:
     """A single-slot ForecastResult carrying an explicit AC pre-clamp total.
 
     ``ac_prereclamp_w`` is ``ac_corrected_unclamped_watts[0]``; None leaves it
-    empty (the legacy / older-cached case). The DC fields are filler.
+    empty (the legacy / older-cached case). ``ac_ceiling_w`` is
+    ``ac_slot_ceilings[0]``; ``ac_p10_w`` is ``ac_p10_watts[0]`` (the served AC
+    P10 band watts) — None leaves each field empty. The DC fields are filler.
     """
     return ForecastResult(
         slot_starts=(start,),
@@ -1064,6 +1113,8 @@ def _one_slot_ac_result(
         ac_corrected_unclamped_watts=(
             () if ac_prereclamp_w is None else (ac_prereclamp_w,)
         ),
+        ac_slot_ceilings=() if ac_ceiling_w is None else (ac_ceiling_w,),
+        ac_p10_watts=() if ac_p10_w is None else (ac_p10_w,),
     )
 
 
@@ -1098,6 +1149,68 @@ def test_dayahead_today_ac_empty_prereclamp_falls_back_to_divide():
     result = _one_slot_ac_result(ac_w=800.0, ac_prereclamp_w=None, start=start)
     energy = c._dayahead_today_kwh_ac(result, now=start)
     assert energy == pytest.approx(round(800.0 / 1.3 * 0.25 / 1000.0, 3))
+
+
+def test_dayahead_today_ac_clamped_high_scalar_uses_prereclamp_not_ceiling():
+    """AC-side IRC-4/FOR-7: a clamped slot under a large scalar contributes the
+    scalar-free ``prereclamp/factor`` capped at the AC ceiling, not the ballooned
+    served ceiling."""
+    c = _make_coordinator()
+    c._intraday_scalar = 2.355
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    # Day-ahead AC 500 W, scalar -> 1177.5 W, AC-clamped to the 800 W limit.
+    result = _one_slot_ac_result(
+        ac_w=800.0, ac_prereclamp_w=1177.5, start=start, ac_ceiling_w=800.0,
+    )
+    energy = c._dayahead_today_kwh_ac(result, now=start)
+    assert energy == pytest.approx(round(500.0 * 0.25 / 1000.0, 3))  # 0.125
+    assert energy != pytest.approx(0.2)
+
+
+# ---------------------------------------------------------------------------
+# FOR-7 (B1): the DAILY AC P10 must not RISE under a high intraday scalar
+# ---------------------------------------------------------------------------
+
+
+def test_dayahead_ac_p10_strips_high_scalar():
+    """A high scalar lifts the whole served band; the daily P10 aggregate divides
+    the transient factor back out so it stays at its scalar-free value."""
+    c = _make_coordinator()
+    c._intraday_scalar = 2.0  # factor at age 0 == 2.0
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    # Central AC served 800 W (unclamped: prereclamp == served), P10 band 600 W
+    # (both carry the 2.0x scalar). Scalar-free central == 400 W, so the P10
+    # strip ratio is 0.5 -> daily P10 == 600 * 0.5 == 300 W.
+    result = _one_slot_ac_result(
+        ac_w=800.0, ac_prereclamp_w=800.0, start=start, ac_p10_w=600.0,
+    )
+    p10 = c._dayahead_today_kwh_ac_p10(result, now=start)
+    assert p10 == pytest.approx(round(300.0 * 0.25 / 1000.0, 3))  # 0.075
+    # NOT the scalar-inflated served band (600 W -> 0.15 kWh).
+    assert p10 != pytest.approx(round(600.0 * 0.25 / 1000.0, 3))
+
+
+def test_dayahead_ac_p10_keeps_down_correction():
+    """A down-correction (factor < 1) keeps the served, scaled-down P10 band —
+    min(1, scalar_free/served) == 1, so the conservative low band is preserved."""
+    c = _make_coordinator()
+    c._intraday_scalar = 0.8  # factor at age 0 == 0.8
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    result = _one_slot_ac_result(
+        ac_w=640.0, ac_prereclamp_w=640.0, start=start, ac_p10_w=480.0,
+    )
+    p10 = c._dayahead_today_kwh_ac_p10(result, now=start)
+    # ratio = (640/0.8)/640 == 1.25, min(1, 1.25) == 1 -> served band kept.
+    assert p10 == pytest.approx(round(480.0 * 0.25 / 1000.0, 3))  # 0.12
+
+
+def test_dayahead_ac_p10_none_without_band():
+    """No AC band issued (ac_p10_watts empty) -> daily P10 is None."""
+    c = _make_coordinator()
+    c._intraday_scalar = 2.0
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    result = _one_slot_ac_result(ac_w=800.0, ac_prereclamp_w=800.0, start=start)
+    assert c._dayahead_today_kwh_ac_p10(result, now=start) is None
 
 
 def test_build_data_carries_ac_keys():

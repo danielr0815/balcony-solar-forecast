@@ -511,6 +511,15 @@ class ForecastResult:
     # unclamped one. Empty () on a v0.1 / older cached result => strip falls back
     # to divide-always (SPEC §8).
     corrected_unclamped_watts: tuple[float, ...] = ()
+    # Physical AC-clamp ceiling per slot, aligned to ``slot_starts``: the group
+    # DC limits + the ungrouped (ceiling-free) planes' corrected DC watts. The
+    # day-ahead headline strip (SPEC §8) caps a re-clamped slot's SCALAR-FREE
+    # value at this ceiling (``min(corrected_unclamped/factor, ceiling)``) instead
+    # of keeping the served, scalar-inflated ceiling — dividing the factor out on
+    # a clamped slot understated the headline, keeping the served ceiling ballooned
+    # it under a large intraday scalar (IRC-4/FOR-7). Empty () on a v0.1 / older
+    # cached result => the strip keeps the served value (legacy divide-always).
+    slot_ceilings: tuple[float, ...] = ()
     # Which learner layer(s) shaped ``total_watts`` this cycle
     # (const.CORRECTION_SOURCE_*). Empty string == not yet set by the engine.
     correction_source: str = ""
@@ -541,6 +550,15 @@ class ForecastResult:
     # slot (ceiling kept) from an unclamped one (factor divided out). Empty () on a
     # v0.1 / older cached result => strip falls back to divide-always (SPEC §8).
     ac_corrected_unclamped_watts: tuple[float, ...] = ()
+    # AC analogue of ``slot_ceilings``: the group AC limits + the ungrouped
+    # planes' served AC watts per slot. Feeds the AC day-ahead headline strip.
+    ac_slot_ceilings: tuple[float, ...] = ()
+    # Per-slot AC P10 band watts (``min(ac_watts * bf10, ac_ceiling)``), aligned
+    # to ``slot_starts`` — the per-slot source the DAILY P10 headline strips the
+    # intraday scalar out of (FOR-7): a spike must not lift the whole band, so the
+    # daily P10 aggregate divides the transient factor back out on each slot while
+    # the served band curve keeps it. Empty when no bands were issued this cycle.
+    ac_p10_watts: tuple[float, ...] = ()
     # Hourly Wh roll-ups of the AC P10 / P90 band curves (keyed by ISO-8601 UTC
     # hour, the SAME keys as ``ac_hourly_wh``). The AC analogue of
     # ``p10_hourly_wh`` / ``p90_hourly_wh``: per slot ac_band_watts =

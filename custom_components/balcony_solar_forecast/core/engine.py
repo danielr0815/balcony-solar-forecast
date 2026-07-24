@@ -856,6 +856,10 @@ def compute_forecast(
     # p10/p90 hourly curves, capped at the per-slot AC ceiling. P50 == ac_watts.
     ac_p10_hourly_wh: dict[str, float] = {}
     ac_p90_hourly_wh: dict[str, float] = {}
+    # Per-slot AC P10 band watts (capped at the AC ceiling): the daily-P10
+    # headline strip (FOR-7) needs each slot's served band value, not just the
+    # hourly roll-up. Empty unless bands are issued below.
+    ac_p10_watts: tuple[float, ...] = ()
     band_by_slot = hk.band_by_slot
     if band_by_slot:
         p10_watts, p50_watts, p90_watts = quantiles.band_curve_from_corrected(
@@ -907,6 +911,7 @@ def compute_forecast(
         ac_p90_w = tuple(
             min(w, ac_slot_ceilings[i]) for i, w in enumerate(ac_p90_w)
         )
+        ac_p10_watts = ac_p10_w
         for i, start in enumerate(slot_starts):
             hkey = (
                 start.astimezone(UTC)
@@ -934,6 +939,9 @@ def compute_forecast(
         raw_hourly_wh=raw_hourly_wh,
         raw_daily_kwh=raw_daily_kwh,
         corrected_unclamped_watts=tuple(corrected_unclamped_watts),
+        slot_ceilings=tuple(slot_ceilings),
+        ac_slot_ceilings=tuple(ac_slot_ceilings),
+        ac_p10_watts=ac_p10_watts,
         correction_source=hk.correction_source,
         p10_watts=p10_watts,
         p50_watts=p50_watts,

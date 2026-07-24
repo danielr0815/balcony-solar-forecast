@@ -450,9 +450,16 @@ Degradationsgrund — die Kurve läuft unverändert auf den gelernten Bändern w
   aktuellen Tages wieder herausgerechnet (die servierte `watts`/`wh_period`-Kurve
   behält ihn). **Clamp-Interaktion:** auf einem Slot, dessen hochkorrigierte
   Gruppenleistung die WR-AC-Obergrenze trifft (der Re-Clamp greift, servierter
-  Wert = Deckel), wird der Skalar NICHT herausdividiert, sondern der Deckelwert
-  unverändert übernommen — sonst würde eine nie angewandte Korrektur wieder
-  abgezogen und die Headline untertrieben (bis Faktor 2,5).
+  Wert = Deckel), ist der skalarfreie Wert `min(prereclamp/Faktor, Deckel)` —
+  `prereclamp` (`corrected_unclamped_watts` = erst-geklammert × Faktor) geteilt
+  durch den Faktor ergibt exakt den skalarfreien servierten Wert, am physischen
+  Deckel gekappt. So bleibt die Headline day-ahead-stabil: das bloße Behalten des
+  servierten Deckels ließ sie unter großem Skalar um die volle Faktor-Reserve
+  ballonieren (IRC-4/FOR-7; 20.07.: +3,27 kWh bei Skalar 2,355), das Herausdividieren
+  auf einem geklammerten Slot untertriebe sie. Klammert die Day-ahead-Kurve schon
+  allein (`prereclamp/Faktor ≥ Deckel`, klarer Mittag), liefert der Slot weiter den
+  Deckel. Ohne `slot_ceilings`/`corrected_unclamped_watts` (v0.1-Cache) bleibt der
+  servierte Deckel unverändert.
 - **AC-Standard (v0.17):** die Haupt-Sensoren (`energy_production_today /
   _tomorrow / _d2`, `power_production_now`, P10/P90-Bänder) melden die **AC**-Kurve
   (betreiberseitiger Standard hinter den Wechselrichtern). Das modellinterne
@@ -717,7 +724,14 @@ empirischen P10/P50/P90-**Multiplikatoren** je Stunde auf die korrigierte Kurve
 angewandt. **Cold Start:** zu wenige Samples in einem Bin → Band kollabiert auf
 P50 (keine Fake-Spreizung). Ausgabe über die `get_forecast`-Service-Response
 (plane-agnostische Gesamt-P10/P50/P90 in 15 min + stündlich), optionale
-Tages-P10/P90-Sensoren, `wh_period`-P10/P90-Attribute. Enable-Flag Default
+Tages-P10/P90-Sensoren, `wh_period`-P10/P90-Attribute. **Intraday-Skalar am
+Tages-P10 asymmetrisch (FOR-7):** die servierte Band-Kurve behält den Skalar, aber
+das **Tages-P10-Aggregat** darf durch einen Hoch-Skalar nicht steigen (nach Spikes
+lag P10 an 3/6 Tagen über dem End-Ist). Je Slot wird das servierte AC-P10-Band mit
+`min(1, skalarfrei/serviert)` des zentralen AC-Strips skaliert — Faktor > 1 dividiert
+heraus, Faktor ≤ 1 behält das (herunterkorrigierte) servierte Band. Das **Tages-P90**
+behält den Skalar (eine Aufwärtskorrektur darf die optimistische Flanke weiten).
+Enable-Flag Default
 **AN**, Kill-Switch im Options-Flow. Nächtlich trainiert aus
 issued(korrigiert) vs. Ist — die bestehenden Ringe werden wiederverwendet.
 

@@ -834,6 +834,11 @@ DATA_KEY_QUANTILE_CURVES = "quantile_curves"      # {"p10": {iso: Wh}, "p50": ..
 # AC-side band curves (Phase 2): {"p10": {iso_hour: Wh}, "p90": {iso_hour: Wh}}
 # HOURLY Wh (the AC bands are computed at hourly resolution; P50 == ac_watts).
 DATA_KEY_QUANTILE_CURVES_AC = "quantile_curves_ac"
+# Daily AC P10 headline (kWh | None) with the intraday scalar stripped
+# asymmetrically (FOR-7): the served band curve keeps the scalar, this day
+# aggregate does not rise under a spike. P90 stays the plain today-sum of the
+# served AC P90 band curve, so no separate key is carried for it.
+DATA_KEY_ENERGY_TODAY_AC_P10 = "energy_today_kwh_ac_p10"
 DATA_KEY_SCOREBOARD = "scoreboard"                # dict: engine_mae / per-comparison mae / vs_best_pct / gate / strata
 DATA_KEY_KILL_GATE_PASSED = "kill_gate_passed"    # bool | None (None == not enough window yet)
 

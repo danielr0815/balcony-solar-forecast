@@ -325,6 +325,38 @@ class TestAcBands:
             assert res.ac_p90_hourly_wh[hkey] == pytest.approx(1.5 * wh)
             assert res.ac_p10_hourly_wh[hkey] == pytest.approx(0.6 * wh)
 
+    def test_ac_p10_watts_per_slot_present_with_bands(self, patched_physics):
+        # The per-slot AC P10 band watts (the daily-P10 strip source, FOR-7) are
+        # populated only when bands are issued, aligned to slot_starts, and cap
+        # at the served AC (p10 factor 0.6 < 1 never bites the ceiling here).
+        site = _never_clamped_site()
+        weather = _clear_sky_series()
+        band = QuantileBands(p10=0.6, p50=1.0, p90=1.5, n=40)
+        base = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        assert base.ac_p10_watts == ()  # no bands -> empty
+        band_by_slot = {s: band for s in base.slot_starts}
+        res = engine.compute_forecast(
+            site, weather, now=_TEST_DATE,
+            hooks=LearnerHooks(band_by_slot=band_by_slot),
+        )
+        assert len(res.ac_p10_watts) == len(res.slot_starts)
+        for i, acw in enumerate(res.ac_watts):
+            assert res.ac_p10_watts[i] == pytest.approx(0.6 * acw)
+
+    def test_slot_ceilings_always_present(self, patched_physics):
+        # The DC + AC per-slot ceilings (the day-ahead headline strip source,
+        # IRC-4) are populated on every run, aligned to slot_starts.
+        site = _clamped_site()
+        weather = _clear_sky_series()
+        res = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        assert len(res.slot_ceilings) == len(res.slot_starts)
+        assert len(res.ac_slot_ceilings) == len(res.slot_starts)
+        # The served curves never exceed their per-slot ceilings.
+        for i, w in enumerate(res.total_watts):
+            assert w <= res.slot_ceilings[i] + 1e-6
+        for i, w in enumerate(res.ac_watts):
+            assert w <= res.ac_slot_ceilings[i] + 1e-6
+
     def test_ac_band_capped_at_ac_ceiling(self, patched_physics):
         # A clamp-biting site: the P90 factor (2.0) would double the noon AC, but
         # the AC ceiling (the single group's 800 W AC limit) caps it. Each hour's
