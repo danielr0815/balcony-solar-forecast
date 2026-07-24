@@ -505,6 +505,12 @@ Membern oder deterministischem GHI < 20 W/m² fällt auf das gelernte Band zurü
 Ein `band_source`-Attribut auf den P10/P90-Sensoren fasst die heutigen Slots
 zusammen: `learned` (nur Ring), `envelope` (Ensemble hat irgendwo geweitet) oder
 `ensemble` (gelernt überall kollabiert, Ensemble lieferte die ganze Spreizung).
+Ergänzend (SCT-4) liefert dasselbe Sensor-Attribut sowie die
+`get_forecast`-Antwort ein `band_source_by_day`: pro **lokalem Tag** die Zahl der
+Slots je Herkunft (`bin`/`envelope`/`ensemble`/`neutral`) — so ist sichtbar,
+welche Prognosetage tatsächlich ein trainiertes Band tragen, ohne eine
+384-Einträge-Slot-Karte in den Recorder zu schreiben (das Attribut ist per
+`_unrecorded_attributes` von der Historie ausgenommen).
 
 ## 7. Degradationsleiter (nie still!)
 
@@ -564,6 +570,17 @@ Degradationsgrund — die Kurve läuft unverändert auf den gelernten Bändern w
   **und** Service-with-Response `balcony_solar_forecast.get_forecast`
   (15-min/stündlich, P10/P50/P90 sobald vorhanden) — das saubere Muster
   nach dem Vorbild `weather.get_forecasts`.
+- **Diagnose-Dump (Config-Entry-Diagnostics, SPEC-2/SCT-4):** der
+  `store`-Block meldet echte Füllstände (`issued_days`, `actuals_days`,
+  `hourly_actuals_days`, `snapshot_ring`/`_capacity`, `schema_version`) und der
+  `learners.state`-Block echte Zählungen (`bias_cells`, `quantile_bins`,
+  `shademap_channels`, `shademap_bins` je Kanal) — die Blöcke sind **nicht mehr
+  fälschlich `available: false`**. Der `forecast`-Block trennt
+  `daily_kwh_dc` vs. `daily_kwh_ac` (statt eines mehrdeutigen `daily_kwh`). Der
+  `quantiles`-Block führt je Bin `n`, `days` und `trained` (= `n ≥
+  QUANTILE_MIN_SAMPLES` **und** `days ≥ QUANTILE_MIN_DAYS`, exakt das
+  Servier-Gate). Der `day_ahead_bias_status`-Sensor führt je Zelle zusätzlich
+  `clamped: true`, wenn θ am Band-Rand (`DAY_AHEAD_BIAS_MIN`/`MAX`) klebt.
 - **Energy-Dashboard:** Energy-Platform-Hook `async_get_solar_forecast`
   (`wh_hours`).
 - Perspektivisch kann battery_manager (separates Projekt, eigene
@@ -962,6 +979,19 @@ Prognose-Markierung auf Höhe der Prognose-Tagessumme: vergangene Tage zeigen
 die **ausgegebene** Summe aus dem Ring, der heutige Tag die
 **Live**-`wh_period`-Summe, und Tage ohne archivierten Snapshot bleiben
 **ehrlich lückenhaft** (keine Markierung, nichts wird nachgerechnet).
+
+**`get_issued_forecast`-Antwort (Treffer, IRC-5/SCT-4):** `hourly_wh` (bedient/
+korrigiert) und `raw_hourly_wh` sind **explizit DC**. Zusätzlich liefert die
+Aktion `hourly_wh_ac` = DC × `eta`, wobei `eta` die DC→AC-Effizienz **zum
+Ausgabezeitpunkt** ist (in den Snapshot eingefroren, `eta_source: "snapshot"`);
+ältere Snapshots ohne gespeichertes eta fallen auf das **aktuelle** gelernte eta
+zurück und weisen das über `eta_source: "current"` aus (eine Site-Skalare —
+Datenblatt-Default bis die Kalibrierung vertraut ist; per-Gruppen-Overrides
+werden nicht abgebildet). `cloud_class_by_hour` (Day-ahead-Wetterklasse je
+Stunde) und `applied_factor_by_hour` (`hourly_wh / raw_hourly_wh`, Stunden mit
+raw≈0 ausgelassen) machen die angewandte Korrektur sichtbar. Die DC-Semantik
+hatte in der Forensik alle Issued-Ratios um ~8 % geschönt — der explizite
+AC-/DC-Ausweis behebt das.
 
 Seit v0.9 fixiert die Karte ihre x-Achse auf die **jahresstabile**
 Tageslicht-Azimutspanne (Minimum/Maximum aus beiden Sonnenwenden, Python-seitig

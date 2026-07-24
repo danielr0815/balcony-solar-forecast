@@ -256,7 +256,7 @@
     },
     "get_issued_forecast": {
       "name": "Ausgegebene Prognose abrufen",
-      "description": "Liefert die Day-Ahead-Prognose so, wie sie für ein vergangenes lokales Datum ausgegeben wurde, aus dem 90-Tage-Ausgabe-Ring (der eingefrorene Stand, ohne Rückschau). Wird von der gestrichelten Prognoselinie der Power-History-Karte für vergangene Tage genutzt.",
+      "description": "Liefert die Day-Ahead-Prognose so, wie sie für ein vergangenes lokales Datum ausgegeben wurde, aus dem 90-Tage-Ausgabe-Ring (der eingefrorene Stand, ohne Rückschau). Wird von der gestrichelten Prognoselinie der Power-History-Karte für vergangene Tage genutzt. Ein Treffer liefert die DC-Kurven plus eine AC-Kurve (hourly_wh_ac, mit dem eta zum Ausgabezeitpunkt), die Wolkenklasse je Stunde und den angewandten Korrekturfaktor.",
       "fields": {
         "entry_id": {
           "name": "Konfigurationseintrag",

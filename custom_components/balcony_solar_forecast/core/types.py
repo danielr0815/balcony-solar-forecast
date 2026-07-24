@@ -14,6 +14,7 @@ Conventions (all internal):
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 
@@ -1199,6 +1200,11 @@ class IssuedSnapshot:
     # a slow-inactive day (slow-only == raw); the monitor then uses the legacy
     # shared signal.
     slow_only_hourly_wh: dict[str, float] = field(default_factory=dict)
+    # Site inverter DC->AC efficiency in effect AT ISSUE TIME (IRC-5/SCT-4): lets
+    # a reader convert the stored DC curves to AC without hindsight. ``None`` on
+    # legacy/v0.1 snapshots (written before v0.20.7); the reader then falls back
+    # to the CURRENT learned eta and flags the substitution.
+    eta: float | None = None
     version: int = 2
 
     @classmethod
@@ -1228,6 +1234,13 @@ class IssuedSnapshot:
                 if isinstance(k, str) and isinstance(v, str)
             }
 
+        eta_raw = d.get("eta")
+        eta = (
+            float(eta_raw)
+            if isinstance(eta_raw, (int, float)) and math.isfinite(float(eta_raw))
+            else None
+        )
+
         return cls(
             issued_at=str(d.get("issued_at", "")),
             status=str(d.get("status", "")),
@@ -1238,6 +1251,7 @@ class IssuedSnapshot:
             per_plane=per_plane,
             cloud_class_by_hour=cloud_class_by_hour,
             slow_only_hourly_wh=_fd("slow_only_hourly_wh"),
+            eta=eta,
             version=_safe_int(d.get("version", 2), 2),
         )
 
@@ -1260,6 +1274,10 @@ class IssuedSnapshot:
         # 90-day issued ring.
         if self.slow_only_hourly_wh:
             out["slow_only_hourly_wh"] = dict(self.slow_only_hourly_wh)
+        # Written only when known (a legacy/omitted eta round-trips as None, which
+        # the reader replaces with the current learned eta).
+        if self.eta is not None:
+            out["eta"] = self.eta
         return out
 
 

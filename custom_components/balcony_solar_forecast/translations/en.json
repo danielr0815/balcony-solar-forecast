@@ -256,7 +256,7 @@
     },
     "get_issued_forecast": {
       "name": "Get issued forecast",
-      "description": "Return the day-ahead forecast as it was issued for one past local date, read from the 90-day issued ring (the frozen stand, no hindsight). Used by the power-history card's dashed forecast line on past days.",
+      "description": "Return the day-ahead forecast as it was issued for one past local date, read from the 90-day issued ring (the frozen stand, no hindsight). Used by the power-history card's dashed forecast line on past days. A hit returns the DC curves plus an AC curve (hourly_wh_ac, using the issue-time eta), the per-hour cloud class and the applied correction factor.",
       "fields": {
         "entry_id": {
           "name": "Config entry",

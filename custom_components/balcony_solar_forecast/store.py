@@ -129,6 +129,7 @@ from .core.types import (
     QuantileState,
     ScoreboardState,
     ShademapState,
+    _safe_int,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -693,6 +694,14 @@ class ForecastStore:
 
     def actuals_dates(self) -> list[str]:
         return sorted(self._data[STORE_KEY_ACTUALS_LOG])
+
+    def schema_version(self) -> int:
+        """The persisted on-disk schema version (for diagnostics, SPEC-2)."""
+        return _safe_int(self._data.get(_SCHEMA_KEY), _CURRENT_SCHEMA)
+
+    def hourly_actuals_dates(self) -> list[str]:
+        """Sorted local-date keys of the per-channel hourly-actuals ring."""
+        return sorted(self._data.get(STORE_KEY_HOURLY_ACTUALS, {}))
 
     # ------------------------------------------------------------------
     # Per-channel hourly actuals ring (short window; shademap trainer input)

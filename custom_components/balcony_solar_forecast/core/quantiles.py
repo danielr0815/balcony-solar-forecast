@@ -61,6 +61,7 @@ __all__ = [
     "QuantileSample",
     "empirical_percentile",
     "bands_for_bin",
+    "ring_evidence",
     "quantile_bin_key",
     "train_quantiles",
     "apply_bands",
@@ -111,6 +112,40 @@ def _entry_date_relerr(entry: object) -> tuple[str, float] | None:
     if rv is None:
         return None
     return ("", rv)
+
+
+def ring_evidence(ring: object) -> tuple[int, int]:
+    """``(n, effective_days)`` for one bin ring — the trained-gate evidence.
+
+    ``n`` is the count of parseable relerr samples; ``effective_days`` is the
+    number of distinct dated days PLUS a provable lower bound on the days the
+    un-dated (legacy) samples span (``ceil(undated / cap)``, the fewest days that
+    many capped samples could have come from). This is the SINGLE source of the
+    cold-start gate used by both :func:`bands_for_bin` (spread vs. neutral) and
+    the coordinator's diagnostics summary (SPEC §6/§10), so the two can never
+    diverge. A non-sequence / empty ring yields ``(0, 0)``. Never raises.
+    """
+    if not isinstance(ring, (list, tuple)):
+        return (0, 0)
+    n = 0
+    distinct_dates: set[str] = set()
+    undated = 0
+    for entry in ring:
+        parsed = _entry_date_relerr(entry)
+        if parsed is None:
+            continue
+        iso, _relerr = parsed
+        n += 1
+        if iso:
+            distinct_dates.add(iso)
+        else:
+            undated += 1
+    if n == 0:
+        return (0, 0)
+    effective_days = len(distinct_dates) + math.ceil(
+        undated / QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN
+    )
+    return (n, effective_days)
 
 
 def _window_cutoff(training_date: str) -> str:
@@ -281,35 +316,19 @@ def bands_for_bin(
     if not ring:
         return QuantileBands.neutral()
 
-    # Extract relerr VALUES + day evidence, tolerating both the dated-pair and
-    # the legacy bare-number entry shapes (the loader normalises, but a directly
-    # constructed QuantileState may carry either). Junk entries are dropped.
-    vals: list[float] = []
-    distinct_dates: set[str] = set()
-    undated = 0
-    for entry in ring:
-        parsed = _entry_date_relerr(entry)
-        if parsed is None:
-            continue
-        iso, relerr = parsed
-        vals.append(relerr)
-        if iso:
-            distinct_dates.add(iso)
-        else:
-            undated += 1
-    n = len(vals)
+    # Extract relerr VALUES, tolerating both the dated-pair and the legacy
+    # bare-number entry shapes (the loader normalises, but a directly constructed
+    # QuantileState may carry either). Junk entries are dropped. The sample count
+    # and the effective-days evidence come from the SHARED ``ring_evidence`` gate
+    # (SPEC §6/§10) so this reader and the diagnostics summary cannot diverge.
+    vals: list[float] = [
+        parsed[1]
+        for entry in ring
+        if (parsed := _entry_date_relerr(entry)) is not None
+    ]
+    n, effective_days = ring_evidence(ring)
     if n == 0:
         return QuantileBands.neutral()
-
-    # Effective days: distinct dated days + a PROVABLE lower bound on the days the
-    # un-dated (legacy / grandfathered) samples span. The trainer never adds more
-    # than QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN to one bin on one day, so
-    # ceil(undated / cap) days is the fewest that many samples could have come
-    # from — this keeps a live install's pre-upgrade 90-day ring active across
-    # the upgrade instead of collapsing every band to P50 on the first restart.
-    effective_days = len(distinct_dates) + math.ceil(
-        undated / QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN
-    )
 
     if n < QUANTILE_MIN_SAMPLES or effective_days < QUANTILE_MIN_DAYS:
         # Cold start: no fabricated spread AND no fabricated SHIFT. A thin bin's

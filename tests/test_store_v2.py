@@ -780,6 +780,22 @@ def test_hourly_actuals_roundtrip_and_ring():
     assert store.get_hourly_actuals("2020-01-01") is None
 
 
+def test_schema_version_and_hourly_actuals_dates_accessors():
+    """Diagnostic read accessors (SPEC-2): on-disk schema + hourly-actuals days."""
+    store = _store()
+    # A fresh store reports the current schema.
+    assert store.schema_version() == STORAGE_DATA_VERSION_V3
+    assert store.hourly_actuals_dates() == []
+    store.record_hourly_actuals(
+        "2026-07-06", {"M1": {"2026-07-06T10:00:00+00:00": 120.0}}
+    )
+    store.record_hourly_actuals(
+        "2026-07-05", {"M1": {"2026-07-05T10:00:00+00:00": 90.0}}
+    )
+    # Sorted ascending, exactly like issued_dates() / actuals_dates().
+    assert store.hourly_actuals_dates() == ["2026-07-05", "2026-07-06"]
+
+
 def test_bootstrap_rejects_wrong_site_signature():
     from custom_components.balcony_solar_forecast.const import (
         BOOTSTRAP_KEY_SITE_SIGNATURE,

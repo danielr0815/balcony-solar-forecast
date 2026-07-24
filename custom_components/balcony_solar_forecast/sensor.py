@@ -74,6 +74,7 @@ from .const import (
     ATTR_WH_PERIOD_P90,
     CONF_COMPARISON_SENSORS,
     DATA_KEY_BAND_SOURCE,
+    DATA_KEY_BAND_SOURCE_BY_DAY,
     DATA_KEY_BIAS_CELLS,
     DATA_KEY_DRIFT_MAE,
     DATA_KEY_ENERGY_TODAY_AC_P10,
@@ -370,6 +371,14 @@ def _build_forecast_response(
         bands = _band_blocks(data)
         if bands:
             entry_resp.update(bands)
+        # Band provenance (SCT-4): the today-level source label + the compact
+        # per-local-day count breakdown, so a consumer of the raw curves can tell
+        # which days actually carry a trained band. Both absent when no band
+        # exists (quantiles off / cold start).
+        entry_resp["band_source"] = data.get(DATA_KEY_BAND_SOURCE, "learned")
+        by_day = data.get(DATA_KEY_BAND_SOURCE_BY_DAY)
+        if isinstance(by_day, dict) and by_day:
+            entry_resp["band_source_by_day"] = dict(by_day)
         entries[eid] = entry_resp
     return {"entries": entries}
 
@@ -1217,6 +1226,9 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
 
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    # The per-day provenance map is a nested dict that shifts every cycle: keep it
+    # visible in the live state but OUT of the recorder (SCT-4, Recorder budget).
+    _unrecorded_attributes = frozenset({"band_source_by_day"})
 
     def __init__(self, coordinator: Any, key: str, band: str) -> None:
         super().__init__(coordinator, key)
@@ -1258,11 +1270,23 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
         Only present while a band actually EXISTS (state is not None): labelling
         a non-existent band "learned" claimed a trained source on an unknown
         sensor (v0.19.2 status honesty) — with no band there is no source.
+
+        ``band_source_by_day`` (SCT-4) breaks the same taxonomy down PER LOCAL DAY
+        as per-slot counts (``bin`` / ``envelope`` / ``ensemble`` / ``neutral``),
+        so a consumer can see which forecast days actually carry a trained band.
+        Kept out of the recorder (``_unrecorded_attributes``); present only when
+        the coordinator emitted it (quantiles on).
         """
         if self.native_value is None:
             return None
         data = self.coordinator.data or {}
-        return {"band_source": data.get(DATA_KEY_BAND_SOURCE, "learned")}
+        attrs: dict[str, Any] = {
+            "band_source": data.get(DATA_KEY_BAND_SOURCE, "learned")
+        }
+        by_day = data.get(DATA_KEY_BAND_SOURCE_BY_DAY)
+        if isinstance(by_day, dict) and by_day:
+            attrs["band_source_by_day"] = by_day
+        return attrs
 
 
 # ---------------------------------------------------------------------------

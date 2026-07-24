@@ -1005,3 +1005,14 @@ DATA_KEY_BAND_SOURCE = "band_source"
 BAND_SOURCE_LEARNED = "learned"
 BAND_SOURCE_ENSEMBLE = "ensemble"
 BAND_SOURCE_ENVELOPE = "envelope"
+
+# Per-slot band provenance, aggregated per LOCAL day so the Recorder never sees a
+# 384-entry per-slot map (SCT-4). {iso_date: {"bin": n, "envelope": n,
+# "ensemble": n, "neutral": n}} — how many of that day's forecast slots got a
+# trained-bin spread, an ensemble-fused / envelope-widened band, a pure ensemble
+# spread, or fell through neutral (no band). Absent when quantiles are off.
+DATA_KEY_BAND_SOURCE_BY_DAY = "band_source_by_day"
+BAND_SLOT_BIN = "bin"
+BAND_SLOT_ENVELOPE = "envelope"
+BAND_SLOT_ENSEMBLE = "ensemble"
+BAND_SLOT_NEUTRAL = "neutral"

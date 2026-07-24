@@ -215,6 +215,9 @@ async def snapshot_issued(coord, today: date) -> None:
         # monitor's per-layer attribution (audit #13b); {} when the slow layer
         # is inactive (slow-only == raw, so nothing extra is stored).
         slow_only_hourly_wh=coord._slow_only_hourly(iso),
+        # Site DC->AC efficiency in effect right now, so the issued AC curve can be
+        # reconstructed later without hindsight (IRC-5/SCT-4).
+        eta=coord._effective_inverter_eta(),
     )
     coord._store.record_issued(iso, snapshot.to_dict())
 

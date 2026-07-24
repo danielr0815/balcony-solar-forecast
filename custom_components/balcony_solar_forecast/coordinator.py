@@ -73,6 +73,10 @@ from ._glue_util import (
 )
 from ._nightly import _NIGHTLY_HOUR, _NIGHTLY_MINUTE
 from .const import (
+    BAND_SLOT_BIN,
+    BAND_SLOT_ENSEMBLE,
+    BAND_SLOT_ENVELOPE,
+    BAND_SLOT_NEUTRAL,
     BAND_SOURCE_ENSEMBLE,
     BAND_SOURCE_ENVELOPE,
     BAND_SOURCE_LEARNED,
@@ -91,6 +95,7 @@ from .const import (
     CORRECTION_SOURCE_NONE,
     CORRECTION_SOURCE_SHADEMAP,
     DATA_KEY_BAND_SOURCE,
+    DATA_KEY_BAND_SOURCE_BY_DAY,
     DATA_KEY_BIAS_CELLS,
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_CORRECTION_SOURCE,
@@ -316,6 +321,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Which source shaped TODAY's band slots (const BAND_SOURCE_*), for the
         # P10/P90 sensors' ``band_source`` attribute. Recomputed per hooks build.
         self._band_source: str = BAND_SOURCE_LEARNED
+        # Per-LOCAL-day band-provenance counts (SCT-4), recomputed per hooks build.
+        self._band_source_by_day: dict[str, dict[str, int]] = {}
 
         # Cached weather image + provenance for the degradation ladder.
         # _last_fetched_at is the PAYLOAD's age anchor: it advances ONLY when the
@@ -1061,6 +1068,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # pre-v0.16 cached state — working: the ensemble attrs only exist after
         # __init__ / an ensemble update.
         self._band_source = BAND_SOURCE_LEARNED
+        # Per-LOCAL-day band provenance counts (SCT-4): compact summary of how each
+        # day's slots resolved (trained bin / envelope / ensemble / neutral), so a
+        # consumer can see WHICH days actually carry a trained band without a
+        # per-slot map hitting the Recorder.
+        band_source_by_day: dict[str, dict[str, int]] = {}
         band_by_slot: dict[datetime, QuantileBands] | None = None
         ens_factors = (
             getattr(self, "_ensemble_factors", None)
@@ -1109,8 +1121,29 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 b = ensembleband_mod.fuse_bands(learned, ens)
                 # Omit a neutral (identity) band so the engine's `if band:` path
                 # short-circuits an all-1.0 multiply.
-                if not (b.p10 == 1.0 and b.p50 == 1.0 and b.p90 == 1.0):
+                neutral_band = b.p10 == 1.0 and b.p50 == 1.0 and b.p90 == 1.0
+                if not neutral_band:
                     bands[slot.start] = b
+                # Per-slot provenance -> per-day counts (same taxonomy as the
+                # today-level ``_band_source``): neutral (no band), envelope
+                # (ensemble widened a learned spread), ensemble (spread came from
+                # the ensemble alone) or bin (trained-bin spread, no ensemble).
+                if neutral_band:
+                    cat = BAND_SLOT_NEUTRAL
+                elif ens is not None:
+                    cat = (
+                        BAND_SLOT_ENVELOPE
+                        if not learned.collapsed
+                        else BAND_SLOT_ENSEMBLE
+                    )
+                else:
+                    cat = BAND_SLOT_BIN
+                day_counts = band_source_by_day.setdefault(
+                    local.date().isoformat(),
+                    {BAND_SLOT_BIN: 0, BAND_SLOT_ENVELOPE: 0,
+                     BAND_SLOT_ENSEMBLE: 0, BAND_SLOT_NEUTRAL: 0},
+                )
+                day_counts[cat] += 1
                 # Band-source accounting over TODAY's slots only.
                 if local.date() == today:
                     if ens is not None:
@@ -1128,6 +1161,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     if learned_spread_today
                     else BAND_SOURCE_ENSEMBLE
                 )
+        self._band_source_by_day = band_source_by_day
 
         slot_factor = None
         scalar = self._intraday_scalar
@@ -2017,6 +2051,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         data[DATA_KEY_BAND_SOURCE] = getattr(
             self, "_band_source", BAND_SOURCE_LEARNED
         )
+        # Per-local-day band-provenance counts (SCT-4). Compact by construction
+        # (<= horizon days x 4 ints); only emitted when non-empty so a
+        # quantiles-off cycle stays byte-identical to the pre-fix payload.
+        band_by_day = getattr(self, "_band_source_by_day", None)
+        if band_by_day:
+            data[DATA_KEY_BAND_SOURCE_BY_DAY] = {
+                d: dict(counts) for d, counts in band_by_day.items()
+            }
         data[DATA_KEY_LEARNER_STATUS] = self._learner_status()
         data[DATA_KEY_BIAS_CELLS] = self._bias_cells_summary()
         data[DATA_KEY_DRIFT_MAE] = self._latest_drift_mae()
@@ -2193,22 +2235,33 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
           ``n``       – trained days,
           ``applied`` – the factor actually served for that cell right now
                         (== ``theta`` once ``n >= RLS_MIN_SAMPLES``, else 1.0
-                        while the cell is still cold-starting and stays neutral).
+                        while the cell is still cold-starting and stays neutral),
+          ``clamped`` – True when the clamped theta sits AT the day-ahead band
+                        edge (``<= DAY_AHEAD_BIAS_MIN`` or ``>= DAY_AHEAD_BIAS_MAX``):
+                        the RLS wants to correct further than the band allows, an
+                        important diagnostic signal (e.g. clear|morning stuck at
+                        the 1.5 ceiling since bootstrap — SCT-4).
         Ratios are dimensionless (theta scales energy AND average power
         identically), so a dashboard can render them directly or multiply a
         per-part average-power baseline by ``applied`` to show the correction in
         W. ``day_part`` is the SOLAR-time part (v0.19), not a clock hour.
         """
+        from .const import DAY_AHEAD_BIAS_MAX, DAY_AHEAD_BIAS_MIN
+
         state = self._bias_state
         out: dict[str, dict[str, Any]] = {}
         for key, cell in sorted(state.cells.items()):
             cc, _, part = key.partition("|")
+            theta = cell.clamped_theta()
             out[key] = {
                 "cloud_class": cc,
                 "day_part": part,
-                "theta": round(cell.clamped_theta(), 4),
+                "theta": round(theta, 4),
                 "n": int(cell.n),
                 "applied": round(state.get_bias(cc, part), 4),
+                "clamped": (
+                    theta <= DAY_AHEAD_BIAS_MIN or theta >= DAY_AHEAD_BIAS_MAX
+                ),
             }
         return out
 
@@ -2336,6 +2389,22 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             out["raw"] = dict(raw)
         return out
 
+    def _effective_inverter_eta(self) -> float:
+        """The site DC->AC efficiency scalar to convert a DC curve to AC now.
+
+        The TRUSTED learned eta when the calibration has folded enough eligible
+        hours, else the datasheet DEFAULT_INVERTER_EFFICIENCY (a single site
+        scalar for the operator's identical inverters; per-group config overrides
+        are not reflected — observability only, IRC-5). Stored into each fresh
+        issued snapshot so the issued AC curve can be reconstructed without
+        hindsight, and reused as the fallback for legacy snapshots that lack it.
+        """
+        from .const import DEFAULT_INVERTER_EFFICIENCY
+
+        cal = getattr(self, "_inverter_cal_state", None) or InverterCalState()
+        eta = inverter_cal_mod.effective_eta(cal)
+        return float(eta) if eta is not None else DEFAULT_INVERTER_EFFICIENCY
+
     def _train_quantiles_day(self, day: date) -> None:
         """Sample one closed ``day`` into the quantile relative-error ring."""
         return _nightly.train_quantiles_day(self, day)
@@ -2348,20 +2417,96 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Per-bin quantile sample counts for diagnostics (SPEC §6/§10).
 
         Reports the enable flag plus, per (class x part) bin, the sample count
-        and whether the bin is trained (n >= QUANTILE_MIN_SAMPLES, i.e. emits a
-        real spread rather than a collapsed-to-P50 band). Bins only — never the
-        raw relative-error values or the operator's location.
+        ``n``, the ``days`` of evidence (distinct dated days + a lower bound on
+        the un-dated legacy samples' span) and whether the bin is ``trained``.
+        ``trained`` mirrors the SERVING gate exactly (QRC-4): a bin emits a real
+        spread only with BOTH ``n >= QUANTILE_MIN_SAMPLES`` AND
+        ``days >= QUANTILE_MIN_DAYS`` — the same ``ring_evidence`` the band reader
+        uses, so a "trained" bin here is a bin that actually produces a band. Bins
+        only — never the raw relative-error values or the operator's location.
         """
-        from .const import QUANTILE_MIN_SAMPLES
+        from .const import QUANTILE_MIN_DAYS, QUANTILE_MIN_SAMPLES
 
         bins: dict[str, dict[str, Any]] = {}
         for key, ring in self._quantile_state.bins.items():
-            n = len(ring)
-            bins[key] = {"n": n, "trained": n >= QUANTILE_MIN_SAMPLES}
+            n, days = quantiles_mod.ring_evidence(ring)
+            bins[key] = {
+                "n": n,
+                "days": days,
+                "trained": (
+                    n >= QUANTILE_MIN_SAMPLES and days >= QUANTILE_MIN_DAYS
+                ),
+            }
         return {
             "available": True,
             "enabled": self._quantiles_enabled,
             "bins": bins,
+        }
+
+    def store_stats(self) -> dict[str, Any]:
+        """Persistence fill-levels for diagnostics (SPEC-2).
+
+        Reports the issued-ring day count, the daily- and hourly-actuals day
+        counts, the rollback snapshot-ring fill (+ its capacity) and the on-disk
+        schema version. Read defensively via the store's public accessors so a
+        legacy store missing one degrades that field to ``None`` rather than the
+        whole block to ``available: False`` (the pre-fix status lie).
+        """
+        from .const import LEARNER_SNAPSHOT_RING
+
+        store = self._store
+
+        def _count(name: str) -> int | None:
+            getter = getattr(store, name, None)
+            if not callable(getter):
+                return None
+            try:
+                return len(getter())
+            except Exception:  # noqa: BLE001 -- diagnostics must not raise
+                return None
+
+        schema_getter = getattr(store, "schema_version", None)
+        schema = None
+        if callable(schema_getter):
+            try:
+                schema = int(schema_getter())
+            except Exception:  # noqa: BLE001 -- diagnostics must not raise
+                schema = None
+        return {
+            "available": True,
+            "issued_days": _count("issued_dates"),
+            "actuals_days": _count("actuals_dates"),
+            "hourly_actuals_days": _count("hourly_actuals_dates"),
+            "snapshot_ring": _count("get_snapshots"),
+            "snapshot_ring_capacity": LEARNER_SNAPSHOT_RING,
+            "schema_version": schema,
+        }
+
+    def learner_state_summary(self) -> dict[str, Any]:
+        """Persisted learner-state fill-levels for diagnostics (SPEC-2).
+
+        Coordinate-free by construction: the day-ahead bias CELL count, the
+        quantile BIN count, and the shademap CHANNEL count with each channel's
+        learned-bin count. Read off the coordinator's live in-memory states so it
+        never raises (a bare/__new__-built coordinator degrades to zeros).
+        """
+        bias = getattr(self, "_bias_state", None)
+        quant = getattr(self, "_quantile_state", None)
+        shade = getattr(self, "_shademap_state", None)
+        bias_cells = len(getattr(bias, "cells", {}) or {})
+        quantile_bins = len(getattr(quant, "bins", {}) or {})
+        channels = getattr(shade, "channels", {}) or {}
+        shademap_bins = {
+            chan: len(bins or {})
+            for chan, bins in channels.items()
+            if isinstance(chan, str)
+        }
+        return {
+            "available": True,
+            "bias_cells": bias_cells,
+            "quantile_bins": quantile_bins,
+            "shademap_channels": len(shademap_bins),
+            "shademap_bins": shademap_bins,
         }
 
     # ------------------------------------------------------------------

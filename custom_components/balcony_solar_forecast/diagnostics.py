@@ -100,7 +100,13 @@ async def async_get_config_entry_diagnostics(
 
 
 def _forecast_summary(data: dict[str, Any]) -> dict[str, Any] | None:
-    """Compact, coordinate-free summary of the last forecast."""
+    """Compact, coordinate-free summary of the last forecast.
+
+    ``daily_kwh_dc`` is the DC (model-internal, learner/scoreboard-truth) local-
+    day roll-up; ``daily_kwh_ac`` is the served AC sibling. The two were
+    conflated as a single ``daily_kwh`` before v0.20.7 (SPEC-4), which read ~8 %
+    high vs. the operator-facing AC energy — the split names which is which.
+    """
     if not data:
         return None
     starts = data.get("slot_starts") or []
@@ -109,7 +115,8 @@ def _forecast_summary(data: dict[str, Any]) -> dict[str, Any] | None:
         "first_slot": starts[0] if starts else None,
         "last_slot": starts[-1] if starts else None,
         "plane_names": list((data.get("plane_watts") or {}).keys()),
-        "daily_kwh": dict(data.get("daily_kwh") or {}),
+        "daily_kwh_dc": dict(data.get("daily_kwh") or {}),
+        "daily_kwh_ac": dict(data.get("daily_kwh_ac") or {}),
         "hourly_count": len(data.get("hourly_wh") or {}),
     }
 

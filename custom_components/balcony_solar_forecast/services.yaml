@@ -242,8 +242,11 @@ get_issued_forecast:
     Return the day-ahead forecast AS IT WAS ISSUED for one past local date, read
     from the 90-day issued ring (the frozen ~01:30 stand, no hindsight). Read-only
     diagnostic used by the power-history card's dashed forecast line on past days;
-    a date with no archived snapshot returns "available: false". Returns a
-    response (SPEC §15.4).
+    a date with no archived snapshot returns "available: false". A hit returns the
+    DC curves (hourly_wh, raw_hourly_wh) plus hourly_wh_ac (= DC x the issue-time
+    eta; eta_source flags "snapshot" vs. a "current"-eta fallback for legacy
+    snapshots), cloud_class_by_hour and applied_factor_by_hour. Returns a response
+    (SPEC §15.4).
   fields:
     entry_id:
       name: Config entry
