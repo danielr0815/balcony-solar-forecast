@@ -133,8 +133,11 @@ tests) and importing the plugin pulls the POSIX-only `fcntl` (unimportable on
 Windows). So the plugin only ever breaks a suite that never uses it. Disabling
 it runs the **full** meaningful suite identically on Linux, macOS, WSL and
 Windows (`pytest-asyncio`, installed via PHACC, still drives the async tests).
-This is exactly what `make test` and the CI `tests` job do — CI runs
-`python -m pytest tests -q -p no:homeassistant`.
+This is what `make test` and the CI `tests` job do — CI runs the same
+`python -m pytest tests -p no:homeassistant`, plus `--cov` flags for a
+report-only coverage summary. Do **not** add a `-q`: `pyproject.toml` already
+sets `addopts = "-q"`, and a second one escalates to `-qq`, which drops the
+`N passed, M skipped` line.
 
 ## 5. Versioning & releases
 

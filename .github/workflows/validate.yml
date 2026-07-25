@@ -139,8 +139,11 @@ jobs:
       # prints a visible per-file terminal summary (skip-covered trims the
       # fully-covered files) but there is deliberately NO `--cov-fail-under`,
       # so coverage never fails the build — it informs, it does not block.
+      # No `-q` here: `pyproject.toml` already sets `addopts = "-q"`, and a
+      # second one escalates to `-qq`, which drops the `N passed, M skipped`
+      # line from the log — the one line a CI run exists to show.
       - name: Run test suite
         run: >-
-          python -m pytest tests -q -p no:homeassistant
+          python -m pytest tests -p no:homeassistant
           --cov=custom_components/balcony_solar_forecast
           --cov-report=term-missing:skip-covered
