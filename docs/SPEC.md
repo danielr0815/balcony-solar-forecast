@@ -1,7 +1,8 @@
 # Spezifikation: Balcony Solar Forecast — Mehrebenen-PV-Prognose mit Selbstlernen
 
-> Status: **v0.18.1 (2026-07-12)** — alle Phasen bis v0.4 (Scoreboard/
-> Quantile/Dashboard, §14) plus v0.5 (Verschattungsprofil, §15) umgesetzt;
+> Status: **v0.23.0 (2026-07-25)** — alle Phasen bis v0.4 (Scoreboard/
+> Quantile/Dashboard, §14) plus die Betreiber-Oberfläche ab v0.5
+> (Verschattungsprofil, gebündelte Karten, Wartungsaktionen, §15) umgesetzt;
 > v0.1.0 seit 2026-07-06 live im Parallellauf. Historie in CHANGELOG.md.
 > Gründungsdokument des Projekts `balcony_solar_forecast` (eigenständige
 > HA-Custom-Integration, danielr0815/balcony-solar-forecast). Synthese aus
@@ -12,10 +13,96 @@
 > als **eigenes Projekt**, nicht als Modul in battery_manager — bestehende
 > Konsumenten koppeln nur über Standard-HA-Schnittstellen.
 > Zielversionen v0.1.0 … v0.4.0 (je Phase einzeln deploybar, mit
-> Abbruch-Gates); Erweiterungen ab v0.5 als Addendum-Sektionen (§15 ff.).
+> Abbruch-Gates); Erweiterungen ab v0.5 wurden zunächst als Addendum-Sektionen
+> angehängt (§14/§15) — seit dem Wegweiser (§0) gilt stattdessen die dort
+> festgeschriebene **thematische** Einsortierung.
 > Umsetzung: Opus 4.8 Ultracode; Prüfungen: Fable 5.
 
+## §0 Wegweiser: was gilt, wo es steht, wie es geändert wird
+
+### Was dieses Dokument ist
+
+`docs/SPEC.md` ist der **Vertrag** dieses Projekts: es beschreibt normativ, was
+die Integration `balcony_solar_forecast` tut — Physik, Lernschichten, Gates,
+Schnittstellen, Persistenz. Es ist **zugleich** das Gründungs- und
+Entscheidungsdokument: einige Abschnitte halten den Erkenntnis- und
+Entscheidungsstand von 2026-07-05/06 fest und beschreiben ausdrücklich **nicht**
+das heutige Verhalten (Liste unten). Code und Tests zitieren die Abschnitte als
+`SPEC §x.y` (rund 455 Fundstellen in 40 Dateien), deshalb sind **bestehende
+Abschnittsnummern unveränderlich** — geändert werden dürfen Titel*text* und
+Inhalt, nie die Nummerierung. Wahrheitsquelle bleibt der Code: widerspricht die
+SPEC dem implementierten Verhalten, ist genau eines von beiden ein Bug, und der
+Widerspruch wird aufgelöst statt stehengelassen. Die Änderungsregel für neues
+Verhalten steht am Ende dieses Wegweisers.
+
+### Thema → maßgebliche Abschnitte
+
+| Thema | Maßgeblich | Ergänzend |
+|---|---|---|
+| Architektur, Modulschnitt, Pipeline, Coordinator-Takte | **§4** | §7 (Degradation), §14.4 (Store-Schema) |
+| Wetterbezug (Open-Meteo, Fetch-Kadenz, Cache) | **§4** (Schritt 1) | §6.1 (Ensemble-API), §7 |
+| Physik / Transposition (Hay-Davies, IAM, Exzentrizität, Bifazial) | **§4** (Schritte 2–4) | §13.4 (Startwerte), Anhang A (Azimut) |
+| Elektrik: Zelltemperatur, η, DC→AC-Kette, AC-Clamps | **§4** (Schritt 7 + „DC→AC-Kette") | §5 (Re-Clamp nach den Lernern), §8 |
+| Horizont & Verschattung (Tabellen, `tau_points`, `diffuse_tau`, SVF) | **§4** (Schritt 5) | §13.4 (Feldsemantik, Validierung), §15.1–§15.3 |
+| Lernschicht 1 — Shademap (langsam, geometrisch) | **§5** | §13.5, §15.2 (Gate-Kopplung), §9 Phase 3 |
+| Lernschicht 2 — Intraday-Skalar (schnell, transient) | **§5** | §8 (Headline-Strip), §14.2 (Band-Asymmetrie) |
+| Lernschicht 3 — Day-ahead-Bias (RLS, θ) | **§5** | §5 (Fingerprint/Reseed), §6 (Bins) |
+| Lernschicht 4 — Wechselrichter-η-Kalibrierung | **§5** | §8 (AC-Standard) |
+| Wolkenklassifikation (k_c-Taxonomie, `CLASSIFIER_VERSION`) | **§5** | §6, §14.1 (dieselben Klassen) |
+| Unsicherheit / Quantile P10/P50/P90 | **§14.2** | §6 (Verfahren, Ring), §6.1 (Ensemble-Hüllkurve) |
+| Degradationsleiter | **§7** | §8 (Sensorik), §4 (Last-Good-Cache) |
+| Konsumenten-Schnittstellen, Entitäten, Attribute, Diagnostics | **§8** | §14.1 (Scoreboard-Sensoren), §15.1 (Diagramm-Entitäten) |
+| Aktionen (Services) | **§16** | §5, §6, §14.3, §15.4–§15.6 (je definierender Abschnitt) |
+| Scoreboard & Kill-Gate | **§14.1** | §9/§10 (Gate-Kriterien, Metrikdefinition) |
+| Store / Persistenz / Ringe | **§14.4** | §4 (Schreibsemantik), §6 (Quantilring), §5 (Rollback-Ring) |
+| Config-Schema, Validierung, Fingerprint | **§5** (Fingerprint/Reseed) | §13.4 (Horizont-Validierung), §4 (Generik), Anhang A |
+| Backfill / Bootstrap / Re-Bootstrap | **§6** | §15.6 (In-Process-Aktion), §9 Phase 2 |
+| Dashboard & Frontend-Karten | **§14.3** | §15.4 (Karten), §15.5 (Installations-Aktion) |
+
+### Historisch, nicht normativ
+
+Diese Abschnitte dokumentieren den **Entscheidungs- und Erkenntnisprozess**, nicht
+das aktuelle Verhalten. Sie bleiben unverändert erhalten (Herkunftsbeleg), sind
+aber nie die Grundlage für „so muss es sich verhalten":
+
+- **§1 Ausgangslage** — Befundlage vor Projektbeginn (2026-07-05).
+- **§2 Standort-Geometrie** — Referenzanlage des Betreibers; Beispiel und
+  Auslieferungs-Default, kein Pflichtverhalten der Integration (D-P9).
+- **§3 Kernfrage & Strategie-Entscheid** — Begründung der gewählten Strategie.
+- **§9 Phasenplan** — Lieferplan; **Ausnahme:** die dort definierten Gate- und
+  Abbruchkriterien gelten weiter (umgesetzt in §14.1).
+- **§11 Entscheidungspunkte (D-P1…D-P11)** — Entscheidungslog.
+- **§12 Betreiber-Antworten (B1…B12)** — Interview-Protokoll.
+- **§13 Messdaten-Befunde** — LTS-Analyse; **Ausnahme:** §13.4 trägt zusätzlich
+  die normative Feldsemantik und Validierung der Horizontzeilen.
+- **Anhang B Quellen** — Belegsammlung des Rechercheteils.
+
+Alles Übrige ist normativ.
+
+### Änderungsregel (verbindlich)
+
+1. **Thematisch einsortieren, nicht chronologisch anhängen.** Neues Verhalten
+   kommt als Unterabschnitt an das **Ende des thematisch zuständigen §** oder,
+   wenn es kein passendes Thema gibt, als **neuer Top-Level-§ mit thematischem
+   Titel**. Ein Unterpunkt unter einer fremden Versionsüberschrift ist verboten
+   (so landete der 0.23-Re-Bootstrap historisch als §15.6 unter einer
+   v0.5-Überschrift).
+2. **Nummern sind unveränderlich.** Bestehende Top-Level- und Unterabschnitts-
+   nummern werden nie umnummeriert, nie gelöscht, nie neu belegt — der Code
+   zitiert sie. Titel*text* darf präzisiert werden; ein Versionsbezug bleibt als
+   Herkunftsvermerk in Klammern erhalten.
+3. **Gleicher PR.** Jede Verhaltensänderung zieht die SPEC im **selben** PR nach;
+   eine Konstante wird mit **Namen** genannt (nie mit Zeilennummer), damit die
+   Aussage nicht mit dem nächsten Edit veraltet.
+4. **Nichts löschen.** Überholte Aussagen werden korrigiert oder als historisch
+   markiert, nicht entfernt.
+
 ## 1. Ausgangslage: zwei Engpässe, ein Konfigurationsdefizit
+
+*Historisch/Entscheidungslog — beschreibt die Befundlage vom 2026-07-05 vor
+Projektbeginn, nicht das aktuelle Verhalten. Aktuell gilt: siehe §4 (Architektur
+und Pipeline) und §5 (Lernschichten); die Antwort auf E3/E4 steht in §4
+(Schritte 4–5).*
 
 | # | Befund | Wirkung |
 |---|---|---|
@@ -33,6 +120,11 @@ unsichtbar). Beide Quellen ergänzen sich: **PVGIS = Fernfeld, Betreiber/
 Lernen = Nahfeld.**
 
 ## 2. Standort-Geometrie (Referenzbeispiel des Betreibers)
+
+*Referenzbeispiel/Bestandsaufnahme (Stand 2026-07-05) — beschreibt die Anlage des
+Betreibers und den Auslieferungs-Default `DEFAULT_SITE`, nicht das Pflicht-
+verhalten der Integration (D-P9: alles ist Konfiguration). Aktuell gilt: siehe §4
+(Generik) und Anhang A (Konventionen).*
 
 Die Integration ist generisch (N Ebenen, frei konfigurierbare
 Mess-Entitäten); das konkrete Setup dient als Referenz und Testfall.
@@ -75,6 +167,9 @@ Verschattung: (a) Hang O/SO 200–300 m (Morgen; Winter fast ganztags),
 (d) häufiger Winternebel (Wetterfehler-Klasse, keine Geometrie).
 
 ## 3. Kernfrage & Strategie-Entscheid
+
+*Historisch/Entscheidungslog — begründet die Strategiewahl vom 2026-07-05, nicht
+das aktuelle Verhalten. Aktuell gilt: siehe §4.*
 
 **Frage des Betreibers:** Reicht ein Aufsatz („Addon-Plugin") auf die
 *Ausgaben* von Open-Meteo Solar Forecast, oder was ist die beste
@@ -341,13 +436,33 @@ nächtlich eingefroren → keine Zirkularität); ist θ für den Slot inaktiv, i
 der Faktor 1,0 und die modellierte Seite gleich der Roh-Kurve (die
 ausgelieferte Kurve trägt dann ebenfalls kein θ). Day-ahead-Bias (seit v0.2.0 implementiert, per Default
 aktiv): 1 RLS-Bias-Skalar je (Wolkenklasse × Tagesabschnitt), nächtlich
-trainiert und über den Options-Flow abschaltbar. Die Zellen sind ge*lernt*
+trainiert und über den Options-Flow abschaltbar.
+**Tagesabschnitte in scheinbarer SONNENZEIT (v0.19):** ein Slot wird nicht nach
+der Ortsuhr, sondern nach dem Stundenwinkel der Sonne einsortiert
+(`solpos.hours_from_solar_noon` → `bias.day_part_for_solar`): `midday` ist das um
+den wahren Mittag symmetrische Fenster `|hours_from_solar_noon| <
+MIDDAY_SOLAR_HALFWIDTH_H` (2,0 h), davor `morning`, danach `afternoon`. Feste
+Ortsuhrzeiten (die früheren 10:00/14:00 — `DAY_PART_MORNING_END_HOUR` /
+`DAY_PART_AFTERNOON_START_HOUR`) driften gegen die Sonne über Sommerzeitwechsel
+und Jahreszeit; die Uhr-Variante (`bias.day_part_for_hour`,
+`bias.day_ahead_factor`) bleibt nur als **Rückfall**, wenn die Standort-Länge
+fehlt. **Anwendung und nächtliches Training teilen dieselbe Sonnenzeit-Binnung**
+(`_nightly.day_part_for_hourkey`), ebenso die Quantilbins (§14.2) und der
+Offline-Backfill (§6) — sonst meinten Zelle und Trainingssample verschiedene
+Sonnenstände. Die Zellen**schlüssel** (`Wolkenklasse|Tagesabschnitt`) sind
+unverändert, der Wechsel migrierte also keinen Lernzustand.
+Die Zellen sind ge*lernt*
 je Abschnitt, werden aber **stetig angewandt**: nahe einer internen
-Abschnittsgrenze (10:00, 14:00) werden die beiden angrenzenden Faktoren
-zeitlich linear überblendet (± `DAY_PART_BLEND_HALFWIDTH_MIN`), damit die
+Abschnittsgrenze (±`MIDDAY_SOLAR_HALFWIDTH_H` um den wahren Mittag) werden die
+beiden angrenzenden Faktoren linear über die Sonnenzeit überblendet
+(± `DAY_PART_SOLAR_BLEND_HALFWIDTH_H` = 0,75 Sonnenstunden ≙ 45 min; die
+Uhr-Variante nutzt `DAY_PART_BLEND_HALFWIDTH_MIN`), damit die
 Korrektur nie als harte Stufe springt — die Prognoseform kommt aus
 Wetter × Physik × Verschattung (stetig), also muss auch der aufgesetzte
-Residual-Korrektor stetig sein (`bias.day_ahead_factor`).
+Residual-Korrektor stetig sein (`bias.day_ahead_factor_solar`). Eine Zelle wird
+**erst ab `RLS_MIN_SAMPLES` trainierten Tagen serviert** — darunter liefert
+`BiasState.get_bias` exakt `DAY_AHEAD_BIAS_NEUTRAL`; das gelernte θ selbst ist auf
+[`DAY_AHEAD_BIAS_MIN`, `DAY_AHEAD_BIAS_MAX`] geklemmt.
 Die **Wolkenklasse** eines Slots (`bias.classify_cloud`, gemeinsame Taxonomie
 für Day-ahead-Bias, Quantilbins und Scoreboard-Strata) wird — nach der stets
 vorrangigen Nebel-Regel — über den **Clear-Sky-Index** k_c = GHI /
@@ -390,7 +505,8 @@ n ≈ 100) nur ~0,001/Tag nachziehen; daher werden **alle** Zellen neu angesät
 Verstärkung hängt an P, **nicht** an n) und ihr effektives n auf
 `DAY_AHEAD_BIAS_RESEED_N` gedeckelt, das aktuelle θ bleibt als Startwert erhalten
 (sanfter als `reset_day_ahead_bias`, das θ auf neutral löscht). Zusätzlich
-INFO-Log + HA-Repair-Issue (Re-Bootstrap/Reset empfohlen). Ein **Erststart** ohne
+INFO-Log + HA-Repair-Issue `config_changed_bias_reseed`
+(`ISSUE_CONFIG_CHANGED_BIAS_RESEED`; Re-Bootstrap/Reset empfohlen). Ein **Erststart** ohne
 gespeicherten Fingerprint (frische Installation oder erster Lauf nach Einführung
 des Features) speichert nur den aktuellen Fingerprint — nichts wird angesät.
 Alle Lerner-Korrekturen (Intraday-Skalar, Day-ahead-Bias) und die
@@ -426,10 +542,24 @@ nie Setup-Crash) und reitet **nicht** auf dem Rollback-Ring (selbst-gatend).
 - Label-Gates im Trainer: eingefrorene Sensoren (unverändert + altes
   `last_updated` = fehlend), Energie-Monotonie, Messkanal-Dropout ⇒
   ganzen Tag verwerfen; nächtlicher Job **idempotent** (datums-gekeyt,
-  doppelt laufbar).
+  doppelt laufbar). Der Job holt zusätzlich versäumte Tage **nach**
+  (`NIGHTLY_CATCHUP_MAX_DAYS` zurück ab gestern), damit ein Neustart oder eine
+  Downtime keine Trainingstage verliert; jeder nachgeholte Tag durchläuft
+  dieselben Gates und denselben Idempotenzmarker.
+- **Zeitstempel-Semantik der Ist-Werte (0.19.2, kritisch):** numerische `start`-
+  Werte einer Statistikzeile werden **nach Größenordnung** disambiguiert
+  (`_actuals._EPOCH_MS_THRESHOLD`: darüber Millisekunden = WebSocket-Format,
+  darunter Sekunden = In-Process-`statistics_during_period`). Die Fehldeutung
+  Sekunden-als-Millisekunden faltet alle Stunden eines Tages auf **einen**
+  1970-Schlüssel, worauf das Tages-Vollständigkeitsgate jeden Tag verwirft und
+  **jedes** nächtliche Lernen still verhungert (Day-ahead-Bias, Shademap,
+  Quantile, Scoreboard, Drift-Monitor gleichzeitig). Dieselbe Prüfung gilt für
+  `scripts/backfill.py` und den In-Process-Re-Bootstrap (§15.6).
 - **Drift-Monitor**: rollierende 7-Tage-MAE korrigiert vs. reine Physik;
   verliert der Lerner 7 Tage in Folge → Auto-Abschaltung + HA-Repair-
-  Issue; letzte 10 Lernstände für Rollback (`LEARNER_SNAPSHOT_RING`, bewusst
+  Issue (`fast_learner_auto_disabled` / `slow_learner_auto_disabled`, je
+  Config-Entry gescoped und persistent, damit die Warnung einen Neustart
+  überlebt wie das Abschalt-Flag); letzte 10 Lernstände für Rollback (`LEARNER_SNAPSHOT_RING`, bewusst
   größer als der 7-Tage-Verluststreak, damit ein Rollback stets auf einen
   Stand VOR dem Streak zugreift; `DRIFT_ROLLBACK_SNAPSHOTS = 3` ist ein
   Legacy-Alias); Store validate-and-clamp beim
@@ -595,9 +725,11 @@ Degradationsgrund — die Kurve läuft unverändert auf den gelernten Bändern w
   (15-min/stündlich, P10/P50/P90 sobald vorhanden) — das saubere Muster
   nach dem Vorbild `weather.get_forecasts`.
 - **Diagnose-Dump (Config-Entry-Diagnostics, SPEC-2/SCT-4):** der
-  `store`-Block meldet echte Füllstände (`issued_days`, `actuals_days`,
+  `store`-Block meldet echte Füllstände (aus `coordinator.store_stats()`:
+  `issued_days`, `actuals_days`,
   `hourly_actuals_days`, `snapshot_ring`/`_capacity`, `schema_version`) und der
-  `learners.state`-Block echte Zählungen (`bias_cells`, `quantile_bins`,
+  `learners.state`-Block echte Zählungen (aus
+  `coordinator.learner_state_summary()`: `bias_cells`, `quantile_bins`,
   `shademap_channels`, `shademap_bins` je Kanal) — die Blöcke sind **nicht mehr
   fälschlich `available: false`**. Der `forecast`-Block trennt
   `daily_kwh_dc` vs. `daily_kwh_ac` (statt eines mehrdeutigen `daily_kwh`). Der
@@ -605,13 +737,35 @@ Degradationsgrund — die Kurve läuft unverändert auf den gelernten Bändern w
   QUANTILE_MIN_SAMPLES` **und** `days ≥ QUANTILE_MIN_DAYS`, exakt das
   Servier-Gate). Der `day_ahead_bias_status`-Sensor führt je Zelle zusätzlich
   `clamped: true`, wenn θ am Band-Rand (`DAY_AHEAD_BIAS_MIN`/`MAX`) klebt.
+- **Statusehrlichkeit der Diagnose-Signale (0.19.2):** ein Diagnose-Sensor
+  behauptet nie eine Wirkung, die er nicht hat.
+  Die Lernstatus-Sensoren melden ausschließlich Werte aus
+  `LEARNER_STATUS_VALUES`: `active` (schaltet **und** formt die Kurve gerade),
+  `off` (Kill-Switch), `disabled_by_drift`, `frozen` (Kollaps-Detektor) und
+  `cold_start` — aktiviert, aber **ohne** gelernten Zustand (frische
+  Installation, direkt nach `reset_day_ahead_bias`); `active` wäre dort eine
+  Statuslüge. Unbekannte Werte melden `None`, nie einen erfundenen Status.
+  Das Attribut `bias_cells` bleibt bei leerem Lerner als `{}` mit `cells_n: 0`
+  bestehen (ein verschwindendes Attribut sah aus wie ein Defekt).
+  `power_production_now` weist neben `inverter_efficiency` ein
+  `inverter_efficiency_source: config | learned` aus — ohne AC-Zähler ist η ein
+  wortwörtliches Config-Echo und sagt das jetzt. Die P10/P90-Sensoren tragen
+  `band_source` **nur, solange ein Band existiert** (kein Band ⇒ kein
+  Herkunftslabel, analog zur Kopplung in der `get_forecast`-Antwort, §6.1).
 - **Energy-Dashboard:** Energy-Platform-Hook `async_get_solar_forecast`
-  (`wh_hours`).
+  (`wh_hours`) — gespeist aus der servierten **AC**-Stundenkurve; ohne Prognose
+  liefert der Hook `None` statt einer alten Kurve (§7).
 - Perspektivisch kann battery_manager (separates Projekt, eigene
   Entscheidung) seine P3-Anforderung „stündliche PV-Prognosen direkt
   nutzen" über den Service oder die Attribute erfüllen.
 
 ## 9. Phasenplan (je Phase einzeln deploybar, mit Gates)
+
+*Historisch/Entscheidungslog — beschreibt den Lieferplan und den Umsetzungsstand
+vom Juli 2026, nicht das aktuelle Verhalten (alle Phasen 0–4 sind ausgeliefert).
+**Ausnahme:** die hier definierten Gate- und Abbruchkriterien sind weiterhin
+normativ; ihre Umsetzung steht in §14.1 (Scoreboard/Kill-Gate) und §10
+(Metrikdefinition).*
 
 | Phase | Version | Inhalt | Gate/Abbruchkriterium |
 |---|---|---|---|
@@ -639,6 +793,10 @@ MAE ≤ ~15 % an Mischtagen. Nebel bleibt die härteste Klasse (ehrlich:
 dort hilft v. a. Intraday + breite Quantile).
 
 ## 11. Entscheidungspunkte
+
+*Historisch/Entscheidungslog — hält die Entscheidungen D-P1…D-P11 vom
+2026-07-05/06 samt Begründung fest, nicht das aktuelle Verhalten. Aktuell gilt:
+der jeweils verlinkte Fachabschnitt (§4, §5, §6, §8, §14).*
 
 - **D-P1** Paketierung: **eigenständige Custom Integration**
   `balcony_solar_forecast` (Betreiber-Entscheid 2026-07-05; überstimmt
@@ -692,6 +850,9 @@ dort hilft v. a. Intraday + breite Quantile).
 
 ## 12. Betreiber-Antworten (2026-07-05 — alle 12 beantwortet)
 
+*Historisch/Entscheidungslog — Protokoll der Betreiber-Antworten vom 2026-07-05,
+nicht das aktuelle Verhalten. Aktuell gilt: §2 (Geometrie), §4/§5 (Umsetzung).*
+
 - **B1 WR:** HMS-**800**W-2T, AC-Limit **800 VA je WR**.
 - **B2 Zuordnung:** aus dem Energie-Dashboard ausgelesen → Tabelle §2.
 - **B3 Seiten-Azimute:** exakt 90° zur Front → 25°/205° exakt.
@@ -711,6 +872,13 @@ dort hilft v. a. Intraday + breite Quantile).
   **Summen-Sensoren** über alle Module → ausgeführt, siehe §9 Phase 0.
 
 ## 13. Messdaten-Befunde (24 Monate LTS, analysiert 2026-07-05)
+
+*Historisch/Analyse-Befund — beschreibt die LTS-Auswertung vom 2026-07-05 und die
+daraus abgeleiteten **Startwerte**, nicht das aktuelle Verhalten (die Werte sind
+seither durch Betreiber-Edits und die Shademap fortgeschrieben). **Ausnahme:**
+§13.4 trägt zusätzlich die normative Feldsemantik und Validierung der
+Horizontzeilen (`tau`, `tau_points`, `diffuse_tau`); sie gilt unverändert (§4
+Schritt 5).*
 
 Methode: stündliche Langzeitstatistik aller 8 Port-Sensoren (137 632
 Zeilen, 2024-07 … 2026-07) → **P90 je (Monat × Stunde)** ≈ Klartag-Profil
@@ -820,6 +988,9 @@ Sonnenständen ±20 %; (4) kein Output nachts/Winterflaute plausibel.
 
 ## Anhang B: Quellen (Auswahl, recherchiert & live verifiziert 2026-07-05)
 
+*Historisch/Belegsammlung — Rechercheliste vom 2026-07-05, nicht das aktuelle
+Verhalten; API-Details können sich seither geändert haben. Aktuell gilt: §4.*
+
 Open-Meteo Docs/Pricing/Terms (minutely_15 ICON-D2 nativ; GTI isotrop,
 Albedo 0,20, 1 Ebene/Call; Free-Tier 10 k/Tag; Previous-Runs- &
 Satellite-Radiation-API) · PVGIS v5.3 printhorizon/seriescalc (48
@@ -835,7 +1006,7 @@ recorder statistics_during_period, exclude_attributes,
 async_get_solar_forecast, Service-with-Response) · DWD CDC Phänologie
 (Laub-Termine, optional).
 
-## 14. v0.4 — Scoreboard + Quantile + Dashboard (D-P11)
+## 14. Skill-Scoreboard, Quantilbänder, Observability-Dashboard & Store-Schema v3 (ab v0.4)
 
 Phase 4 (v0.4.0), Betreiber-Entscheid 2026-07-06 (D-P11): drei Deliverables;
 der **battery_manager-Cutover ist DEFERRED**, bis das Scoreboard das Kill-Gate
@@ -866,7 +1037,9 @@ bei n = 2); Konsumenten blenden die Zeile aus (C1).
 - die **Ist**-Zahl ist die Summe der 8 Modul-Ist-Werte aus dem Actuals-Ring.
 
 **Sensorik:** die ausgelieferten Objekt-IDs sind **unpräfixiert** —
-`daily_kwh_mae` und `vs_best_baseline_pct` (positiv = Motor besser als bester
+`daily_kwh_mae` (Tages-kWh, Primärmetrik), `hourly_mae` (Wh je Tageslichtstunde,
+die berichtete Zweitmetrik aus §9/§10) und `vs_best_baseline_pct` (positiv =
+Motor besser als bester
 Baseline), je Vergleich `comparison_daily_kwh_mae_<slug>`: der Geräte-Slug trägt
 bereits `balcony_solar_forecast`, das Präfix-Weglassen vermeidet bewusst den
 `…_forecast_*`-Stutter (die internen DATA-Keys der Scoreboard-Summary behalten
@@ -938,9 +1111,16 @@ inner-schema: jeder v2-Schlüssel wird **byte-treu** durchgereicht, die drei
 neuen v3-Sektionen (`quantile_state`, `scoreboard_state`, `comparison_ring`)
 werden leer default-injiziert.
 
-## 15. v0.5 — Verschattungsprofil-Diagramm (Sonnenbahn vs. gelernte Verschattung)
+## 15. Betreiber-Oberfläche: Verschattungsprofil, Karten & Wartungsaktionen (ab v0.5)
 
-**Zweck:** Für ein wählbares Modul und ein wählbares lokales Datum die
+Dieser Abschnitt bündelt, was der Betreiber **sieht und bedient**: das
+Verschattungsprofil-Diagramm samt seiner Entitäten und Semantik (§15.1–§15.3),
+die mitgelieferten Lovelace-Karten (§15.4) sowie die beiden Wartungsaktionen
+Dashboard-Installation (§15.5) und In-Process-Re-Bootstrap (§15.6). Die
+Nummerierung ist historisch gewachsen (§15.1–§15.4 stammen aus v0.5, §15.5 aus
+v0.7.x, §15.6 aus v0.23) und bleibt unverändert, weil der Code sie zitiert.
+
+**Zweck des Verschattungsprofil-Diagramms (§15.1–§15.3):** Für ein wählbares Modul und ein wählbares lokales Datum die
 aktuell bekannte Verschattung sichtbar machen: die Sonnenbahn (Elevation über
 Sonnen-Azimut) mit der **effektiven** Beam-Transmittanz τ, die die Prognose an
 jeder Sonnenposition tatsächlich anwendet (statischer Konfig-Horizont, per
@@ -1169,3 +1349,41 @@ nutzbaren Tage) werden als `ServiceValidationError` mit verständlicher Meldung
 zurückgegeben, nie als Traceback. Default-Zeitraum: `end` = gestern (lokal),
 `start` = heute − `BOOTSTRAP_DEFAULT_MAX_DAYS` (Deckel; Tage ohne Actuals werden
 übersprungen, ein zu weiter Start korrigiert sich selbst).
+
+## 16. Aktionen (Services): normativer Überblick
+
+Die Aktionen sind über die SPEC verteilt definiert (jede bei ihrem Thema); dieser
+Abschnitt ist das **vollständige Inventar** und der Einstieg. Er beschreibt keine
+neue Semantik — bei Abweichung gilt der jeweils verlinkte Fachabschnitt.
+
+**Registrierung (verbindlich):** alle Aktionen werden **einmal in `async_setup`**
+registriert (`_services.async_register_services`, HA-Quality-Scale
+`action-setup`) — unabhängig vom Ladezustand eines Config-Entries. Ein Aufruf
+ohne geladenen Entry liefert dadurch einen verständlichen
+`ServiceValidationError` statt „Service not found". Jede Aktion nimmt ein
+optionales `entry_id`; **schreibende** Aktionen lösen genau **einen** Coordinator
+auf (`_resolve_single_coordinator`) und verlangen bei mehreren Anlagen ein
+explizites `entry_id`. Fehlerbilder sind stets `ServiceValidationError` mit
+Klartext, nie ein Traceback.
+
+| Aktion | Antwort | Wirkung | Definition |
+|---|---|---|---|
+| `get_forecast` | `ONLY` | servierte Kurve (15-min + stündlich), Bänder nur wenn vorhanden — inkl. `band_source`/`band_source_by_day` | §8, §6.1 |
+| `get_issued_forecast` | `ONLY` | eingefrorene **as-issued**-Tageskurve aus dem 90-Tage-Ring (DC + `hourly_wh_ac`, `cloud_class_by_hour`, `applied_factor_by_hour`); Fehltreffer ist kein Fehler | §15.4 |
+| `get_shade_profile` | `ONLY` | Verschattungsprofil für Modul/Datum **ohne** Änderung der Live-Auswahl und ohne den Memo zu verdrängen | §15.4 |
+| `dump_shademap` | `ONLY` | gelernte Schattenkarte als Polartabelle je Kanal (visuelle Prüfung gegen bekannte Hindernisse) | §5 |
+| `suggest_shade_groups` | `ONLY` | datengetriebener Gruppierungsvorschlag + Ähnlichkeitsmatrix + aktuelle Gruppierung | §5 |
+| `run_bootstrap` | `ONLY` | In-Process-Re-Bootstrap mit der Live-Config; **`dry_run` Default `true`** | §15.6 |
+| `import_bootstrap` | `OPTIONAL` | Import eines offline erzeugten Bootstrap-Payloads (additiv, mit Rollback-Snapshot) | §6 |
+| `rollback_learners` | `OPTIONAL` | Bias + Shademap + Quantile gemeinsam aus dem Snapshot-Ring zurücksetzen (nur Zustand, keine Schalter) | §5, §6 |
+| `reset_day_ahead_bias` | `OPTIONAL` | alle gelernten θ-Zellen löschen; die Kurve fällt sofort auf Physik + Shademap | §5 |
+| `install_dashboard` | `OPTIONAL` | Observability-Dashboard mit den echten Entity-IDs schreiben (Marker-Gate, idempotent) | §15.5 |
+
+**Lese- vs. Schreibgrenze:** die sechs `ONLY`-Aktionen sind — mit Ausnahme von
+`run_bootstrap` mit `dry_run: false` — **rein lesend** und dürfen weder
+Lernzustand noch Auswahl noch Store verändern. Die beiden Aktionen, die
+Lernzustand **ersetzen** (`import_bootstrap` und `run_bootstrap` im
+Import-Modus), legen vorher einen Rollback-Snapshot ab; `rollback_learners`
+liest aus demselben Ring. `reset_day_ahead_bias` ist bewusst ein **gezielter**
+Eingriff: es löscht nur die θ-Zellen und lässt Schalter, Shademap, Drift-Zustand
+und den Rollback-Ring unberührt (Rückweg über den letzten nächtlichen Snapshot).
