@@ -216,25 +216,32 @@ def _tau_points_diffuse_site() -> SiteConfig:
 
 
 @pytest.mark.parametrize(
-    "hour_start_h, expected_tau_label",
-    [(4, "fully-gated (el<4.5 -> tau_points 0)"),
-     (5, "intermediate (below edge -> tau_points ~0.5)")],
+    "hour_start, expected_tau_label",
+    [(datetime(2026, 8, 25, 4, 0, tzinfo=UTC),
+      "fully-gated (slot midpoint 04:30Z, el~0.9 < node 4.5 -> tau_points 0)"),
+     (datetime(2026, 8, 25, 4, 30, tzinfo=UTC),
+      "intermediate (slot midpoint 05:00Z, el~5.5 -> interpolated tau_points)")],
 )
 def test_reconstruct_matches_engine_on_tau_points_diffuse(
-    hour_start_h, expected_tau_label
+    hour_start, expected_tau_label
 ):
     """reconstruct_plane_hour == engine raw plane physics on a tau_points +
     diffuse_tau setup (the v0.22 mirror invariant). Byte-for-byte: the gated
     total (day-ahead-bias reference), the diffuse floor (SVF band integral with
-    diffuse_tau) and the ungated beam (SLOW reference)."""
-    from datetime import datetime
+    diffuse_tau) and the ungated beam (SLOW reference).
 
+    The two cases pin BOTH beam-gate branches at the true sun elevation (the
+    parity the sun_el fix closed): the first slot's midpoint sits below the
+    lowest tau_points node (fully gated, static_tau 0); the second's midpoint
+    lands strictly INSIDE the profile (el~5.5, between the 4.5/5.5/6.5 knots),
+    so the gate resolves an INTERPOLATED partial tau_points -- neither 0 nor 1.
+    ``HourlyWeather.start`` needs no hour alignment; both paths evaluate the sun
+    at start + 30 min."""
     from balcony_solar_forecast.core import horizon
 
     site = _tau_points_diffuse_site()
     plane = site.plane_by_name("M")
     svf = horizon.sky_view_factor(plane)
-    hour_start = datetime(2026, 8, 25, hour_start_h, 0, tzinfo=UTC)
     wx = bf.HourlyWeather(
         start=hour_start, ghi=200.0, dni=850.0, dhi=60.0, temp_c=15.0
     )
