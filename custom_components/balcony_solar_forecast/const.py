@@ -16,7 +16,7 @@ from __future__ import annotations
 DOMAIN = "balcony_solar_forecast"
 
 INTEGRATION_NAME = "Balcony Solar Forecast"
-INTEGRATION_VERSION = "0.23.0"
+INTEGRATION_VERSION = "0.23.1"
 
 # --- Update behaviour (SPEC §4: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
@@ -346,6 +346,39 @@ def _plane(name, az, tilt, wp, horizon, actual_entity):
     }
 
 
+# ===========================================================================
+# DEFAULT_SITE — REFERENCE EXAMPLE, *NOT* A MAINTAINED IMAGE OF THE OPERATOR'S
+# PLANT (labelled honestly in 0.23.1).
+# ---------------------------------------------------------------------------
+# What it IS: the shipped starting point of a fresh install and the anchor of
+# the geometry/engine tests — a complete, valid example of the site-object
+# STRUCTURE and FORMAT (planes, tilts, horizon rows with tau/seasonal rows,
+# inverter groups). Change it only with the tests in mind; several test
+# expectations are pinned to these numbers.
+#
+# What it is NOT: the operator's live configuration. Known, deliberate
+# deviations as of 0.23.1 (documented in docs/project-knowledge/05-…):
+#   * The seasonal screen az 135-175 sits on M4/M8 here (_south_horizon), but
+#     the shademap evaluation DISPROVED that placement: the real near-field
+#     screen shades M2/M3. Live no longer carries this screen at all; it uses
+#     per-module tree windows instead.
+#   * The hard wall edge is az 212 here (_wall_row(212.0)); live moved it to
+#     az 195 on 2026-07-16.
+#   * No `albedo` and no `bifacial_beam_gain` key => ALBEDO_DEFAULT 0.2 and
+#     BEAM_GAIN_DEFAULT 1.0 apply; live runs 0.15 and 1.25.
+#   * No `tau_points` / `tau_points_bare` / `diffuse_tau` rows at all, i.e.
+#     none of the 0.22 horizon refinements are exercised by the default.
+#
+# Consequences: never bootstrap a real install against this object. The
+# in-process action `balcony_solar_forecast.run_bootstrap` (SPEC §15.6) always
+# uses the LIVE config; `scripts/backfill.py` requires `--site` and gates this
+# object behind the explicit `--use-default-site` opt-in (SPEC §6).
+#
+# The substantive rework — a neutral, entity-free minimal default plus a real
+# onboarding flow, so a foreign install does not inherit this plant's geometry
+# and its eight hardcoded Hoymiles entity ids — is the subject of
+# docs/adr/ADR-0023 (onboarding / site configuration) and NOT this comment.
+# ===========================================================================
 DEFAULT_SITE = {
     CONF_LATITUDE: 48.547853,
     CONF_LONGITUDE: 12.187272,

@@ -700,6 +700,34 @@ unangetastet, ein Payload mit dem Schlüssel ersetzt ihn wie die anderen beiden
 Lerner; der Rollback-Ring (`LearnerSnapshot`) trägt den Quantilzustand mit, damit
 `rollback_learners` alle drei Lerner konsistent zurücksetzt.
 
+**Welche Site rekonstruiert wird (verbindlich ab 0.23.1).** Der Bootstrap ist nur
+so gut wie die Geometrie, gegen die er rekonstruiert — und ein Bootstrap gegen
+eine FREMDE Geometrie sieht gesund aus: die Site-Signatur (`site_signature`)
+prüft erst beim **Import** und nur Lat/Lon + Ebenennamen. Deshalb gilt:
+
+- **Standardweg ist die Aktion** `balcony_solar_forecast.run_bootstrap` (§15.6).
+  Sie ist in-process, braucht keinen Long-Lived-Token und nimmt **immer** die
+  Live-Config dieser Installation (`coordinator._site`) — ein Site-Irrtum ist
+  dort strukturell ausgeschlossen.
+- **`scripts/backfill.py` verlangt `--site`** (Site-Objekt in der
+  `SiteConfig.from_dict`-Form, wie es der Config-Flow speichert). Der frühere
+  **stille** Rückfall auf `const.DEFAULT_SITE` ist entfallen; ohne `--site`
+  bricht der Lauf **vor dem ersten Fetch** mit einer handlungsleitenden Meldung
+  ab (Exit-Code 2), die den Aktions-Weg, den Export der Live-Config und das
+  Opt-in nennt.
+- **`--use-default-site`** ist das ausdrückliche Opt-in auf den ausgelieferten
+  **Referenzstandort** `const.DEFAULT_SITE` — für Demo, Tests und CI. Es
+  protokolliert eine deutliche WARNING, dass dieser Standort NICHT die eigene
+  Anlage ist: `DEFAULT_SITE` ist ein Struktur-/Formatbeispiel und kein
+  gepflegtes Abbild der Betreiberanlage (bekannte Abweichungen: der durch die
+  Shademap-Auswertung **widerlegte** Screen az 135–175 auf M4/M8 — real wirkt er
+  auf M2/M3 —, Wandkante az 212 statt live az 195, keine `albedo`- /
+  `bifacial_beam_gain`- / `tau_points`- / `diffuse_tau`-Schlüssel, also
+  `ALBEDO_DEFAULT` 0,2 und `BEAM_GAIN_DEFAULT` 1,0). Gibt man beides an, gewinnt
+  `--site`. Die inhaltliche Neufassung des Auslieferungs-Defaults (neutraler
+  Minimal-Standort + Onboarding) ist Gegenstand von ADR-0023, nicht dieses
+  Abschnitts.
+
 ### 6.1 Ensemble-Wetter-Unsicherheitsbänder (v0.16, optional, Standard AUS)
 
 Die gelernten P10/P50/P90 (§14.2) kommen aus dem Residuenring je (Wolkenklasse ×
@@ -1410,7 +1438,9 @@ idempotente Refresh (z. B. nach einem Integrations-Update). Die Antwort meldet
 Der 320-Tage-Re-Bootstrap (§6) läuft ab v0.23 auch IN-PROCESS als Aktion
 `balcony_solar_forecast.run_bootstrap` in den Entwicklerwerkzeugen — ohne
 Long-Lived-Token, ohne `site.json`, mit der **Live-Config** dieser Installation.
-Der externe `scripts/backfill.py` bleibt der Offline-/CI-Weg; beide teilen sich
+Der externe `scripts/backfill.py` bleibt der Offline-/CI-Weg (dort ist `--site`
+seit 0.23.1 **Pflicht**, der Referenzstandort nur per `--use-default-site`
+erreichbar, §6); beide teilen sich
 denselben HA-freien Kern (`core/bootstrap_build.py` für die Mathematik,
 `core/openmeteo_backfill.py` für den Open-Meteo-Previous-Runs-Fetch), sodass die
 emittierten Bootstrap-Dicts byte-identisch sind.

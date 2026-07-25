@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.1] - 2026-07-25
+
+A trap in the offline backfill CLI: `--site` was optional, and omitting it
+silently reconstructed the whole bootstrap against `const.DEFAULT_SITE` — the
+shipped **reference** site, not yours. That flag is now required, and the
+reference site is labelled honestly for what it is. The `run_bootstrap` action
+was never affected (it always uses the live config).
+
+### Fixed
+
+- **`scripts/backfill.py` no longer falls back to the reference site silently.**
+  Without `--site` the run now aborts **before the first network call** (exit
+  code 2) with a message naming the three real options: the in-process
+  `balcony_solar_forecast.run_bootstrap` action (no token, always the live
+  config — the recommended path), how to export your live site object to
+  `site.json`, and the new opt-in flag. Reconstructing against foreign geometry
+  is not detectable after the fact: `site_signature` only guards the *import*,
+  and only on lat/lon + plane names, so a wrong-site bootstrap trains every
+  learner on a stranger's plant while looking healthy.
+
+### Changed
+
+- **New `--use-default-site` opt-in** makes the old behaviour explicit for demo,
+  test and CI runs, and logs a loud WARNING that the reference site is not the
+  operator's plant. `--site` wins if both are given.
+- **`const.DEFAULT_SITE` is labelled honestly.** A comment block at the
+  definition states that it is a structure/format example and *not* a maintained
+  image of the operator's plant, and names the known deviations: the seasonal
+  screen az 135–175 sits on M4/M8 there although the shademap evaluation showed
+  it actually shades M2/M3; the wall edge is az 212 instead of the live az 195;
+  and there are no `albedo` / `bifacial_beam_gain` / `tau_points` /
+  `diffuse_tau` keys (so albedo 0.2 and beam gain 1.0 apply). **No geometry was
+  changed** — the numbers stay the test anchor; the substantive rework of the
+  shipped default belongs to the onboarding ADR (ADR-0023).
+
+### Docs
+
+- **SPEC §6** now fixes the site semantics of a bootstrap run (action = standard
+  path, `--site` mandatory, `--use-default-site` opt-in); §15.6 cross-references
+  it. `docs/BACKFILL.md` follows with a rewritten "Your site (`--site`,
+  required)" section, an updated flag table and a troubleshooting row.
+- **SPEC currency pass (0.23.x).** SPEC §0 gained an as-built signpost that
+  routes each topic to its authoritative section, and the corrections around
+  action resolution, bias fallback and map provenance landed. New
+  `tests/test_spec_integrity.py` guards the contract mechanically: every
+  `SPEC §x.y` citation in the tree must resolve to a real heading (section
+  numbers stay immutable), every action and every public site-config field must
+  be named in the SPEC, and every top-level section must be reachable from the
+  §0 signpost. `CLAUDE.md`, `CONTRIBUTING.md`, the PR template and the CI
+  workflow carry the matching reminder.
+
 ## [0.23.0] - 2026-07-25
 
 The 320-day re-bootstrap is now a Home Assistant action —

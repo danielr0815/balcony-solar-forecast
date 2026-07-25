@@ -46,9 +46,17 @@ Usage (see docs/BACKFILL.md for the full operator runbook):
         --ha-url http://homeassistant.local:8123 \\
         --token "$HA_LONG_LIVED_TOKEN" \\
         --start 2024-07-01 --end 2026-07-01 \\
+        --site site.json \\
         --out bootstrap.json
 
 Add ``--dry-run`` to fetch + reconstruct + summarise WITHOUT writing the file.
+
+``--site`` is REQUIRED since 0.23.1: omitting it used to fall back silently to
+the shipped reference site ``const.DEFAULT_SITE``, which trains the learners
+against foreign geometry. Use ``--use-default-site`` to opt into that reference
+site deliberately (demo / tests / CI). The recommended path for a real install
+is not this CLI at all but the in-process action
+``balcony_solar_forecast.run_bootstrap`` (no token, always the live config).
 """
 
 from __future__ import annotations
@@ -140,6 +148,82 @@ _LOGGER = logging.getLogger("balcony_solar_forecast.backfill")
 # aiohttp client timeout for the WebSocket LTS pull below (the Open-Meteo
 # weather fetch owns its own copy in ``core.openmeteo_backfill``).
 _HTTP_TIMEOUT_SECONDS = 120.0
+
+
+# ===========================================================================
+# Site resolution (0.23.1) — no silent fallback to the reference site.
+#
+# Until 0.23.0 ``--site`` was optional and omitting it reconstructed against
+# ``const.DEFAULT_SITE`` — the SHIPPED REFERENCE site, not the operator's. A
+# bootstrap built that way trains every learner against foreign geometry and
+# looks perfectly healthy while doing it (the site signature only guards the
+# IMPORT, and only on lat/lon + plane names). ``--site`` is therefore required
+# now, with ``--use-default-site`` as the explicit opt-in for demo/CI runs.
+# ===========================================================================
+
+
+class SiteArgumentError(RuntimeError):
+    """``--site`` missing and the reference-site opt-in not given."""
+
+
+MISSING_SITE_MESSAGE = (
+    "No site configuration given: pass --site <file.json> (or, only for "
+    "demo/CI runs against the shipped reference site, --use-default-site).\n"
+    "\n"
+    "  Recommended instead of this script: run the re-bootstrap IN Home "
+    "Assistant.\n"
+    "    Developer Tools -> Actions -> balcony_solar_forecast.run_bootstrap\n"
+    "    It is in-process, needs no long-lived token and no site.json, and it "
+    "always\n"
+    "    uses THIS install's live config (dry_run defaults to true). See "
+    "docs/BACKFILL.md.\n"
+    "\n"
+    "  To keep using this CLI, export your live site object to JSON:\n"
+    "    Settings -> Devices & Services -> Balcony Solar Forecast -> Configure"
+    " -> the\n"
+    "    'site' object selector holds the live object; copy it into site.json "
+    "(the\n"
+    "    SiteConfig.from_dict shape). The same object is stored on the HA host "
+    "under\n"
+    "    .storage/core.config_entries as the entry's options.site. Then pass "
+    "--site site.json.\n"
+    "\n"
+    "  --use-default-site reconstructs against const.DEFAULT_SITE, the shipped "
+    "REFERENCE\n"
+    "  site. That is a structural example, NOT your plant — see the comment at "
+    "DEFAULT_SITE."
+)
+
+REFERENCE_SITE_WARNING = (
+    "!!! --use-default-site: reconstructing against const.DEFAULT_SITE, the "
+    "SHIPPED REFERENCE site. This is NOT your plant. Its geometry is known to "
+    "deviate from the operator's live install (M4/M8 screen az 135-175, wall "
+    "edge az 212, no albedo / bifacial_beam_gain keys), so the resulting "
+    "bootstrap trains the learners against foreign geometry. Intended for "
+    "demo / tests / CI only — for a real install use --site or the "
+    "balcony_solar_forecast.run_bootstrap action."
+)
+
+
+def resolve_site_arg(args: argparse.Namespace) -> Path | None:
+    """Resolve the ``--site`` argument to a path, or raise.
+
+    Returns the site JSON path, or ``None`` meaning "use the shipped
+    ``DEFAULT_SITE``" — which is reachable ONLY through the explicit
+    ``--use-default-site`` opt-in, and logs a loud WARNING when taken.
+    """
+    site = getattr(args, "site", None)
+    use_default = bool(getattr(args, "use_default_site", False))
+    if site:
+        if use_default:
+            _LOGGER.warning(
+                "--use-default-site ignored: --site %s takes precedence", site
+            )
+        return Path(site)
+    if not use_default:
+        raise SiteArgumentError(MISSING_SITE_MESSAGE)
+    _LOGGER.warning(REFERENCE_SITE_WARNING)
+    return None
 
 
 # ===========================================================================
@@ -310,7 +394,7 @@ async def run_backfill(args: argparse.Namespace) -> int:
     """Top-level async driver. Returns a process exit code."""
     import aiohttp  # lazy
 
-    site = load_site(Path(args.site) if args.site else None)
+    site = load_site(resolve_site_arg(args))
     site_tz = resolve_tz(getattr(args, "tz", None))
     start = date.fromisoformat(args.start)
     end = date.fromisoformat(args.end)
@@ -453,8 +537,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="bootstrap.json",
                    help="Output bootstrap JSON path (default: bootstrap.json)")
     p.add_argument("--site", default=None,
-                   help="Optional site JSON override (defaults to the shipped "
-                        "reference site DEFAULT_SITE)")
+                   help="Site JSON for YOUR install (SiteConfig.from_dict "
+                        "shape). Required unless --use-default-site is given; "
+                        "export it from the config flow's 'site' object "
+                        "selector. The recommended path is the in-process "
+                        "balcony_solar_forecast.run_bootstrap action instead.")
+    p.add_argument("--use-default-site", action="store_true",
+                   help="Opt in to the SHIPPED REFERENCE site "
+                        "(const.DEFAULT_SITE) instead of --site. Demo / tests "
+                        "/ CI only — it is NOT your plant; logs a warning.")
     p.add_argument("--tz", default=None,
                    help="Site IANA timezone (e.g. Europe/Berlin) for local-hour "
                         "day-part / cloud-class keying; defaults to UTC")
@@ -473,6 +564,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         return asyncio.run(run_backfill(args))
+    except SiteArgumentError as err:
+        # Raised at the top of run_backfill, before any network call.
+        _LOGGER.error("%s", err)
+        return 2
     except KeyboardInterrupt:  # pragma: no cover
         _LOGGER.warning("Interrupted")
         return 130

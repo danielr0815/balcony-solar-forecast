@@ -112,9 +112,10 @@ the rollback snapshot lets you undo it.
 - Your HA base URL reachable from the dev machine, e.g.
   `http://homeassistant.local:8123` (or the LAN IP).
 
-- The integration installed on HA (the reference site is the shipped
-  `DEFAULT_SITE`; if your planes/entities differ, export a `--site` JSON — see
-  below).
+- The integration installed on HA **and your site object exported to a JSON
+  file** — `--site` is **required** since 0.23.1 (see
+  [Your site (`--site`, required)](#your-site---site-required)). The CLI no
+  longer falls back to the shipped reference site on its own.
 
 ---
 
@@ -128,6 +129,7 @@ py -3.14 scripts/backfill.py \
     --token "PASTE_LONG_LIVED_TOKEN" \
     --start 2024-07-01 \
     --end   2026-07-01 \
+    --site  site.json \
     --out   bootstrap.json
 ```
 
@@ -138,6 +140,7 @@ py -3.14 scripts/backfill.py \
     --ha-url http://homeassistant.local:8123 \
     --token "PASTE_LONG_LIVED_TOKEN" \
     --start 2024-07-01 --end 2026-07-01 \
+    --site site.json \
     --dry-run --verbose
 ```
 
@@ -156,9 +159,14 @@ several thousand quasi-clear shademap samples and all twelve (4 cloud classes ×
 | `--start` | yes | Range start `YYYY-MM-DD` (UTC calendar). |
 | `--end` | yes | Range end `YYYY-MM-DD` (inclusive). |
 | `--out` | no | Output path (default `bootstrap.json`). |
-| `--site` | no | Site JSON override (defaults to the shipped reference site). |
+| `--site` | **yes*** | Your site object as JSON (`SiteConfig.from_dict` shape). |
+| `--use-default-site` | no | *Opt in to the shipped **reference** site instead of `--site`. Demo / tests / CI only — it is **not** your plant; logs a warning. |
 | `--dry-run` | no | Do everything except write `--out`. |
 | `-v/--verbose` | no | Debug logging (per-day skip reasons). |
+
+\* `--site` is required unless `--use-default-site` is given. Up to 0.23.0 it was
+optional and the run silently reconstructed against the shipped reference site;
+that trap is closed (see below).
 
 Keep the token out of your shell history: on POSIX shells put it in an env var
 and reference it (`--token "$HA_TOKEN"`); PowerShell: `--token $env:HA_TOKEN`.
@@ -268,15 +276,37 @@ The interim az-ramp (τ(az) sun-path projection) is **deprecated**: migrate it t
 
 ---
 
-## Custom site (`--site`)
+## Your site (`--site`, required)
 
-If your install is not the shipped reference site, export the site object your
-config flow stored (the `SiteConfig.from_dict` shape: `latitude`, `longitude`,
-`planes[]` with `name`/`azimuth_deg`/`tilt_deg`/`wp`/`efficiency`/`horizon`/
-`actual_entity`/`shade_group`/`ross_coeff`, and `groups[]`) to a JSON file and
-pass `--site site.json`.
-Each plane needs its `actual_entity` (the LTS statistic id) for the measured
-side; planes without one are skipped.
+A bootstrap is only as good as the geometry it reconstructs against — and one
+built against a *foreign* site looks perfectly healthy: the `site_signature`
+check runs at **import** time and only compares lat/lon + plane names. So since
+**0.23.1** the CLI refuses to guess:
+
+- **`--site site.json` is required.** Export the site object your config flow
+  stored: Settings → Devices & Services → **Balcony Solar Forecast** →
+  *Configure* → the `site` object selector holds the live object; copy it into
+  `site.json`. (The same object sits on the HA host in
+  `.storage/core.config_entries` as the entry's `options.site`.) The shape is
+  `SiteConfig.from_dict`: `latitude`, `longitude`, `planes[]` with
+  `name`/`azimuth_deg`/`tilt_deg`/`wp`/`efficiency`/`horizon`/`actual_entity`/
+  `shade_group`/`ross_coeff`, plus `groups[]`. Each plane needs its
+  `actual_entity` (the LTS statistic id) for the measured side; planes without
+  one are skipped.
+- **Or skip the export entirely** and use the
+  [`run_bootstrap` action](#re-bootstrap-from-home-assistant-run_bootstrap): it
+  always uses this install's live config, so there is no site file to get wrong.
+- **`--use-default-site`** is the explicit opt-in to the shipped reference site
+  `const.DEFAULT_SITE`, for demo/test/CI runs. It logs a warning, and it should:
+  `DEFAULT_SITE` is a structure/format **example**, not a maintained image of
+  the operator's plant. Known deviations: the screen at az 135–175 sits on M4/M8
+  there although the shademap evaluation showed it actually shades M2/M3; the
+  wall edge is az 212 instead of the live az 195; and it carries no `albedo`,
+  `bifacial_beam_gain`, `tau_points` or `diffuse_tau` keys (so albedo 0.2 and
+  beam gain 1.0 apply). If both flags are given, `--site` wins.
+
+Running without either flag aborts before the first network call with exit
+code 2 and a message pointing at all three routes.
 
 ---
 
@@ -284,6 +314,7 @@ side; planes without one are skipped.
 
 | Symptom | Cause / fix |
 |---|---|
+| `No site configuration given` (exit 2) | `--site` is required since 0.23.1. Export your site object (see [Your site](#your-site---site-required)), use the `run_bootstrap` action instead, or pass `--use-default-site` for a demo/CI run against the reference site. |
 | `HA WebSocket auth failed` | Bad/expired token — regenerate the long-lived token. |
 | `No weather returned for the requested range` | Range predates the archive (Previous-Runs since 01/2024). Narrow `--start`. |
 | `ANALYSIS fallback (NOT as-issued)` warning | Previous-Runs radiation was empty for the range; the script used the Historical Forecast API. The bootstrap is still written but the day-ahead bias is weaker. |

@@ -119,6 +119,9 @@ def _run_cli_path(monkeypatch, site, weather, lts_by_entity, out_path) -> dict:
         "--start", weather[0].start.date().isoformat(),
         "--end", weather[-1].start.date().isoformat(),
         "--out", str(out_path),
+        # The parity fixture IS DEFAULT_SITE, so this run takes the reference
+        # site deliberately (since 0.23.1 --site is otherwise required).
+        "--use-default-site",
     ])
     rc = asyncio.run(bf.run_backfill(args))
     assert rc == 0, f"run_backfill returned {rc}"

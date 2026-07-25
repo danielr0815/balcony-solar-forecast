@@ -1021,9 +1021,14 @@ def resolve_tz(name: str | None):
 def load_site(site_json: Path | None) -> SiteConfig:
     """Load a SiteConfig from a JSON file, or the shipped DEFAULT_SITE.
 
-    The operator's live site is the reference DEFAULT_SITE (SPEC §2). A
-    ``--site`` override lets a different install reuse this. The site dict must
-    match ``SiteConfig.from_dict`` (the config-flow object shape).
+    ``site_json`` is the site object as the config flow stores it (the
+    ``SiteConfig.from_dict`` shape). ``None`` falls back to the shipped
+    REFERENCE site ``const.DEFAULT_SITE`` — a structural example whose geometry
+    is knowingly stale (see the comment at ``DEFAULT_SITE``), never a stand-in
+    for a real install. Callers must make that fallback deliberate: the CLI
+    gates it behind ``--use-default-site`` (``backfill.resolve_site_arg``) and
+    the in-process ``run_bootstrap`` action never uses it at all (SPEC §6,
+    §15.6).
     """
     if site_json is None:
         return SiteConfig.from_dict(const.DEFAULT_SITE)
