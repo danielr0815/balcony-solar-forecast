@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.2] - 2026-07-25
+
+A documentation release: no runtime behaviour changes. `docs/SPEC.md` stopped
+being the project's founding document and became what the operator asked for —
+a specification of the **requirements of the shipped version**, nothing else,
+carrying the version it was last reviewed against. Everything it shed is kept
+verbatim in the new, explicitly non-normative `docs/HISTORIE.md`, including the
+old→new section table that keeps every pre-rewrite `SPEC §…` reference in this
+changelog, in `docs/orders/` and in old PRs resolvable.
+
+Two findings from the 0.23.1 review are fixed along the way.
+
 ### Changed
 
 - **`docs/SPEC.md` is now a current-state specification.** On the operator's
@@ -24,8 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   learning visibility, uncertainty, bootstrap · §13–§16 degradation, consumer
   interfaces, metrics/kill-gate, persistence · §17–§21 shade diagram, dashboard,
   actions, conventions, QA) and carries a **version stamp** in its header
-  ("Gilt für Version: 0.23.1") that a new guard checks against
-  `const.INTEGRATION_VERSION`.
+  ("Gilt für Version: 0.23.2") that a new guard checks against
+  `const.INTEGRATION_VERSION`. This release is the stamp's first live exercise:
+  bumping the version to 0.23.2 turned the suite red until the SPEC header was
+  pulled along, which is exactly the drift it exists to stop.
 - **New `docs/HISTORIE.md`** (explicitly NOT normative) holds everything the SPEC
   shed — founding context, the 2026-07-05 findings, the strategy decision, the
   phase plan, D-P1…D-P11, B1…B12, the LTS measurement analysis, the dated
@@ -46,6 +60,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its transition table. The citation scan now also covers `scripts/`,
   `dashboards/` and `docs/` (excluding `docs/orders/`), so the citations nobody
   used to test can no longer rot.
+- **SPEC §10 now describes the card precedence in BOTH directions.** "One card
+  per root cause" was only written down for the order presence-gap → streak. The
+  shipped code also resolves the reverse — a `learning_stalled_*` card that is
+  already standing is removed on the next counted discard night once a channel
+  goes missing (mistyped entity id, renamed or deleted inverter entity, reload),
+  leaving only the more specific presence card. That is intended, the streak
+  itself is not reset, and the specification says so now instead of leaving a
+  reader to read it as a regression.
+
+### Fixed
+
+- **The fresh-install guard test did not discriminate.**
+  `test_fresh_install_guard_reads_the_real_issued_ring` asserted only that the
+  streak stays at zero when nothing is in the issued ring — which stayed green
+  under the very mutation it was written for: renaming
+  `ForecastStore.get_issued` makes the `AttributeError` land in
+  `record_actuals_outcome`'s outer handler, and a streak that never advances is
+  also a streak of zero. It gained a **positive control** on the same real
+  store: exactly one day is recorded via `record_issued`, and exactly that day
+  must count (streak 1, `last_discard_day` equal to it) while the days on either
+  side of it do not. The test now fails under the rename, under a guard stuck on
+  `False`, and under a guard stuck on `True`.
 
 ## [0.23.1] - 2026-07-25
 

@@ -681,6 +681,13 @@ def test_fresh_install_guard_reads_the_real_issued_ring():
 
     Same real store, same dropouts — but nothing recorded in the issued ring,
     so none of the days were ours and the streak must stay at zero.
+
+    The all-zero half alone does NOT discriminate: rename
+    ``ForecastStore.get_issued`` and the ``AttributeError`` lands in
+    ``record_actuals_outcome``'s outer handler, so the streak is *also* zero and
+    the assertion still passes. The second half is therefore a POSITIVE control
+    on the same real ring — exactly one day is recorded via ``record_issued``,
+    and exactly that day must count.
     """
     from datetime import timedelta
 
@@ -696,6 +703,30 @@ def test_fresh_install_guard_reads_the_real_issued_ring():
         coord._record_actuals_outcome(_DAY + timedelta(days=offset), accepted=False)
 
     assert store.get_learning_health()["discard_streak"] == 0
+    assert coord.raised == []
+
+    # --- Positive control: ONE day in the real ring, and only that one counts.
+    store = _real_store()
+    coord = _Coord(store=store)
+    ours = _DAY + timedelta(days=3)
+    store.record_issued(ours.isoformat(), {"status": "ok"})
+
+    for offset in range(LEARNING_STALLED_STREAK_DAYS * 2):
+        coord._last_actuals_dropout = {
+            "reason": DROPOUT_REASON_DEAD_CHANNEL,
+            "modules": ["M2"],
+            "entities": ["sensor.m2"],
+        }
+        coord._record_actuals_outcome(_DAY + timedelta(days=offset), accepted=False)
+
+    health = store.get_learning_health()
+    # Exactly one: the days before ``ours`` predate us, the days after it are
+    # not in the ring either. A guard stuck on False makes this 0, a guard stuck
+    # on True (or a ring read that silently swallows its own error) makes it 10.
+    assert health["discard_streak"] == 1
+    assert health["last_discard_day"] == ours.isoformat()
+    assert health["last_discard_reason"] == DROPOUT_REASON_DEAD_CHANNEL
+    # One structurally discarded day is far below the threshold, so still silent.
     assert coord.raised == []
 
 

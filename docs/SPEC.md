@@ -1,6 +1,6 @@
 # Spezifikation: Balcony Solar Forecast — Mehrebenen-PV-Prognose mit Selbstlernen
 
-> **Gilt für Version: 0.23.1** · Zuletzt aktualisiert: 2026-07-25
+> **Gilt für Version: 0.23.2** · Zuletzt aktualisiert: 2026-07-25
 >
 > Diese Spezifikation beschreibt **ausschließlich den Ist-Stand dieser Version**:
 > was die Integration `balcony_solar_forecast` heute tut und tun muss. Sie
@@ -922,6 +922,18 @@ Diagnose-Dump sichtbar, setzt aber **keine** eigene `learning_stalled_*`-Karte.
 Es geht nichts verloren: die Präsenzkarte nennt genau die Kanäle, über die das
 Dead-Channel-Gate stolpert, und die Unterdrückung endet, sobald die Kanäle
 auflösen — eine Strähne mit wirklich anderer Ursache erscheint also weiterhin.
+
+Der Vorrang gilt in **beide** Richtungen, auch wenn die Präsenzlücke erst
+**nachträglich** auftritt: steht bereits eine `learning_stalled_*`-Karte und
+verschwindet danach ein Messkanal (Tippfehler beim Reconfigure, umbenannte oder
+gelöschte Wechselrichter-Entität, Reload), dann räumt die nächste gezählte
+Verwurfsnacht die stehende Strähnenkarte **weg** und lässt allein die
+Präsenzkarte stehen. Das ist gewollt und keine Regression: die Präsenzkarte
+nennt ab diesem Moment die spezifischere Ursache und den konkreten Handgriff,
+während die Strähnenkarte nur noch die Folge beschriebe. Die Strähne selbst
+wird dabei **nicht** zurückgesetzt — sie zählt weiter und bleibt im
+Diagnose-Dump lesbar, so dass die Karte nach Behebung der Präsenzlücke sofort
+wieder erscheinen kann, wenn der Verwurf eine andere Wurzel hat.
 
 **Der AC-Zähler ist bewusst kein Repair-Issue.** `ac_actual_entity` ist optional,
 selbst-gatend (fehlt oder lügt der Zähler, bleibt η auf dem konfigurierten Wert
