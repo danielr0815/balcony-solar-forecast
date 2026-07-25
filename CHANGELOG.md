@@ -13,8 +13,26 @@ shipped **reference** site, not yours. That flag is now required, and the
 reference site is labelled honestly for what it is. The `run_bootstrap` action
 was never affected (it always uses the live config).
 
+The same reference site turned out to hide a second, quieter failure: it wires
+**eight** of the reference plant's inverter entity ids, and the nightly label
+gates discard the *whole* day for *both* learners as soon as one configured
+channel is unusable. An install that adopted that default therefore threw away
+every single night — forever — while the status entities kept reporting
+`cold_start` and the learners kept reporting "active". That is now visible.
+
 ### Fixed
 
+- **"This install is not learning" is now a repair issue, not a log line.** Two
+  independent detectors (SPEC §5.1). At setup and after every config change,
+  every configured plane `actual_entity` is checked for existence in this Home
+  Assistant; a missing one raises `actual_entity_missing`, which **names the
+  plane and the entity id** and points at Reconfigure. And when the nightly
+  training discards the whole day `LEARNING_STALLED_STREAK_DAYS` times in a row,
+  one of three reason-specific issues fires —
+  `learning_stalled_dead_channel` / `_frozen_channel` / `_low_coverage` —
+  because the three gates need three different remedies (fix the entity id,
+  restart the stuck DTU, close the recorder gap). Both clear themselves: the
+  first when every channel resolves again, the second on the first accepted day.
 - **`scripts/backfill.py` no longer falls back to the reference site silently.**
   Without `--site` the run now aborts **before the first network call** (exit
   code 2) with a message naming the three real options: the in-process
@@ -27,6 +45,29 @@ was never affected (it always uses the live config).
 
 ### Changed
 
+- **No false alarm during a new install's run-in phase.** A brand-new plant
+  legitimately has no complete long-term-statistics days yet, and the nightly
+  catch-up window reaches back before the installation existed. A discarded day
+  therefore only counts toward the streak when the integration actually *issued*
+  a forecast for that day — proof that we were running and the channels should
+  have logged. The streak is also idempotent per day, since a discarded day is
+  never recorded and is re-read every night. Both sides are covered by tests:
+  the fresh install stays silent, the permanently dead channel does not.
+- **The discard streak survives restarts** in a new `learning_health` store
+  section (streak, last cause, channels responsible, last accepted day) — added
+  **additively inside schema v3, no version bump**, following the same pattern
+  as `inverter_cal_state` and `config_fingerprint`: a store written before
+  0.23.1 reads back neutral and every other section stays byte-faithful.
+- **The diagnostics dump answers "why is nothing being learned?"** through the
+  accessors it already used, not a third code path:
+  `store.learning_health` (cause, modules, streak, threshold, last accepted day)
+  and `learners.state.actual_channels` (configured / missing channels, AC-meter
+  status). Zero learned cells reads very differently once you can see that the
+  input channels do not exist.
+- **The optional AC meter stays diagnostics-only, deliberately.**
+  `ac_actual_entity` is self-gating and never blocks learning, so a missing one
+  is reported in the dump and logged once rather than raising a second repair
+  card that would dilute the one that actually requires action.
 - **New `--use-default-site` opt-in** makes the old behaviour explicit for demo,
   test and CI runs, and logs a loud WARNING that the reference site is not the
   operator's plant. `--site` wins if both are given.
@@ -43,6 +84,27 @@ was never affected (it always uses the live config).
 
 ### Docs
 
+- **New SPEC §5.1** documents the label gates' *visibility*: both detectors, the
+  two repair-issue families, the run-in-phase rule as a binding requirement, the
+  diagnostics fields, and why the channel check does **not** hang off the config
+  fingerprint (that reconcile runs before the first refresh — at a cold boot,
+  usually before the inverter integration has registered its entities — and
+  `actual_entity` is deliberately not a fingerprint field). §8, §14.4 and the §0
+  signpost carry the matching entries.
+- **Three corrections found in the 0.23.1 SPEC review.** §5 described the
+  nightly catch-up as "`NIGHTLY_CATCHUP_MAX_DAYS` back from yesterday"; it is
+  really a window *ending yesterday* that starts the day after the newest
+  recorded actuals day, capped at that constant — which is also why a fresh
+  install's sweep necessarily reaches into pre-install history. §8 named the
+  diagnostics key `snapshot_ring`/`_capacity`; it is `snapshot_ring_capacity`.
+  And `async_setup`'s docstring promised "All six services" while
+  `services.yaml` had grown to ten.
+- **`tests/test_spec_integrity.py` gained three guards** so those three cannot
+  recur: every `ISSUE_*` id in `const.py` must be named in the SPEC, must carry
+  an `issues` translation in **both** shipped languages (title *and*
+  description — an untranslated repair card renders as a raw slug), and
+  `async_setup`'s docstring must name every service in `services.yaml` and state
+  their count.
 - **SPEC §6** now fixes the site semantics of a bootstrap run (action = standard
   path, `--site` mandatory, `--use-default-site` opt-in); §15.6 cross-references
   it. `docs/BACKFILL.md` follows with a rewritten "Your site (`--site`,

@@ -6,6 +6,14 @@ learning layers (v0.2.0 + v0.3.0, SPEC §5) — a compact learner-state summary
 (status per layer, current intraday scalar, rolling drift MAE, and per-channel
 shademap bin counts) for bug reports.
 
+Learning VISIBILITY (0.23.1) rides the two existing accessors rather than a
+third code path: ``store_stats()['learning_health']`` carries the nightly
+whole-day-discard streak, its cause, the channels responsible and the last day
+actually accepted, while ``learner_state_summary()['actual_channels']`` says
+whether the configured measurement entities exist at all. Together they answer
+"why has this install learned nothing?" from a diagnostics download alone — no
+log access required (SPEC §8).
+
 Coordinates are redacted (both the top-level entry lat/lon and the per-site
 copy). The learner summary is coordinate-free by construction — sun-azimuth /
 elevation bin indices are geometry, not the operator's location — but we still

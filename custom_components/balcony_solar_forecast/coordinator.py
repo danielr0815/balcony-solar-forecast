@@ -36,7 +36,8 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import CoreState, Event, HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -45,7 +46,7 @@ from homeassistant.util import dt as dt_util
 # Extracted concern groups (HA-glue level). The coordinator keeps every public /
 # tested method name as a thin delegate into these modules (code motion only —
 # SPEC unchanged); they reach coordinator state back through the ``coord`` param.
-from . import _actuals, _nightly, _scoreboard_glue
+from . import _actuals, _channel_health, _nightly, _scoreboard_glue
 from ._actuals import (
     _actuals_from_stats,  # noqa: F401  re-exported for tests
     _is_frozen_channel,  # noqa: F401  re-exported for tests
@@ -389,6 +390,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # AC-meter calibration folds enough eligible hours (never load-bearing).
         self._inverter_cal_state: InverterCalState = InverterCalState()
         self._learner_states_loaded = False
+
+        # --- Learning visibility (0.23.1, SPEC §5) --------------------------
+        # Which label gate discarded the LAST actuals read (set by
+        # _actuals.async_read_actuals; None == the day was accepted), and the
+        # last measurement-channel presence check. Both transient: the durable
+        # half lives in the store's learning-health section.
+        self._last_actuals_dropout: dict[str, Any] | None = None
+        self._channel_health: dict[str, Any] = {"available": False}
 
         # Collapse detector: the frozen local date is persisted in DriftState
         # (collapse_frozen_date) so a mid-day restart keeps the freeze; there is
@@ -942,6 +951,52 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             await self._async_nightly_job()
         except Exception:  # pragma: no cover - startup best-effort
             _LOGGER.warning("Startup catch-up sweep failed", exc_info=True)
+
+    @callback
+    def async_schedule_channel_health_check(self) -> None:
+        """Check the measurement channels once HA is up (SPEC §5, 0.23.1).
+
+        NOT hooked into :meth:`_reconcile_config_fingerprint`, deliberately, for
+        two reasons. (1) Timing: the fingerprint reconcile runs inside
+        ``async_prime_from_store`` — before the first refresh and, at a cold HA
+        boot, typically before the inverter integration has registered its
+        entities, so every restart would raise a false "channel missing" alarm.
+        (2) Trigger: the fingerprint covers the FORECAST-relevant geometry, and
+        ``actual_entity`` is deliberately not part of it (swapping a sensor id
+        must not re-seed the bias cells) — so it fires on the wrong changes and
+        misses the right one.
+
+        Running it from entry setup covers both required moments instead: a
+        config change reloads the entry (``_async_reload_entry``), so setup — and
+        this check — runs again. While HA is still starting we defer to
+        EVENT_HOMEASSISTANT_STARTED so the source integration has had its turn.
+        """
+        if self.hass.state is CoreState.running:
+            self.async_check_actual_channels()
+            return
+
+        @callback
+        def _on_started(_event: Event) -> None:
+            self.async_check_actual_channels()
+
+        self.entry.async_on_unload(
+            self.hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STARTED, _on_started
+            )
+        )
+
+    @callback
+    def async_check_actual_channels(self) -> dict[str, Any]:
+        """Verify every configured ``actual_entity`` exists; raise/clear issue."""
+        return _channel_health.check_actual_channels(self)
+
+    def _record_actuals_outcome(self, day: date, *, accepted: bool) -> None:
+        """Fold one nightly actuals read into the persisted discard streak."""
+        _channel_health.record_actuals_outcome(self, day, accepted=accepted)
+
+    def learning_health_summary(self) -> dict[str, Any]:
+        """Persisted discard-streak state for the diagnostics dump (SPEC §8)."""
+        return _channel_health.learning_health_summary(self)
 
     @callback
     def async_shutdown_extra(self) -> None:
@@ -2545,6 +2600,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "snapshot_ring": _count("get_snapshots"),
             "snapshot_ring_capacity": LEARNER_SNAPSHOT_RING,
             "schema_version": schema,
+            # Why the nightly is (not) learning: last whole-day-discard reason,
+            # the channels that caused it, the streak length and the last day
+            # actually accepted — remote diagnosis without log access (0.23.1).
+            "learning_health": self.learning_health_summary(),
         }
 
     def learner_state_summary(self) -> dict[str, Any]:
@@ -2572,6 +2631,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "quantile_bins": quantile_bins,
             "shademap_channels": len(shademap_bins),
             "shademap_bins": shademap_bins,
+            # Measurement-channel presence as of the last check (0.23.1): a
+            # learner with zero cells reads very differently when its input
+            # channels do not exist at all.
+            "actual_channels": getattr(
+                self, "_channel_health", {"available": False}
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -2721,12 +2786,17 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         never clears another entry's warning (coordinator:1199)."""
         return f"{issue_id}_{self.entry.entry_id}"
 
-    def _raise_repair_issue(self, issue_id: str) -> None:
+    def _raise_repair_issue(
+        self, issue_id: str, placeholders: dict[str, str] | None = None
+    ) -> None:
         """Create a persistent HA repair issue for an auto-disabled layer.
 
         Persistent so it survives an HA restart while the disable flag does
         (SPEC §5: never silent degradation); the registry id is entry-scoped but
         the translation key stays the base id so the shared translation applies.
+        ``placeholders`` fills the ``{name}`` slots of that translation — the
+        learning-visibility issues (0.23.1) have to name the concrete channels
+        and the concrete reason to be actionable.
         """
         try:
             ir.async_create_issue(
@@ -2737,6 +2807,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 is_persistent=True,
                 severity=ir.IssueSeverity.WARNING,
                 translation_key=issue_id,
+                translation_placeholders=placeholders,
             )
         except Exception:  # pragma: no cover - repair registry best-effort
             _LOGGER.debug("Could not raise repair issue %s", issue_id, exc_info=True)

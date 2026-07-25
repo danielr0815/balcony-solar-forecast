@@ -23,6 +23,9 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE,
+    DROPOUT_REASON_DEAD_CHANNEL,
+    DROPOUT_REASON_FROZEN_CHANNEL,
+    DROPOUT_REASON_LOW_COVERAGE,
     LABEL_FROZEN_MIN_REPEATS,
 )
 from .core import SiteConfig, solpos
@@ -46,7 +49,14 @@ async def async_read_actuals(
     measurement never poisons the write-once ring ("Messkanal-Dropout ⇒
     ganzen Tag verwerfen"). The window follows the LOCAL calendar day
     exactly so DST (23/25-h) days are bounded correctly (coordinator:1256).
+
+    Side effect (0.23.1): ``coord._last_actuals_dropout`` is set to the reason
+    dict of the gate that discarded the day, or to ``None`` when the day was
+    accepted. Discarding is otherwise indistinguishable from "nothing measured
+    yet" at the call site, and the nightly streak detector must be able to name
+    WHICH gate fired — the three cases have different remedies.
     """
+    coord._last_actuals_dropout = None
     entity_by_module = {
         p.name: p.actual_entity
         for p in coord._site.planes
@@ -66,7 +76,9 @@ async def async_read_actuals(
 
     from homeassistant.components.recorder import get_instance
 
-    def _read() -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    def _read() -> tuple[
+        dict[str, float], dict[str, dict[str, float]], dict[str, object] | None
+    ]:
         from homeassistant.components.recorder.statistics import (
             statistics_during_period,
         )
@@ -82,14 +94,21 @@ async def async_read_actuals(
             {"mean", "state"},
         )
         expected = _daylight_hours_in_local_day(coord._site, start, end)
-        return _actuals_from_stats(
+        dropout: dict[str, object] = {}
+        daily, hourly = _actuals_from_stats(
             stats,
             entity_by_module,
             expected_daylight_hours=expected,
             day=day,
+            dropout_out=dropout,
         )
+        return daily, hourly, (dropout or None)
 
-    return await get_instance(coord.hass).async_add_executor_job(_read)
+    daily, hourly, dropout = await get_instance(coord.hass).async_add_executor_job(
+        _read
+    )
+    coord._last_actuals_dropout = dropout
+    return daily, hourly
 
 
 async def async_read_ac_actuals(
@@ -204,6 +223,7 @@ def _actuals_from_stats(
     *,
     expected_daylight_hours: int,
     day: date,
+    dropout_out: dict[str, object] | None = None,
 ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
     """Pure post-processing of LTS rows into per-module (daily, hourly) actuals.
 
@@ -226,7 +246,25 @@ def _actuals_from_stats(
     catch-up re-reads it once LTS is complete. A permanently dead (but still
     configured) sensor therefore blocks training until the operator removes it —
     the warnings name the module + entity id to make that actionable.
+
+    ``dropout_out`` (optional, 0.23.1) is FILLED IN PLACE with
+    ``{"reason": DROPOUT_REASON_*, "modules": [...], "entities": [...]}``
+    whenever a gate discards the day, and left untouched otherwise. That is the
+    machine-readable half of the warnings above: the nightly streak detector
+    persists it and the repair issue names the reason, because a dead channel
+    (wrong/removed entity id), a frozen channel (stuck DTU sensor) and a
+    coverage break (recorder gap) each need a different remedy.
     """
+    def _dropout(reason: str, module: str) -> tuple[dict, dict]:
+        if dropout_out is not None:
+            dropout_out.clear()
+            dropout_out.update(
+                reason=reason,
+                modules=[module],
+                entities=[entity_by_module.get(module, "")],
+            )
+        return {}, {}
+
     daily: dict[str, float] = {}
     hourly: dict[str, dict[str, float]] = {}
     covered_hours: dict[str, int] = {}
@@ -250,7 +288,7 @@ def _actuals_from_stats(
                 "(channel dropout, SPEC §5)",
                 module, entity_id, day,
             )
-            return {}, {}
+            return _dropout(DROPOUT_REASON_DEAD_CHANNEL, module)
         if _is_frozen_channel(means):
             _LOGGER.warning(
                 "Channel %s (%s) looks frozen on %s (byte-identical "
@@ -258,7 +296,7 @@ def _actuals_from_stats(
                 "for both learners (SPEC §5)",
                 module, entity_id, day,
             )
-            return {}, {}
+            return _dropout(DROPOUT_REASON_FROZEN_CHANNEL, module)
         per_hour: dict[str, float] = {}
         wh = 0.0
         for hkey, m in zip(hkeys, means, strict=False):
@@ -286,7 +324,7 @@ def _actuals_from_stats(
                 covered_hours[worst], expected_daylight_hours,
                 DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE * 100.0,
             )
-            return {}, {}
+            return _dropout(DROPOUT_REASON_LOW_COVERAGE, worst)
     return daily, hourly
 
 

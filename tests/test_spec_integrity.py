@@ -6,7 +6,7 @@ reader gets from a line of physics to the paragraph that justifies it. Keeping
 them true has so far relied on discipline alone — this module turns that
 discipline into a test.
 
-Four guards, all pure (no Home Assistant, no fixtures — plain file reads):
+Seven guards, all pure (no Home Assistant, no fixtures — plain file reads):
 
   (a) **Citation integrity.** Every ``SPEC §x[.y]`` cited anywhere under
       ``custom_components/`` (``.py``, ``services.yaml``, the frontend ``.js``)
@@ -28,6 +28,15 @@ Four guards, all pure (no Home Assistant, no fixtures — plain file reads):
       case that motivated it, a finished ADR that lived only on the author's
       disk while three tracked files (one of them shipped to users via HACS)
       already pointed at it.
+  (f) **Repair-issue coverage.** Every ``ISSUE_*`` id in ``const.py`` is named
+      in the SPEC **and** carries an ``issues`` translation in *both* shipped
+      languages. A repair card is the loudest thing this integration can say to
+      an operator; one that ships with an untranslated key renders as a raw
+      slug, and one the SPEC never mentions is a behaviour nobody agreed to.
+  (g) **Action-count integrity.** The ``async_setup`` docstring must name every
+      service in ``services.yaml`` and state their number. Written after that
+      docstring claimed "All six services" for four releases while the manifest
+      had grown to ten — a reader's first, wrongest impression of the surface.
 
 Deliberately *lower bounds*: a mere word match proves the name appears, not
 that the prose is good. The point is that the mechanical gap — a field or an
@@ -37,6 +46,7 @@ fails a test instead of aging quietly.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -48,6 +58,10 @@ _SPEC_PATH = _REPO / "docs" / "SPEC.md"
 _INTEGRATION = _REPO / "custom_components" / "balcony_solar_forecast"
 _SERVICES_YAML = _INTEGRATION / "services.yaml"
 _CONST_PY = _INTEGRATION / "const.py"
+_INIT_PY = _INTEGRATION / "__init__.py"
+_TRANSLATIONS = _INTEGRATION / "translations"
+# Both shipped languages. A repair issue must be readable in each.
+_LANGUAGES = ("en", "de")
 _SCAN_ROOTS = (_REPO / "custom_components", _REPO / "tests")
 # Text-bearing sources that carry citations: python, the service manifest, the
 # bundled Lovelace cards, icons/manifest json.
@@ -346,4 +360,103 @@ def test_every_doc_reference_resolves_to_a_tracked_file():
         + "\n".join(f"  {ref}  <- {rel}:{line}" for ref, rel, line in dangling)
         + "\n\nFix by committing the referenced document, or by rewriting the"
         " reference so it names no path."
+    )
+
+
+# ---------------------------------------------------------------------------
+# (f) Repair-issue coverage.
+# ---------------------------------------------------------------------------
+
+_ISSUE_ASSIGN_RE = re.compile(r'^(ISSUE_[A-Z0-9_]+)\s*=\s*"([^"]+)"', re.M)
+
+
+def _repair_issue_ids() -> dict[str, str]:
+    """``{ISSUE_* constant: translation key}`` for every repair issue."""
+    return dict(_ISSUE_ASSIGN_RE.findall(_read(_CONST_PY)))
+
+
+def test_every_repair_issue_is_documented_in_the_spec():
+    """A repair card the SPEC has never heard of is behaviour nobody agreed to.
+
+    Repair issues are the integration's loudest channel to the operator — the
+    only one that survives a restart and appears unprompted in the UI. Which
+    ones exist, and under what condition, belongs in the contract.
+    """
+    issues = _repair_issue_ids()
+    # Sanity only: prove the scanner sees the block. Deliberately NOT the exact
+    # count — this guard is about coverage, not about freezing the surface.
+    assert len(issues) >= 3, f"const.py issue scanner found {issues}"
+
+    spec = _read(_SPEC_PATH)
+    missing = sorted(
+        f"{key} ({const})"
+        for const, key in issues.items()
+        if not re.search(rf"\b{re.escape(key)}\b", spec)
+    )
+    assert not missing, (
+        "repair issues defined in const.py but never named in docs/SPEC.md:\n  "
+        + "\n  ".join(missing)
+        + "\n\nName the issue id in the section that describes the condition"
+        " that raises it."
+    )
+
+
+@pytest.mark.parametrize("lang", _LANGUAGES)
+def test_every_repair_issue_is_translated(lang: str):
+    """An untranslated repair key renders in the UI as a raw slug.
+
+    Both shipped languages, title AND description: a card that says
+    ``learning_stalled_dead_channel`` teaches the operator nothing, which
+    defeats the entire point of raising it.
+    """
+    issues = _repair_issue_ids()
+    blob = json.loads(_read(_TRANSLATIONS / f"{lang}.json"))
+    translated = blob.get("issues") or {}
+
+    missing = sorted(key for key in issues.values() if key not in translated)
+    assert not missing, (
+        f"repair issues without a translations/{lang}.json entry:\n  "
+        + "\n  ".join(missing)
+    )
+    incomplete = sorted(
+        key
+        for key in issues.values()
+        if not (translated[key].get("title") and translated[key].get("description"))
+    )
+    assert not incomplete, (
+        f"repair issues with an incomplete translations/{lang}.json entry"
+        " (title + description are both required):\n  " + "\n  ".join(incomplete)
+    )
+
+
+# ---------------------------------------------------------------------------
+# (g) Action-count integrity.
+# ---------------------------------------------------------------------------
+
+_ASYNC_SETUP_DOC_RE = re.compile(
+    r"async def async_setup\([^)]*\)[^:]*:\s*\"\"\"(.*?)\"\"\"", re.S
+)
+
+
+def test_async_setup_docstring_matches_services_yaml():
+    """The service list in ``async_setup``'s docstring must be current.
+
+    That docstring is the first description of the action surface any reader
+    meets, and it claimed "All six services" — naming six of them — while
+    ``services.yaml`` had grown to ten. A stale count is worse than none: it
+    reads as authoritative.
+    """
+    services = _SERVICE_KEY_RE.findall(_read(_SERVICES_YAML))
+    match = _ASYNC_SETUP_DOC_RE.search(_read(_INIT_PY))
+    assert match is not None, "async_setup has no docstring to check"
+    doc = match.group(1)
+
+    unnamed = [s for s in services if not re.search(rf"\b{s}\b", doc)]
+    assert not unnamed, (
+        "services registered by async_setup but not named in its docstring: "
+        + ", ".join(unnamed)
+    )
+    assert re.search(rf"\b{len(services)}\b", doc), (
+        f"async_setup's docstring does not state the service count ({len(services)});"
+        " it read 'All six services' while services.yaml had ten."
     )

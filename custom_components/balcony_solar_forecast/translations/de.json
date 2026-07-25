@@ -135,6 +135,22 @@
     "config_changed_bias_reseed": {
       "title": "Day-ahead-Bias nach Konfigurationsänderung neu angelernt",
       "description": "Eine prognoserelevante Einstellung wurde geändert (Azimut/Neigung/Spitzenleistung/Wirkungsgrad/Ross-Koeffizient/Horizont einer Ebene, die Albedo oder eine Wechselrichter-AC-Grenze), daher wurden die Day-ahead-Bias-Zellen zum Neulernen gegen die neue Geometrie wieder geöffnet. Für den schnellsten Neustart den Offline-Backfill-Bootstrap erneut ausführen oder den Dienst \"Day-ahead-Bias zurücksetzen\" aufrufen. Diese Meldung danach schließen."
+    },
+    "actual_entity_missing": {
+      "title": "Messkanäle existieren nicht — es kann nichts gelernt werden",
+      "description": "{count} von {configured} konfigurierten Messkanälen zeigen auf Entitäten, die es in diesem Home Assistant nicht gibt: {channels}.\n\nDas nächtliche Training verwirft den ganzen Tag, sobald ein Kanal unbrauchbar ist — die Prognose lernt also nie etwas über Ihre Anlage, solange das so bleibt.\n\nIntegration öffnen, \"Neu konfigurieren\" wählen und für diese Ebenen die eigenen Wechselrichter-Sensoren eintragen (oder die Ebene entfernen). Der mitgelieferte Standardstandort ist ein Referenzbeispiel und trägt die Sensor-IDs einer fremden Anlage."
+    },
+    "learning_stalled_dead_channel": {
+      "title": "Seit {days} Tagen wird nichts gelernt — ein Kanal meldet nichts",
+      "description": "Das nächtliche Training hat {days} Mal in Folge den ganzen Tag verworfen, zuletzt {last_day}, weil {channels} überhaupt keine verwertbaren Statistikzeilen geliefert hat.\n\nPrüfen Sie, ob die Entity-ID noch stimmt, ob der Sensor nicht dauerhaft nicht verfügbar ist und ob er nicht vom Recorder ausgeschlossen wurde (ohne Langzeitstatistik kann ein Sensor nie Trainingsdaten liefern).\n\nBis wieder ein Tag angenommen wird, verbessert sich weder der Day-ahead-Bias noch die Verschattungskarte. Die Meldung verschwindet von selbst, sobald ein Tag die Label-Gates besteht."
+    },
+    "learning_stalled_frozen_channel": {
+      "title": "Seit {days} Tagen wird nichts gelernt — ein Kanal ist eingefroren",
+      "description": "Das nächtliche Training hat {days} Mal in Folge den ganzen Tag verworfen, zuletzt {last_day}, weil {channels} stundenlang denselben Wert ungleich null gehalten hat.\n\nDer Wechselrichter-/DTU-Sensor hängt: neu starten oder das Abfrage-Timeout erhöhen. Der Tag wird absichtlich verworfen — ein eingefrorener Messwert würde den Lernern eine Leistung beibringen, die die Anlage nie erbracht hat.\n\nDie Meldung verschwindet von selbst, sobald ein Tag die Label-Gates besteht."
+    },
+    "learning_stalled_low_coverage": {
+      "title": "Seit {days} Tagen wird nichts gelernt — die Messung ist unvollständig",
+      "description": "Das nächtliche Training hat {days} Mal in Folge den ganzen Tag verworfen, zuletzt {last_day}, weil {channels} zu wenige der Tageslichtstunden abgedeckt hat.\n\nSuchen Sie nach einer Lücke in Recorder/Langzeitstatistik, einem zu aggressiven Datenbank-Purge oder einem Modul, das mitten am Tag ausfällt. Ein Teiltag wird absichtlich verworfen: gegen die Prognose der Gesamtanlage gerechnet sieht er wie ein Ertragsdefizit aus und würde beide Lerner nach unten verzerren.\n\nDie Meldung verschwindet von selbst, sobald ein Tag die Label-Gates besteht."
     }
   },
   "services": {

@@ -756,6 +756,59 @@ ISSUE_SLOW_LEARNER_DISABLED = "slow_learner_auto_disabled"
 # cells were re-seeded against the new geometry (A4/FOR-4): the operator may want
 # to re-run the offline backfill bootstrap or reset_day_ahead_bias.
 ISSUE_CONFIG_CHANGED_BIAS_RESEED = "config_changed_bias_reseed"
+# --- Learning-visibility gates (0.23.1) ------------------------------------
+# Both make "the system is not learning" VISIBLE instead of log-only. The
+# failure they were written for: DEFAULT_SITE ships EIGHT of the reference
+# plant's Hoymiles entity ids, and _actuals discards the WHOLE day for BOTH
+# learners as soon as ONE configured channel is unusable. A foreign install
+# that adopts the shipped default therefore throws away every night forever
+# while status + entities look perfectly normal (cold_start, learner "active") —
+# the status-lie class the July forensics named as the core problem.
+#
+# 1) Raised at setup / after a config change when a configured plane
+#    `actual_entity` does not exist in this HA instance at all. Catches the
+#    copied reference site in seconds instead of after days of silence.
+ISSUE_ACTUAL_ENTITY_MISSING = "actual_entity_missing"
+# 2) Raised when the nightly training discarded the WHOLE day
+#    LEARNING_STALLED_STREAK_DAYS times in a row for a STRUCTURAL reason.
+#    ONE ISSUE ID PER REASON, deliberately: the three gates have three
+#    different remedies (fix the entity id / restart the stuck DTU / close the
+#    recorder gap), and a remedy passed as a translation PLACEHOLDER would ship
+#    English prose into the German repair card. Per-reason ids keep every word
+#    of the advice inside the translation file where it can be translated.
+ISSUE_LEARNING_STALLED_DEAD_CHANNEL = "learning_stalled_dead_channel"
+ISSUE_LEARNING_STALLED_FROZEN_CHANNEL = "learning_stalled_frozen_channel"
+ISSUE_LEARNING_STALLED_LOW_COVERAGE = "learning_stalled_low_coverage"
+
+# --- Nightly whole-day discard reasons (SPEC §5 label gates) ---------------
+# Which gate in `_actuals._actuals_from_stats` discarded the day. Persisted in
+# the store's learning-health section and surfaced in diagnostics + the
+# `learning_stalled` repair issue, because the remedies differ: a dead channel
+# is a wrong/removed entity id, a frozen channel is a stuck DTU/inverter sensor,
+# and low coverage is a recorder/LTS gap or a module dying mid-day.
+DROPOUT_REASON_DEAD_CHANNEL = "dead_channel"
+DROPOUT_REASON_FROZEN_CHANNEL = "frozen_channel"
+DROPOUT_REASON_LOW_COVERAGE = "low_coverage"
+DROPOUT_REASONS = (
+    DROPOUT_REASON_DEAD_CHANNEL,
+    DROPOUT_REASON_FROZEN_CHANNEL,
+    DROPOUT_REASON_LOW_COVERAGE,
+)
+# Which repair issue a persistent streak of each reason raises. Exhaustive over
+# DROPOUT_REASONS by construction (asserted in tests): a new gate that forgets
+# its issue id would otherwise stall learning invisibly again.
+ISSUE_LEARNING_STALLED_BY_REASON = {
+    DROPOUT_REASON_DEAD_CHANNEL: ISSUE_LEARNING_STALLED_DEAD_CHANNEL,
+    DROPOUT_REASON_FROZEN_CHANNEL: ISSUE_LEARNING_STALLED_FROZEN_CHANNEL,
+    DROPOUT_REASON_LOW_COVERAGE: ISSUE_LEARNING_STALLED_LOW_COVERAGE,
+}
+# Consecutive STRUCTURALLY discarded days before the repair issue fires. Only
+# days the integration actually issued a forecast for count (a fresh install's
+# catch-up sweep reaches back into pre-install history and must stay silent),
+# so this is a real "we ran, we measured, we still learned nothing" streak.
+# Five: long enough that a single recorder purge / mid-day outage self-heals,
+# short enough to beat the 14-day scoreboard window to the punch.
+LEARNING_STALLED_STREAK_DAYS = 5
 
 
 # ===========================================================================
@@ -912,6 +965,16 @@ STORE_KEY_INVERTER_CAL_STATE = "inverter_cal_state"  # InverterCalState (learned
 # differs from the live config the bias cells are re-seeded (see
 # DAY_AHEAD_BIAS_RESEED_N) so learning re-accelerates against the new geometry.
 STORE_KEY_CONFIG_FINGERPRINT = "config_fingerprint"  # str | None
+# Learning-health bookkeeping (0.23.1): the nightly whole-day-discard streak and
+# its cause, so "nothing was learned for N days" survives a restart and can be
+# read remotely from the diagnostics dump instead of only from the log. Added
+# ADDITIVELY within v3 (NO version bump), exactly like STORE_KEY_INVERTER_CAL_STATE
+# and STORE_KEY_CONFIG_FINGERPRINT: _empty_state injects the neutral dict and a
+# store lacking the key reads back neutral, so every existing v3 store stays
+# byte-faithful. Shape: {discard_streak: int, last_discard_reason: str | None,
+# last_discard_modules: list[str], last_discard_day: iso | None,
+# last_accepted_day: iso | None}.
+STORE_KEY_LEARNING_HEALTH = "learning_health"
 
 # --- New diagnostic sensors / binary sensors (SPEC §8/§10) -----------------
 # Entity object_ids are unprefixed: the device slug already carries

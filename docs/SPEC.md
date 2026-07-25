@@ -49,6 +49,7 @@ Verhalten steht am Ende dieses Wegweisers.
 | Lernschicht 3 — Day-ahead-Bias (RLS, θ) | **§5** | §5 (Fingerprint/Reseed), §6 (Bins) |
 | Lernschicht 4 — Wechselrichter-η-Kalibrierung | **§5** | §8 (AC-Standard) |
 | Wolkenklassifikation (k_c-Taxonomie, `CLASSIFIER_VERSION`) | **§5** | §6, §14.1 (dieselben Klassen) |
+| Label-Gates & ihre Sichtbarkeit (Repair-Issues, Anlaufphase) | **§5.1** | §5 (die Gates selbst), §8 (Diagnose-Dump), §14.4 (`learning_health`) |
 | Unsicherheit / Quantile P10/P50/P90 | **§14.2** | §6 (Verfahren, Ring), §6.1 (Ensemble-Hüllkurve) |
 | Degradationsleiter | **§7** | §8 (Sensorik), §4 (Last-Good-Cache) |
 | Konsumenten-Schnittstellen, Entitäten, Attribute, Diagnostics | **§8** | §14.1 (Scoreboard-Sensoren), §15.1 (Diagramm-Entitäten) |
@@ -630,10 +631,16 @@ nie Setup-Crash) und reitet **nicht** auf dem Rollback-Ring (selbst-gatend).
 - Label-Gates im Trainer: eingefrorene Sensoren (unverändert + altes
   `last_updated` = fehlend), Energie-Monotonie, Messkanal-Dropout ⇒
   ganzen Tag verwerfen; nächtlicher Job **idempotent** (datums-gekeyt,
-  doppelt laufbar). Der Job holt zusätzlich versäumte Tage **nach**
-  (`NIGHTLY_CATCHUP_MAX_DAYS` zurück ab gestern), damit ein Neustart oder eine
-  Downtime keine Trainingstage verliert; jeder nachgeholte Tag durchläuft
-  dieselben Gates und denselben Idempotenzmarker.
+  doppelt laufbar). Der Job holt zusätzlich versäumte Tage **nach**, damit ein
+  Neustart oder eine Downtime keine Trainingstage verliert; jeder nachgeholte
+  Tag durchläuft dieselben Gates und denselben Idempotenzmarker. Das
+  Nachholfenster **endet gestern** und beginnt am Tag **nach dem neuesten
+  bereits erfassten Ist-Tag**, gedeckelt auf `NIGHTLY_CATCHUP_MAX_DAYS`
+  (`_nightly.catchup_days`) — es ist also kein fixer Block „N Tage zurück ab
+  gestern“, sondern genau die Lücke seit dem letzten erfassten Tag, höchstens
+  N Tage breit. Auf einer frischen Installation ohne erfasste Tage ist das
+  volle N-Tage-Fenster die Obergrenze, und es reicht damit zwangsläufig in
+  Zeiträume **vor** der Installation zurück (s. Anlaufphase-Regel unten).
 - **Zeitstempel-Semantik der Ist-Werte (0.19.2, kritisch):** numerische `start`-
   Werte einer Statistikzeile werden **nach Größenordnung** disambiguiert
   (`_actuals._EPOCH_MS_THRESHOLD`: darüber Millisekunden = WebSocket-Format,
@@ -663,6 +670,79 @@ nie Setup-Crash) und reitet **nicht** auf dem Rollback-Ring (selbst-gatend).
   Modulen, Total-Dropout) ⇒ beide Lerner für den Tag einfrieren, nur der
   geclampte Intraday-Skalar reagiert.
 - Kill-Switches je Lernschicht im Options-Flow.
+
+### 5.1 Sichtbarkeit der Label-Gates: „es wird nicht gelernt“ ist keine Log-Zeile (0.23.1)
+
+Die Label-Gates oben sind **richtig** — ein Teiltag oder ein eingefrorener
+Kanal darf nie Grundwahrheit werden. Ihre Konsequenz war aber **unsichtbar**:
+`_actuals._actuals_from_stats` verwirft den ganzen Tag für **beide** Lerner,
+sobald **ein** konfigurierter Kanal unbrauchbar ist, und meldete das
+ausschließlich als Log-Warnung. Status und Entitäten sahen dabei völlig normal
+aus (`cold_start`, Lerner „active"). Für jeden Nutzer, der den ausgelieferten
+Referenzstandort (`const.DEFAULT_SITE` mit seinen **acht** fremden
+Wechselrichter-Entity-IDs) ganz oder teilweise übernimmt, heißt das: Nacht für
+Nacht wird alles verworfen, das System lernt **nie** — dieselbe Statuslügen-
+Klasse, die die Juli-Forensik an anderer Stelle bereits als Kernproblem hatte.
+Zwei Gates machen das sichtbar; beide sind reine **Meldewege** und verändern
+weder die Physik noch eine Lernentscheidung.
+
+**(a) Messkanal-Präsenz (Sofort-Check).** Beim Setup des Config-Entries und
+nach jeder Konfigurationsänderung (die den Entry neu lädt) wird geprüft, ob
+jede in den Ebenen konfigurierte `actual_entity` in dieser HA-Instanz
+überhaupt **existiert** (State **oder** Entity-Registry-Eintrag; eine bloß
+`unavailable` Entität gilt als vorhanden — das ist ein Gerätefehler, kein
+Konfigurationsfehler, und Sache von (b)). Fehlt mindestens eine, wird das
+persistente Repair-Issue `actual_entity_missing` gesetzt, das **Ebene und
+Entity-ID** nennt und zum Reconfigure mit den eigenen Wechselrichter-Sensoren
+auffordert; sind wieder alle vorhanden, wird es gelöscht. Der Check hängt
+**nicht** am `config_fingerprint`-Abgleich: dieser läuft in
+`async_prime_from_store` vor dem ersten Refresh und beim Kaltstart typischerweise
+bevor die Wechselrichter-Integration ihre Entitäten registriert hat (Fehlalarm
+bei jedem Neustart), und `actual_entity` ist bewusst **kein** Fingerprint-Feld
+(ein Sensor-ID-Tausch darf die Bias-Zellen nicht neu ansäen). Während HA noch
+startet wird der Check auf `EVENT_HOMEASSISTANT_STARTED` vertagt.
+
+**(b) Verwurfssträhne (nächtlich).** Wird das nächtliche Training
+`LEARNING_STALLED_STREAK_DAYS` Tage in Folge **komplett** verworfen, wird ein
+Repair-Issue gesetzt, das die **Ursache** nennt — je Gate ein eigenes Issue,
+weil die drei Fälle verschiedene Gegenmittel haben:
+`learning_stalled_dead_channel` (Kanal ohne verwertbare LTS-Zeilen ⇒ Entity-ID
+/ Recorder-Ausschluss prüfen), `learning_stalled_frozen_channel` (eingefrorener
+DTU-Sensor ⇒ neu starten) und `learning_stalled_low_coverage` (Tagesabdeckung
+reißt ⇒ Recorder-Lücke / Purge / Modulausfall mitten am Tag). Je Gate hält
+`_actuals` den Grund maschinenlesbar fest (`DROPOUT_REASON_*` plus betroffene
+Ebene und Entity-ID); die Zuordnung Grund → Issue
+(`ISSUE_LEARNING_STALLED_BY_REASON`) ist über `DROPOUT_REASONS` vollständig.
+Der Zustand liegt **persistiert** in der additiven Store-Sektion
+`learning_health` (§14.4), überlebt also Neustarts. Beim ersten wieder
+angenommenen Tag: Strähne auf 0, alle drei Issues gelöscht.
+
+**Keine Fehlalarme in der Anlaufphase (verbindlich).** Eine neue, korrekt
+konfigurierte Anlage hat naturgemäß erst einmal keine (vollständigen)
+LTS-Tage, und das Nachholfenster reicht bei leerem Store zwangsläufig in die
+Zeit **vor** der Installation zurück. Ein verworfener Tag zählt daher nur dann
+auf die Strähne, wenn er **strukturell** ist — operationalisiert als: die
+Integration hat für diesen Tag eine Prognose **ausgeliefert** (Eintrag im
+Issued-Ring). Nur dann liefen wir, nur dann hätten die Kanäle geloggt haben
+müssen. Tage vor unserer Zeit zählen nie; die Strähne ist zusätzlich
+**tagesidempotent** (ein verworfener Tag wird nicht erfasst und daher jede
+Nacht erneut gelesen — nur ein Tag **neuer** als der zuletzt gezählte zählt
+hoch, sonst feuerte das Issue nach zwei realen Tagen).
+
+**Sichtbarkeit im Diagnose-Dump (§8).** Beide Gates schreiben in die bereits
+vorhandenen Accessoren, nicht in einen dritten Sonderweg:
+`store_stats()['learning_health']` (letzte Verwurfsursache, betroffene Ebenen,
+Strähnenlänge, Schwelle, letzter angenommener Ist-Tag) und
+`learner_state_summary()['actual_channels']` (Anzahl konfigurierter Kanäle,
+fehlende Kanäle, AC-Zähler-Status). Fern-Diagnose ist damit ohne Log-Zugriff
+möglich.
+
+**Der AC-Zähler ist bewusst kein Repair-Issue.** `ac_actual_entity` ist
+optional, selbst-gatend (fehlt oder lügt der Zähler, bleibt η auf dem
+konfigurierten Wert und das DC-Lernen ist unberührt) und **nie** ein
+Lern-Blocker. Eine zweite Repair-Karte neben der blockierenden würde genau das
+Signal verwässern, das Handlung erfordert; ein fehlender AC-Zähler erscheint
+daher im Diagnose-Dump (`actual_channels.ac_missing`) und einmal im Log.
 
 ## 6. Unsicherheit (Phase 4, optional)
 
@@ -844,11 +924,20 @@ Degradationsgrund — die Kurve läuft unverändert auf den gelernten Bändern w
 - **Diagnose-Dump (Config-Entry-Diagnostics, SPEC-2/SCT-4):** der
   `store`-Block meldet echte Füllstände (aus `coordinator.store_stats()`:
   `issued_days`, `actuals_days`,
-  `hourly_actuals_days`, `snapshot_ring`/`_capacity`, `schema_version`) und der
+  `hourly_actuals_days`, `snapshot_ring`, `snapshot_ring_capacity`,
+  `schema_version`, `learning_health`) und der
   `learners.state`-Block echte Zählungen (aus
   `coordinator.learner_state_summary()`: `bias_cells`, `quantile_bins`,
   `shademap_channels`, `shademap_bins` je Kanal) — die Blöcke sind **nicht mehr
-  fälschlich `available: false`**. Der `forecast`-Block trennt
+  fälschlich `available: false`**. Seit 0.23.1 tragen dieselben beiden
+  Accessoren zusätzlich die **Lern-Sichtbarkeit** (§5.1):
+  `store.learning_health` (`discard_streak`, `last_discard_reason`,
+  `last_discard_modules`, `last_discard_day`, `last_accepted_day`,
+  `streak_threshold`) beantwortet „warum lernt diese Installation nichts?",
+  `learners.state.actual_channels` (`configured`, `missing`, `ac_configured`,
+  `ac_missing`) beantwortet „existieren die Messkanäle überhaupt?" — beides
+  ohne Log-Zugriff, denn null gelernte Zellen lesen sich völlig anders, wenn
+  die Eingangskanäle gar nicht existieren. Der `forecast`-Block trennt
   `daily_kwh_dc` vs. `daily_kwh_ac` (statt eines mehrdeutigen `daily_kwh`). Der
   `quantiles`-Block führt je Bin `n`, `days` und `trained` (= `n ≥
   QUANTILE_MIN_SAMPLES` **und** `days ≥ QUANTILE_MIN_DAYS`, exakt das
@@ -1239,6 +1328,18 @@ zurücksetzt, ist ein KRITISCHER Fehler**. Die Migration ist rein
 inner-schema: jeder v2-Schlüssel wird **byte-treu** durchgereicht, die drei
 neuen v3-Sektionen (`quantile_state`, `scoreboard_state`, `comparison_ring`)
 werden leer default-injiziert.
+
+**Additive Erweiterungen INNERHALB von v3 (ohne Versionssprung).** Nach
+demselben Muster kamen `inverter_cal_state` (§5, AC-Seite), `config_fingerprint`
+(§5, Fingerprint/Reseed) und — mit 0.23.1 — `learning_health` (§5.1) hinzu:
+`_empty_state()` injiziert den neutralen Wert, der gemeinsame Ladepfad liest
+einen Store **ohne** den Schlüssel auf denselben neutralen Wert, und jede andere
+Sektion bleibt byte-treu. Ein bestehender v3-Store lädt damit unverändert; ein
+korrupter Abschnitt fällt validate-and-clamp auf neutral zurück statt Setup zu
+crashen. `learning_health` hält
+`{discard_streak, last_discard_reason, last_discard_modules, last_discard_day,
+last_accepted_day}` — die Verwurfssträhne des nächtlichen Trainings, damit sie
+einen Neustart überlebt.
 
 ## 15. Betreiber-Oberfläche: Verschattungsprofil, Karten & Wartungsaktionen (ab v0.5)
 
