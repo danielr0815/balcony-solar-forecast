@@ -1,4 +1,4 @@
-"""Pure tests for the Open-Meteo ENSEMBLE client (v0.16, SPEC §6).
+"""Pure tests for the Open-Meteo ENSEMBLE client (v0.16, SPEC §11.3).
 
 No Home Assistant needed — ``build_ensemble_params`` / ``validate_ensemble`` /
 ``parse_ensemble`` are pure, and ``async_fetch_ensemble_raw`` is driven with a

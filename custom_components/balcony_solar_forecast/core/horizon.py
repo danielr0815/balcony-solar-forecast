@@ -1,6 +1,6 @@
 """Per-plane horizon: beam masking + diffuse sky-view factor (stdlib only).
 
-Owner: horizon. Pure, HA-free. Encodes SPEC §4 step 5 / §13:
+Owner: horizon. Pure, HA-free. Encodes SPEC §5:
   - ``interp_elevation``: linear interpolation of the horizon-line elevation
     at a given sun azimuth from the plane's sorted (az, elev, tau) table,
     with 360-degree azimuth wrap.
@@ -261,7 +261,7 @@ def _row_diffuse_tau_at(
     sky-view integral only: the blocked wedge radiates ``diffuse_tau`` of the
     open sky instead of the beam ``tau`` / ``tau_points`` value — the effective
     radiance of the obstructed sector relative to open sky (a bright wall
-    reflects ~0.5). It is NOT a transmission (SPEC §13) and never touches the
+    reflects ~0.5). It is NOT a transmission (SPEC §5.1) and never touches the
     beam gate. Default None == the diffuse keeps using the beam tau
     (:func:`_row_tau_at`), the pre-0.22 behaviour, so a row the operator did not
     mark is bit-identical and the beam path stays byte-untouched.
@@ -424,7 +424,7 @@ def _profile_knot_elevations(
     """Sorted unique interior knot elevations across all rows' ``tau_points``.
 
     These are the elevations at which the diffuse band-integral segments the
-    blocked wedge (§2.1). Empty when no row carries a profile — the caller then
+    blocked wedge (SPEC §5.3). Empty when no row carries a profile — the caller then
     takes the fast scalar path. A superset (knots from every row, not just the
     two az-bracketing ones) only ADDS segment boundaries where tau is already
     continuous, so the midpoint quadrature stays correct.

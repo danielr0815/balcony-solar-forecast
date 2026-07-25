@@ -1,6 +1,6 @@
 """Tests for the SLOW learner: shademap (pure, HA-free).
 
-Covers (SPEC §5, task brief):
+Covers (SPEC §9.1):
   - bin-key math: az 5 deg x el 2.5 deg x half-year, azimuth 360 wrap,
     below-horizon sun folds to el bin 0;
   - half-year separation: same sun position, opposite season -> different bins;
@@ -425,7 +425,7 @@ def test_effective_tau_wall_bin_can_reach_full_occlusion():
 
 
 # ---------------------------------------------------------------------------
-# pooled_bin_n: read-time pooled EVIDENCE count (confidence viz, SPEC §5)
+# pooled_bin_n: read-time pooled EVIDENCE count (confidence viz, SPEC §9.2)
 # ---------------------------------------------------------------------------
 
 
@@ -604,7 +604,7 @@ def test_bootstrap_non_dict_yields_empty_state():
 
 
 # ---------------------------------------------------------------------------
-# PROPERTY TESTS (task brief)
+# PROPERTY TESTS
 # ---------------------------------------------------------------------------
 
 
@@ -653,7 +653,7 @@ def test_property_half_year_separation_same_position():
     """Same sun position, different season => independently learned bins.
 
     Training the spring half must not leak into the summer half and vice versa
-    (SPEC §5: April laublos vs. August belaubt must not alias).
+    (SPEC §9.1: April laublos vs. August belaubt must not alias).
     """
     st = ShademapState()
     # Train ONLY the spring half heavily toward a shaded (leafed-out=bare here)

@@ -1,4 +1,4 @@
-"""Validate the observability dashboard YAML (SPEC §14.3).
+"""Validate the observability dashboard YAML (SPEC §18.1).
 
 Pure test (no Home Assistant import): it only needs PyYAML, which ships with
 HA and is available in the plain-core environment too. Guards the two things
@@ -143,14 +143,14 @@ def test_only_builtin_card_types(dashboard):
 
 
 def test_uses_the_five_documented_builtin_cards(dashboard):
-    """SPEC §14.3 names history-graph, entities, gauge, markdown (+ statistics)."""
+    """SPEC §18.1 names history-graph, entities, gauge, markdown (+ statistics)."""
     types = {card["type"] for card in _iter_cards(dashboard)}
     for required in ("markdown", "entities", "history-graph", "gauge"):
         assert required in types, f"missing required built-in card: {required}"
 
 
 def test_gauge_binds_engine_vs_best_baseline(dashboard):
-    """SPEC §14.3: a gauge bound to engine_vs_best_baseline_pct."""
+    """SPEC §18.1: a gauge bound to engine_vs_best_baseline_pct."""
     gauges = [c for c in _iter_cards(dashboard) if c["type"] == "gauge"]
     assert gauges, "expected a gauge card"
     assert any(
@@ -163,19 +163,19 @@ def test_gauge_binds_engine_vs_best_baseline(dashboard):
 def test_required_scoreboard_and_learner_entities_referenced(dashboard):
     referenced = set(_iter_entity_ids(dashboard))
     required = {
-        # scoreboard / kill-gate (SPEC §9/§10/§14.1)
+        # scoreboard / kill-gate (SPEC §15)
         "binary_sensor.balcony_solar_forecast_kill_gate_passed",
         "sensor.balcony_solar_forecast_daily_kwh_mae",
         "sensor.balcony_solar_forecast_vs_best_baseline_pct",
-        # the two documented operator comparisons (SPEC §14.1)
+        # the two documented operator comparisons (SPEC §15.3)
         "sensor.balcony_solar_forecast_comparison_daily_kwh_mae_8_entry_baseline",
         "sensor.balcony_solar_forecast_comparison_daily_kwh_mae_alt_1600w",
-        # quantile band sensors (SPEC §6/§14.2)
+        # quantile band sensors (SPEC §11.2)
         "sensor.balcony_solar_forecast_energy_production_today_p10",
         "sensor.balcony_solar_forecast_energy_production_today_p90",
-        # forecast total vs measured (SPEC §14.3)
+        # forecast total vs measured (SPEC §18.1)
         "sensor.balcony_solar_forecast_energy_production_today",
-        # learners / drift / degradation (SPEC §5/§7/§14.3)
+        # learners / drift / degradation (SPEC §9/§13/§18.1)
         "sensor.balcony_solar_forecast_source_status",
         "binary_sensor.balcony_solar_forecast_degraded",
         "sensor.balcony_solar_forecast_fast_learner_status",
@@ -187,7 +187,7 @@ def test_required_scoreboard_and_learner_entities_referenced(dashboard):
 
 
 def test_per_module_actual_sensors_referenced(dashboard):
-    """SPEC §14.3: measured ground truth = the 8 per-module DC power sensors."""
+    """SPEC §18.1: measured ground truth = the 8 per-module DC power sensors."""
     referenced = set(_iter_entity_ids(dashboard))
     modules = {
         "sensor.inverter_port_1_dc_power",
@@ -246,7 +246,7 @@ def test_comparison_ids_follow_slug_pattern(dashboard):
 
 
 def test_shademap_documented_via_dump_service(dashboard):
-    """SPEC §14.3: note that dump_shademap yields the full polar data."""
+    """SPEC §18.1: note that dump_shademap yields the full polar data."""
     blobs = [
         c.get("content", "")
         for c in _iter_cards(dashboard)
@@ -257,7 +257,7 @@ def test_shademap_documented_via_dump_service(dashboard):
 
 
 def test_comparison_config_example_documented(dashboard):
-    """D-P9: the operator's two comparison entities are documented in-dash."""
+    """SPEC §15.3: the documented comparison entities are named in-dashboard."""
     joined = "\n".join(
         c.get("content", "")
         for c in _iter_cards(dashboard)

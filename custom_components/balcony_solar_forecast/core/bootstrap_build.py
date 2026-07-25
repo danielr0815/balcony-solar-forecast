@@ -1,4 +1,4 @@
-"""Home-Assistant-free learner-bootstrap core (SPEC §6).
+"""Home-Assistant-free learner-bootstrap core (SPEC §12.4).
 
 The math that turns ~2 years of history into a warm start for the two learning
 layers (day-ahead RLS bias + geometric shademap) plus the quantile relerr ring.
@@ -20,7 +20,7 @@ The reconstruction re-runs the repo's ``core/`` physics (the SAME the live
 engine runs) at the hour midpoint, treating the resulting instantaneous DC power
 as the hour's mean (hourly-mean semantics). This is deliberately coarse — the
 sub-hour geometry the live 15-min path sees is lost — which is exactly why the
-backfilled shademap bins get their ``n`` capped (SPEC §6): live data overrides
+backfilled shademap bins get their ``n`` capped (SPEC §12.5): live data overrides
 them quickly.
 """
 
@@ -85,7 +85,7 @@ class PlaneHourReconstruction:
     POA — i.e. the beam that would arrive with a CLEAR horizon (static tau = 1).
     This is deliberate: the shademap learns a beam-referenced transmittance
     ``T = (P_measured − P_diffuse) / P_beam`` that **replaces** the static
-    horizon tau of the bin (SPEC §5), so the reference beam must be the
+    horizon tau of the bin (SPEC §9.1), so the reference beam must be the
     un-attenuated geometric beam — otherwise a shaded bin (static tau ~ 0)
     would have ~0 modeled beam, fail the beam-share gate, and never learn the
     very shade it exists to capture.
@@ -121,7 +121,7 @@ class BootstrapAccumulator:
     # Day-ahead RLS: {cell_key: BiasCell}. Trained by a scalar RLS step per
     # (day x cell) aggregated Wh pair.
     bias: dict[str, BiasCell] = field(default_factory=dict)
-    # Quantile relerr ring (SPEC §6): accumulated ACROSS days via the LIVE
+    # Quantile relerr ring (SPEC §12.6): accumulated ACROSS days via the LIVE
     # quantiles.train_quantiles, so the seeded rings are byte-identical to a
     # live-trained state (date-windowed, count-capped). ``last_iso_date`` is the
     # newest processed day, used to re-window the ring at emit time relative to
@@ -144,7 +144,7 @@ class BootstrapAccumulator:
 # horizon gate -> electrical.dc_power) at the hour MIDPOINT and treat the
 # resulting instantaneous DC power as the hour's mean (hourly-mean semantics),
 # so hour energy Wh == mean power W * 1 h. This is exactly the smearing the
-# SPEC calls out as the reason to cap the backfilled bin n (§6): sub-hour
+# SPEC calls out as the reason to cap the backfilled bin n (SPEC §12.5): sub-hour
 # geometry is lost, so a backfilled bin is worth less than a live 15-min one.
 
 
@@ -224,7 +224,7 @@ def reconstruct_plane_hour(
 
     # UNGATED beam+circumsolar POA (static tau = 1): the counterfactual clear-
     # horizon beam the shademap references, so a shaded bin still has a non-zero
-    # modeled beam to divide by (SPEC §5 — the learned T REPLACES the static
+    # modeled beam to divide by (SPEC §9.1 — the learned T REPLACES the static
     # tau, so the reference must be un-attenuated).
     beam_poa_ungated = max(0.0, beam + circ)
 
@@ -402,7 +402,7 @@ def process_day(
     the module's total-day Wh, so we distribute it across the day's daylight
     hours in proportion to each hour's MODELED total DC energy for that module
     (a shape-preserving disaggregation). This is deliberately coarse — exactly
-    why backfilled bins get their n capped (SPEC §6). When the caller supplies
+    why backfilled bins get their n capped (SPEC §12.4). When the caller supplies
     true hourly actuals (see ``process_day_hourly``) that path is used instead.
     """
     return _process_day_impl(
@@ -522,7 +522,7 @@ def _process_day_impl(
     # model's own output. The day-ahead bias below still uses the daily
     # disaggregation, where the daily ratio IS the real signal.
     #
-    # Day-level hygiene gates (mirror the LIVE nightly trainer, SPEC §5): two
+    # Day-level hygiene gates (mirror the LIVE nightly trainer, SPEC §9.8): two
     # years of history certainly contain snow-cover and frozen-sensor days, and
     # without these gates a snow day passes every per-hour check (forecast-side
     # kc is clear, the measured/modeled ratio is uniformly near-zero so the
@@ -552,7 +552,7 @@ def _process_day_impl(
             shademap_day_ok = False
     for plane in (planes if shademap_day_ok else ()):
         chan = plane.name
-        # Storage is ALWAYS per plane (SPEC §5): the learned samples are stored
+        # Storage is ALWAYS per plane (SPEC §9.2): the learned samples are stored
         # under the plane's OWN channel (its name), mirroring the live nightly
         # trainer. Grouping is applied only at READ time in the coordinator
         # (effective_tau_pooled), so the bootstrap stays group-agnostic and any
@@ -602,7 +602,7 @@ def _process_day_impl(
                 neighbour_ratio=neighbour_ratio,
             ):
                 continue
-            # Beam-referenced transmittance (SPEC §5): subtract the modeled
+            # Beam-referenced transmittance (SPEC §9.1): subtract the modeled
             # diffuse floor, divide by the modeled beam.
             measured_t = (p_meas - r.diffuse_wh) / r.beam_wh
             bin_key = shademap_bin_key(r.sun_az, r.sun_el, _doy_of(hkey))
@@ -640,7 +640,7 @@ def _process_day_impl(
         acc.bias_samples += 1
         contributed = True
 
-    # --- 4) QUANTILE SEED (SPEC §6): per-hour relerr against the theta-CORRECTED
+    # --- 4) QUANTILE SEED (SPEC §12.6): per-hour relerr against the theta-CORRECTED
     # gated forecast, mirroring the live train_quantiles_day path so the day-0
     # bands are not cold (only overcast bins were ever trained before A6). Per
     # hour: corrected = clamp(theta_cell) x gated_modeled_site (theta AFTER this
@@ -678,7 +678,7 @@ def _process_day_impl(
         if corrected <= const.QUANTILE_MIN_FORECAST_WH:
             continue  # below-threshold hour never enters the ring (live parity)
         if per_bin_today.get(key, 0) >= const.QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN:
-            continue  # cap correlated hours per bin per day (SPEC §6)
+            continue  # cap correlated hours per bin per day (SPEC §12.6)
         q_samples.append(
             quantiles_mod.QuantileSample(
                 cloud_class=cloud_class,
@@ -739,7 +739,7 @@ def _resolve_hourly_measured(
 
     True hourly actuals are used verbatim when present. Otherwise the module's
     daily total is disaggregated across daylight hours in proportion to the
-    MODELED total DC energy that hour (shape-preserving; SPEC §6 coarse
+    MODELED total DC energy that hour (shape-preserving; SPEC §12.4 coarse
     backfill). Returns {} when neither source has data for the module.
     """
     if actuals_hourly is not None:
@@ -801,7 +801,7 @@ def _classify_cloud(
     *,
     elevation_deg: float | None = None,
 ) -> str:
-    """Cloud class via the live bias.classify_cloud (SPEC §5/§6, A5).
+    """Cloud class via the live bias.classify_cloud (SPEC §8, A5).
 
     Passes the hour's GHI and sun ``elevation_deg`` so the classifier keys on the
     CLEAR-SKY INDEX (k_c = GHI / Haurwitz(elevation)) — the SAME taxonomy the live
@@ -824,7 +824,7 @@ def _classify_cloud(
 
 
 def _day_part_for_slot(dt: datetime, lon: float) -> str:
-    """SOLAR day part for an hour-start datetime (v0.19, SPEC §5).
+    """SOLAR day part for an hour-start datetime (v0.19, SPEC §8).
 
     Bins by APPARENT SOLAR time (``bias.day_part_for_solar`` over
     ``solpos.hours_from_solar_noon``), so the bootstrapped day-ahead bias cells
@@ -932,7 +932,7 @@ def build_bootstrap_json(
 ) -> dict:
     """Assemble the contract bootstrap dict from the accumulator (pure).
 
-    Caps every shademap bin's ``n`` at ``max_bin_n`` (SPEC §6: backfilled bins
+    Caps every shademap bin's ``n`` at ``max_bin_n`` (SPEC §12.5: backfilled bins
     are hourly-smeared, so live data should override quickly) and clamps every
     factor. The result is exactly what ``store.import_bootstrap`` expects:
     top-level schema/version/site-signature + ``BiasState.to_dict()`` and
@@ -959,7 +959,7 @@ def build_bootstrap_json(
     # backfill day (a bin last touched early in a multi-year range must not keep
     # samples older than the window measured from the newest day) and enforce the
     # count-cap backstop — reusing the LIVE trim so the seeded ring is
-    # byte-identical to a live-trained one (SPEC §6).
+    # byte-identical to a live-trained one (SPEC §12.6).
     cutoff = quantiles_mod._window_cutoff(acc.last_iso_date)
     quant_bins: dict[str, list] = {}
     for bk, ring in acc.quantile_state.bins.items():
@@ -981,7 +981,7 @@ def build_bootstrap_json(
 
 
 def site_signature(site: SiteConfig) -> str:
-    """Stable lat/lon + plane-name digest for the import sanity check (SPEC §6).
+    """Stable lat/lon + plane-name digest for the import sanity check (SPEC §12.5).
 
     A short sha256 over the rounded coordinates and the ordered plane names, so
     the import service can refuse a bootstrap built for a different site.
@@ -1027,8 +1027,8 @@ def load_site(site_json: Path | None) -> SiteConfig:
     is knowingly stale (see the comment at ``DEFAULT_SITE``), never a stand-in
     for a real install. Callers must make that fallback deliberate: the CLI
     gates it behind ``--use-default-site`` (``backfill.resolve_site_arg``) and
-    the in-process ``run_bootstrap`` action never uses it at all (SPEC §6,
-    §15.6).
+    the in-process ``run_bootstrap`` action never uses it at all
+    (SPEC §12.2/§12.3/§7.8).
     """
     if site_json is None:
         return SiteConfig.from_dict(const.DEFAULT_SITE)

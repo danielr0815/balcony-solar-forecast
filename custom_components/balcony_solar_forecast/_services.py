@@ -3,7 +3,7 @@
 ``install_dashboard``, ``suggest_shade_groups``, ``get_shade_profile`` and
 ``get_issued_forecast``.
 
-  * ``run_bootstrap`` (SPEC §6, ``SupportsResponse.ONLY``): rebuild the learner
+  * ``run_bootstrap`` (SPEC §12.2, ``SupportsResponse.ONLY``): rebuild the learner
     bootstrap IN-PROCESS from the live config — no token, no ``site.json``, no
     dev machine — and (only on an explicit ``dry_run: false``) import it via the
     same ``coordinator.async_import_bootstrap`` path as ``import_bootstrap``. The
@@ -11,14 +11,14 @@
     registers it. Serialised against the nightly job by the coordinator's
     ``_bootstrap_lock``.
 
-  * ``get_issued_forecast`` (SPEC §15.4, ``SupportsResponse.ONLY``): return the
+  * ``get_issued_forecast`` (SPEC §18.4, ``SupportsResponse.ONLY``): return the
     forecast AS IT WAS ISSUED for one past LOCAL date, read straight from the
     store's 90-day issued ring — the read-only source behind the power-history
     card's dashed forecast line on PAST days. It never recomputes from today's
     learned state (no hindsight); a date with no archived snapshot yields
     ``available: False`` (the card draws no line) rather than an error.
 
-  * ``get_shade_profile`` (SPEC §15, ``SupportsResponse.ONLY``): compute the
+  * ``get_shade_profile`` (SPEC §17, ``SupportsResponse.ONLY``): compute the
     sun-path + learned-shade profile for a given module/date WITHOUT changing the
     coordinator's live diagram selection — the read-only source behind the
     shade-profile card's comparison-date overlay. Defaults module/date to the
@@ -26,7 +26,7 @@
     reuses the same pure geometry + read-time pool as the live diagram but bypasses
     the single-slot memo so an ad-hoc query never evicts the primary entry.
 
-  * ``suggest_shade_groups`` (SPEC §5, ``SupportsResponse.ONLY``): compare every
+  * ``suggest_shade_groups`` (SPEC §9.3, ``SupportsResponse.ONLY``): compare every
     plane's individually-learned shademap channel bin-wise and return a
     similarity matrix plus a data-driven grouping suggestion (complete-linkage
     agglomeration over the n-weighted mean tau difference), so the operator no
@@ -35,7 +35,7 @@
     resolves the target coordinator, hands it the site's plane names + the live
     ``ShademapState``, and adds the CURRENT grouping for comparison.
 
-  * ``install_dashboard`` (SPEC §14.3, ``SupportsResponse.OPTIONAL``): write the
+  * ``install_dashboard`` (SPEC §18.2, ``SupportsResponse.OPTIONAL``): write the
     observability dashboard config — with THIS install's real entity ids — into
     a UI-created (empty) storage-mode dashboard, so the operator no longer
     copy-pastes the reference YAML and hand-edits object_ids. Idempotent: a
@@ -54,13 +54,13 @@ ServiceValidationError instead of "Service not found" while no entry is
 loaded. The ``get_forecast`` response builder itself stays in ``sensor.py``
 (imported lazily by its handler).
 
-  * ``import_bootstrap`` (SPEC §6): ingest the offline backfill JSON to pre-seed
+  * ``import_bootstrap`` (SPEC §12.5): ingest the offline backfill JSON to pre-seed
     the day-ahead bias + shademap learner states. The heavy lifting (schema
     validation, clamping, n-credit capping, persistence) belongs to the store /
     coordinator; this layer only resolves the target entry, loads the payload
     from an inline object/string or an allowed file path, and forwards it to
     ``coordinator.async_import_bootstrap(dict)``.
-  * ``dump_shademap`` (SPEC §5, ``SupportsResponse.ONLY``): return the learned
+  * ``dump_shademap`` (SPEC §9.1, ``SupportsResponse.ONLY``): return the learned
     shademap as a polar table (sun azimuth x elevation) per channel so the
     operator can eyeball it against known obstructions. The polar-table shaping
     is a pure, HA-free presentation concern implemented + tested here
@@ -769,7 +769,7 @@ def _handle_get_shade_profile(
     """Return the sun-path + learned-shade profile for a module/date, read-only.
 
     The on-demand analysis behind the shade-profile card's comparison-date
-    overlay (SPEC §15): resolve the single target coordinator, default ``module``
+    overlay (SPEC §17): resolve the single target coordinator, default ``module``
     to its current shade-profile selection and ``date`` to its current selected
     date, validate the module against the site's plane names, and compute the
     profile via ``build_shade_profile_for`` WITHOUT mutating the coordinator's
@@ -845,7 +845,7 @@ def _handle_get_issued_forecast(
     "archive since <date>" hint instead of a bare emptiness the operator would
     misread as "the forecast stopped updating".
 
-    A HIT also carries the AC-side + metadata block (IRC-5/SCT-4, SPEC §15.4):
+    A HIT also carries the AC-side + metadata block (IRC-5/SCT-4, SPEC §18.4):
     ``hourly_wh``/``raw_hourly_wh`` are explicitly DC; ``hourly_wh_ac`` is the
     served DC curve times ``eta`` (the DC->AC efficiency FROZEN into the snapshot
     at issue time, ``eta_source == "snapshot"`` — or, for a legacy snapshot that
@@ -933,7 +933,7 @@ def _handle_get_issued_forecast(
             "hourly_wh": {k: _round3(v) for k, v in corrected.items()},
             "raw_hourly_wh": {k: _round3(v) for k, v in raw.items()},
             # The served (corrected) DC curve converted to AC with the issue-time
-            # eta — the DC curves above are explicitly DC (SPEC §15.4).
+            # eta — the DC curves above are explicitly DC (SPEC §18.4).
             "hourly_wh_ac": {k: _round3(v * eta) for k, v in corrected.items()},
             "eta": round(eta, 4),
             "eta_source": eta_source,
@@ -953,7 +953,7 @@ def build_polar_table(state: Any) -> dict[str, Any]:
 
     Accepts a ``ShademapState``, its ``to_dict()`` mapping, or any object with a
     ``channels`` mapping of ``{channel: {bin_key: bin}}`` where ``bin_key`` is
-    ``"az_idx:el_idx:half"`` (SPEC §5). Returns::
+    ``"az_idx:el_idx:half"`` (SPEC §9.1). Returns::
 
         {"channels": {channel: {"bins": [
             {"sun_az": <bin-centre deg 0=N>,

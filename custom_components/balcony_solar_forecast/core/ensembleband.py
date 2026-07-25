@@ -1,4 +1,4 @@
-"""Ensemble-weather uncertainty band factors (v0.16, SPEC §6).
+"""Ensemble-weather uncertainty band factors (v0.16, SPEC §11.3).
 
 Owner: quantiles (band family). Pure, HA-free (stdlib only). Two functions:
 
@@ -34,7 +34,7 @@ from __future__ import annotations
 import math
 
 # Reuse the SAME percentile pair as the learned bands so the two share one
-# notion of "the 80% central interval" (SPEC §6): the ensemble 0.1 / 0.9 and the
+# notion of "the 80% central interval" (SPEC §11.3): the ensemble 0.1 / 0.9 and the
 # residual-ring P10 / P90 are directly envelope-comparable.
 from ..const import QUANTILE_P_HIGH, QUANTILE_P_LOW
 from .quantiles import empirical_percentile
@@ -52,7 +52,7 @@ def ensemble_band_factors(
     f_min: float,
     f_max: float,
 ) -> dict[str, tuple[float, float]]:
-    """Per-hour ``(f10, f90)`` ensemble spread factors (SPEC §6).
+    """Per-hour ``(f10, f90)`` ensemble spread factors (SPEC §11.3).
 
     For each hour present in BOTH maps: skip when the deterministic GHI is
     missing / non-finite / below ``min_det_ghi`` (the ratio is noise there);
@@ -104,7 +104,7 @@ def fuse_bands(
 ) -> QuantileBands:
     """Fold one hour's ensemble spread into the learned band by ENVELOPE-MAX.
 
-    Contract (SPEC §6):
+    Contract (SPEC §11.3):
 
       * ``ens is None`` -> ``learned`` returned UNCHANGED (bit-identical): a slot
         the ensemble does not cover stays exactly on the learned band.

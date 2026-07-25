@@ -1,6 +1,6 @@
 """Versioned persistent store for Balcony Solar Forecast.
 
-Owner: store. One HA ``Store`` per config entry holds (SPEC §4, §5, §6, §9):
+Owner: store. One HA ``Store`` per config entry holds (SPEC §16):
 
   * the last-good Open-Meteo payload + its fetch timestamp (survives a
     restart so the degradation ladder starts from a warm cache);
@@ -8,12 +8,12 @@ Owner: store. One HA ``Store`` per config entry holds (SPEC §4, §5, §6, §9):
     carried only ``hourly_wh`` / ``daily_kwh`` / ``status``; v2 (this schema)
     stores BOTH the raw-physics and the corrected hourly curves plus the
     per-plane modeled beam/diffuse/ghi/kc components the SLOW learner needs
-    to train from hourly long-term statistics (SPEC §9, operator decision
+    to train from hourly long-term statistics (SPEC §16.2, operator decision
     2026-07-06);
   * a daily actuals ring — measured DC energy per module per day (read from
     recorder statistics by the nightly job);
   * the LEARNER state (schema v2, additive): the day-ahead RLS ``BiasState``
-    (the intraday scalar is NEVER persisted — SPEC §5), the ``ShademapState``,
+    (the intraday scalar is NEVER persisted — SPEC §9.4), the ``ShademapState``,
     the ``DriftState`` (rolling MAE + loss streaks + auto-disable flags) and a
     small ring of ``LearnerSnapshot`` rollback points.
 
@@ -23,14 +23,14 @@ losslessly: the three v1 rings are carried through untouched and the four learne
 sections are injected at their neutral defaults (empty bias / shademap / drift,
 no snapshots). This is additive — nothing is dropped.
 
-v2 -> v3 is ADDITIVE (SPEC §14, v0.4). Every v2 key is carried through
+v2 -> v3 is ADDITIVE (SPEC §16.1, v0.4). Every v2 key is carried through
 BYTE-FAITHFUL and three new v3 sections are default-injected empty:
   * STORE_KEY_QUANTILE_STATE   -> QuantileState().to_dict()  (empty relerr ring)
   * STORE_KEY_SCOREBOARD_STATE -> ScoreboardState().to_dict() (empty day ring)
   * STORE_KEY_COMPARISON_RING  -> {}  ({iso_date: {comparison_name: daily_kwh}})
 
-CRITICAL INVARIANT (SPEC §14): the LIVE install (entry
-01KWT809F7MHH97F8XCKEJTZ0M) has a POPULATED v2 store on disk RIGHT NOW —
+CRITICAL INVARIANT (SPEC §16.1): a live install has a POPULATED v2 store on
+disk —
 shademap 7 channels / 851 bins, day-ahead 12 cells, drift + rollback +
 trained_days. A v2 -> v3 migration that drops or RESETS any of that learner
 state is a CRITICAL failure. The migration is inner-schema only (the
@@ -64,7 +64,7 @@ v0.4 additions):
       "learning_health":     {"discard_streak": int, ...},          # nightly whole-day-discard streak
     }
 
-**Load is validate-and-clamp** (SPEC §5 "Store validate-and-clamp beim
+**Load is validate-and-clamp** (SPEC §16.4 "Store validate-and-clamp beim
 Laden"): a corrupt / wrong-shaped / unknown-version blob NEVER crashes setup.
 Every learner section round-trips through its ``from_dict`` (which itself
 clamps every factor into its legal band and yields a neutral state on
@@ -138,7 +138,7 @@ from .core.types import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Ring sizes (SPEC §4/§6: 90-day error buffer + as-issued log).
+# Ring sizes (SPEC §16.2: 90-day error buffer + as-issued log).
 _ISSUED_RING_DAYS = 90
 _ACTUALS_RING_DAYS = 90
 
@@ -181,7 +181,7 @@ def _coerce_learning_health(raw: Any) -> dict[str, Any]:
     the neutral section is injected — every other section stays byte-faithful
     (the same additive contract as ``inverter_cal_state`` /
     ``config_fingerprint``). A corrupt section degrades to neutral rather than
-    crashing setup (SPEC §5).
+    crashing setup (SPEC §16.4).
     """
     out = _empty_learning_health()
     if not isinstance(raw, dict):
@@ -287,7 +287,7 @@ def _coerce_hourly_actuals(raw: Any) -> dict[str, Any]:
 
     Trimmed to the short HOURLY_ACTUALS_RING_DAYS window (this ring is far
     heavier than the daily rings — per-hour, per-channel — so it must stay
-    small, SPEC §4 eMMC budget).
+    small, SPEC §16.3 eMMC budget).
     """
     if not isinstance(raw, dict):
         return {}
@@ -329,13 +329,13 @@ def _coerce_snapshots(raw: Any) -> list[dict[str, Any]]:
 def validate_state(raw: Any) -> dict[str, Any]:
     """Coerce a loaded blob into a well-formed CURRENT-schema (v3) state.
 
-    Never raises (SPEC §5). Handles:
+    Never raises (SPEC §16.4). Handles:
       * non-dict / missing-schema blobs -> empty neutral state;
       * a v1 blob -> migrated v1->v2->v3 (rings kept, learner + scoreboard/
         quantile sections injected at neutral defaults);
       * a v2 blob -> migrated v2->v3 ADDITIVELY: EVERY v2 key (rings + all four
         learner sections + hourly actuals + trained_days) carried through
-        byte-faithful, the three v3 sections default-injected empty (SPEC §14
+        byte-faithful, the three v3 sections default-injected empty (SPEC §16.1
         CRITICAL: never drop/reset live learner state);
       * a v3 blob -> validated + clamped in place;
       * an unknown (future) schema -> discarded to empty (warned).
@@ -378,7 +378,7 @@ def _migrate_v1_to_v2(raw: dict[str, Any]) -> dict[str, Any]:
     The three v1 rings (last payload, issued log, actuals log) are preserved
     exactly; the four learner sections are injected at their neutral defaults.
     A live v1 install therefore keeps every byte of its warm cache and history
-    across the upgrade (SPEC §5/§6).
+    across the upgrade (SPEC §16.1).
     """
     _LOGGER.info(
         "Migrating forecast store schema %s -> %s (additive; learner state "
@@ -410,7 +410,7 @@ def _validate_learner_sections(
 
     Shared by the v2->v3 migration and the v3 in-place validation: every section
     round-trips through its clamping dataclass so a corrupt section collapses to
-    a neutral state instead of crashing (SPEC §5), and a WELL-FORMED section is
+    a neutral state instead of crashing (SPEC §16.4), and a WELL-FORMED section is
     preserved byte-faithful (the round-trip is the identity on clean data —
     exactly what the CRITICAL v2->v3 invariant requires for the live 851-bin
     shademap / 12-cell bias / drift / rollback / trained_days).
@@ -484,7 +484,7 @@ def _coerce_comparison_ring(raw: Any) -> dict[str, Any]:
 
 
 def _migrate_v2_to_v3(raw: dict[str, Any]) -> dict[str, Any]:
-    """ADDITIVE v2 -> v3 migration (SPEC §14 CRITICAL — never reset learners).
+    """ADDITIVE v2 -> v3 migration (SPEC §16.1 CRITICAL — never reset learners).
 
     EVERY v2 key (the three v1 rings + hourly actuals + all four learner
     sections + trained_days) is carried through BYTE-FAITHFUL via
@@ -536,12 +536,12 @@ def ingest_bootstrap(
     service surfaces that to the operator); every value inside a well-formed
     payload is clamped, never rejected. The backfilled shademap bins have their
     sample count ``n`` capped at ``BOOTSTRAP_MAX_BIN_N`` so live 15-min data
-    overrides the hourly-smeared backfill quickly (SPEC §6).
+    overrides the hourly-smeared backfill quickly (SPEC §12.5).
 
     When ``expected_signature`` is given, the payload's
     ``BOOTSTRAP_KEY_SITE_SIGNATURE`` MUST match it (a bootstrap built for a
     different site — wrong coordinates / renamed planes — would replace the
-    learner state with geometrically wrong bins, SPEC §6). A payload with no
+    learner state with geometrically wrong bins, SPEC §12.5). A payload with no
     signature is accepted (older backfill files) but logged.
 
     Ingestion is a REPLACE of the learner state from the (trusted, offline-
@@ -631,7 +631,7 @@ class ForecastStore:
         self._data: dict[str, Any] = _empty_state()
         # Monotonic timestamp of the last time the last-good payload was
         # scheduled for disk write; None until the first payload persist.
-        # Used to time-gate payload writes (eMMC-wear budget, SPEC §4).
+        # Used to time-gate payload writes (eMMC-wear budget, SPEC §16.3).
         self._last_payload_save_at: float | None = None
 
     # ------------------------------------------------------------------
@@ -682,7 +682,7 @@ class ForecastStore:
         The in-memory copy is always updated (so the degradation ladder and a
         clean unload/HA-stop flush see the latest weather), but a disk write is
         *time-gated*: it is only scheduled at most every
-        ``PAYLOAD_MIN_SAVE_INTERVAL_SECONDS`` (SPEC §4 eMMC-wear budget). The
+        ``PAYLOAD_MIN_SAVE_INTERVAL_SECONDS`` (SPEC §16.3 eMMC-wear budget). The
         nightly job and the unload/HA-stop flush guarantee eventual persistence.
         """
         self._data[STORE_KEY_LAST_PAYLOAD] = {
@@ -767,7 +767,7 @@ class ForecastStore:
 
         ``per_channel`` maps ``{channel: {iso_hour: wh}}``. This ring is far
         heavier than the daily rings, so it is trimmed to the short
-        HOURLY_ACTUALS_RING_DAYS window (SPEC §4 eMMC budget). The shademap
+        HOURLY_ACTUALS_RING_DAYS window (SPEC §16.3 eMMC budget). The shademap
         trainer consumes it via :meth:`get_hourly_actuals`.
         """
         ring = self._data.setdefault(STORE_KEY_HOURLY_ACTUALS, {})
@@ -888,7 +888,7 @@ class ForecastStore:
 
         The nightly job pushes a snapshot of (bias, shademap) BEFORE it applies
         that night's training, so a drifting layer can be rolled back. Newest
-        entry is last; the oldest is dropped when the ring overflows (SPEC §5).
+        entry is last; the oldest is dropped when the ring overflows (SPEC §16.2).
         """
         ring: list[dict[str, Any]] = self._data[STORE_KEY_LEARNER_SNAPSHOTS]
         ring.append(snapshot.to_dict())
@@ -953,7 +953,7 @@ class ForecastStore:
         clamped, n-capped bootstrap. Raises ``ValueError`` on a schema mismatch /
         non-dict payload / site-signature mismatch (the import service surfaces it
         to the operator); all values inside a well-formed payload are clamped,
-        never rejected (SPEC §6).
+        never rejected (SPEC §12.5).
 
         The quantile ring is handled ADDITIVELY: a payload carrying
         ``BOOTSTRAP_KEY_QUANTILE`` (a v0.20.7+ seeding backfill) REPLACES the ring
@@ -992,7 +992,7 @@ class ForecastStore:
         self._schedule_save()
 
     # ------------------------------------------------------------------
-    # v3: quantile state (SPEC §6) — owner: quantiles/store
+    # v3: quantile state (SPEC §11.1) — owner: quantiles/store
     # ------------------------------------------------------------------
 
     def get_quantile_state(self) -> QuantileState:
@@ -1005,7 +1005,7 @@ class ForecastStore:
         self._schedule_save()
 
     # ------------------------------------------------------------------
-    # v3: scoreboard state (SPEC §9/§10) — owner: scoreboard/store
+    # v3: scoreboard state (SPEC §15.2) — owner: scoreboard/store
     # ------------------------------------------------------------------
 
     def get_scoreboard_state(self) -> ScoreboardState:

@@ -25,7 +25,7 @@ Betrieb/Runbook → `05-anlage-und-betrieb-runbook.md`.
   `_dashboard.py` dokumentiert das ausdrücklich (`learner_status_fast` → `sensor.…_fast_learner_status`).
   In den Tabellen unten steht deshalb beides. Wer die Zuordnung programmatisch braucht: `collect_entity_map()`
   in `_dashboard.py` mappt `key → entity_id` aus der Entity-Registry; die Aktion `install_dashboard` nutzt genau das.
-- **Verfügbarkeit (SPEC §7, „nie still"):** Prognose-Entitäten folgen dem Coordinator
+- **Verfügbarkeit (SPEC §13, „nie still"):** Prognose-Entitäten folgen dem Coordinator
   (`CoordinatorEntity.available`, d. h. `last_update_success`). **Diagnose-Entitäten sind immer verfügbar**
   (`_DiagnosticSensor.available` → `True`), damit der Betreiber auch im Ausfall lesen kann, *warum*.
   Die beiden Mess-Sensoren sind **vom Coordinator entkoppelt** und hängen nur an ihren Quell-Entitäten.

@@ -775,7 +775,7 @@ def test_recorder_excludes_curve_attributes():
     assert exclude_attributes(object()) == {
         "watts",
         "wh_period",
-        # Shade-profile diagram curve arrays (SPEC §5) — bulky, per-selection.
+        # Shade-profile diagram curve arrays (SPEC §17.1) — bulky, per-selection.
         "time",
         "azimuth",
         "sun_elevation",

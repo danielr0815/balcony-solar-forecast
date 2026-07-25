@@ -187,7 +187,7 @@ def _validate_tau_points(row) -> None:
 
 
 def _validate_shade_groups(site: SiteConfig) -> None:
-    """Guard the shade-group → shademap-channel aliasing (SPEC §5).
+    """Guard the shade-group → shademap-channel aliasing (SPEC §9.2).
 
     A ``shade_group`` is the shademap channel its member planes pool their shade
     learning into (``PlaneConfig.shade_channel``). It must not equal the NAME of

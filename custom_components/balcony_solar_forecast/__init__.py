@@ -55,7 +55,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     releases while services.yaml grew to ten).
 
     Also serves + auto-registers the two bundled Lovelace cards (the
-    shade-profile diagram, SPEC §15, and the power-history card) so they appear
+    shade-profile diagram, SPEC §18.5, and the power-history card) so they appear
     in the card picker with no HACS install: static paths now, the storage-mode
     resources once HA is running. This step never raises into setup — the cards
     are an enhancement, not a dependency.
@@ -92,7 +92,7 @@ async def async_setup_entry(
 
     coordinator.async_start_nightly_job()
 
-    # Learning visibility (0.23.1, SPEC §5): verify every configured
+    # Learning visibility (0.23.1, SPEC §10): verify every configured
     # ``actual_entity`` actually exists in this HA. The nightly gates discard
     # the WHOLE day as soon as one channel is unusable, so an install that
     # adopted the shipped reference site (which carries the reference plant's

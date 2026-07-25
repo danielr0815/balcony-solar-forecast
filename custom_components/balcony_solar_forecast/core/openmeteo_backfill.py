@@ -1,4 +1,4 @@
-"""Open-Meteo Previous-Runs / Historical-Forecast weather fetch (SPEC §6).
+"""Open-Meteo Previous-Runs / Historical-Forecast weather fetch (SPEC §12.4).
 
 Shared, Home-Assistant-FREE weather beschaffung for the learner bootstrap. Both
 the dev-machine CLI (``scripts/backfill.py``) and the in-process
@@ -26,10 +26,10 @@ from .bootstrap_build import HourlyWeather
 
 _LOGGER = logging.getLogger(__name__)
 
-# --- Open-Meteo endpoints (SPEC §6, verified 2026-07-06) -------------------
+# --- Open-Meteo endpoints (SPEC §12.4, verified 2026-07-06) -------------------
 PREVIOUS_RUNS_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
 HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
-# Day-1 lead: value predicted ~24 h before valid time (SPEC §2/§9: as-issued).
+# Day-1 lead: value predicted ~24 h before valid time (SPEC §12.1/§15.2: as-issued).
 PREVIOUS_RUN_LEAD_DAY = 1
 # The radiation + temperature variables we transpose locally. On the
 # Previous-Runs API these carry a "_previous_dayN" suffix (as-issued); on the
@@ -167,7 +167,7 @@ async def fetch_weather_range(
     Tries the Previous-Runs API (day-1 lead, forecast-as-issued). On failure —
     or if the suffixed radiation variables come back empty — degrades to the
     Historical Forecast API with a WARNING that the data is analysis, not
-    forecast (SPEC §6: graceful degrade, still useful for the geometric
+    forecast (SPEC §12.1: graceful degrade, still useful for the geometric
     shademap). Returns ``(records, is_as_issued)``.
     """
     suffix = f"_previous_day{PREVIOUS_RUN_LEAD_DAY}"

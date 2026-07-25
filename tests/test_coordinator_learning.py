@@ -936,7 +936,7 @@ def test_drift_mae_is_one_day_energy_error():
 def test_drift_noise_level_delta_is_not_a_loss():
     """A rounding-scale corrected-vs-raw delta on a well-trained/clear day must
     NOT count as a losing day — the absolute floor guards against seven such
-    coin-flips auto-disabling a layer over meaningless Wh (SPEC §5)."""
+    coin-flips auto-disabling a layer over meaningless Wh (SPEC §9.8)."""
     from custom_components.balcony_solar_forecast.const import (
         DRIFT_LOSS_MIN_ABS_WH,
     )
@@ -2096,7 +2096,7 @@ def test_stat_row_hour_key_seconds_ms_datetime_agree():
 def test_actuals_from_stats_zero_row_module_discards_day():
     """A configured module with NO LTS rows is a channel dropout: the whole day
     is discarded — a partial-site measurement must never train against the
-    full-site model (SPEC §5: Messkanal-Dropout => ganzen Tag verwerfen)."""
+    full-site model (SPEC §9.8: Messkanal-Dropout => ganzen Tag verwerfen)."""
     from custom_components.balcony_solar_forecast.coordinator import (
         _actuals_from_stats,
     )
@@ -2434,7 +2434,7 @@ def test_per_plane_modeled_trims_night_hours_and_rounds():
 
 
 # ---------------------------------------------------------------------------
-# Shade groups (SPEC §5): READ-TIME pooling. Storage is ALWAYS per plane; a
+# Shade groups (SPEC §9.2): READ-TIME pooling. Storage is ALWAYS per plane; a
 # grouped plane's forecast/diagram POOLS its group siblings only at read time,
 # so grouping/dissolution is fully reversible and lossless.
 # ---------------------------------------------------------------------------

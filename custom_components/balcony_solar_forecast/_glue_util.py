@@ -10,7 +10,7 @@ out of ``coordinator.py`` so the extracted concern modules (``_actuals``,
   * the LOCAL calendar-day roll-ups (``_local_daily_kwh`` /
     ``_daily_kwh_from_hourly`` / ``_filter_hourly_to_local_day``);
   * the frozen-dataclass copy ``_replace_drift``;
-  * the live-actual state guard ``_usable_power`` (SPEC §5 label gates) with its
+  * the live-actual state guard ``_usable_power`` (SPEC §9.8 label gates) with its
     ``_UNUSABLE_STATES`` constant.
 
 Pure functions only — no coordinator state, no I/O. ``coordinator.py`` re-imports
@@ -43,7 +43,7 @@ def _replace_drift(state: DriftState, **changes) -> DriftState:
 def _usable_power(state: State | None, now: datetime) -> float | None:
     """Numeric live power from a state, or None if unusable / frozen.
 
-    Guards (SPEC §5 label gates applied live): missing state, unknown /
+    Guards (SPEC §9.8 label gates applied live): missing state, unknown /
     unavailable / empty state, non-numeric value, or a stale reading whose
     ``last_updated`` is older than LABEL_FROZEN_STALE_SECONDS (a frozen sensor
     holding an old value — treated as missing). A fresh zero is a legitimate

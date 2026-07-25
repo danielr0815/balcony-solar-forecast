@@ -1,6 +1,6 @@
 """Tests for the versioned store, schema v2 (owner: store).
 
-Covers the store contract (SPEC §5/§6/§9):
+Covers the store contract (SPEC §16):
 
   * v1 -> v2 migration is lossless (existing live install survives; the three
     v1 rings are preserved byte-for-byte, learner sections injected neutral);

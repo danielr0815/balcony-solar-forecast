@@ -1,4 +1,4 @@
-"""Tests for the ``install_dashboard`` service (SPEC §14.3).
+"""Tests for the ``install_dashboard`` service (SPEC §18.2).
 
 Two halves:
 

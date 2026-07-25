@@ -1,6 +1,6 @@
 """Sensor platform for the Balcony Solar Forecast integration.
 
-Consumer-facing outputs (SPEC §8):
+Consumer-facing outputs (SPEC §14):
 
   * ``energy_production_today`` / ``_tomorrow`` / ``_d2`` — daily kWh with the
     full 15-min curve as ``watts`` / ``wh_period`` dict attributes (excluded
@@ -9,9 +9,9 @@ Consumer-facing outputs (SPEC §8):
     re-points its three forecast entity pickers, no code change.
   * ``power_production_now`` — instantaneous site AC power (W, measurement).
   * diagnostic ``last_fetch_age_min`` and ``source_status`` — the degradation
-    ladder made visible (SPEC §7).
+    ladder made visible (SPEC §13).
 
-The ``get_forecast`` service-with-response (SPEC §8) is registered from
+The ``get_forecast`` service-with-response (SPEC §14.4) is registered from
 ``async_setup`` (see ``_services.py``); this module owns only its response
 builder (:func:`_build_forecast_response`), after the pattern of
 ``weather.get_forecasts``.
@@ -23,7 +23,7 @@ is the flat dict documented on ``BalconySolarCoordinator._build_data`` —
 15-min curves keyed by ISO-UTC slot start), ``hourly_wh``, ``daily_kwh``,
 ``slot_starts``, ``plane_watts`` and ``computed_at``. Unavailable is signalled
 by the coordinator raising ``UpdateFailed`` (so ``last_update_success`` is
-False), never by a stale value (SPEC §7). This file imports HA; the core stays
+False), never by a stale value (SPEC §13). This file imports HA; the core stays
 HA-free.
 """
 
@@ -127,7 +127,7 @@ from .core.types import ComparisonConfig
 SENSOR_LAST_FETCH_AGE = "last_fetch_age_min"
 SENSOR_SOURCE_STATUS = "source_status"
 
-# Per-layer learner status values + layer names (SPEC §5) live in const now
+# Per-layer learner status values + layer names (SPEC §14.7) live in const now
 # (shared with the coordinator, which writes exactly these strings). Re-exported
 # here so the display code and its tests keep importing them from this module.
 __all__ = [
@@ -216,7 +216,7 @@ async def async_setup_entry(
         ),
         LastFetchAgeSensor(coordinator),
         SourceStatusSensor(coordinator),
-        # --- learning-layer diagnostics (v0.2.0 + v0.3.0, SPEC §5) ---
+        # --- learning-layer diagnostics (v0.2.0 + v0.3.0, SPEC §9) ---
         IntradayScalarSensor(coordinator),
         DriftMaeCorrectedSensor(coordinator),
         LearnerStatusSensor(
@@ -230,14 +230,14 @@ async def async_setup_entry(
             SENSOR_LEARNER_STATUS_DAY_AHEAD,
             LEARNER_LAYER_DAY_AHEAD,
         ),
-        # --- v0.4 skill scoreboard (SPEC §9/§10) ---
+        # --- v0.4 skill scoreboard (SPEC §15.5) ---
         EngineDailyKwhMaeSensor(coordinator),
         EngineHourlyMaeSensor(coordinator),
         EngineVsBestBaselinePctSensor(coordinator),
-        # --- v0.4 quantile bands (SPEC §6/§10): today's P10/P90 ---
+        # --- v0.4 quantile bands (SPEC §11.2): today's P10/P90 ---
         EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P10, _Q_P10),
         EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P90, _Q_P90),
-        # --- Shade-profile diagram data (SPEC §15) ---
+        # --- Shade-profile diagram data (SPEC §17.1) ---
         ShadeProfileSensor(coordinator),
     ]
 
@@ -263,7 +263,7 @@ async def async_setup_entry(
     if ac_source:
         entities.append(MeasuredAcPowerSensor(coordinator, ac_source))
 
-    # One MAE sensor per configured comparison forecast (SPEC §9/§10). The list
+    # One MAE sensor per configured comparison forecast (SPEC §15.3). The list
     # is read from the merged entry config (data + options); it ships EMPTY, so
     # a stock install adds zero comparison sensors. A rename produces a new
     # sensor (slug-keyed unique_id) rather than silently rewriting history.
@@ -321,7 +321,7 @@ def _configured_comparisons(coordinator: Any) -> tuple[ComparisonConfig, ...]:
     Reads CONF_COMPARISON_SENSORS from the merged ``{**entry.data,
     **entry.options}`` (options win) and parses it leniently via
     ``ComparisonConfig.list_from_options`` (malformed / half-filled rows are
-    dropped). Ships EMPTY (D-P9), so a stock install returns no comparisons.
+    dropped). Ships EMPTY (SPEC §15.3), so a stock install returns no comparisons.
     Never raises: an entry without options or a missing key yields ().
     """
     entry = getattr(coordinator, "entry", None)
@@ -340,7 +340,7 @@ def _build_forecast_response(
     total_hourly, issued_at}}}``. ``planes`` maps plane name -> list of 15-min
     watts aligned to ``slot_starts``. All read from the coordinator's flat
     ``self.data`` dict; a coordinator without a current forecast yields empty
-    curves rather than a stale one (SPEC §7).
+    curves rather than a stale one (SPEC §13).
     """
     entries: dict[str, Any] = {}
     store = hass.data.get(DOMAIN, {})
@@ -363,7 +363,7 @@ def _build_forecast_response(
             "total_hourly": dict(data.get(_KEY_HOURLY_WH) or {}),
             "issued_at": data.get(_KEY_COMPUTED_AT),
         }
-        # v0.4 quantile bands (SPEC §6/§8): plane-agnostic TOTAL p10/p50/p90
+        # v0.4 quantile bands (SPEC §11.2/§14.4): plane-agnostic TOTAL p10/p50/p90
         # 15-min + hourly Wh curves alongside the served (corrected) curve. Only
         # present when the engine issued bands this cycle; absent otherwise so a
         # quantiles-off / cold-start install simply omits the blocks rather than
@@ -457,7 +457,7 @@ class BalconyForecastEntity(CoordinatorEntity):
 
     Availability follows the coordinator: an entity is available while the
     last update succeeded (the coordinator raises ``UpdateFailed`` for the
-    unavailable rung of the degradation ladder — SPEC §7). Diagnostic
+    unavailable rung of the degradation ladder — SPEC §13). Diagnostic
     entities override this to stay available so the operator can always read
     *why* the forecast is degraded.
     """
@@ -496,7 +496,7 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     # The bulky curve dicts (served + the three quantile bands) are all excluded
-    # from the recorder (SPEC §8) via _unrecorded_attributes + recorder.py.
+    # from the recorder (SPEC §14.4) via _unrecorded_attributes + recorder.py.
     _unrecorded_attributes = frozenset(
         {
             ATTR_WATTS,
@@ -531,7 +531,7 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
         data = self.coordinator.data or {}
         watts_all = data.get(_KEY_WATTS) or {}
         wh_all = data.get(_KEY_WH_PERIOD) or {}
-        # v0.4 band curves (SPEC §6/§8): 15-min P10/P90 Wh, sliced to this day
+        # v0.4 band curves (SPEC §11.2/§14.4): 15-min P10/P90 Wh, sliced to this day
         # like the served curve. Empty when quantiles are off / cold-started, so
         # the attrs are simply empty dicts (no fabricated spread).
         curves = data.get(DATA_KEY_QUANTILE_CURVES)
@@ -819,7 +819,7 @@ class MeasuredAcPowerSensor(BalconyForecastEntity, SensorEntity):
 
 
 class _DiagnosticSensor(BalconyForecastEntity, SensorEntity):
-    """Base for always-available diagnostic sensors (SPEC §7 visibility)."""
+    """Base for always-available diagnostic sensors (SPEC §13 visibility)."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
@@ -844,7 +844,7 @@ class LastFetchAgeSensor(_DiagnosticSensor):
     def native_value(self) -> float | None:
         # Prefer the coordinator's LIVE age so this always-available diagnostic
         # keeps climbing during an outage instead of freezing at the last
-        # computed value (SPEC §7). Fall back to the frozen snapshot only if the
+        # computed value (SPEC §13). Fall back to the frozen snapshot only if the
         # live property is unavailable.
         age_s = getattr(self.coordinator, "weather_age_seconds_live", None)
         if age_s is None:
@@ -931,7 +931,7 @@ class EnergyProductionDcSensor(_DiagnosticSensor):
 
 
 # ---------------------------------------------------------------------------
-# Learning-layer diagnostics (v0.2.0 + v0.3.0, SPEC §5, §9)
+# Learning-layer diagnostics (v0.2.0 + v0.3.0, SPEC §9/§14.7)
 # ---------------------------------------------------------------------------
 
 
@@ -939,7 +939,7 @@ class IntradayScalarSensor(_DiagnosticSensor):
     """The FAST learner's currently applied intraday clear-sky-index scalar.
 
     Unitless multiplier in [INTRADAY_SCALAR_MIN, MAX]; 1.0 == no correction.
-    Transient (re-inits to 1.0 on restart, never persisted — SPEC §5), so it is
+    Transient (re-inits to 1.0 on restart, never persisted — SPEC §9.4), so it is
     read straight from the coordinator's live ``self.data`` snapshot. Stays
     available even during a degraded forecast so the operator can see the
     learner is neutralised.
@@ -958,7 +958,7 @@ class IntradayScalarSensor(_DiagnosticSensor):
 
 
 class DriftMaeCorrectedSensor(_DiagnosticSensor):
-    """Rolling 7-day daylight MAE of the CORRECTED (served) curve (SPEC §5).
+    """Rolling 7-day daylight MAE of the CORRECTED (served) curve (SPEC §9.8).
 
     The drift monitor's headline number: mean absolute error of the learner-
     corrected forecast against measured production over the trailing
@@ -1009,7 +1009,7 @@ class LearnerStatusSensor(_DiagnosticSensor):
     One instance per learner layer (fast intraday, slow shademap, day-ahead
     bias). Reads ``self.data[DATA_KEY_LEARNER_STATUS][<layer>]`` — a string the
     coordinator sets from the resolved kill switch + drift-disable flag +
-    collapse freeze (SPEC §5). Unknown/missing values report ``None`` (unknown)
+    collapse freeze (SPEC §14.7). Unknown/missing values report ``None`` (unknown)
     rather than inventing a status. Always available so the operator can always
     see why a layer is or is not correcting.
     """
@@ -1059,7 +1059,7 @@ class LearnerStatusSensor(_DiagnosticSensor):
 
 
 # ---------------------------------------------------------------------------
-# v0.4 skill-scoreboard diagnostics (SPEC §9/§10 — the kill-gate metrics)
+# v0.4 skill-scoreboard diagnostics (SPEC §15.5 — the kill-gate metrics)
 # ---------------------------------------------------------------------------
 
 
@@ -1070,7 +1070,7 @@ class _ScoreboardSensor(_DiagnosticSensor):
     ``core.scoreboard.scoreboard_summary`` emits). All fields are read
     defensively: the scoreboard is optional and disable-able, and the
     coordinator may not have populated it yet, so a missing summary or field
-    yields ``None`` (never a fabricated zero — SPEC §9).
+    yields ``None`` (never a fabricated zero — SPEC §15.2).
     """
 
     def _summary(self) -> dict[str, Any]:
@@ -1080,7 +1080,7 @@ class _ScoreboardSensor(_DiagnosticSensor):
 
 
 class EngineDailyKwhMaeSensor(_ScoreboardSensor):
-    """Engine daily-kWh MAE over the rolling window (SPEC §10 primary metric).
+    """Engine daily-kWh MAE over the rolling window (SPEC §15.1 primary metric).
 
     The engine forecast AS ISSUED for each scored day, mean absolute daily-kWh
     error vs. the measured site energy. kWh unit; no device_class (an MAE is not
@@ -1109,7 +1109,7 @@ class EngineDailyKwhMaeSensor(_ScoreboardSensor):
 
 
 class EngineHourlyMaeSensor(_ScoreboardSensor):
-    """Engine hourly MAE over the window (SPEC §10 second metric).
+    """Engine hourly MAE over the window (SPEC §15.1 second metric).
 
     Mean per-daylight-hour Wh error of the issued corrected curve vs. measured.
     Wh unit; ``None`` until at least one day in the window has an hourly MAE.
@@ -1128,7 +1128,7 @@ class EngineHourlyMaeSensor(_ScoreboardSensor):
 
 
 class EngineVsBestBaselinePctSensor(_ScoreboardSensor):
-    """Percent the engine beats the BEST baseline on daily-kWh MAE (SPEC §10).
+    """Percent the engine beats the BEST baseline on daily-kWh MAE (SPEC §15.5).
 
     Positive == engine better (smaller error) than the best configured
     comparison. ``None`` when there is no scored engine day, no comparison with a
@@ -1148,7 +1148,7 @@ class EngineVsBestBaselinePctSensor(_ScoreboardSensor):
 
 
 class ComparisonDailyKwhMaeSensor(_ScoreboardSensor):
-    """Daily-kWh MAE of one configured external comparison forecast (SPEC §10).
+    """Daily-kWh MAE of one configured external comparison forecast (SPEC §15.5).
 
     One instance per ``CONF_COMPARISON_SENSORS`` entry. The object_id is suffixed
     with the comparison's stable slug so a rename mints a new sensor rather than
@@ -1210,7 +1210,7 @@ class ComparisonDailyKwhMaeSensor(_ScoreboardSensor):
 
 
 # ---------------------------------------------------------------------------
-# v0.4 quantile daily band sensors (SPEC §6/§10 — today's P10 / P90 energy)
+# v0.4 quantile daily band sensors (SPEC §11.2 — today's P10 / P90 energy)
 # ---------------------------------------------------------------------------
 
 
@@ -1261,7 +1261,7 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        """Expose which source shaped today's band (v0.16, SPEC §6).
+        """Expose which source shaped today's band (v0.16, SPEC §11.3).
 
         ``band_source`` summarises today's slots: "learned" (residual ring only),
         "ensemble" (learned collapsed everywhere and the ensemble supplied the
@@ -1292,7 +1292,7 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
 
 
 # ---------------------------------------------------------------------------
-# Shade-profile diagram (sun path vs learned shade) — SPEC §15
+# Shade-profile diagram (sun path vs learned shade) — SPEC §17.1
 # ---------------------------------------------------------------------------
 
 

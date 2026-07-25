@@ -1,9 +1,9 @@
-"""Nightly training / guard sweep (idempotent, date-keyed) — SPEC §4/§5.
+"""Nightly training / guard sweep (idempotent, date-keyed) — SPEC §9.7/§9.8.
 
 Owner: glue (nightly trainer). Runs at ~01:30 local (and once on startup as a
 catch-up): snapshot today's issued forecast, read each closed day's measured
 per-module energy, take a rollback snapshot, run the collapse detector, train
-the day-ahead RLS bias + the shademap under the SPEC §5 label gates, sample the
+the day-ahead RLS bias + the shademap under the SPEC §9.8 label gates, sample the
 quantile ring, and drive the rolling-MAE drift monitor with its auto-disable +
 repair-issue + rollback ring.
 
@@ -73,13 +73,13 @@ from .core import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Nightly training/snapshot job local wall-clock (SPEC §4: ~01:30 local).
+# Nightly training/snapshot job local wall-clock (SPEC §2: ~01:30 local).
 _NIGHTLY_HOUR = 1
 _NIGHTLY_MINUTE = 30
 
 
 # One nightly day-part-aggregated observation for the RLS bias. Duck-typed like
-# the intraday sample the bias contract accepts (SPEC §5); the trainer only
+# the intraday sample the bias contract accepts (SPEC §9.5); the trainer only
 # requires attribute access, so a frozen dataclass suffices.
 @dataclass(frozen=True, slots=True)
 class _DayAheadSample:
@@ -104,7 +104,7 @@ async def async_nightly_job(coord, now: datetime | None = None) -> None:
       6) drift monitor: update rolling MAE, auto-disable a losing layer.
 
     Every step is wrapped so a single failure never aborts the rest or
-    crashes HA (SPEC §5). Recorder reads run in the recorder executor.
+    crashes HA (SPEC §9.7). Recorder reads run in the recorder executor.
     """
     local_now = dt_util.as_local(now or dt_util.utcnow())
     today = local_now.date()
@@ -116,7 +116,7 @@ async def async_nightly_job(coord, now: datetime | None = None) -> None:
 
     # 2-6) Catch-up sweep: run the actuals-read + training/guard logic for
     # every closed day back to the last one we processed, bounded to a few
-    # days (SPEC §5 idempotent/date-keyed). A missed 01:30 job (HA down at
+    # days (SPEC §9.7 idempotent/date-keyed). A missed 01:30 job (HA down at
     # night, multi-day outage) would otherwise silently lose those days'
     # training, drift and collapse detection.
     yesterday = today - timedelta(days=1)
@@ -146,7 +146,7 @@ async def async_nightly_job(coord, now: datetime | None = None) -> None:
             _LOGGER.warning(
                 "Nightly training/guard failed for %s", day, exc_info=True
             )
-        # Skill scoreboard (SPEC §9/§10): score this closed day's engine
+        # Skill scoreboard (SPEC §15.2): score this closed day's engine
         # forecast-as-issued + each comparison AS IT STOOD that day against
         # the measured site energy, and persist it into the rolling window.
         # Independently guarded so a scoreboard failure never aborts the
@@ -235,7 +235,7 @@ def cloud_class_by_hour(coord, iso: str) -> dict[str, str]:
 
     Derived from the cached weather series so the nightly RLS trains the
     real (cloud class x day part) cell rather than a fixed "clear" label
-    (SPEC §5). A cloudy/fog/overcast day therefore trains the correct cell,
+    (SPEC §8). A cloudy/fog/overcast day therefore trains the correct cell,
     and a genuinely clear day is never routed to a fog-poisoned one. Best
     effort: an unparseable weather image yields an empty map.
     """
@@ -277,8 +277,8 @@ def per_plane_modeled(coord, iso: str) -> dict[str, PlaneHourlyModeled]:
     self-references toward sqrt(true_t) and a wall bin (static tau 0) has ~0
     modeled beam and is untrainable. Engine builds without the reference
     export are simply not trained (no fallback to the gated series). When
-    ``_last_result`` is absent (v0.1 build), returns an empty mapping (SPEC
-    §6: attempt, not a blocker).
+    ``_last_result`` is absent (older cached build), returns an empty mapping
+    (SPEC §12.1: attempt, not a blocker).
     """
     result = getattr(coord, "_last_result", None)
     if result is None:
@@ -377,7 +377,7 @@ async def train_and_guard(coord, day: date) -> None:
 
     # --- 4) Collapse detector -----------------------------------------
     # All channels ~0 while forecast high => snow / total dropout: freeze
-    # BOTH geometric learners for the FOLLOWING served day (SPEC §5), and
+    # BOTH geometric learners for the FOLLOWING served day (SPEC §9.8), and
     # skip training the geometric learners on the collapse day itself.
     if coord._is_collapse_day(iso, issued, actuals):
         coord._set_collapse_frozen_date(next_iso)
@@ -397,7 +397,7 @@ async def train_and_guard(coord, day: date) -> None:
         coord._train_day_ahead(iso, issued, actuals)
         coord._train_shademap(iso, issued, actuals)
 
-    # --- 5b) Quantile bands (SPEC §6/§10) -----------------------------
+    # --- 5b) Quantile bands (SPEC §11.1) -----------------------------
     # Sample the day's hourly relative errors (measured vs issued-CORRECTED)
     # into the 90-day ring. Runs on every day (incl. collapse days: a
     # dropout hour's relerr is legitimately near 0), inside the same
@@ -427,7 +427,7 @@ def set_collapse_frozen_date(coord, iso: str | None) -> None:
 def train_quantiles_day(coord, day: date) -> None:
     """Sample one closed ``day`` into the quantile relative-error ring.
 
-    NO-LEAKAGE + consistent frame (SPEC §6): the relative error is
+    NO-LEAKAGE + consistent frame (SPEC §11.1): the relative error is
     ``measured_hourly / issued-CORRECTED-hourly`` — the SAME issued corrected
     curve the scoreboard scores and the bands are later applied to. Each
     daylight hour whose corrected Wh exceeds QUANTILE_MIN_FORECAST_WH becomes
@@ -475,7 +475,7 @@ def train_quantiles_day(coord, day: date) -> None:
     if not samples:
         return
     # Date-stamp every sample with the trained day's ISO date so the ring is
-    # date-windowed and the collapse gate can count distinct days (SPEC §6).
+    # date-windowed and the collapse gate can count distinct days (SPEC §11.1).
     coord._quantile_state = quantiles_mod.train_quantiles(
         coord._quantile_state, samples, training_date=iso
     )
@@ -668,7 +668,7 @@ def day_ahead_samples(
     physics; ``raw_hourly`` here is that curve, raw only as a legacy fallback —
     see :func:`train_day_ahead`); the cloud class is the forecast cloud class of
     each hour (snap.cloud_class_by_hour,
-    SPEC §5) so a fog/overcast day trains its own cell, not a fixed "clear"
+    SPEC §8) so a fog/overcast day trains its own cell, not a fixed "clear"
     one. When TRUE per-hour measured site energy is available
     (``site_measured_hourly``) each (class, part) cell carries its OWN
     measured/modeled pair — a real independent per-part signal. Otherwise the
@@ -746,9 +746,9 @@ def train_shademap(
     For each plane and each hour with a quasi-clear sample, compute the
     beam-referenced transmittance ``T = (P_measured - P_diffuse) / P_beam``
     (against the UNGATED beam reference the snapshot stores, FIX-3) and
-    EMA-update the matched bin (SPEC §5). Measured hourly per-plane energy
+    EMA-update the matched bin (SPEC §9.1). Measured hourly per-plane energy
     comes from the store's hourly-actuals ring (populated by the nightly LTS
-    read); when absent the shademap does not train that night (SPEC §6
+    read); when absent the shademap does not train that night (SPEC §12.1
     attempt-not-blocker).
 
     Measured-side clearness gate (coordinator:1015): the whole day must have
@@ -770,7 +770,7 @@ def train_shademap(
         return
     # Measured-side clearness gate at the DAY level: reject days the forecast
     # called clear but reality was overcast (a transient weather bust must
-    # not darken a geometric bin, SPEC §5). Uses the RAW gated modeled total
+    # not darken a geometric bin, SPEC §9.1). Uses the RAW gated modeled total
     # (the forecast the engine issued) vs the measured site total.
     if not coord._day_is_measured_clear(iso, snap, hourly_actuals):
         return
@@ -795,7 +795,7 @@ def day_is_measured_clear(
     snap: IssuedSnapshot,
     hourly_actuals: dict[str, dict[str, float]],
 ) -> bool:
-    """Measured-side clearness gate for shademap training (SPEC §5).
+    """Measured-side clearness gate for shademap training (SPEC §9.1).
 
     The candidate day's measured site energy must be at least
     SHADEMAP_MEASURED_CLEAR_MIN_FRAC of the modeled RAW forecast; otherwise
@@ -838,7 +838,7 @@ def train_channel(
     plane = coord._site.plane_by_name(channel)
     if plane is None:
         return state, False
-    # Storage is ALWAYS per plane (SPEC §5): each plane's learning is stored under
+    # Storage is ALWAYS per plane (SPEC §9.2): each plane's learning is stored under
     # its OWN measurement channel (the plane name) forever. Grouping is applied
     # only at READ time (coordinator._build_shade_pool_map + effective_tau_pooled),
     # so it stays fully reversible — a dissolved group instantly reads each plane's
@@ -924,7 +924,7 @@ def is_collapse_day(
 
     True when the modeled day is non-trivial (> COLLAPSE_FORECAST_MIN_WH)
     yet the measured site energy is below COLLAPSE_MEASURED_MAX_FRAC of it
-    (SPEC §5). The modeled total is sliced to the training LOCAL day so an
+    (SPEC §9.8). The modeled total is sliced to the training LOCAL day so an
     old 4-day snapshot cannot inflate the threshold (FIX-2). Absent either
     side, not a collapse (can't tell).
     """
@@ -947,7 +947,7 @@ def is_collapse_day(
 def update_drift(
     coord, iso: str, issued: dict | None, actuals: dict | None
 ) -> None:
-    """Rolling daylight-MAE drift monitor with per-layer auto-disable (SPEC §5).
+    """Rolling daylight-MAE drift monitor with per-layer auto-disable (SPEC §9.8).
 
     Decomposes the served curve as ``corrected = slow ∘ fast`` and attributes a
     "losing" day to the GUILTY layer only, so an innocent layer is never
@@ -1001,7 +1001,7 @@ def update_drift(
     has_slow = bool(slow_hourly)
     slow_total = sum(slow_hourly.values()) if has_slow else raw_total
     # Daily-kWh absolute error as the MAE proxy (the operator's primary
-    # metric is daily kWh, SPEC §10/B9; the issued ring stores hourly so a
+    # metric is daily kWh, SPEC §15.1; the issued ring stores hourly so a
     # true daylight-hour MAE is available to a future finer implementation).
     raw_mae = abs(raw_total - measured_wh)
     corrected_mae = abs(corrected_total - measured_wh)
@@ -1025,7 +1025,7 @@ def update_drift(
 
     def _losing(challenger_mae: float, reference_mae: float) -> bool:
         """A materially worse challenger: beats the reference by both the
-        relative margin AND the absolute Wh floor (SPEC §5)."""
+        relative margin AND the absolute Wh floor (SPEC §9.8)."""
         return (
             challenger_mae > reference_mae * (1.0 + DRIFT_LOSS_MARGIN)
             and (challenger_mae - reference_mae) > DRIFT_LOSS_MIN_ABS_WH
@@ -1088,7 +1088,7 @@ def update_drift(
 
 
 def restore_layer_snapshot(coord, layer: str) -> str | None:
-    """Roll the auto-disabled layer back to its pre-streak state (SPEC §5).
+    """Roll the auto-disabled layer back to its pre-streak state (SPEC §9.8).
 
     Picks the snapshot taken DRIFT_LOSS_STREAK_DAYS nightly runs ago: the
     ring holds LEARNER_SNAPSHOT_RING (> streak) entries, so the state saved
@@ -1128,7 +1128,7 @@ def maybe_push_rollback_snapshot(coord, iso: str) -> None:
 
     Keeps the last LEARNER_SNAPSHOT_RING snapshots (which exceeds
     DRIFT_LOSS_STREAK_DAYS, so a pre-streak good state survives an
-    auto-disable, SPEC §5) via the store's ``push_snapshot`` /
+    auto-disable, SPEC §9.8) via the store's ``push_snapshot`` /
     ``get_snapshots`` (the real ForecastStore API). One snapshot per nightly
     run: the snapshot's ``taken_at`` UTC date is the idempotence key, so a
     second run the same night is a no-op. ``iso`` (the training day) is

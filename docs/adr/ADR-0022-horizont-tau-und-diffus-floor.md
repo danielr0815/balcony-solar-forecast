@@ -146,7 +146,7 @@ falsch wirken).
 - **Config-UI ist ein ObjectSelector** (`config_flow.py::_site_selector`):
   Das Site-Objekt wird als freies YAML/JSON-Objekt editiert; ein neues
   verschachteltes Feld braucht **keine** neue UI-Komponente, nur Validierung
-  (`_site_validation.py`) + Doku (SPEC §13).
+  (`_site_validation.py`) + Doku (SPEC §5.1).
 - **RAW-Kurve ist Lern-Wahrheit:** Day-ahead-Bias, Quantile-Bins, Scoreboard
   und Kill-Gate referenzieren die statische Physik. Eine Korrektur, die nur in
   der CORRECTED-Kurve lebt (Shademap), repariert die servierte Kurve, aber
@@ -291,7 +291,7 @@ Sprungstelle entsteht.
    gleiche Länge und identisches el-Raster (Fehler `seasonal_points_mismatch`);
    fehlt es, gilt kahl = skalares `tau_bare` (bestehende Pflicht bei seasonal).
 5. Empfohlene (nicht erzwungene) Konvention: letzter Knoten `tau = 1.0` bei
-   `el == elevation_deg` — Verstoß erzeugt kein Fehler, aber die Doku (SPEC §13)
+   `el == elevation_deg` — Verstoß erzeugt kein Fehler, aber die Doku (SPEC §5.1)
    erklärt die resultierende Sprungstelle. Kein Monotonie-Zwang (reale Kronen
    können Lücken haben; der Messbefund 7–8 = 0,41 < 6–7 = 0,43 zeigt das).
 6. Serialisierung: `to_dict` emittiert `tau_points` nur wenn gesetzt
@@ -312,7 +312,7 @@ Sprungstelle entsteht.
 - `scripts/backfill.py` und Shade-Profile-Diagnostik: nutzen dieselben
   `horizon.*`-Funktionen; das Schattenprofil-Diagramm (az×el-Scan) wird durch
   die el-Abhängigkeit erstmals **korrekt** statt konstant je az-Spalte.
-- `docs/SPEC.md` §13 (+ §4 Schritt 5 ein Satz).
+- `docs/SPEC.md` §5.1 (+ §5.3 ein Satz).
 
 ### 2.7 Migrationspfad von der Interim-az-Rampe
 

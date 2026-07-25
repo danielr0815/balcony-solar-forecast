@@ -1,7 +1,7 @@
 """Tests for the store schema v3 additive migration (owner: store).
 
-The v2 -> v3 migration is the HIGH-RISK item of v0.4 (SPEC §14). The LIVE
-install (entry 01KWT809F7MHH97F8XCKEJTZ0M) has a POPULATED v2 store on disk
+The v2 -> v3 migration is the HIGH-RISK item of v0.4 (SPEC §16.1). The LIVE
+install has a POPULATED v2 store on disk
 RIGHT NOW: shademap 7 channels / 851 bins, day-ahead 12 cells, drift + rollback
 + trained_days + the three v1 rings + the hourly-actuals ring. A v2 -> v3
 migration that DROPS or RESETS any of that learner state is a CRITICAL failure.
@@ -17,7 +17,7 @@ This module proves the migration is:
     are default-injected EMPTY;
   * validate-and-clamp on load: a corrupt v3 quantile/scoreboard/comparison
     blob degrades that section to empty/neutral WITHOUT touching any preserved
-    section and WITHOUT raising (SPEC §5);
+    section and WITHOUT raising (SPEC §16.4);
   * the schema stamp advances to v3 and the on-disk store is scheduled for a
     write-back so a live v2 install is upgraded on first load.
 
@@ -110,7 +110,7 @@ def _store(initial=None) -> ForecastStore:
 # ===========================================================================
 # The live-install fixture: a REALISTIC, POPULATED v2 store dict
 # ---------------------------------------------------------------------------
-# Mirrors what the live entry 01KWT809F7MHH97F8XCKEJTZ0M has on disk: every v2
+# Mirrors what a live entry has on disk: every v2
 # section populated with clean, in-band data so the round-trip is the identity.
 # (A smaller but structurally-faithful stand-in for the 7-channel / 851-bin /
 # 12-cell live map — the migration path is bin-count-agnostic.)
@@ -252,7 +252,7 @@ def _populated_v2_store() -> dict:
 def test_populated_v2_migrates_with_all_learner_state_intact():
     """The live-install fixture migrates to v3 with every section preserved.
 
-    This is the CRITICAL v0.4 invariant (SPEC §14): the migration is the
+    This is the CRITICAL v0.4 invariant (SPEC §16.1): the migration is the
     identity on clean data for every preserved section, and injects only the
     three new v3 sections empty.
     """
@@ -425,7 +425,7 @@ def test_v1_migrates_all_the_way_to_v3():
 
 # ===========================================================================
 # Validate-and-clamp: corrupt v3 sections degrade WITHOUT touching preserved
-# state and WITHOUT raising (SPEC §5)
+# state and WITHOUT raising (SPEC §16.4)
 # ===========================================================================
 
 

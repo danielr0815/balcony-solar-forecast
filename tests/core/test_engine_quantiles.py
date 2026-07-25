@@ -1,6 +1,6 @@
-"""Engine-hook tests for the quantile bands in core/engine.py (SPEC §6/§10).
+"""Engine-hook tests for the quantile bands in core/engine.py (SPEC §11.2).
 
-Plain pytest, no Home Assistant imports (SPEC §4). These exercise the v0.4
+Plain pytest, no Home Assistant imports (SPEC §2). These exercise the v0.4
 addition to ``compute_forecast``: the ``LearnerHooks.band_by_slot`` quantile
 hook.
 

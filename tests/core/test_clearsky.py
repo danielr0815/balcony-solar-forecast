@@ -1,6 +1,6 @@
 """Tests for the Haurwitz clear-sky model and clear-sky index.
 
-Pure pytest, no Home Assistant imports (SPEC §4). Owner: irradiance.
+Pure pytest, no Home Assistant imports (SPEC §2). Owner: irradiance.
 """
 
 from __future__ import annotations

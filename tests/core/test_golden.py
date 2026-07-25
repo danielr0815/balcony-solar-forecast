@@ -1,4 +1,4 @@
-"""Golden tests against offline pvlib reference vectors (SPEC §9 Phase 1).
+"""Golden tests against offline pvlib reference vectors (SPEC §21 Phase 1).
 
 Merge-blocker per the phase plan: our stdlib core must reproduce pvlib on the
 two links pvlib actually covers — solar position and Hay-Davies plane-of-array
@@ -7,7 +7,7 @@ dates, and hourly 05:00..20:00 UTC, for a nominal and a low-sun synthetic
 irradiance case.
 
 Vectors are produced OUTSIDE this repo by scratchpad/gen_reference_vectors.py
-in a throwaway pvlib venv (pvlib/pandas are NEVER runtime deps, SPEC §4) and
+in a throwaway pvlib venv (pvlib/pandas are NEVER runtime deps, SPEC §2) and
 committed as tests/core/reference_vectors.json.
 
 Scope / deliberate deviations:
@@ -46,7 +46,7 @@ from types import ModuleType
 import pytest
 
 # Import the core modules directly from their files so the test stays strictly
-# HA-free (SPEC §4), the same self-contained pattern used by test_solpos.py.
+# HA-free (SPEC §2), the same self-contained pattern used by test_solpos.py.
 # Loading via the full package path ``custom_components.balcony_solar_forecast``
 # would execute the integration-root ``__init__.py`` (imports ``homeassistant``)
 # and fail under bare pytest. ``const``/``solpos``/``transpose`` depend only on

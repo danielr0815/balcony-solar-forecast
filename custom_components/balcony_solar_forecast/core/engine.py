@@ -2,9 +2,9 @@
 
 Owner: engine. Pure, HA-free. Ties together solpos -> transpose -> horizon
 -> electrical over every 15-min slot and every plane, then rolls the
-AC-clamped site total up to hourly Wh and daily kWh (SPEC §4 steps 2-7).
+AC-clamped site total up to hourly Wh and daily kWh (SPEC §4/§5/§6).
 
-Dual curve (SPEC §5 / §9, operator decision 2026-07-06)
+Dual curve (SPEC §9/§16.2, operator decision 2026-07-06)
 -------------------------------------------------------
 Every cycle the engine computes BOTH:
 
@@ -60,7 +60,7 @@ Per-slot pipeline (values are interval means; sun position at the midpoint):
 Attribution split: the per-plane DC power is decomposed into the part driven
 by the beam+circumsolar POA vs. the diffuse+ground POA (pre-AC-clamp), so the
 SLOW learner can train the beam-referenced transmittance
-``T = (P_measured - P_diffuse_modeled) / P_beam_modeled`` (SPEC §5). The AC
+``T = (P_measured - P_diffuse_modeled) / P_beam_modeled`` (SPEC §9.1). The AC
 clamp is applied to the TOTAL, then split back proportionally so the reported
 beam/diffuse watts already respect the clamp.
 
@@ -86,7 +86,7 @@ hourly Wh (keyed by ISO-8601 UTC hour) and daily kWh (keyed by ISO date in the
 ``tz`` calendar, UTC by default). The per-plane, per-slot beam_watts /
 diffuse_watts / kc series on each PlaneResult let the coordinator roll up the
 per-plane hourly beam_wh / diffuse_wh / ghi / kc (PlaneHourlyModeled) for the
-nightly issued snapshot v2 (SPEC §9) without bloating the frozen result type.
+nightly issued snapshot v2 (SPEC §16.2) without bloating the frozen result type.
 Slots with missing (None) irradiance/temperature are treated as
 zero-production and skipped safely.
 """
@@ -142,7 +142,7 @@ SlotFactorHook = Callable[[datetime], float]
 
 @dataclass(frozen=True, slots=True)
 class LearnerHooks:
-    """Optional learner callables injected into the engine (SPEC §5 / §9).
+    """Optional learner callables injected into the engine (SPEC §9/§16.2).
 
     All fields default to the identity: ``beam_tau=None`` => the static horizon
     transmittance gates the beam (raw physics); ``slot_factor=None`` => no
@@ -158,7 +158,7 @@ class LearnerHooks:
     ``bias.apply_day_ahead_bias`` into ``slot_factor``, then hands this object
     to :func:`compute_forecast`.
 
-    ``band_by_slot`` (v0.4, SPEC §6/§10) is the quantile hook: a mapping from
+    ``band_by_slot`` (v0.4, SPEC §11.2) is the quantile hook: a mapping from
     each slot-start datetime the engine iterates to that slot's empirical
     ``QuantileBands`` (P10/P50/P90 multipliers for its weather-class x day-part
     bin). When it is None or empty the engine emits NO band curves (the
@@ -193,7 +193,7 @@ _NEUTRAL_HOOKS = LearnerHooks()
 
 
 def _slot_albedo(slot: WeatherSlot, base_albedo: float = ALBEDO_DEFAULT) -> float:
-    """Snow-aware ground albedo for a slot (SPEC §4 physics musts).
+    """Snow-aware ground albedo for a slot (SPEC §4.6 physics musts).
 
     ``base_albedo`` is the site's configured ground albedo (v0.20,
     ``SiteConfig.albedo``; the shipped default when unset) — snow cover still
@@ -230,7 +230,7 @@ class _PlanePoaSplit:
     shademap references); ``diffuse_poa`` = gated isotropic + ground (the shade
     floor). Their sum is the plane POA fed to the DC model.
     ``beam_poa_ungated`` is beam + circumsolar with tau := 1 (clear horizon) —
-    the SLOW learner's beam reference (SPEC §5, FIX-3): the learned tau REPLACES
+    the SLOW learner's beam reference (SPEC §9.1, FIX-3): the learned tau REPLACES
     the static tau, so the training reference must be the un-attenuated beam.
     """
 
@@ -278,7 +278,7 @@ def _plane_poa_components(
     the SVF-scaled diffuse floor exactly ONCE. The RAW and CORRECTED splits are
     then a cheap gate-arithmetic step over this shared result
     (:func:`_gate_split`) — the only thing that differs between the two curves is
-    which tau attenuates the beam (SPEC §5 slow learner). The isotropic diffuse
+    which tau attenuates the beam (SPEC §9.1 slow learner). The isotropic diffuse
     is always scaled by the plane's static sky-view factor and the ground
     reflection is never touched by the beam gate, so a fully occluding wall bin
     (tau=0) kills the beam but keeps the diffuse floor.
@@ -309,7 +309,7 @@ def _plane_poa_components(
     # HERE (pvlib-style, after the pure transposition) so the golden vectors
     # stay pvlib-comparable, and BEFORE the ungated-reference capture below so
     # the shademap trains against the optics-corrected beam instead of
-    # absorbing the deficit as AOI-shaped phantom shading (SPEC §4). A
+    # absorbing the deficit as AOI-shaped phantom shading (SPEC §4.4). A
     # transposition stand-in without the cos_theta key (analytic test fakes)
     # skips the modifier.
     cos_theta = comps.get("cos_theta")
@@ -474,7 +474,7 @@ def compute_forecast(
     ``PlaneResult`` (aligned to ``slot_starts``) give the coordinator every
     input it needs to roll up the per-plane hourly ``PlaneHourlyModeled``
     (beam_wh / diffuse_wh / ghi / kc) for the nightly issued snapshot v2 and to
-    train the shademap from hourly LTS (SPEC §9); the engine deliberately keeps
+    train the shademap from hourly LTS (SPEC §9.1); the engine deliberately keeps
     that hourly-per-plane aggregation OUT of ForecastResult so the frozen result
     contract stays minimal.
 
@@ -530,7 +530,7 @@ def compute_forecast(
     # and survives across the 15-min recompute cycles — no per-call memo here
     # (audit #9b).
 
-    # Static AC ceiling ingredients for the per-slot band cap (SPEC §6/§10). The
+    # Static AC ceiling ingredients for the per-slot band cap (SPEC §11.2). The
     # most the site can deliver in a slot is the sum of every group's AC limit
     # plus the corrected watts of any plane in NO group (ceiling-free). The group
     # sum is static; the ungrouped contribution is added per slot below.
@@ -579,13 +579,13 @@ def compute_forecast(
     # PRE-re-clamp corrected site total per slot (sum of cor_clamped * factor,
     # BEFORE the second AC clamp). Its difference from ``total_watts`` reveals
     # per slot whether the re-clamp bit; the coordinator's day-ahead headline
-    # strip reads it (SPEC §8). Always populated, aligned to ``slot_starts``.
+    # strip reads it (SPEC §14.1). Always populated, aligned to ``slot_starts``.
     corrected_unclamped_watts: list[float] = []
     plane_series: dict[str, list[float]] = {p.name: [] for p in planes}
     # Per-plane beam / diffuse DC watts (CORRECTED, post-clamp) + kc, aligned.
     beam_series: dict[str, list[float]] = {p.name: [] for p in planes}
     diffuse_series: dict[str, list[float]] = {p.name: [] for p in planes}
-    # SLOW-learner training reference (SPEC §5, FIX-3): UNGATED beam DC and raw
+    # SLOW-learner training reference (SPEC §9.1, FIX-3): UNGATED beam DC and raw
     # diffuse DC at the RAW operating point — never gated by the learned tau,
     # never clamped, never slot-factored. Labels must not depend on learned
     # state (else T self-references toward sqrt(true_t)).
@@ -661,7 +661,7 @@ def compute_forecast(
             _append_zero_slot()
             continue
 
-        # Clear-sky index for this slot (learning gate / normaliser, SPEC §5).
+        # Clear-sky index for this slot (learning gate / normaliser, SPEC §4.2).
         kc = clearsky.clear_sky_index(slot.ghi, sun_el)
         kc_series.append(kc)
 
@@ -688,7 +688,7 @@ def compute_forecast(
             raw_beam_dc, raw_diffuse_dc = _dc_split(raw_split, plane, slot.temp_c)
             raw_unclamped[plane.name] = raw_beam_dc + raw_diffuse_dc
 
-            # SLOW-learner label reference (SPEC §5, FIX-3): UNGATED beam DC at
+            # SLOW-learner label reference (SPEC §9.1, FIX-3): UNGATED beam DC at
             # the RAW operating point, pre-clamp, no slot factor. DC is linear in
             # POA at a fixed cell temperature, so derive one Wp-per-POA
             # conversion from the raw total (== engine's real operating point)
@@ -785,11 +785,11 @@ def compute_forecast(
         # Pre-re-clamp corrected total: the factored per-plane watts summed
         # BEFORE the second clamp. On a slot where the up-corrected curve hit the
         # AC ceiling this exceeds ``cor_slot_total`` (the served, re-clamped
-        # total); the coordinator uses the gap to detect a clamped slot (SPEC §8).
+        # total); the coordinator uses the gap to detect a clamped slot (SPEC §14.1).
         corrected_unclamped_watts.append(sum(cor_factored.values()))
 
         # Physical AC ceiling for this slot's band cap: group limits + the
-        # ceiling-free (ungrouped) planes' corrected watts (SPEC §6/§10).
+        # ceiling-free (ungrouped) planes' corrected watts (SPEC §11.2).
         ungrouped_cor = sum(
             cor_final.get(p.name, 0.0)
             for p in planes
@@ -836,7 +836,7 @@ def compute_forecast(
         # eta-weighted factored DC per plane summed BEFORE the inverter AC clamp.
         # On a clipped slot this exceeds ``ac_slot_total`` (the served, clamped AC);
         # the coordinator's AC day-ahead strip uses the gap to detect a clamped
-        # slot (SPEC §8). Equals ``ac_slot_total`` exactly on an unclipped slot.
+        # slot (SPEC §14.1). Equals ``ac_slot_total`` exactly on an unclipped slot.
         ac_corrected_unclamped_watts.append(
             sum(plane_eta[name] * w for name, w in ac_input.items())
         )
@@ -865,7 +865,7 @@ def compute_forecast(
         for plane in planes
     )
 
-    # --- Quantile bands (v0.4, SPEC §6/§10) ---------------------------------
+    # --- Quantile bands (v0.4, SPEC §11.2) ---------------------------------
     # When a per-slot band map is injected, emit the P10/P50/P90 site-power
     # curves by multiplying the CORRECTED per-slot total by each band factor,
     # then roll them up to hourly Wh using the SAME UTC hour key as ``hourly_wh``

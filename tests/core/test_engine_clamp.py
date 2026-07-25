@@ -1,7 +1,7 @@
 """Re-clamp tests for core/engine.py: learner corrections + quantile bands
 never exceed the configured inverter AC limits (FIX A).
 
-Plain pytest, no Home Assistant imports (SPEC §4). The fast-learner slot factor
+Plain pytest, no Home Assistant imports (SPEC §2). The fast-learner slot factor
 is applied to the ALREADY-clamped per-plane watts and the groups are clamped
 AGAIN afterwards, so an up-correction (factor > 1) or a P90 band factor > 1 can
 never lift the served curve above what the inverters can physically deliver.

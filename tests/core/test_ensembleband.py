@@ -1,6 +1,6 @@
-"""Pure tests for core/ensembleband.py — ensemble spread + fusion (v0.16, SPEC §6).
+"""Pure tests for core/ensembleband.py — ensemble spread + fusion (v0.16, SPEC §11.3).
 
-Plain pytest, no Home Assistant (SPEC §4). Covers:
+Plain pytest, no Home Assistant (SPEC §2). Covers:
 
   * ensemble_band_factors: hand-computed type-7 0.1/0.9 percentiles, member
     clamps, and the min-members / min-det-GHI / missing-det skips;

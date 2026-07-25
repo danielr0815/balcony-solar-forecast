@@ -1,6 +1,6 @@
 """SLOW learner: geometric beam-transmittance field (shademap).
 
-Owner: shademap. Pure, HA-free (stdlib only). Implements SPEC §5 "Langsamer
+Owner: shademap. Pure, HA-free (stdlib only). Implements SPEC §9.1 "Langsamer
 Lerner". Per measurement channel (plane / MPPT port), per bin
 (sun azimuth SHADEMAP_AZ_BIN_DEG x sun elevation SHADEMAP_EL_BIN_DEG x
 HALF-YEAR before/after summer solstice), an EMA (alpha SHADEMAP_EMA_ALPHA) of
@@ -11,7 +11,7 @@ the BEAM-REFERENCED transmittance
 — deliberately NOT the total measured/modeled ratio: a shaded bin still
 contains the diffuse floor, so a total ratio applied to the beam over-predicts
 shade and misattributes diffuse-independent losses (soiling, eta error) to the
-beam (SPEC §5).
+beam (SPEC §9.1).
 
 Quasi-clear samples ONLY: an elevation-dependent clear-sky-index gate
 (Haurwitz is crude at low sun, so the lower k_c bound relaxes toward
@@ -128,7 +128,7 @@ def _wrap360(az: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Bin keying (SPEC §5: az 5 deg x el 2.5 deg x half-year)
+# Bin keying (SPEC §9.1: az 5 deg x el 2.5 deg x half-year)
 # ---------------------------------------------------------------------------
 
 
@@ -137,7 +137,7 @@ def half_year_index(doy: int) -> int:
 
     Splits the year at SUMMER_SOLSTICE_DOY so leaf-off (April, rising limb) and
     leaf-on (August, falling limb) never alias into the same sun-position bin
-    (SPEC §5). The rising limb (day-of-year < solstice, foliage growing toward
+    (SPEC §9.1). The rising limb (day-of-year < solstice, foliage growing toward
     full) is half 0; the falling limb (>= solstice, foliage decaying toward
     bare) is half 1. Two days at the same solar geometry but opposite foliage
     regimes therefore land in distinct bins.
@@ -157,7 +157,7 @@ def half_year_index(doy: int) -> int:
 
 
 def shademap_bin_key(sun_az: float, sun_el: float, doy: int) -> str:
-    """Canonical bin key ``f"{az_idx}:{el_idx}:{half}"`` (SPEC §5).
+    """Canonical bin key ``f"{az_idx}:{el_idx}:{half}"`` (SPEC §9.1).
 
     ``az_idx = floor(wrap360(sun_az) / SHADEMAP_AZ_BIN_DEG)`` (azimuth is the
     INTERNAL 0=N convention, wrapped so 360 -> 0),
@@ -196,7 +196,7 @@ def _bin_centre(bin_key: str) -> tuple[float, float, int] | None:
 
 
 # ---------------------------------------------------------------------------
-# Quasi-clear sample gate (SPEC §5)
+# Quasi-clear sample gate (SPEC §9.1)
 # ---------------------------------------------------------------------------
 
 
@@ -224,7 +224,7 @@ def is_quasi_clear(
     stability_ratio: float | None = None,
     neighbour_ratio: float | None = None,
 ) -> bool:
-    """Quasi-clear sample gate for training a bin (SPEC §5).
+    """Quasi-clear sample gate for training a bin (SPEC §9.1).
 
     True only when ALL hold:
       * k_c within [lo(sun_el), SHADEMAP_KC_HI], where lo ramps from
@@ -271,7 +271,7 @@ def is_quasi_clear(
 
 
 # ---------------------------------------------------------------------------
-# Beam-referenced transmittance (SPEC §5)
+# Beam-referenced transmittance (SPEC §9.1)
 # ---------------------------------------------------------------------------
 
 
@@ -282,7 +282,7 @@ def beam_referenced_t(
 ) -> float | None:
     """Beam-referenced transmittance ``(P_meas - P_diff_model) / P_beam_model``.
 
-    SPEC §5: the sample references the BEAM only; the diffuse floor is
+    SPEC §9.1: the sample references the BEAM only; the diffuse floor is
     subtracted from the measurement so a shaded bin (measurement ~= diffuse
     floor) yields T ~= 0 rather than the total ratio (which would over-predict
     shade and blame diffuse-independent losses on the beam).
@@ -313,7 +313,7 @@ def beam_referenced_t(
 
 
 # ---------------------------------------------------------------------------
-# EMA update (SPEC §5)
+# EMA update (SPEC §9.1)
 # ---------------------------------------------------------------------------
 
 
@@ -371,7 +371,7 @@ def update_bin(
 
 
 # ---------------------------------------------------------------------------
-# Shrinkage blend + application (SPEC §5)
+# Shrinkage blend + application (SPEC §9.1)
 # ---------------------------------------------------------------------------
 
 
@@ -464,7 +464,7 @@ def effective_tau_pooled(
     doy: int,
     static_prior: float,
 ) -> float:
-    """READ-TIME pooled transmittance over several channels/one bin (SPEC §5).
+    """READ-TIME pooled transmittance over several channels/one bin (SPEC §9.1).
 
     Storage stays per plane (one channel each); GROUPING happens only here, at
     read time, and is therefore fully reversible. The SAME bin key is looked up
@@ -516,7 +516,7 @@ def pooled_bin_n(
     sun_el: float,
     doy: int,
 ) -> int:
-    """READ-TIME pooled sample count over several channels/one bin (SPEC §5).
+    """READ-TIME pooled sample count over several channels/one bin (SPEC §9.1).
 
     The learned EVIDENCE behind :func:`effective_tau_pooled`: the SAME bin key is
     looked up in every listed channel and the found bins' ``n`` are summed — the
@@ -539,7 +539,7 @@ def apply_shademap_to_beam(beam_w: float, *, tau: float) -> float:
     ``beam_w * tau``, with tau clamped to the shademap band and a non-negative
     result (a negative modeled beam is coerced to 0). Only beam+circumsolar is
     passed here — the isotropic diffuse is scaled by the static sky-view factor
-    elsewhere (SPEC §5: the learned map applies to beam only).
+    elsewhere (SPEC §9.1: the learned map applies to beam only).
     """
     b = _finite(beam_w, 0.0)
     if b <= 0.0:
@@ -548,12 +548,12 @@ def apply_shademap_to_beam(beam_w: float, *, tau: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Diagnostics: polar-table dump (SPEC §5 "Polartabelle")
+# Diagnostics: polar-table dump (SPEC §9.1 "Polartabelle")
 # ---------------------------------------------------------------------------
 
 
 def dump_polar_table(state: ShademapState) -> list[dict]:
-    """Export the learned map as a flat polar table (SPEC §5 diagnostic).
+    """Export the learned map as a flat polar table (SPEC §9.1 diagnostic).
 
     One row per populated bin per channel, each a plain dict:
         {"channel", "az": centre_az_deg, "elev": centre_el_deg,
@@ -587,7 +587,7 @@ def dump_polar_table(state: ShademapState) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Bootstrap ingestion with n-credit cap (SPEC §6)
+# Bootstrap ingestion with n-credit cap (SPEC §12.5)
 # ---------------------------------------------------------------------------
 
 
@@ -595,7 +595,7 @@ def ingest_bootstrap_shademap(raw: object, *, max_bin_n: int) -> ShademapState:
     """Validate + clamp a bootstrap shademap blob, capping each bin's n-credit.
 
     ``raw`` is the ``BOOTSTRAP_KEY_SHADEMAP`` object from a backfill JSON (a
-    :class:`ShademapState` dict, see SPEC §6). It is parsed through
+    :class:`ShademapState` dict, see SPEC §12.5). It is parsed through
     ``ShademapState.from_dict`` (which already validates + clamps tau and drops
     malformed channels/bins), then EVERY bin's ``n`` is capped at ``max_bin_n``
     (const BOOTSTRAP_MAX_BIN_N). Hourly-smeared backfilled bins are less
@@ -620,7 +620,7 @@ def ingest_bootstrap_shademap(raw: object, *, max_bin_n: int) -> ShademapState:
 
 
 # ---------------------------------------------------------------------------
-# Shade-group similarity + suggestion (SPEC §5, suggest_shade_groups service)
+# Shade-group similarity + suggestion (SPEC §9.1, suggest_shade_groups service)
 # ---------------------------------------------------------------------------
 
 
@@ -664,7 +664,7 @@ def _channel_has_data(state: ShademapState, channel: str) -> bool:
 def channel_similarity(
     state: ShademapState, channel_a: str, channel_b: str
 ) -> dict:
-    """Bin-wise similarity of two shademap channels (SPEC §5).
+    """Bin-wise similarity of two shademap channels (SPEC §9.1).
 
     Compares the two channels over the INTERSECTION of their bin keys — the sun
     positions BOTH have actually learned. Each common bin contributes weight
@@ -731,7 +731,7 @@ def suggest_shade_groups(
     max_diff: float,
     min_common_bins: int,
 ) -> dict:
-    """Data-driven shade-group suggestion from the per-plane shademaps (SPEC §5).
+    """Data-driven shade-group suggestion from the per-plane shademaps (SPEC §9.1).
 
     Each plane's learned shading is stored INDIVIDUALLY (its own channel, keyed
     by the plane name since v0.13.0). This compares every plane pair via

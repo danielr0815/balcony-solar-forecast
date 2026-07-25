@@ -367,7 +367,7 @@ aiohttp-Session (keine neue Dependency, `requirements: []` bleibt), als
 gewöhnlichen Horizontzeilen (τ 0) konvertiert und normal persistiert — **keine
 Laufzeit-Abhängigkeit**, kein Offline-Problem (Schritt ist überspringbar,
 Fehler degradieren zu „offener Himmel"). Zwei Pflicht-Konvertierungen an der
-Importgrenze: **Azimut-Rotation 0=S → 0=N** (SPEC Anhang A; im Kern existiert
+Importgrenze: **Azimut-Rotation 0=S → 0=N** (SPEC §20.1; im Kern existiert
 bewusst kein Remap) und Ausdünnen auf ≤ ~24 Stützstellen mit
 Terminator-Disziplin (geschlossenes 360°-Profil).
 

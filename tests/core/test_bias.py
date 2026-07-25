@@ -1,6 +1,6 @@
 """Tests for the FAST learner (intraday scalar + day-ahead RLS bias).
 
-Pure pytest, no Home Assistant imports (SPEC §4). Owner: bias.
+Pure pytest, no Home Assistant imports (SPEC §2). Owner: bias.
 
 Covers every edge case the contract calls out:
   - intraday: no data / too little coverage -> neutral; k_c-space geometry
@@ -879,7 +879,7 @@ def test_apply_bias_missing_cell_neutral():
 
 
 def test_intraday_has_no_persisted_state_type():
-    """SPEC §5: the intraday scalar is transient. Assert there is no dataclass
+    """SPEC §9.4: the intraday scalar is transient. Assert there is no dataclass
     for it in types and that BiasState (the ONLY persisted FAST state) carries
     day-ahead cells only — never an intraday field."""
     import balcony_solar_forecast.core.types as types_mod

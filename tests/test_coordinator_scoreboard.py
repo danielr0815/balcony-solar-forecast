@@ -213,7 +213,7 @@ def test_score_day_reads_comparison_history_and_scores(monkeypatch):
         ComparisonConfig(name="8-Entry Baseline", daily_entity="sensor.base"),
         ComparisonConfig(name="Alt 1600W", daily_entity="sensor.alt"),
     )
-    # Matched horizon (SPEC §9): the comparison is read at the engine's ~01:30
+    # Matched horizon (SPEC §15.2): the comparison is read at the engine's ~01:30
     # issue horizon = the FIRST usable state at/after the issue time, not the
     # settled end-of-day value. base's first usable row is 6.0 (the leading
     # 'unknown' is skipped, the later 12.0 is a mid-day refresh we must NOT

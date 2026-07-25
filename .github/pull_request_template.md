@@ -6,10 +6,14 @@
 ## Checkliste
 
 - [ ] **SPEC nachgezogen** — `docs/SPEC.md` beschreibt das neue Verhalten
-      thematisch einsortiert (§0 „Änderungsregel"; bestehende Abschnitts-
-      nummern bleiben unverändert). *Oder* hier begründet, warum keine
+      thematisch einsortiert (SPEC §1.3 „Änderungsregeln"; Abschnittsnummern
+      sind append-only, kein Versionsbezug im Text, Historie gehört nach
+      `docs/HISTORIE.md`). *Oder* hier begründet, warum keine
       Vertragsänderung nötig ist (reines Refactoring, nur Tests, nur Tooling):
       <!-- Begründung -->
+- [ ] **Versionsstempel** im SPEC-Kopf („Gilt für Version") gezogen, falls
+      dies ein Release-PR ist — der Wächter vergleicht ihn mit
+      `const.INTEGRATION_VERSION`.
 - [ ] **Tests fallen auf dem Parent-Commit durch** — neue Tests gegen den
       Stand vor dieser Änderung laufen lassen; sie müssen *semantisch*
       fehlschlagen. Bei verhaltensneutralen Refactorings stattdessen:
@@ -20,7 +24,7 @@
 - [ ] **Abwärtskompatibilität optionaler Config-Felder** — neue optionale
       Felder werden in `to_dict()` nur-wenn-gesetzt serialisiert (eine
       Alt-Config ergibt byte-identisch dasselbe Dict); ein Feld, das die
-      RAW-Kurve verändert, ist im Config-Fingerprint ergänzt (SPEC §4.1).
+      RAW-Kurve verändert, ist im Config-Fingerprint ergänzt (SPEC §7.6).
       Store-Migrationen sind additiv und verwerfen keinen Lernzustand.
 - [ ] **CHANGELOG.md** unter `[Unreleased]` ergänzt.
 - [ ] **Version nur im Release-PR** angefasst — und dann an allen drei Stellen

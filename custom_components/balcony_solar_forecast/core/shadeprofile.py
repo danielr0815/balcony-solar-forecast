@@ -1,7 +1,7 @@
 """Sun-path vs. learned-shade profile for one plane on one date (stdlib only).
 
 Owner: shadeprofile. Pure, HA-free. Builds the data behind the "shade profile"
-diagram (SPEC §15): for a chosen module/plane and a chosen local
+diagram (SPEC §17): for a chosen module/plane and a chosen local
 date it walks the sun across the sky and reports, at each step, the sun's
 azimuth + elevation and the *effective* beam transmittance the engine would
 apply there — i.e. the currently-known shading (static config horizon blended
@@ -28,7 +28,7 @@ HA sensor drops straight into its attributes for an ApexCharts card to plot.
 Never raises on a degenerate input (empty horizon, unknown channel, polar
 night): it returns empty arrays and a zeroed summary instead.
 
-READ-TIME pooling (SPEC §5): shade learning is stored per plane; grouped planes
+READ-TIME pooling (SPEC §9.2): shade learning is stored per plane; grouped planes
 are pooled only at read time. When a ``pool`` of channels wider than the plane's
 own ``channel`` is supplied, the MAIN ``transmittance`` curve (and the shade
 horizon) is the n-weighted POOLED tau the forecast actually applies, and a
@@ -120,7 +120,7 @@ def effective_tau_at(
     drift-disabled / collapse-frozen (see ``coordinator.build_shade_profile``);
     then the result is the static-only shading the forecast applies.
 
-    READ-TIME pooling (SPEC §5): when ``pool`` names channels beyond the plane's
+    READ-TIME pooling (SPEC §9.2): when ``pool`` names channels beyond the plane's
     own ``channel``, the learned tau is the n-weighted POOL over those channels
     (:func:`shademap.effective_tau_pooled`) — exactly what the served forecast
     applies for a grouped plane. ``pool`` None or equal to ``(channel,)`` reads
@@ -184,7 +184,7 @@ def shade_horizon_at(
     prior varies with the sun elevation, so it cannot be hoisted — a legacy row
     without a profile returns the same scalar tau at every el, so the extra
     lookups are bit-identical to the pre-0.22 hoisted value. The effective tau
-    uses the READ-TIME POOL (SPEC §5) when ``pool`` is wider than ``(channel,)``,
+    uses the READ-TIME POOL (SPEC §9.2) when ``pool`` is wider than ``(channel,)``,
     so the drawn shade horizon matches the pooled sun-path curve.
     """
     horizon_elev = horizon_mod.interp_elevation(plane, sun_az)
@@ -348,7 +348,7 @@ def compute_shade_profile(
     how "today" is bucketed elsewhere); the day-of-year fed to the seasonal
     foliage ramp and the shademap half-year split is that local date's doy.
 
-    READ-TIME pooling (SPEC §5): when ``pool`` names channels wider than the
+    READ-TIME pooling (SPEC §9.2): when ``pool`` names channels wider than the
     plane's own ``channel``, the MAIN ``transmittance`` array + the shade horizon
     are the n-weighted POOL (what the forecast applies), and a parallel
     ``transmittance_individual`` array carries the plane's OWN channel alone for

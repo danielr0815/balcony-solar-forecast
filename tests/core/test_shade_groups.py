@@ -1,4 +1,4 @@
-"""Pure-core tests for shade groups (SPEC §5) — HA-free.
+"""Pure-core tests for shade groups (SPEC §9.2) — HA-free.
 
 Covers the two pure pieces of the READ-TIME shade-pooling feature:
 

@@ -1,6 +1,6 @@
 """DC power model + per-inverter-group AC clamp (stdlib math only).
 
-Owner: engine. Pure, HA-free. Implements SPEC §4 step 7:
+Owner: engine. Pure, HA-free. Implements SPEC §6:
   - Ross cell temperature: Tcell = Tamb + ROSS_COEFF * POA.
   - Power derate TEMP_COEFF_PER_K per K vs TEMP_REF_C.
   - Per-inverter-group AC clamp: min(sum of member ports, ac_limit_w).
@@ -55,7 +55,7 @@ def dc_power(
     if poa_w_m2 <= 0.0:
         return 0.0
 
-    # Ross NOCT-style cell temperature: linear in POA (SPEC §4). The mounting
+    # Ross NOCT-style cell temperature: linear in POA (SPEC §6.1). The mounting
     # geometry sets the coefficient; fall back to the default when unset.
     k_ross = ross_coeff if ross_coeff is not None else ROSS_COEFF
     t_cell = temp_amb + k_ross * poa_w_m2

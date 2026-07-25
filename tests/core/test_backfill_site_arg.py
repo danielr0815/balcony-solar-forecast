@@ -8,7 +8,7 @@ az 135-175, wall edge az 212 instead of the live 195, no ``albedo`` /
 learner against foreign geometry — and looked healthy while doing it, because
 the site signature only guards the IMPORT and only on lat/lon + plane names.
 
-These tests pin the closed trap (SPEC §6):
+These tests pin the closed trap (SPEC §12.3):
 
   * no ``--site`` and no opt-in  -> abort with an actionable message that names
     the ``run_bootstrap`` action, the config export and the opt-in flag;

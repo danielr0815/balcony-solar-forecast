@@ -1,6 +1,6 @@
 """AC-side served-curve tests for core/engine.py (Phase 1 AC-side forecast).
 
-Plain pytest, no Home Assistant imports (SPEC §4). Phase 1 adds a deterministic
+Plain pytest, no Home Assistant imports (SPEC §2). Phase 1 adds a deterministic
 DC->AC transform on top of the DC pipeline: per inverter group AC = min(eta_inv *
 factor * sum(DC_unclamped), ac_limit), with the served DC clip point moved to
 ac_limit/eta_inv INSIDE the AC curve only. The DC path (total_watts / hourly_wh /

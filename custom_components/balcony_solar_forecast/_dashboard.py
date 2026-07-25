@@ -1,4 +1,4 @@
-"""Pure builder for the generated observability Lovelace dashboard (SPEC §14.3).
+"""Pure builder for the generated observability Lovelace dashboard (SPEC §18.2).
 
 The ``install_dashboard`` service (see :mod:`._services`) writes a full Lovelace
 config into a UI-created (empty) dashboard, wiring every card to the INSTALL's
@@ -240,7 +240,7 @@ def _has_entity_row(rows: list[dict[str, Any]]) -> bool:
 def _add_kill_gate_verdict(
     cards: list[dict[str, Any]], entity_map: dict[str, str]
 ) -> None:
-    """Kill-gate verdict markdown (SPEC §9/§10) — templated on the real ids."""
+    """Kill-gate verdict markdown (SPEC §15.4) — templated on the real ids."""
     kill = entity_map.get(BINARY_SENSOR_KILL_GATE_PASSED)
     pct = entity_map.get(SENSOR_FORECAST_VS_BEST_BASELINE_PCT)
     if kill is None or pct is None:
@@ -253,7 +253,7 @@ def _add_kill_gate_verdict(
 def _add_vs_best_gauge(
     cards: list[dict[str, Any]], entity_map: dict[str, str]
 ) -> None:
-    """Forecast-vs-best-baseline gauge (SPEC §9); positive = forecast better."""
+    """Forecast-vs-best-baseline gauge (SPEC §15.5); positive = forecast better."""
     entity_id = entity_map.get(SENSOR_FORECAST_VS_BEST_BASELINE_PCT)
     if entity_id is None:
         return
@@ -281,7 +281,7 @@ def _add_scoreboard(
     entity_map: dict[str, str],
     comparison_slugs: list[tuple[str, str]],
 ) -> None:
-    """Skill scoreboard (SPEC §9/§10): forecast MAE + per-comparison MAE."""
+    """Skill scoreboard (SPEC §15.2/§15.1): forecast MAE + per-comparison MAE."""
     rows: list[dict[str, Any]] = []
     for key, name in (
         (BINARY_SENSOR_KILL_GATE_PASSED, "Kill-gate passed"),
@@ -312,7 +312,7 @@ def _add_scoreboard(
 def _add_forecast_history(
     cards: list[dict[str, Any]], entity_map: dict[str, str]
 ) -> None:
-    """Forecast-vs-measured power comparison history-graph (SPEC §14.3).
+    """Forecast-vs-measured power comparison history-graph (SPEC §18.1).
 
     The forecast power sensor (``power_production_now``) now reports AC (Phase 2),
     so this card pairs it apples-to-apples with the measured site AC meter
@@ -360,7 +360,7 @@ def _add_dc_diagnostics(
     A lean diagnostic ``entities`` card so the operator can still see the DC
     model — now that the main power/energy sensors report AC — alongside the
     learned DC→AC efficiency. The DC curve remains the self-learning / scoreboard
-    truth (SPEC §5); these two rows read the unchanged DC data keys. The learned
+    truth (SPEC §6.5); these two rows read the unchanged DC data keys. The learned
     site η (``inverter_efficiency_learned``) rides as an attribute of the AC
     ``power_production_now`` sensor (it has no scalar entity of its own), so it is
     surfaced here via an ``attribute`` entities-row — a built-in row type, not a
@@ -449,7 +449,7 @@ def _add_measured_power(
 def _add_forecast_band(
     cards: list[dict[str, Any]], entity_map: dict[str, str]
 ) -> None:
-    """Today's P10 / P50 / P90 band (SPEC §6/§14.2)."""
+    """Today's P10 / P50 / P90 band (SPEC §11/§11.2)."""
     rows: list[dict[str, Any]] = []
     for key, name in (
         (SENSOR_ENERGY_TODAY_P10, "P10 (conservative)"),
@@ -473,7 +473,7 @@ def _add_forecast_band(
 def _add_learners(
     cards: list[dict[str, Any]], entity_map: dict[str, str]
 ) -> None:
-    """Learner status + drift MAE + degradation source (SPEC §5/§7)."""
+    """Learner status + drift MAE + degradation source (SPEC §9/§13)."""
     head: list[dict[str, Any]] = []
     for key, name in (
         (SENSOR_SOURCE_STATUS, "Source status (degradation ladder)"),
@@ -512,7 +512,7 @@ def _add_learners(
 def _add_drift_trend(
     cards: list[dict[str, Any]], entity_map: dict[str, str]
 ) -> None:
-    """Drift MAE (corrected) trend history-graph (SPEC §5)."""
+    """Drift MAE (corrected) trend history-graph (SPEC §9.8)."""
     entity_id = entity_map.get(SENSOR_DRIFT_MAE_CORRECTED)
     if entity_id is None:
         return
@@ -540,7 +540,7 @@ def _add_shademap_markdown(cards: list[dict[str, Any]]) -> None:
 def _add_shade_profile_card(
     cards: list[dict[str, Any]], entity_map: dict[str, str]
 ) -> None:
-    """The bundled shade-profile diagram card (SPEC §15) — replaces the opt-in
+    """The bundled shade-profile diagram card (SPEC §18.3) — replaces the opt-in
     HACS apexcharts snippet, wired to the three real entity ids."""
     sensor = entity_map.get(SENSOR_SHADE_PROFILE)
     module_select = entity_map.get(SELECT_SHADE_PROFILE_MODULE)
@@ -559,7 +559,7 @@ def _add_shade_profile_card(
 
 
 def _add_comparison_reminder(cards: list[dict[str, Any]]) -> None:
-    """Comparison-sensor configuration reminder markdown (D-P9: ships EMPTY)."""
+    """Comparison-sensor configuration reminder markdown (SPEC §15.3: ships EMPTY)."""
     cards.append(
         {
             "type": "markdown",
@@ -583,7 +583,7 @@ _KILL_GATE_TEMPLATE = (
     "{% elif passed == 'off' %} ## ❌ Kill-gate NOT passed\n\n"
     "Over the current full window the forecast is **not** yet the required "
     "margin better than the best baseline. Keep the frozen baseline in place "
-    "(SPEC §9). {% else %} ## ⏳ Kill-gate: window not full yet\n\n"
+    "(SPEC §15.4). {% else %} ## ⏳ Kill-gate: window not full yet\n\n"
     "Not enough scored days in the rolling window to assert the gate "
     "(`unknown` until a full window of nightly scores exists). {% endif %}\n\n"
     "{% if pct not in ('unknown', 'unavailable') %} Forecast vs best baseline: "
@@ -608,7 +608,7 @@ _SHADEMAP_MARKDOWN = (
 
 _COMPARISON_MARKDOWN = (
     "The scoreboard ships with **no** comparison baselines configured "
-    "(generic, not hardcoded — D-P9). Add them in **Settings → Devices & "
+    "(generic, not hardcoded — SPEC §15.3). Add them in **Settings → Devices & "
     "Services → Balcony Solar Forecast → Configure → Comparison sensors**. The "
     "operator's live site uses:\n\n\n"
     "| Name | Daily-kWh entity |\n"

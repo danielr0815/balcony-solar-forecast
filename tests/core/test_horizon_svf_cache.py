@@ -1,6 +1,6 @@
 """Module-level SVF memo tests (Phase-D optimisation #2, audit #9b).
 
-Plain pytest, no Home Assistant imports (SPEC §4).
+Plain pytest, no Home Assistant imports (SPEC §2).
 
 ``horizon.sky_view_factor`` now delegates to a module-level
 ``functools.lru_cache`` keyed on the plane GEOMETRY (horizon rows tuple, tilt,

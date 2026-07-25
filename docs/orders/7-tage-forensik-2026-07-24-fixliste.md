@@ -1,5 +1,9 @@
 # 7-Tage-Forensik 17.–24.07.2026 — priorisierte Fix- und Verbesserungsliste
 
+> **Abgeschlossener Auftrag, historisch.** Die `SPEC §…`-Verweise in diesem
+> Dokument beziehen sich auf die ALTE SPEC-Gliederung (vor der Neufassung
+> für 0.23.2). Übersetzung alt → neu: `docs/HISTORIE.md` §H13.
+
 Erstellt 2026-07-24 (Fable 5 Ultracode, 9-Agenten-Workflow `wf_c3d5b74f-576`, 44 Findings,
 39 adversarial CONFIRMED / 1 REFUTED / 2 DUPLICATE / 1 PLAUSIBLE). **Nur Analyse — Umsetzung
 erfolgt in einem zweiten Schritt (Opus), Abschlussprüfung via Fable.** Datengrundlage:

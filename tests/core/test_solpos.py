@@ -1,7 +1,7 @@
 """Tests for the NOAA closed-form solar position (core/solpos.py).
 
-Pure pytest, no Home Assistant imports (SPEC §4). Anchor values are the
-PVGIS-verified operator-site figures from SPEC §13:
+Pure pytest, no Home Assistant imports (SPEC §2). Anchor values are the
+PVGIS-verified operator-site figures from SPEC §21:
 
   * Landshut / operator site (48.547853 N, 12.187272 E)
   * 2025-06-21 solar-noon elevation 64.9 +- 0.4 deg
@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 # Import the core module directly from its file so the test stays strictly
-# HA-free (SPEC §4). Loading it via the full package path
+# HA-free (SPEC §2). Loading it via the full package path
 # ``custom_components.balcony_solar_forecast.core.solpos`` would execute the
 # integration-root ``__init__.py``, which imports ``homeassistant`` and is
 # unavailable to plain pytest. ``solpos.py`` depends only on stdlib
@@ -43,7 +43,7 @@ _spec.loader.exec_module(_solpos)
 sun_position = _solpos.sun_position
 _refraction_correction = _solpos._refraction_correction
 
-# Operator reference site (SPEC §2 / const.DEFAULT_SITE).
+# Operator reference site (SPEC §7.8 / const.DEFAULT_SITE).
 LAT = 48.547853
 LON = 12.187272
 
@@ -74,7 +74,7 @@ def _scan_solar_noon(y, mo, d):
 
 
 # ---------------------------------------------------------------------------
-# Anchor accuracy (PVGIS-verified, SPEC §13)
+# Anchor accuracy (PVGIS-verified, SPEC §21)
 # ---------------------------------------------------------------------------
 
 
@@ -114,7 +114,7 @@ def test_equinox_noon_elevation():
 
 
 # ---------------------------------------------------------------------------
-# Azimuth convention & sign-error traps (SPEC Anhang A silent-error class)
+# Azimuth convention & sign-error traps (SPEC §20.1 silent-error class)
 # ---------------------------------------------------------------------------
 
 
@@ -170,7 +170,7 @@ def test_azimuth_always_in_range():
 
 
 # ---------------------------------------------------------------------------
-# Low-sun / night behaviour (SPEC §4 low-sun trap)
+# Low-sun / night behaviour (SPEC §4.1 low-sun trap)
 # ---------------------------------------------------------------------------
 
 

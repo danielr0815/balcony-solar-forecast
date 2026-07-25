@@ -1,6 +1,6 @@
 """Pure-core tests for the inverter DC->AC efficiency site calibration.
 
-Plain pytest, no Home Assistant imports (SPEC §4). Covers the AC-side Phase 3
+Plain pytest, no Home Assistant imports (SPEC §2). Covers the AC-side Phase 3
 calibration primitives in ``core/inverter_cal.py`` + ``InverterCalState``:
 
   * ``eligible_ratio`` — the min-load / clip / finite / positive-DC gate, and

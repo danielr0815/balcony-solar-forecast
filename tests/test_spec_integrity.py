@@ -1,4 +1,4 @@
-"""Machine-guarded integrity of the SPEC contract (SPEC §0).
+"""Machine-guarded integrity of the SPEC contract (SPEC §1, §21).
 
 ``docs/SPEC.md`` is the project's contract, and the code cites it by section
 number in hundreds of places. Those citations are load-bearing: they are how a
@@ -6,21 +6,31 @@ reader gets from a line of physics to the paragraph that justifies it. Keeping
 them true has so far relied on discipline alone — this module turns that
 discipline into a test.
 
-Seven guards, all pure (no Home Assistant, no fixtures — plain file reads):
+Since the 2026-07-25 rewrite the SPEC is a **current-state** specification: it
+describes only the behaviour of the version named in its header stamp.
+Provenance lives in ``docs/HISTORIE.md``. Two of the guards below exist to keep
+it that way — (h) pins the stamp to the shipped version, (i) keeps historical
+prose out.
+
+Nine guards, all pure (no Home Assistant, no fixtures — plain file reads):
 
   (a) **Citation integrity.** Every ``SPEC §x[.y]`` cited anywhere under
-      ``custom_components/`` (``.py``, ``services.yaml``, the frontend ``.js``)
-      or ``tests/`` must resolve to a real heading in ``docs/SPEC.md``. This is
-      the guard that makes SPEC §0's "section numbers are immutable" rule
-      enforceable rather than merely stated.
+      ``custom_components/``, ``tests/``, ``scripts/``, ``dashboards/`` or
+      ``docs/`` must resolve to a real heading in ``docs/SPEC.md``. This is the
+      guard that makes SPEC §1.3's "section numbers are append-only" rule
+      enforceable rather than merely stated. ``docs/orders/`` is excluded: a
+      finished order is a historical record and keeps the numbering it was
+      written against (``docs/HISTORIE.md`` §H13 translates it).
   (b) **Service coverage.** Every service defined in ``services.yaml`` is
       mentioned in the SPEC — a new action cannot ship undocumented.
   (c) **Config-surface coverage.** Every public field of the ``site`` config
       object (the ``CONF_*`` block in ``const.py``) is mentioned in the SPEC —
       a new operator-visible field cannot ship undocumented.
-  (d) **Signpost completeness.** Every top-level section of the SPEC is picked
-      up by the SPEC §0 signpost (topic table or the historical list), so a new
-      section cannot grow past the map that is supposed to route readers to it.
+  (d) **Signpost completeness.** Every top-level section of the SPEC is routed
+      to by the §1.2 signpost table, so a new section cannot grow past the map
+      that is supposed to lead readers to it. The old variant also accepted a
+      "historisch, nicht normativ" listing; that escape hatch is gone with the
+      historical sections themselves.
   (e) **Document-reference integrity.** Every repo-relative ``docs/…`` path
       named in a tracked markdown file, in ``custom_components/`` or in
       ``tests/`` must resolve to a **tracked** file. Guard (a) protects section
@@ -41,6 +51,17 @@ Seven guards, all pure (no Home Assistant, no fixtures — plain file reads):
       service in ``services.yaml`` and state their number. Written after that
       docstring claimed "All six services" for four releases while the manifest
       had grown to ten — a reader's first, wrongest impression of the surface.
+  (h) **Version-stamp currency.** The SPEC header's "Gilt für Version: <x>"
+      must equal ``const.INTEGRATION_VERSION``. A stamp nobody maintains is
+      worse than none — it reads as authoritative while it rots, exactly the
+      failure class of the stale "All six services" docstring.
+  (i) **No historical prose.** ``docs/SPEC.md`` must not carry the markers of
+      the old founding document: an explicit "historisch, nicht normativ" flag
+      anywhere in the body, or a *heading* for a provenance chapter
+      ("Phasenplan", "Entscheidungspunkte", "Betreiber-Antworten", …). Markers
+      and headings, never plain keywords — the SPEC may legitimately describe
+      compatibility with older stored state (SPEC §1.3 rule 4), and its header
+      may say where the Phasenplan went.
 
 Deliberately *lower bounds*: a mere word match proves the name appears, not
 that the prose is good. The point is that the mechanical gap — a field or an
@@ -67,10 +88,24 @@ _INIT_PY = _INTEGRATION / "__init__.py"
 _TRANSLATIONS = _INTEGRATION / "translations"
 # Both shipped languages. A repair issue must be readable in each.
 _LANGUAGES = ("en", "de")
-_SCAN_ROOTS = (_REPO / "custom_components", _REPO / "tests")
+_SCAN_ROOTS = (
+    _REPO / "custom_components",
+    _REPO / "tests",
+    _REPO / "scripts",
+    _REPO / "dashboards",
+    _REPO / "docs",
+)
 # Text-bearing sources that carry citations: python, the service manifest, the
-# bundled Lovelace cards, icons/manifest json.
-_SCAN_SUFFIXES = {".py", ".yaml", ".yml", ".js", ".json"}
+# bundled Lovelace cards, icons/manifest json, prose.
+_SCAN_SUFFIXES = {".py", ".yaml", ".yml", ".js", ".json", ".md"}
+# Excluded from the citation scan (relative POSIX prefixes). Finished orders and
+# the historical record keep the numbering they were written against; the SPEC
+# itself uses bare "§x" cross-references, not "SPEC §x" citations.
+_CITATION_EXCLUDES = (
+    "docs/orders/",
+    "docs/HISTORIE.md",
+    "docs/SPEC.md",
+)
 
 
 def _read(path: Path) -> str:
@@ -82,7 +117,7 @@ def _read(path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 _HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$", re.M)
-# "§0 Wegweiser", "4. Zielarchitektur", "14.1 Skill-Scoreboard" -> 0 / 4 / 14.1
+# "§1 Vertrag", "4. Physikkern", "§14.1 Prognose-Sensoren" -> 1 / 4 / 14.1
 _NUMBERED_RE = re.compile(r"^(?:§\s*)?(\d+(?:\.\d+)*)[.):]?(?:\s|$)")
 # "Anhang A: Konventionen" -> "Anhang A"
 _APPENDIX_RE = re.compile(r"^(Anhang\s+[A-Z])\b")
@@ -131,8 +166,10 @@ def _scan_citations() -> list[tuple[str, int, str]]:
                 continue
             if "__pycache__" in path.parts:
                 continue
-            text = _read(path)
             rel = path.relative_to(_REPO).as_posix()
+            if rel.startswith(_CITATION_EXCLUDES):
+                continue
+            text = _read(path)
             for run in _CITE_RUN_RE.finditer(text):
                 line = text.count("\n", 0, run.start()) + 1
                 for sec in _SECTION_NO_RE.findall(run.group(0)):
@@ -143,8 +180,13 @@ def _scan_citations() -> list[tuple[str, int, str]]:
 def test_every_spec_citation_resolves_to_a_heading():
     """A cited section number must exist as a heading in docs/SPEC.md.
 
-    This is the enforcement arm of the immutability rule: renumbering or
-    deleting a section breaks here, naming the exact citation sites to fix.
+    This is the enforcement arm of the append-only rule (SPEC §1.3): renumbering
+    or deleting a section breaks here, naming the exact citation sites to fix.
+
+    It cannot catch a citation that still *resolves* but now points at a
+    different topic — the risk the one-off renumbering carried. That is why the
+    rewrite moved every citation in a single pass and why numbers are
+    append-only from now on.
     """
     citations = _scan_citations()
     # Sanity: the scanner must actually see the citation corpus (a silent
@@ -181,7 +223,7 @@ def test_every_service_is_documented_in_the_spec():
         "services defined in services.yaml but never named in docs/SPEC.md: "
         + ", ".join(missing)
         + "\n\nDocument the action in its defining section and list it in the"
-        " §16 overview."
+        " §19 action inventory."
     )
 
 
@@ -198,7 +240,7 @@ _CONF_ASSIGN_RE = re.compile(r'^(CONF_[A-Z0-9_]+)\s*=\s*"([^"]+)"')
 _FIELD_ALLOWLIST = {
     # Shared by planes and inverter groups. As a bare word "name" matches
     # almost any prose, so requiring it proves nothing; the field itself is
-    # documented in the §4.1 schema table.
+    # documented in the §7.3 / §7.5 schema tables.
     "name",
 }
 
@@ -237,7 +279,7 @@ def test_every_public_site_config_field_is_documented_in_the_spec():
     assert not missing, (
         "site-config fields defined in const.py but never named in"
         " docs/SPEC.md:\n  " + "\n  ".join(missing)
-        + "\n\nAdd the field to the §4.1 schema table (name, meaning, range /"
+        + "\n\nAdd the field to the §7 schema tables (name, meaning, range /"
         " default) and to the section that describes its behaviour."
     )
 
@@ -246,22 +288,27 @@ def test_every_public_site_config_field_is_documented_in_the_spec():
 # (d) Signpost completeness.
 # ---------------------------------------------------------------------------
 
-_SIGNPOST_START = "### Thema → maßgebliche Abschnitte"
-_SIGNPOST_END = "### Änderungsregel"
+_SIGNPOST_START = "### §1.2 Wegweiser"
+_SIGNPOST_END = "### §1.3 Änderungsregeln"
 
-# The signpost cannot route to itself; §0 IS the signpost.
-_SIGNPOST_ALLOWLIST = {"0"}
+# The signpost cannot route to itself; §1 CONTAINS the signpost.
+_SIGNPOST_ALLOWLIST = {"1"}
 
 
 def test_every_top_level_section_is_covered_by_the_signpost():
-    """Every ``##`` section is reachable from the SPEC §0 signpost.
+    """Every ``##`` section is reachable from the SPEC §1.2 signpost table.
 
-    The signpost block spans the topic table AND the "historisch, nicht
-    normativ" list: a section is covered if it is routed to as current
-    doctrine or explicitly marked historical. Anything else is a section that
-    grew past the map.
+    A section the table does not route to is a section that grew past the map.
+    Unlike the pre-rewrite variant there is no "historisch, nicht normativ"
+    escape hatch: every section of a current-state spec is current doctrine and
+    has to be findable as such.
     """
     spec = _read(_SPEC_PATH)
+    for marker in (_SIGNPOST_START, _SIGNPOST_END):
+        assert marker in spec, (
+            f"SPEC signpost marker {marker!r} not found in docs/SPEC.md — this"
+            " guard reads the topic table between the §1.2 and §1.3 headings."
+        )
     start = spec.index(_SIGNPOST_START)
     block = spec[start : spec.index(_SIGNPOST_END, start)]
 
@@ -274,10 +321,9 @@ def test_every_top_level_section_is_covered_by_the_signpost():
         if level == 2 and ident not in referenced and ident not in _SIGNPOST_ALLOWLIST
     ]
     assert not uncovered, (
-        "top-level SPEC sections missing from the §0 signpost:\n  "
+        "top-level SPEC sections missing from the §1.2 signpost table:\n  "
         + "\n  ".join(uncovered)
-        + "\n\nAdd a row to the topic table (normative) or an entry to the"
-        " 'Historisch, nicht normativ' list."
+        + "\n\nAdd a row to the topic table naming the new section."
     )
 
 
@@ -348,7 +394,7 @@ def test_every_doc_reference_resolves_to_a_tracked_file():
 
     Existence on the author's machine is not enough: the reference is read by
     someone with a fresh clone, so the target has to be committed. That is the
-    exact failure this guard was written for — const.py, SPEC §6 and the
+    exact failure this guard was written for — const.py, the SPEC and the
     changelog citing an ADR that was still untracked.
     """
     refs = _scan_doc_refs()
@@ -536,4 +582,115 @@ def test_async_setup_docstring_matches_services_yaml():
         f"async_setup's docstring says 'All {stated.group(1)} services' while "
         f"services.yaml registers {len(services)}; it read 'All six services' "
         "for four releases while services.yaml had grown to ten."
+    )
+
+
+# ---------------------------------------------------------------------------
+# (h) Version-stamp currency.
+# ---------------------------------------------------------------------------
+
+# The header stamp, e.g. "> **Gilt für Version: 0.23.1** · Zuletzt aktualisiert:
+# 2026-07-25". Anchored to a blockquote line in the first few lines of the file
+# so a version number appearing anywhere in the prose cannot satisfy it.
+_VERSION_STAMP_RE = re.compile(
+    r"^>\s*\*\*Gilt für Version:\s*([0-9][^*]*?)\s*\*\*", re.M
+)
+
+
+def test_spec_version_stamp_matches_the_shipped_version():
+    """The SPEC header must name the version it was last reviewed against.
+
+    A current-state specification is only as trustworthy as the claim "this
+    describes version X". Without a machine check that claim is the same kind of
+    quiet liability as the "All six services" docstring: authoritative-looking
+    and four releases stale. The stamp lives in the header blockquote, is read
+    from there, and is compared with ``const.INTEGRATION_VERSION``.
+    """
+    head = _read(_SPEC_PATH)[:2000]
+    match = _VERSION_STAMP_RE.search(head)
+    assert match is not None, (
+        "docs/SPEC.md has no version stamp in its header. Add a blockquote line"
+        ' "> **Gilt für Version: <x.y.z>** · Zuletzt aktualisiert: <YYYY-MM-DD>"'
+        " directly under the title (SPEC §1.1)."
+    )
+    stamped = match.group(1).strip()
+    shipped = _const_module().INTEGRATION_VERSION
+    assert stamped == shipped, (
+        f"docs/SPEC.md is stamped for version {stamped} while the integration"
+        f" ships {shipped}.\n\nPull the SPEC header to {shipped} and check"
+        " whether the contract itself changed with it — the stamp is a review"
+        " marker, not a find-and-replace (SPEC §1.3 rule 6)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# (i) No historical prose.
+# ---------------------------------------------------------------------------
+
+# Explicit "this section is history" flags. These only ever appeared as such,
+# so their mere presence anywhere in the body is the finding.
+_HISTORY_FLAGS: tuple[tuple[str, str], ...] = (
+    ("Historisch/", "the '*Historisch/… — beschreibt nicht das aktuelle"
+                    " Verhalten*' flag the old sections carried"),
+    ("Historisch, nicht normativ", "the old §0 listing of historical sections"),
+    ("Gründungsdokument", "the founding-document framing"),
+    ("Jury-Urteil", "the design-review verdict"),
+)
+# Chapter topics that are provenance by definition. Checked against HEADINGS
+# only: the header may legitimately say "the Phasenplan now lives in HISTORIE",
+# but a *section* by that name is the old document growing back.
+_HISTORY_CHAPTERS: tuple[tuple[str, str], ...] = (
+    ("Phasenplan", "the delivery-plan chapter"),
+    ("Entscheidungspunkte", "the D-P decision log"),
+    ("Betreiber-Antworten", "the operator-interview protocol"),
+    ("Messdaten-Befunde", "the LTS analysis snapshot"),
+    ("Ausgangslage", "the pre-project findings"),
+)
+
+
+def test_spec_carries_no_historical_sections():
+    """docs/SPEC.md describes the present tense only (SPEC §1.1, §1.3).
+
+    The operator's rule is that the specification states the requirements of the
+    *current* version — not how the project got there. Provenance belongs in
+    ``docs/HISTORIE.md``, which is explicitly non-normative and carries the
+    old→new section mapping.
+
+    Deliberately marker-based, not keyword-based: a rule about compatibility
+    with older stored state ("a snapshot without the shadow curve falls back
+    to …") is current behaviour and must stay. What must not come back is a
+    *section* of history — hence the structural markers below.
+    """
+    spec = _read(_SPEC_PATH)
+    found = [
+        f"{marker!r} ({why})" for marker, why in _HISTORY_FLAGS if marker in spec
+    ]
+    titles = "\n".join(title for _lvl, _ident, title in _headings())
+    found += [
+        f"heading containing {marker!r} ({why})"
+        for marker, why in _HISTORY_CHAPTERS
+        if marker in titles
+    ]
+    assert not found, (
+        "docs/SPEC.md carries historical prose again:\n  "
+        + "\n  ".join(found)
+        + "\n\nMove it to docs/HISTORIE.md (non-normative) and leave only the"
+        " behaviour the shipped version owes its users."
+    )
+
+
+def test_historie_document_exists_and_carries_the_transition_table():
+    """The old numbering must stay resolvable for issues, PRs and changelogs.
+
+    The one-off renumbering is the only reason ``docs/HISTORIE.md`` is not
+    optional: without §H13 an entry that says "SPEC §5" is unreadable, because
+    §5 now means something else entirely.
+    """
+    path = _REPO / "docs" / "HISTORIE.md"
+    assert path.is_file(), "docs/HISTORIE.md is missing (SPEC §1.3 rule 5)"
+    text = _read(path)
+    assert "§H13" in text and "Übergangstabelle" in text, (
+        "docs/HISTORIE.md must keep the §H13 old→new transition table; it is"
+        " what keeps pre-rewrite SPEC citations in CHANGELOG.md, docs/orders/"
+        " and old PRs resolvable."
     )

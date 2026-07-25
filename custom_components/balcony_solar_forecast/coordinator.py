@@ -6,24 +6,24 @@ Owner: glue (coordinator). Ties the pure physics core to Home Assistant:
   * recompute the forecast every 15 min from the cached weather;
   * walk the degradation ladder — fresh → cached last-good (within an age
     limit) → pure-physics from the last valid weather image → unavailable
-    (SPEC §7), each step visible via the ``status`` field;
+    (SPEC §13), each step visible via the ``status`` field;
   * per tick, read every configured ``actual_entity`` (guarded against
     unknown / unavailable / stale states) and feed the FAST learner's
     intraday clear-sky-index scalar (transient, re-init to 1.0 on restart,
-    NEVER persisted — SPEC §5);
+    NEVER persisted — SPEC §9.4);
   * a nightly job (01:30 local, idempotent, date-keyed) that snapshots the
     forecast-as-issued (v2 dual-curve), reads yesterday's per-module actual
     energy from recorder long-term statistics (in the executor), trains the
     day-ahead RLS bias + the shademap under the label gates, runs the drift
     monitor (auto-disable + repair issue + rollback ring) and the collapse
-    detector (SPEC §5).
+    detector (SPEC §9.8).
 
 ``self.data`` is the single dict every platform reads (see the contract at
 the bottom of ``_build_data``). ``None`` data means the coordinator has no
-usable forecast yet; entities go ``unavailable`` honestly (SPEC §7).
+usable forecast yet; entities go ``unavailable`` honestly (SPEC §13).
 
 Everything the learners touch is clamped, gated, disable-able and rollbackable;
-degradation is never silent (SPEC §5 Schutzmechanismen).
+degradation is never silent (SPEC §9 Schutzmechanismen).
 """
 
 from __future__ import annotations
@@ -201,7 +201,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Duck-typed sample container handed to core/bias.py. The bias contract only
-# requires attribute access (SPEC §5: "may realise it as a frozen dataclass");
+# requires attribute access (SPEC §9.5: "may realise it as a frozen dataclass");
 # the coordinator builds these so the two owners share only the const tunables.
 # (The nightly ``_DayAheadSample`` sibling lives in ``_nightly.py``.)
 # ---------------------------------------------------------------------------
@@ -268,7 +268,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             seconds=int(cfg.get(CONF_FETCH_INTERVAL, FETCH_INTERVAL_SECONDS))
         )
         self._site = SiteConfig.from_dict(cfg[CONF_SITE])
-        # Shade pooling is READ-TIME (SPEC §5): every plane's learning is stored
+        # Shade pooling is READ-TIME (SPEC §9.2): every plane's learning is stored
         # under its OWN channel forever; grouped planes are pooled only when the
         # forecast/diagram reads the map, so grouping stays fully reversible. The
         # pool membership is derived on demand from PlaneConfig.shade_channel +
@@ -277,10 +277,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Resolved kill switches (options-flow). Rebuilt on every reload.
         self._learner_config = LearnerConfig.from_dict(cfg)
 
-        # --- Skill scoreboard config (v0.4, SPEC §9/§10) --------------------
+        # --- Skill scoreboard config (v0.4, SPEC §15) --------------------
         # Enable flag + rolling-window length + kill-gate margin, all from the
         # options flow (defaults from const). The comparison sensors are a
-        # GENERIC, CONFIGURABLE list (ships EMPTY, D-P9); a malformed/half-filled
+        # GENERIC, CONFIGURABLE list (ships EMPTY, SPEC §15.3); a malformed/half-filled
         # row is dropped by ComparisonConfig.list_from_options.
         self._scoreboard_enabled = bool(
             cfg.get(CONF_SCOREBOARD_ENABLED, DEFAULT_SCOREBOARD_ENABLED)
@@ -295,14 +295,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             ComparisonConfig.list_from_options(cfg.get(CONF_COMPARISON_SENSORS))
         )
 
-        # --- Quantile bands (v0.4, SPEC §6/§10) -----------------------------
+        # --- Quantile bands (v0.4, SPEC §11) -----------------------------
         # Historical-simulation P10/P50/P90 bands, enable flag from the options
         # flow (default ON; kill switch is BooleanSelector).
         self._quantiles_enabled = bool(
             cfg.get(CONF_QUANTILES_ENABLED, DEFAULT_QUANTILES_ENABLED)
         )
 
-        # --- Ensemble-weather uncertainty bands (v0.16, SPEC §6) ------------
+        # --- Ensemble-weather uncertainty bands (v0.16, SPEC §11.3) ------------
         # Opt-in (default OFF). When ON, an ensemble spread is folded into the
         # learned bands by envelope-max; the ensemble is NEVER load-bearing and
         # is cached in memory only (not persisted). All state below is transient.
@@ -334,7 +334,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # round-trip — including the keep-richer branch that retains the old
         # payload — so a sustained partial Open-Meteo degradation is not
         # re-fetched every tick yet still ages the served payload honestly
-        # through the cached/physics_fallback/unavailable ladder (SPEC §7:
+        # through the cached/physics_fallback/unavailable ladder (SPEC §13:
         # never degrade silently).
         self._last_fetched_at: datetime | None = None
         self._last_attempt_at: datetime | None = None
@@ -352,7 +352,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._unsub_nightly = None
 
         # Serialises the nightly training job against the in-process
-        # ``run_bootstrap`` action (SPEC §6): both mutate the persisted learner
+        # ``run_bootstrap`` action (SPEC §12.2): both mutate the persisted learner
         # state, so the nightly wrapper and the bootstrap handler acquire this
         # ONE lock. A second concurrent ``run_bootstrap`` sees ``locked()`` and
         # is rejected with a clear ServiceValidationError (see _bootstrap.py).
@@ -360,7 +360,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         # --- FAST learner: transient intraday state (NEVER persisted) -------
         # Re-init to 1.0 on construction => on every HA restart / reload the
-        # scalar starts neutral (SPEC §5).
+        # scalar starts neutral (SPEC §9.4).
         self._intraday_scalar: float = INTRADAY_NEUTRAL
         # Trailing ring of measured-vs-modeled samples (k_c space), one per
         # tick where a usable measurement + non-trivial modeled energy exist.
@@ -391,7 +391,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._inverter_cal_state: InverterCalState = InverterCalState()
         self._learner_states_loaded = False
 
-        # --- Learning visibility (0.23.1, SPEC §5) --------------------------
+        # --- Learning visibility (0.23.1, SPEC §10) --------------------------
         # Which label gate discarded the LAST actuals read (set by
         # _actuals.async_read_actuals; None == the day was accepted), and the
         # last measurement-channel presence check. Both transient: the durable
@@ -401,7 +401,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         # Collapse detector: the frozen local date is persisted in DriftState
         # (collapse_frozen_date) so a mid-day restart keeps the freeze; there is
-        # no transient copy here (SPEC §5).
+        # no transient copy here (SPEC §9.8).
 
         # Last computed ForecastResult (for the nightly per-plane snapshot).
         self._last_result: ForecastResult | None = None
@@ -415,7 +415,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # matching the served curve (which then carries no θ either).
         self._day_factor: dict[datetime, float] = {}
 
-        # --- Shade-profile diagram selection (SPEC §15) ---------------------
+        # --- Shade-profile diagram selection (SPEC §17) ---------------------
         # Which module/plane + local date the shade-profile sensor renders. The
         # select entity owns the persisted module (RestoreEntity) and pushes it
         # here; the date entity always defaults to today (not restored). None =>
@@ -449,14 +449,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         Learner state is validate-and-clamp: a corrupt/absent blob yields a
         neutral state (BiasState/ShademapState/DriftState empty), never an
-        exception (SPEC §5). The intraday scalar is deliberately NOT loaded
+        exception (SPEC §9.8). The intraday scalar is deliberately NOT loaded
         (transient, re-init 1.0).
         """
         self._load_learner_states()
         # A user who re-enabled a drift-auto-disabled layer via the options flow
         # triggers a full reload; clearing the stale disable flag is gated on a
         # real OFF->ON option transition inside rebuild_learner_config (a plain
-        # restart with the option untouched keeps the flag, SPEC §5).
+        # restart with the option untouched keeps the flag, SPEC §9.8).
         self.rebuild_learner_config()
         # A forecast-relevant config change (planes/albedo/AC limits) invalidates
         # the geometry the day-ahead bias cells were learned against: re-open them
@@ -480,7 +480,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         Each getter is expected to already validate-and-clamp; we additionally
         guard the whole load so a store without the v2 getters (older schema in
-        flight) or any unexpected error can never crash setup (SPEC §5).
+        flight) or any unexpected error can never crash setup (SPEC §16.4).
         """
         if self._learner_states_loaded:
             return
@@ -527,7 +527,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Re-resolve kill switches. A drift auto-disable is cleared ONLY when
         the user actually re-enables the layer (persisted option transition
         False -> True) — a restart/reload with the option untouched keeps the
-        flag and the repair issue (SPEC §5: disabled until the user re-enables).
+        flag and the repair issue (SPEC §9.8: disabled until the user re-enables).
 
         UX: with the option still ON, the user clears an auto-disable by
         toggling the layer OFF and then ON again in the options flow (each toggle
@@ -569,7 +569,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._persist_drift_state()
 
     async def async_import_bootstrap(self, data: dict) -> dict:
-        """Ingest an offline backfill bootstrap (SPEC §6).
+        """Ingest an offline backfill bootstrap (SPEC §12.5).
 
         Delegates schema validation, clamping, the site-signature check and the
         n-credit cap to ForecastStore.import_bootstrap (which also pushes a
@@ -603,13 +603,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return self._shademap_state
 
     # ------------------------------------------------------------------
-    # Shade groups: read-time pool membership (SPEC §5)
+    # Shade groups: read-time pool membership (SPEC §9.2)
     # ------------------------------------------------------------------
 
     def _build_shade_pool_map(
         self, state: ShademapState
     ) -> dict[str, tuple[str, ...]]:
-        """Build ``{plane.name: pool}`` for READ-TIME shade pooling (SPEC §5).
+        """Build ``{plane.name: pool}`` for READ-TIME shade pooling (SPEC §9.2).
 
         Storage is always per plane (one channel per plane, keyed by name);
         pooling happens only here, at read time, so grouping stays reversible.
@@ -651,7 +651,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return pool_map
 
     # ------------------------------------------------------------------
-    # Shade-profile diagram (sun path vs learned shade) — SPEC §15
+    # Shade-profile diagram (sun path vs learned shade) — SPEC §17
     # ------------------------------------------------------------------
 
     def shade_profile_plane_names(self) -> list[str]:
@@ -694,7 +694,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         shademap only attenuates the served beam when the layer is enabled, not
         drift-auto-disabled, not collapse-frozen for today, and has learned bins.
         The shade-profile diagram consults the SAME gate so it never paints
-        learned shading the forecast is not applying (SPEC §15).
+        learned shading the forecast is not applying (SPEC §17.2).
         """
         return (
             self._learner_config.slow_enabled
@@ -765,7 +765,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         is per plane: the module's OWN channel is its name; the read POOL adds its
         group siblings (+ any legacy group channel), so the main curve is the
         pooled tau the forecast applies and the individual channel rides along as
-        a comparison view (SPEC §5).
+        a comparison view (SPEC §9.2).
         """
         shademap = self._shademap_state if slow_active else ShademapState()
         pool = self._build_shade_pool_map(shademap).get(module, (module,))
@@ -785,7 +785,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Stable lat/lon + plane-name digest (mirrors backfill.site_signature).
 
         Lets ForecastStore.import_bootstrap refuse a bootstrap built for a
-        different site (wrong coordinates / renamed planes), SPEC §6.
+        different site (wrong coordinates / renamed planes), SPEC §12.5.
         """
         import hashlib
 
@@ -805,7 +805,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         profile (per row: elevation AND the transmittance fields tau / seasonal /
         tau_leafed / tau_bare AND the v0.22 inline elevation profiles
         tau_points / tau_points_bare AND the v0.22 per-row diffuse override
-        diffuse_tau — the horizon rows ARE the tau-carrying "screens" of SPEC §5,
+        diffuse_tau — the horizon rows ARE the tau-carrying "screens" of SPEC §7.7,
         so a τ 0→0.4 edit OR a tau_points knot edit reshapes the modeled beam by
         +50–150 Wh/day mornings (ADR-2), and setting diffuse_tau on the wall rows
         lifts the modeled iso-diffuse floor by +0.1–0.2 kWh/day site-wide (ADR-3);
@@ -954,7 +954,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     @callback
     def async_schedule_channel_health_check(self) -> None:
-        """Check the measurement channels once HA is up (SPEC §5, 0.23.1).
+        """Check the measurement channels once HA is up (SPEC §10, 0.23.1).
 
         NOT hooked into :meth:`_reconcile_config_fingerprint`, deliberately, for
         two reasons. (1) Timing: the fingerprint reconcile runs inside
@@ -1016,7 +1016,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         _channel_health.record_actuals_outcome(self, day, accepted=accepted)
 
     def learning_health_summary(self) -> dict[str, Any]:
-        """Persisted discard-streak state for the diagnostics dump (SPEC §8)."""
+        """Persisted discard-streak state for the diagnostics dump (SPEC §14.6)."""
         return _channel_health.learning_health_summary(self)
 
     @callback
@@ -1026,7 +1026,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._unsub_nightly()
             self._unsub_nightly = None
         # Reset the transient FAST-learner state so a reload starts neutral
-        # (the intraday scalar is never persisted, SPEC §5).
+        # (the intraday scalar is never persisted, SPEC §9.4).
         self._intraday_scalar = INTRADAY_NEUTRAL
         self._intraday_samples.clear()
 
@@ -1053,7 +1053,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 f"Weather image too old ({age}); no forecast issued"
             )
 
-        # Ensemble-weather uncertainty (v0.16, SPEC §6): opt-in. Runs AFTER the
+        # Ensemble-weather uncertainty (v0.16, SPEC §11.3): opt-in. Runs AFTER the
         # main fetch/weather is confirmed, in its OWN guard — any failure/absence
         # degrades to the learned bands and the main degradation ladder above is
         # NEVER touched by ensemble state. OFF => factors stay None so the hooks
@@ -1122,7 +1122,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             and not frozen
             and bool(self._shademap_state.channels)
         )
-        # Day-ahead RLS is part of the fast/weather-error family (SPEC §5
+        # Day-ahead RLS is part of the fast/weather-error family (SPEC §9.5
         # "Schneller Lerner ... optional später: 1 RLS-Bias-Skalar"), so it is
         # gated by fast_disabled; collapse freeze also silences it.
         day_ahead_active = (
@@ -1180,11 +1180,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # so the cache and _last_result stay in lockstep across ticks.
         self._day_factor = day_factor
 
-        # Per-slot quantile bands (SPEC §6/§10): keyed by the identical
+        # Per-slot quantile bands (SPEC §11.2): keyed by the identical
         # slot.start datetimes the engine iterates. Each slot's LEARNED band is
         # the empirical P10/P50/P90 of its (forecast cloud class x local day part)
         # bin; a starved / cold-start bin collapses to the neutral band (no fake
-        # spread). When the ensemble is ON (v0.16, SPEC §6) each slot's learned
+        # spread). When the ensemble is ON (v0.16, SPEC §11.3) each slot's learned
         # band is FUSED by envelope-max with today's ensemble spread for that
         # slot's hour — the wider band wins, never multiplied (no double count),
         # never narrowed. A slot whose FUSED band is still the neutral identity is
@@ -1331,7 +1331,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         build the closure identically — the binding can never diverge.
 
         The engine calls the hook per PLANE (channel == plane name). Storage is
-        per plane, so pooling happens HERE at read time (SPEC §5): each plane
+        per plane, so pooling happens HERE at read time (SPEC §9.2): each plane
         reads the n-weighted pool of its group siblings (+ any legacy group
         channel), so the north module reads the shading the south module proved.
         An ungrouped plane's pool is just its own channel — bit-identical to the
@@ -1419,7 +1419,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # the served weather is still the old image and has to keep aging
             # through cached/physics_fallback/unavailable. Stamping it "fresh"
             # here would let a sustained partial-degradation serve arbitrarily
-            # old weather at age ~0 forever (SPEC §7: never degrade silently).
+            # old weather at age ~0 forever (SPEC §13: never degrade silently).
             self._last_attempt_at = now
             self._last_fetch_ok = True
             self._last_error = None
@@ -1437,11 +1437,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._store.set_last_payload(payload, now.isoformat())
 
     # ------------------------------------------------------------------
-    # Ensemble-weather uncertainty (v0.16, SPEC §6) — NEVER load-bearing
+    # Ensemble-weather uncertainty (v0.16, SPEC §11.3) — NEVER load-bearing
     # ------------------------------------------------------------------
 
     async def _async_update_ensemble(self, now: datetime, weather) -> None:
-        """Refresh the per-hour ensemble spread factors (v0.16, SPEC §6).
+        """Refresh the per-hour ensemble spread factors (v0.16, SPEC §11.3).
 
         Fetches a fresh ensemble payload only when the cached one is stale (its
         OWN ENSEMBLE_FETCH_INTERVAL_S cadence), parses it (identity-cached),
@@ -1538,7 +1538,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return {k: sums[k] / counts[k] for k in sums}
 
     def ensemble_state_summary(self) -> dict[str, Any]:
-        """Compact ensemble diagnostics block (v0.16, SPEC §6).
+        """Compact ensemble diagnostics block (v0.16, SPEC §11.3).
 
         Coordinate-free: the enable flag, the cached payload's age in seconds, the
         representative member count and how many hours currently carry a usable
@@ -1603,7 +1603,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         The collapse detector freezes the CURRENT local day when YESTERDAY
         collapsed (snow that is still on the panels this morning). The freeze
-        date is persisted in DriftState so a mid-day restart keeps it (SPEC §5).
+        date is persisted in DriftState so a mid-day restart keeps it (SPEC §9.8).
         """
         today = dt_util.as_local(dt_util.utcnow()).date().isoformat()
         return self._drift_state.collapse_frozen_date == today
@@ -1641,7 +1641,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         normalises the modeled side to the SAME subset of planes that produced a
         usable reading (partial channel dropout must not read as a production
         deficit: a DTU serving 4 of 8 ports would otherwise drive the ratio
-        toward 0.5, SPEC §5 channel-dropout guard). Both sides are then
+        toward 0.5, SPEC §9.4 channel-dropout guard). Both sides are then
         normalised by the Haurwitz clear-sky reference so geometry/season cancel.
         Returns None when no channel is usable or the modeled site energy for the
         usable subset is below INTRADAY_MIN_MODELED_WH.
@@ -1685,7 +1685,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         Scaling the modeled side to exactly the planes that reported a usable
         measurement keeps the intraday ratio a pure weather error even under a
-        partial DTU dropout (SPEC §5). Falls back to the full-site RAW power
+        partial DTU dropout (SPEC §9.4). Falls back to the full-site RAW power
         (still θ-scaled) when the per-plane breakdown is unavailable (empty
         plane_results). When θ is inactive for the slot (day-ahead layer off /
         starved cell) the factor is 1.0, so the served curve carries no θ and the
@@ -1711,7 +1711,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         Normalising measured and modeled site energy by the SAME clear-sky
         reference removes the geometry/season component from the intraday ratio
-        (SPEC §5: condition in k_c space). Returns 0 when the sun is down.
+        (SPEC §9.4: condition in k_c space). Returns 0 when the sun is down.
         """
         midpoint = now + timedelta(minutes=7, seconds=30)
         _az, el = solpos.sun_position(midpoint, self._site.latitude, self._site.longitude)
@@ -1729,7 +1729,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         LABEL_FROZEN_STALE_SECONDS (frozen sensor), is skipped. Returns
         ``(sum_over_usable_channels, {plane names that produced a reading})`` so
         the caller can scale the modeled side to the same subset (partial
-        dropout guard, SPEC §5), or None when NO channel produced a usable
+        dropout guard, SPEC §9.4), or None when NO channel produced a usable
         reading (nothing to learn from this tick).
         """
         usable_planes: set[str] = set()
@@ -1763,7 +1763,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     ) -> None:
         """Reconstruct the trailing intraday sample ring after a restart/reload.
 
-        The scalar itself is never persisted (SPEC §5), but the raw samples it is
+        The scalar itself is never persisted (SPEC §9.4), but the raw samples it is
         derived from are re-derivable measurements: rebuild them from the
         recorder's 5-min statistics of the site-total measured DC power sensor
         (measured side) and the last forecast curve (θ-corrected modeled side —
@@ -1950,7 +1950,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         slot) so its headline is bit-identical to the divide-always path. When
         ``corrected_unclamped_watts`` or ``slot_ceilings`` is empty (a v0.1 /
         older cached result) a clamped slot keeps the served ceiling unchanged
-        (SPEC §8).
+        (SPEC §14.1).
         """
         return self._dayahead_today_kwh_over(
             now, result.slot_starts, result.total_watts,
@@ -2189,13 +2189,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         data[DATA_KEY_LEARNER_STATUS] = self._learner_status()
         data[DATA_KEY_BIAS_CELLS] = self._bias_cells_summary()
         data[DATA_KEY_DRIFT_MAE] = self._latest_drift_mae()
-        # --- v0.4 additive scoreboard keys (SPEC §9/§10) ---
+        # --- v0.4 additive scoreboard keys (SPEC §15) ---
         # The rolling-window aggregate view + the kill-gate verdict, derived from
         # the persisted DayScore ring. Cheap pure assembly; never raises.
         summary = self._scoreboard_summary()
         data[DATA_KEY_SCOREBOARD] = summary
         data[DATA_KEY_KILL_GATE_PASSED] = summary.get("kill_gate_passed")
-        # --- v0.4 additive quantile band curves (SPEC §6/§10) ---
+        # --- v0.4 additive quantile band curves (SPEC §11.2) ---
         # {p10: {iso_slot: Wh}, p50: ..., p90: ...} 15-min band Wh curves, from
         # the engine's per-slot band watts (only present when quantile bands were
         # applied this cycle; absent/cold-start => omitted so the P10/P90 sensors
@@ -2282,7 +2282,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         }
 
     def _learner_status(self) -> dict[str, Any]:
-        """Per-layer learner status for the diagnostic entities (SPEC §5).
+        """Per-layer learner status for the diagnostic entities (SPEC §14.7).
 
         Returns the three layer keys ``fast`` / ``slow`` / ``day_ahead`` mapped
         to the ENUM strings the LearnerStatusSensor / LearnerActiveSensor read
@@ -2312,7 +2312,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return LEARNER_STATUS_ACTIVE
 
         def _day_ahead_status() -> str:
-            # Day-ahead RLS shares the fast/weather-error disable flag (SPEC §5).
+            # Day-ahead RLS shares the fast/weather-error disable flag (SPEC §9.5).
             if not cfg.day_ahead_enabled:
                 return LEARNER_STATUS_OFF
             if drift.fast_disabled:
@@ -2393,7 +2393,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return out
 
     # ------------------------------------------------------------------
-    # Nightly job (idempotent, date-keyed) — SPEC §4/§5
+    # Nightly job (idempotent, date-keyed) — SPEC §2/§9.7
     # ------------------------------------------------------------------
 
     async def _async_nightly_job(self, now: datetime | None = None) -> None:
@@ -2402,7 +2402,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         Acquires the shared bootstrap lock so the nightly training never
         interleaves its learner-state writes with an in-process ``run_bootstrap``
         import (and vice-versa); it WAITS for a bootstrap in flight rather than
-        skipping, so no night's training is lost (SPEC §6). Tests call
+        skipping, so no night's training is lost (SPEC §12.2). Tests call
         ``_nightly.async_nightly_job`` directly and so bypass the lock.
         """
         # __init__ sets the lock; a __new__-built test double may not, so ensure
@@ -2448,7 +2448,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return _nightly.set_collapse_frozen_date(self, iso)
 
     # ------------------------------------------------------------------
-    # Skill scoreboard (the kill-gate) — SPEC §9/§10
+    # Skill scoreboard (the kill-gate) — SPEC §15
     # ------------------------------------------------------------------
 
     async def _score_scoreboard_day(self, day: date) -> None:
@@ -2460,7 +2460,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return _scoreboard_glue.issued_after_cutoff(self, snap, day)
 
     def _dominant_weather_class(self, snap: IssuedSnapshot, iso: str) -> str:
-        """Yesterday's DOMINANT cloud class from the issued snapshot (SPEC §9)."""
+        """Yesterday's DOMINANT cloud class from the issued snapshot (SPEC §8)."""
         return _scoreboard_glue.dominant_weather_class(self, snap, iso)
 
     async def _comparison_kwh_for_day(self, day: date) -> dict[str, float]:
@@ -2555,7 +2555,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return _scoreboard_glue.scoreboard_summary(self)
 
     def quantile_state_summary(self) -> dict[str, Any]:
-        """Per-bin quantile sample counts for diagnostics (SPEC §6/§10).
+        """Per-bin quantile sample counts for diagnostics (SPEC §11.1).
 
         Reports the enable flag plus, per (class x part) bin, the sample count
         ``n``, the ``days`` of evidence (distinct dated days + a lower bound on
@@ -2704,7 +2704,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         snap: IssuedSnapshot,
         hourly_actuals: dict[str, dict[str, float]],
     ) -> bool:
-        """Measured-side clearness gate for shademap training (SPEC §5)."""
+        """Measured-side clearness gate for shademap training (SPEC §9.1)."""
         return _nightly.day_is_measured_clear(self, iso, snap, hourly_actuals)
 
     def _train_channel(
@@ -2736,11 +2736,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     def _update_drift(
         self, iso: str, issued: dict | None, actuals: dict | None
     ) -> None:
-        """Rolling daylight-MAE drift monitor with auto-disable (SPEC §5)."""
+        """Rolling daylight-MAE drift monitor with auto-disable (SPEC §9.8)."""
         return _nightly.update_drift(self, iso, issued, actuals)
 
     def _restore_layer_snapshot(self, layer: str) -> str | None:
-        """Roll the auto-disabled layer back to its pre-streak state (SPEC §5)."""
+        """Roll the auto-disabled layer back to its pre-streak state (SPEC §9.8)."""
         return _nightly.restore_layer_snapshot(self, layer)
 
     async def async_rollback_learners(
@@ -2753,7 +2753,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         the newest snapshot, 2 the one before, capped at the ring length. Enable
         flags and drift state are untouched:
         re-enabling after an auto-disable stays an explicit operator action in
-        the options flow (SPEC §5).
+        the options flow (SPEC §9.8).
         """
         snaps = self._store.get_snapshots()
         if not snaps:
@@ -2813,7 +2813,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Create a persistent HA repair issue for an auto-disabled layer.
 
         Persistent so it survives an HA restart while the disable flag does
-        (SPEC §5: never silent degradation); the registry id is entry-scoped but
+        (SPEC §9.8: never silent degradation); the registry id is entry-scoped but
         the translation key stays the base id so the shared translation applies.
         ``placeholders`` fills the ``{name}`` slots of that translation — the
         learning-visibility issues (0.23.1) have to name the concrete channels
@@ -2866,7 +2866,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
 
     # ------------------------------------------------------------------
-    # Recorder actuals (per-module daily energy) — SPEC §4
+    # Recorder actuals (per-module daily energy) — SPEC §9.7
     # ------------------------------------------------------------------
 
     async def _async_read_daily_actuals(self, day: date) -> dict[str, float]:

@@ -1,7 +1,7 @@
-"""Recorder / long-term-statistics actuals reader — SPEC §4/§5 label gates.
+"""Recorder / long-term-statistics actuals reader — SPEC §9.7/§9.8 label gates.
 
 Owner: glue (nightly actuals IO). Reads a closed day's per-module measured DC
-energy from the recorder's hourly long-term statistics and applies the SPEC §5
+energy from the recorder's hourly long-term statistics and applies the SPEC §9.8
 "Messkanal-Dropout ⇒ ganzen Tag verwerfen" label gates before the numbers may
 become training / scoreboard ground truth against the FULL-site modeled energy.
 
@@ -42,7 +42,7 @@ async def async_read_actuals(
     Wh totals AND the per-module ``{iso_hour: wh}`` buckets (the shademap
     trainer needs hourly resolution).
 
-    Label gates (SPEC §5, all delegated to :func:`_actuals_from_stats`):
+    Label gates (SPEC §9.8, all delegated to :func:`_actuals_from_stats`):
     a frozen channel, a configured channel with NO usable rows (dead DTU
     port), or ANY channel covering too little of the daylight span is a
     DROPOUT — the WHOLE day is discarded for BOTH learners so a partial-site
@@ -227,7 +227,7 @@ def _actuals_from_stats(
 ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
     """Pure post-processing of LTS rows into per-module (daily, hourly) actuals.
 
-    Applies the SPEC §5 label gates, each of which discards the WHOLE day
+    Applies the SPEC §9.8 label gates, each of which discards the WHOLE day
     ("Messkanal-Dropout ⇒ ganzen Tag verwerfen") so a partial-site measurement
     never becomes the training/scoreboard ground truth against the FULL-site
     modeled energy (which would read as a production deficit — the same failure
@@ -285,7 +285,7 @@ def _actuals_from_stats(
             _LOGGER.warning(
                 "Channel %s (%s) has no usable LTS rows on %s (dead/unavailable "
                 "DTU port?); discarding the whole day for both learners "
-                "(channel dropout, SPEC §5)",
+                "(channel dropout, SPEC §9.8)",
                 module, entity_id, day,
             )
             return _dropout(DROPOUT_REASON_DEAD_CHANNEL, module)
@@ -293,7 +293,7 @@ def _actuals_from_stats(
             _LOGGER.warning(
                 "Channel %s (%s) looks frozen on %s (byte-identical "
                 "hourly means during daylight); discarding the whole day "
-                "for both learners (SPEC §5)",
+                "for both learners (SPEC §9.8)",
                 module, entity_id, day,
             )
             return _dropout(DROPOUT_REASON_FROZEN_CHANNEL, module)
@@ -330,7 +330,7 @@ def _actuals_from_stats(
 
 def _is_frozen_channel(means: list[float]) -> bool:
     """True when hourly means show a frozen sensor: the SAME non-zero value held
-    for >= LABEL_FROZEN_MIN_REPEATS consecutive hours (SPEC §5 label gate).
+    for >= LABEL_FROZEN_MIN_REPEATS consecutive hours (SPEC §9.8 label gate).
 
     A frozen Hoymiles/DTU sensor holds its last value (never goes unavailable),
     so the recorder carries the same non-zero mean forward hour after hour. A run

@@ -1,4 +1,4 @@
-"""Tests for the learner-state diagnostics summary (SPEC §5).
+"""Tests for the learner-state diagnostics summary (SPEC §14.6).
 
 The diagnostics dump must carry a compact learner summary (per-layer status,
 intraday scalar, drift MAE, correction source) plus the optional persisted-

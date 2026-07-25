@@ -1,6 +1,6 @@
 """FAST learner: intraday clear-sky-index scalar + day-ahead RLS bias.
 
-Owner: bias. Pure, HA-free (stdlib only). Implements SPEC §5 "Schneller
+Owner: bias. Pure, HA-free (stdlib only). Implements SPEC §9.4 "Schneller
 Lerner". Two independent mechanisms live here:
 
   1. INTRADAY SCALAR (transient, NEVER persisted): an exponentially decayed
@@ -18,7 +18,7 @@ Lerner". Two independent mechanisms live here:
 
 All tunables come from const. Everything is clamped, gated and disable-able;
 a corrupt/absent state degrades to the neutral 1.0 factor, never an
-exception (SPEC §5).
+exception (SPEC §9.5).
 
 Frozen public contract (7 implementers depend on these exact signatures):
 
@@ -46,7 +46,7 @@ scalar as
     s = sum_i(w_i * measured_kc_i) / sum_i(w_i * modeled_kc_i),
     w_i = exp(-age_i / tau).
 
-This ratio-of-sums is invariant to the plane mix (SPEC §5: "Geometrie/Saison
+This ratio-of-sums is invariant to the plane mix (SPEC §9.4: "Geometrie/Saison
 cancel"): scaling every plane's contribution by the same measured/modeled
 proportion leaves ``s`` unchanged regardless of how the total splits across
 planes, and low-elevation slots (tiny denominator, noisy per-sample ratio)
@@ -203,7 +203,7 @@ def compute_intraday_scalar(
     *,
     now: datetime,
 ) -> float:
-    """Exponentially-decayed measured/modeled ratio in k_c space (SPEC §5).
+    """Exponentially-decayed measured/modeled ratio in k_c space (SPEC §9.4).
 
     Over the trailing INTRADAY_TRAILING_WINDOW_MINUTES up to ``now``, weight
     each sample by exp(-age_minutes / INTRADAY_TAU_MINUTES) and take the
@@ -277,7 +277,7 @@ def compute_intraday_scalar(
 
     # Coverage gate: the in-window samples must span at least the minimum
     # trailing duration, otherwise we do not have enough recent history to
-    # trust the correction (SPEC §5: "letzten 2-4 h").
+    # trust the correction (SPEC §9.4: "letzten 2-4 h").
     span_min = oldest_age - newest_age
     if span_min < INTRADAY_MIN_TRAILING_MINUTES:
         return INTRADAY_NEUTRAL
@@ -408,7 +408,7 @@ def classify_cloud(
     ghi: float | None = None,
     elevation_deg: float | None = None,
 ) -> str:
-    """Cloud class in {clear, mixed, overcast, fog} (SPEC §5/§6).
+    """Cloud class in {clear, mixed, overcast, fog} (SPEC §8).
 
     Fog test FIRST (it overrides everything): fog when ``visibility_m`` <
     FOG_VISIBILITY_M OR (``cloud_low`` > FOG_CLOUD_LOW_PCT AND ``month`` in
@@ -477,7 +477,7 @@ def classify_cloud(
 
 
 def day_part_for_hour(local_hour: int) -> str:
-    """Map a local clock hour (0..23) to a day part (SPEC §5).
+    """Map a local clock hour (0..23) to a day part (SPEC §8).
 
     [dawn, DAY_PART_MORNING_END_HOUR) => morning; [that,
     DAY_PART_AFTERNOON_START_HOUR) => midday; [that, dusk) => afternoon.
@@ -496,7 +496,7 @@ def day_part_for_hour(local_hour: int) -> str:
 
 
 def day_part_for_solar(hours_from_noon: float) -> str:
-    """Map APPARENT SOLAR time to a day part (v0.19, SPEC §5).
+    """Map APPARENT SOLAR time to a day part (v0.19, SPEC §8).
 
     ``hours_from_noon`` is the signed solar time relative to solar noon
     (``solpos.hours_from_solar_noon``): negative = morning, 0 = noon,
@@ -664,7 +664,7 @@ def train_day_ahead_bias(
     state: BiasState,
     samples: list[DayAheadSample],
 ) -> BiasState:
-    """Nightly RLS update of the day-ahead bias cells (SPEC §5).
+    """Nightly RLS update of the day-ahead bias cells (SPEC §9.5).
 
     For each sample, run one single-parameter RLS step (forgetting factor
     RLS_FORGETTING_FACTOR, init covariance RLS_INIT_COVARIANCE) on the cell

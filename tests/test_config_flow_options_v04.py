@@ -1,4 +1,4 @@
-"""Tests for the v0.4 options-flow additions (SPEC §6, §9, §10).
+"""Tests for the v0.4 options-flow additions (SPEC §11/§15).
 
 The (slim) options step exposes the quantile kill switch (Boolean selector,
 default ON) and the editable comparison-sensors list (structured ObjectSelector,
@@ -6,7 +6,7 @@ default ON) and the editable comparison-sensors list (structured ObjectSelector,
 the exact HTTP-flow path, and persist. The comparison list is now a STRUCTURED
 selector — each row is a required ``name`` plus a required ``daily_entity`` — yet
 it is still NORMALISED on save through ``ComparisonConfig.list_from_options`` so
-malformed / half-filled rows are dropped. Ships EMPTY (D-P9): a stock install
+malformed / half-filled rows are dropped. Ships EMPTY (SPEC §15.3): a stock install
 persists no comparisons. Structural fields no longer live here (they moved to
 the reconfigure flow), so a submit carries only the tunables.
 

@@ -1,13 +1,13 @@
 """Binary sensor platform for the Balcony Solar Forecast integration.
 
-A single ``degraded`` problem sensor makes the degradation ladder (SPEC §7)
+A single ``degraded`` problem sensor makes the degradation ladder (SPEC §13)
 visible: it is *on* whenever the forecast is not fresh (cached last-good
 payload, pure-physics fallback, or unavailable), with the current status and
 the payload age exposed as attributes. It intentionally stays available even
 when the forecast itself is unavailable, so the operator can always read
 *why* the system is degraded.
 
-Two ``*_learner_active`` diagnostics (v0.2.0 + v0.3.0, SPEC §5) show at a
+Two ``*_learner_active`` diagnostics (v0.2.0 + v0.3.0, SPEC §9) show at a
 glance whether each learner layer is currently shaping the served curve: they
 are *on* only while the layer status is ``active`` (kill switch on, not
 drift-disabled, not collapse-frozen). They too stay available during a
@@ -83,7 +83,7 @@ class DegradedSensor(BalconyForecastEntity, BinarySensorEntity):
     @property
     def available(self) -> bool:
         # Always available: reporting "we are degraded" must survive the
-        # forecast itself going unavailable (SPEC §7 -- never silent).
+        # forecast itself going unavailable (SPEC §13 -- never silent).
         return True
 
     @property
@@ -105,7 +105,7 @@ class DegradedSensor(BalconyForecastEntity, BinarySensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         data = self.coordinator.data or {}
         # Live age (climbs during an outage) with a frozen-snapshot fallback,
-        # so the always-available diagnostic never freezes (SPEC §7).
+        # so the always-available diagnostic never freezes (SPEC §13).
         age_s = getattr(self.coordinator, "weather_age_seconds_live", None)
         if age_s is None:
             age_s = data.get("weather_age_seconds")
@@ -126,7 +126,7 @@ class LearnerActiveSensor(BalconyForecastEntity, BinarySensorEntity):
     """'On' while a learner layer is actively shaping the served curve.
 
     On == the layer's status is ``active``; off for every other status (kill
-    switch off, drift-auto-disabled, or collapse-frozen — SPEC §5). Reports the
+    switch off, drift-auto-disabled, or collapse-frozen — SPEC §14.7). Reports the
     fine-grained status as an attribute for the operator. Always available so
     "the learner is off / disabled" survives the forecast going unavailable.
     """
@@ -164,7 +164,7 @@ class LearnerActiveSensor(BalconyForecastEntity, BinarySensorEntity):
 
 
 class KillGatePassedSensor(BalconyForecastEntity, BinarySensorEntity):
-    """'On' when the engine passes the kill-gate over a FULL window (SPEC §9/§10).
+    """'On' when the engine passes the kill-gate over a FULL window (SPEC §15.4).
 
     The gate the whole v0.4 plan hinges on: on == the engine is at least
     ``SCOREBOARD_GATE_MARGIN`` better than the best baseline on daily-kWh MAE
@@ -185,7 +185,7 @@ class KillGatePassedSensor(BalconyForecastEntity, BinarySensorEntity):
     @property
     def available(self) -> bool:
         # Diagnostic: the kill-gate verdict must remain readable even when the
-        # forecast itself is unavailable (SPEC §7 -- never silent).
+        # forecast itself is unavailable (SPEC §13 -- never silent).
         return True
 
     def _gate(self) -> bool | None:

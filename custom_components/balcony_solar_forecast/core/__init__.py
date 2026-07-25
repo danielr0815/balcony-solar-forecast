@@ -2,7 +2,7 @@
 
 Nothing in this package imports from ``homeassistant``; everything is pure
 functions over the plain data types in ``types.py``, testable with bare
-pytest (SPEC §4). This module re-exports the stable public API the HA glue
+pytest (SPEC §2). This module re-exports the stable public API the HA glue
 and the tests depend on.
 """
 

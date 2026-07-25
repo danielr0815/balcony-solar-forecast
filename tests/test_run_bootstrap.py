@@ -1,4 +1,4 @@
-"""Tests for the in-process ``run_bootstrap`` action (SPEC §6).
+"""Tests for the in-process ``run_bootstrap`` action (SPEC §12.2).
 
 The handler is driven against fake hass/coordinator doubles with the network
 (Open-Meteo) and recorder reads monkeypatched out, so the tests exercise the
@@ -365,7 +365,7 @@ async def test_missing_recorder_maps_to_validation_error(monkeypatch):
 
 # --------------------------------------------------------------------------
 # Nightly-lock docking: the run_bootstrap lock IS the coordinator's shared
-# lock, and the nightly wrapper WAITS on it (not skips) — proving SPEC §15.6.
+# lock, and the nightly wrapper WAITS on it (not skips) — proving SPEC §12.2.
 # Exercises the REAL coordinator._async_nightly_job wrapper (mutation-proof:
 # deleting its ``async with self._bootstrap_lock`` breaks these).
 # --------------------------------------------------------------------------

@@ -62,7 +62,7 @@ grober Referenz die Stunde nicht dominiert; ein einzelnes Sample reduziert exakt
 auf `clear_sky_index`.
 
 **Wichtig:** k_c ist **nur Lern-Gate und Normierung**, nie Prognosequelle
-(SPEC §4 Schritt 3). Haurwitz kennt weder Trübung noch Höhe; deshalb gaten die
+(SPEC §4.2). Haurwitz kennt weder Trübung noch Höhe; deshalb gaten die
 Lerner k_c elevationsabhängig.
 
 ## 4. Transposition und DC-Modell
@@ -464,6 +464,6 @@ Bootstrap-Dict), nicht die Physik-Spiegelung.
 Architektur/Datenfluss `01-…` · Lernschichten (Shademap-τ, Bias, Quantile) `03-…` ·
 Entities/Services/Diagramm `04-…` · Anlage & Runbook `05-…` · offene Punkte,
 D3-Fit, Screen-Zuordnung `06-…`.
-Primärquellen im Repo: `docs/SPEC.md` §4/§5/§13 + Anhang A,
+Primärquellen im Repo: `docs/SPEC.md` §4/§5/§20.1,
 `docs/adr/ADR-0022-horizont-tau-und-diffus-floor.md` (+ `…-rechnungen-diffus-floor.md`),
 `CHANGELOG.md` 0.22.0.

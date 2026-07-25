@@ -1,4 +1,4 @@
-"""In-process learner re-bootstrap — the ``run_bootstrap`` action (SPEC §6).
+"""In-process learner re-bootstrap — the ``run_bootstrap`` action (SPEC §12.2).
 
 Owner: glue (bootstrap IO). The dev-machine CLI (``scripts/backfill.py``) rebuilds
 the three learner states from ~2 years of history, but it needs a long-lived
@@ -13,7 +13,7 @@ runs the SAME reconstruction IN-PROCESS from the developer tools:
     recorder executor) over the planes' configured ``actual_entity`` — NOT the
     WebSocket API, so numeric row ``start`` values are epoch SECONDS; the reduce
     reuses ``_actuals._stat_row_hour_key`` whose magnitude test survives the
-    historical seconds-vs-milliseconds bug (SPEC §5, regression-guarded).
+    historical seconds-vs-milliseconds bug (SPEC §9.7, regression-guarded).
   * Config: taken straight from the live coordinator (``coordinator._site``) — no
     ``site.json``, which is the whole point of the in-app path.
 
@@ -233,7 +233,7 @@ def _parse_date(raw: str, field: str) -> date:
 async def _fetch_weather(
     hass: HomeAssistant, site, start: date, end: date
 ) -> tuple[list, bool]:
-    """Fetch hourly as-issued weather over [start, end], chunked (SPEC §6).
+    """Fetch hourly as-issued weather over [start, end], chunked (SPEC §12.2).
 
     Splits the range into consecutive windows and calls the shared HA-free
     Previous-Runs fetch per window (each degrades to the Historical Forecast API

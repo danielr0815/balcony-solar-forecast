@@ -98,7 +98,7 @@ def test_score_day_drops_non_finite_and_negative_comparisons():
     # measured/engine degrade to 0.0 (day still scored), but a non-finite /
     # negative COMPARISON is DROPPED, never clamped to a fabricated 0.0 (which
     # would charge the baseline the whole measured energy and unfairly inflate
-    # the engine's edge; a missing comparison is ABSENT, SPEC §9).
+    # the engine's edge; a missing comparison is ABSENT, SPEC §15.2).
     d = _day(
         "2026-07-01",
         measured=float("nan"),
@@ -395,7 +395,7 @@ def test_kill_gate_undetermined_full_window_without_comparison():
     # A full window but NO comparison ever scored is "no baseline data", NOT an
     # engine loss: the verdict is UNDETERMINED (None), never a false FAIL (a
     # stock/empty-comparison install, a typo'd/renamed entity or a purged
-    # recorder must not read as "engine lost"). SPEC §9.
+    # recorder must not read as "engine lost"). SPEC §15.2.
     days = [
         _day(f"2026-07-0{i}", measured=10.0, engine=9.0) for i in range(1, 6)
     ]

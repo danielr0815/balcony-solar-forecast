@@ -77,7 +77,7 @@ def test_default_site_returns_parsed_siteconfig() -> None:
     site = validate_site(_site())
     m4 = site.plane_by_name("M4")
     assert m4 is not None
-    # M4 carries the seasonal tree rows (SPEC §13) — foliage encoded.
+    # M4 carries the seasonal tree rows (SPEC §7.8) — foliage encoded.
     assert any(r.seasonal for r in m4.horizon)
 
 
@@ -116,7 +116,7 @@ def test_no_planes_rejected() -> None:
 
 @pytest.mark.parametrize("azimuth", [-1.0, 360.1, 400.0, -155.0])
 def test_azimuth_out_of_range(azimuth) -> None:
-    """Guards the 25-deg-plane sign-error trap (SPEC Anhang A).
+    """Guards the 25-deg-plane sign-error trap (SPEC §20.1).
 
     An operator who accidentally enters the Open-Meteo 0=S signed value
     (e.g. -155 for the 25-deg plane) instead of the internal 0=N value must
@@ -634,7 +634,7 @@ def test_site_with_no_groups_ok() -> None:
 
 
 # --------------------------------------------------------------------------
-# Shade groups (SPEC §5): shared shademap channel + aliasing guard.
+# Shade groups (SPEC §9.2): shared shademap channel + aliasing guard.
 # --------------------------------------------------------------------------
 
 
@@ -784,7 +784,7 @@ def test_de_and_en_have_same_error_keys() -> None:
 # Entity + service name coverage: every translation_key set on an entity and
 # the get_forecast service must resolve to a name in both locales, otherwise
 # the seven entities collapse onto the bare device name and become
-# indistinguishable in battery_manager's entity picker (SPEC §8).
+# indistinguishable in battery_manager's entity picker (SPEC §14).
 # --------------------------------------------------------------------------
 
 # translation_key -> platform, mirroring sensor.py / binary_sensor.py.

@@ -270,38 +270,46 @@ Datenquelle, nicht als Eich-Nachweis. Details und die Nachjustierungs-Matrix
 ### 5.1 `docs/SPEC.md` ist der Vertrag
 
 Die SPEC ist keine Hintergrundlektüre, sondern die Quelle, gegen die der Code
-geschrieben ist; Code-Kommentare zitieren sie (`SPEC §4`, `§9/§10`, …).
+geschrieben ist; Code-Kommentare zitieren sie (`SPEC §4`, `SPEC §9.1`, …).
 
+* Die SPEC ist eine **Ist-Spezifikation**: sie beschreibt ausschließlich das
+  Verhalten der aktuellen Version. Ihr Kopf trägt „Gilt für Version: <X>" und
+  wird maschinell gegen `const.INTEGRATION_VERSION` geprüft.
 * Jede Verhaltensänderung **im selben PR** in der SPEC nachziehen.
-* Neues Verhalten kommt als **versionierter Nachtrag** — dem Muster `## 14. v0.4 …`
-  / `## 15. v0.5 …` folgen (nummerierter Abschnitt mit Entities, Defaults, Gating,
-  Tunables). Beispiel aus 0.23: `run_bootstrap` steht in §15.6.
-* Verschiebst oder renummerierst du Abschnitte, **korrigiere die `SPEC §…`-Zitate
-  im Code**. Diese Kommentare sind tragend — sie halten fest, welcher Vorfall oder
-  welches Review die Logik begründet hat.
+* Neues Verhalten wird **thematisch einsortiert** — als Unterabschnitt am Ende
+  des zuständigen §, oder als neuer Top-Level-§ mit thematischem Titel. Kein
+  versionierter Nachtrag, kein „seit v0.x" im Text.
+* Abschnittsnummern sind seit der Neufassung (0.23.x) **append-only**. Ändert
+  sich doch einmal die Gliederung, **korrigiere die `SPEC §…`-Zitate im Code** —
+  diese Kommentare sind tragend.
+* Historie, Herleitung und die Zuordnung der **alten** Abschnittsnummern stehen
+  in `docs/HISTORIE.md` (nicht normativ); Release-Chronik in `CHANGELOG.md`.
 
-**SPEC-Landkarte** (wo steht was — Abschnittsnummern und -titel aus `docs/SPEC.md`
-in der aktuellen Fassung):
+**SPEC-Landkarte** (wo steht was — Abschnittsnummern aus `docs/SPEC.md` in der
+aktuellen Fassung):
 
 | Thema | SPEC-Abschnitt(e) | Inhalt dort |
 |---|---|---|
-| Physik / Motor-Pipeline | **§4** „Zielarchitektur: eigenständige Integration `balcony_solar_forecast`" | die nummerierten Pipeline-Schritte 1–8 (`fetcher` · `solpos` · `clearsky` · `transpose` Hay-Davies + IAM + Exzentrizität + `bifacial_beam_gain` · `horizon` inkl. `tau_points`/halbtransparenter SVF · `shademap` · `electrical` Ross+AC-Clamp · `bias`/`quantiles`), dazu die **DC→AC-Kette** und die Store-Schreibsemantik |
-| Standort & Startwerte | **§2** „Standort-Geometrie (Referenzbeispiel des Betreibers)", **§13** „Messdaten-Befunde (24 Monate LTS, analysiert 2026-07-05)" | Ebenen/Azimute der Referenzanlage; die messdatenbasierten Horizont-/τ-Startwerte, auf die §4 Schritt 5 verweist |
-| Lernschichten | **§5** „Lernschichten (beide numpy-frei, beide abschaltbar)" | Shademap-EMA, Day-ahead-RLS, Intraday-Skalar, Config-Fingerprint + Reseed, η_inv-Kalibrierung, Re-Clamp nach Slot-Faktor sowie die Schutzmechanismen (Label-Gates, Drift-Monitor + Rollback-Ring, Kollaps-Detektor, Kill-Switches) |
-| Quantile / Unsicherheit | **§6** „Unsicherheit (Phase 4, optional)", **§6.1** „Ensemble-Wetter-Unsicherheitsbänder", **§14.2** „Quantile P10/P50/P90 (§6/§10)" | Band-Semantik und -Gates, Neutralband statt Fake-Spreizung, Ensemble-Fusion (Standard AUS) |
-| Degradationsleiter | **§7** „Degradationsleiter (nie still!)" | frisch → Last-Good-Cache → reine Physik → `unavailable`, jede Stufe sichtbar; das Ensemble ist ausdrücklich **keine** Stufe |
-| Konsumenten-/Sensor-Schnittstellen | **§8** „Schnittstellen für Konsumenten (Standard-HA, keine Kopplung)"; Verschattungsprofil-Entitäten **§15.1**/**§15.2** | Sensor-Namen, AC-Standard vs. `*_dc`-Diagnose, skalarfreie Headline-Semantik, Mess-Sensoren, Diagnostics-Dump, Energy-Platform-Hook |
-| Scoreboard / Kill-Gate | **§14.1** „Skill-Scoreboard (das Kill-Gate, §9/§10)"; Gate-Schwellen **§9** „Phasenplan", Metrik-Definitionen **§10** „Validierung & Metriken" | matched-pair-Baselines, Strata, Verdikt-Logik; die ≥ 10 %-Primärmetrik (Tages-kWh-MAE) und die stratifizierten Zweitmetriken |
-| Services/Aktionen | `get_forecast` **§8** · `import_bootstrap`/`dump_shademap`/`rollback_learners` **§9** (Phase 2) und **§5** · `get_issued_forecast` und `get_shade_profile` **§15.4** · `install_dashboard` **§14.3** + **§15.5** · `run_bootstrap` **§15.6** | es gibt **kein** eigenes Service-Kapitel — jede Aktion steht bei dem Feature, das sie bedient |
-| Config-Schema | **§4** („Generik statt Hardcoding"; `tau_points` in Schritt 5, `ross_coeff` in Schritt 7), **§5** (`ac_actual_entity`/`ac_actual_invert`), **§9** Phase 1 (Umfang des Config-Flows), **Anhang A** (die drei Azimut-Konventionen) | ebenfalls kein zentrales Schemakapitel — Feldsemantik steht beim jeweiligen Rechenschritt |
-| Store-Schema | **§14.4** „Store-Schema v3 (additiv über v2)"; Schreibsemantik **§4** | inneres v2→v3 additiv, äußere `Store`-Hülle bleibt 1 — die Vorlage für jede weitere Migration (§5.2) |
-| Dashboard / Karten | **§14.3** „Observability-Dashboard", **§15.3**/**§15.4** | Bordmittel-View vs. generiertes Dashboard, `core/shadeprofile.py`-Tunables, die gebündelten Karten |
-
-Zum Lesen: **§1–§13 plus Anhang A/B** sind die Ur-SPEC (2026-07-05/06), **§14 und
-§15** sind die versionierten Nachträge — neue Abschnitte kommen hinten dazu, alte
-werden ergänzt, nicht umnummeriert. **§9** (Phasenplan mit „✅ IMPLEMENTIERT"-Marken)
-und **§13** sind Status- bzw. Analyse-Momentaufnahmen: für das *aktuelle* Verhalten
-gilt der Code, nicht der Phasen-Haken.
+| Vertrag, Änderungsregeln, Wächter | **§1**, **§21** | Versionsstempel, Wegweiser, Änderungsregeln, die neun Guards von `tests/test_spec_integrity.py` |
+| Architektur, Modulschnitt, Takte | **§2** | HA-freier Kern, stdlib-only, Generik, Modulkarte, Fetch-/Rechen-/Nightly-Kadenz |
+| Wetterbezug | **§3** | Open-Meteo-Call, Schema-Validierung, Last-Good-Cache, Retry, Budget |
+| Physik | **§4** | Sonnenstand, Haurwitz/k_c, Hay-Davies, IAM, `bifacial_beam_gain`, Albedo, Intervallsemantik |
+| Horizont & SVF | **§5** | Feldsemantik der Horizontzeilen, `tau_points`, `diffuse_tau`, Laub-Rampe, halbtransparenter SVF |
+| Elektrik / DC→AC | **§6** | Ross, η, `clamp_groups_ac`, Re-Clamp, Trennung DC-Lernen / AC-Ausgabe |
+| Config-Schema | **§7** | `site`/`planes`/`horizon`/`groups`-Tabellen, Fehlercodes, Fingerprint + Reseed, `DEFAULT_SITE` samt bekannter Mängel |
+| Wetterklassen & Zeitbinnung | **§8** | `classify_cloud`, `CLASSIFIER_VERSION`, Sonnenzeit-Tagesabschnitte, Zellschlüssel |
+| Lernschichten | **§9** | Shademap, Pooling, `suggest_shade_groups`, Intraday-Skalar, Day-ahead-RLS, η-Kalibrierung, Nightly-Job, Schutzmechanismen |
+| Lern-Sichtbarkeit | **§10** | Messkanal-Präsenz, Verwurfssträhne, Repair-Issues, Anlaufphase |
+| Unsicherheit / Bänder | **§11** | Quantilring und Gates, Servieren, Ensemble-Hüllkurve (Standard AUS) |
+| Bootstrap / Backfill | **§12** | `run_bootstrap`, `scripts/backfill.py`, gemeinsamer Kern, Import-Semantik, Quantil-Seeding |
+| Degradationsleiter | **§13** | frisch → Last-Good-Cache → reine Physik → `unavailable`, jede Stufe sichtbar |
+| Konsumenten-Schnittstellen | **§14** | Sensor-Namen, AC-Standard vs. `*_dc`, Headline-Semantik, Mess-Sensoren, Diagnostics-Dump, Energy-Hook, Statusehrlichkeit |
+| Scoreboard / Kill-Gate | **§15** | Metrikdefinitionen, Fairness/Leakage, Vergleichsliste, Gate-Schwellen, Sensorik |
+| Store / Persistenz | **§16** | Schema v3 + Migrationsinvariante, Ringe, Schreibsemantik, Lade-Robustheit |
+| Verschattungsprofil | **§17** | Entitäten, engine-exakte Semantik, `core/shadeprofile.py`-Tunables |
+| Dashboard / Karten | **§18** | Referenz-YAML, `install_dashboard`, die zwei gebündelten Karten, Auslieferung |
+| Aktionen (Services) | **§19** | vollständiges Inventar, Registrierung, Lese-/Schreibgrenze |
+| Konventionen / Checkliste | **§20** | Azimut 0=N, Neigung, Inbetriebnahme-Checkliste |
 
 ### 5.2 Store-Schema-Migrationen
 
@@ -314,7 +322,7 @@ gilt der Code, nicht der Phasen-Haken.
 Einstiegspunkt ist `store.validate_state`: nicht-dict → leerer Neutralzustand, v1 →
 `_migrate_v1_to_v2` → `_migrate_v2_to_v3`, v2 → `_migrate_v2_to_v3`, v3 →
 `_validate_v3`, unbekannt/zukünftig → verworfen mit Warnung. **`validate_state`
-wirft nie** — „validate-and-clamp beim Laden" (SPEC §5): jede Lerner-Sektion geht
+wirft nie** — „validate-and-clamp beim Laden" (SPEC §16.4): jede Lerner-Sektion geht
 durch ihr `from_dict`, das kaputte Werte auf neutrale Defaults klemmt, statt Setup
 zu killen.
 

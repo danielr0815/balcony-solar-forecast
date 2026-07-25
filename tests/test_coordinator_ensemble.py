@@ -1,4 +1,4 @@
-"""Coordinator glue tests for the ensemble-weather bands (v0.16, SPEC §6).
+"""Coordinator glue tests for the ensemble-weather bands (v0.16, SPEC §11.3).
 
 Import is via ``custom_components.balcony_solar_forecast`` (the real HA-importing
 package), so Home Assistant is required; skipped on the plain-core path. The

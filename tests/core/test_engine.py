@@ -1,6 +1,6 @@
 """End-to-end tests for core/engine.py: the pure physics pipeline.
 
-Plain pytest, no Home Assistant imports (SPEC §4).
+Plain pytest, no Home Assistant imports (SPEC §2).
 
 The sibling physics modules (solpos, transpose, horizon) are owned by other
 tasks and may still be stubs while this runs, so these tests inject small,
@@ -136,7 +136,7 @@ def patched_physics(monkeypatch):
     """Patch the engine's physics deps with analytic stand-ins.
 
     Default horizon: a hard wall occludes the S-facing planes once the sun
-    passes az 210 (SPEC §13 building edge), leaving N/front planes open.
+    passes az 210 (SPEC §7.8 building edge), leaving N/front planes open.
     """
     monkeypatch.setattr(engine.solpos, "sun_position", fake_sun_position)
     monkeypatch.setattr(engine.transpose, "hay_davies_poa", fake_hay_davies_poa)

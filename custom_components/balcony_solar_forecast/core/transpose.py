@@ -1,6 +1,6 @@
 """Hay-Davies plane-of-array transposition (stdlib math only).
 
-Owner: irradiance. Pure, HA-free. Implements the SPEC §4 physics musts:
+Owner: irradiance. Pure, HA-free. Implements the SPEC §4.3 physics musts:
   - Hay-Davies anisotropic diffuse (beam + circumsolar + isotropic rest).
   - Rb capped <= RB_CAP; circumsolar forced to 0 below LOW_SUN_CUTOFF_DEG.
   - Ground-reflected term albedo * GHI * (1 - cos(tilt)) / 2.
@@ -191,7 +191,7 @@ def hay_davies_poa(
     beam = dni * cos_theta
 
     # Below the low-sun cutoff the anisotropic (circumsolar) geometry is
-    # unreliable (SPEC §4 must). We collapse the distrusted circumsolar share
+    # unreliable (SPEC §4.3 must). We collapse the distrusted circumsolar share
     # into the isotropic dome by forcing ai = 0 BEFORE splitting the diffuse,
     # so the full DHK*tilt_factor_sky is retained (energy-conserving) instead
     # of dropping dhi*ai*tilt_factor of real diffuse. Zeroing only the

@@ -1,6 +1,6 @@
 """Tests for the shade-profile UI platform layer (select / date / sensor).
 
-Owner: platform (shade-profile diagram, SPEC §15). The three entities that
+Owner: platform (shade-profile diagram, SPEC §17.1). The three entities that
 drive the diagram — the module ``select``, the date ``date`` and the
 ``ShadeProfileSensor`` — had zero platform coverage (audit #19). These exercise
 the entity-layer glue WITHOUT standing up a full HA instance: entities are
