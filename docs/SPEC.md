@@ -444,9 +444,17 @@ den wahren Mittag symmetrische Fenster `|hours_from_solar_noon| <
 MIDDAY_SOLAR_HALFWIDTH_H` (2,0 h), davor `morning`, danach `afternoon`. Feste
 Ortsuhrzeiten (die früheren 10:00/14:00 — `DAY_PART_MORNING_END_HOUR` /
 `DAY_PART_AFTERNOON_START_HOUR`) driften gegen die Sonne über Sommerzeitwechsel
-und Jahreszeit; die Uhr-Variante (`bias.day_part_for_hour`,
-`bias.day_ahead_factor`) bleibt nur als **Rückfall**, wenn die Standort-Länge
-fehlt. **Anwendung und nächtliches Training teilen dieselbe Sonnenzeit-Binnung**
+und Jahreszeit. Die Uhr-Binnung `bias.day_part_for_hour` bleibt **ausschließlich
+als defensiver Rückfall im nächtlichen Trainingspfad**: `_nightly.day_part_for_hourkey`
+liest die Länge per `getattr` vom Coordinator und binnt nur dann lokal-nach-Uhr,
+wenn sie fehlt — damit ein Training lieber gröber läuft als jedes Sample zu
+verwerfen. Im **Servierpfad gibt es keinen Rückfall**: der Coordinator ruft
+`solpos.hours_from_solar_noon(..., self._site.longitude)` unbedingt, und
+`Site.longitude` (`core/types.py`) ist ein nicht-optionales `float`.
+`bias.day_ahead_factor` (die Uhr-Variante des Faktors) ist **Legacy und nicht
+normativ**: sie hat keine Aufrufstelle im Produktivcode und wird nur noch von
+Tests abgedeckt; verbindlich ist allein `bias.day_ahead_factor_solar`.
+**Anwendung und nächtliches Training teilen dieselbe Sonnenzeit-Binnung**
 (`_nightly.day_part_for_hourkey`), ebenso die Quantilbins (§14.2) und der
 Offline-Backfill (§6) — sonst meinten Zelle und Trainingssample verschiedene
 Sonnenstände. Die Zellen**schlüssel** (`Wolkenklasse|Tagesabschnitt`) sind
@@ -1117,8 +1125,9 @@ Dieser Abschnitt bündelt, was der Betreiber **sieht und bedient**: das
 Verschattungsprofil-Diagramm samt seiner Entitäten und Semantik (§15.1–§15.3),
 die mitgelieferten Lovelace-Karten (§15.4) sowie die beiden Wartungsaktionen
 Dashboard-Installation (§15.5) und In-Process-Re-Bootstrap (§15.6). Die
-Nummerierung ist historisch gewachsen (§15.1–§15.4 stammen aus v0.5, §15.5 aus
-v0.7.x, §15.6 aus v0.23) und bleibt unverändert, weil der Code sie zitiert.
+Nummerierung ist historisch gewachsen (§15.1–§15.4 im Kern aus v0.5, wobei §15.4
+mit den gebündelten Lovelace-Karten in v0.8 und v0.11 erweitert wurde; §15.5 aus
+v0.8; §15.6 aus v0.23) und bleibt unverändert, weil der Code sie zitiert.
 
 **Zweck des Verschattungsprofil-Diagramms (§15.1–§15.3):** Für ein wählbares Modul und ein wählbares lokales Datum die
 aktuell bekannte Verschattung sichtbar machen: die Sonnenbahn (Elevation über
@@ -1186,7 +1195,8 @@ HACS-Artefakt (`dashboards/shade_profile_apexcharts.yaml`,
 eingefärbt (Schwellen an `SHADE_PROFILE_TAU_THRESHOLD` ausgerichtet), beide
 Horizontlinien überlagert. Details in `docs/DASHBOARD.md` §4b.
 
-Seit v0.7 liefert die Integration **zwei eigene, abhängigkeitsfreie
+Seit v0.8 (Verschattungsprofil-Karte) bzw. v0.11 (Power-History-Karte) liefert
+die Integration **zwei eigene, abhängigkeitsfreie
 Lovelace-Karten** aus (vanilla `HTMLElement` + programmatisches SVG, keine
 HACS-Frontend-Installation nötig), geführt in der `_frontend._CARDS`-Liste:
 `custom:balcony-shade-profile-card`
@@ -1359,12 +1369,33 @@ neue Semantik — bei Abweichung gilt der jeweils verlinkte Fachabschnitt.
 **Registrierung (verbindlich):** alle Aktionen werden **einmal in `async_setup`**
 registriert (`_services.async_register_services`, HA-Quality-Scale
 `action-setup`) — unabhängig vom Ladezustand eines Config-Entries. Ein Aufruf
-ohne geladenen Entry liefert dadurch einen verständlichen
-`ServiceValidationError` statt „Service not found". Jede Aktion nimmt ein
-optionales `entry_id`; **schreibende** Aktionen lösen genau **einen** Coordinator
-auf (`_resolve_single_coordinator`) und verlangen bei mehreren Anlagen ein
-explizites `entry_id`. Fehlerbilder sind stets `ServiceValidationError` mit
-Klartext, nie ein Traceback.
+läuft dadurch nie in „Service not found"; jeder Handler löst sein Ziel erst zur
+Aufrufzeit aus `hass.data[DOMAIN]` auf. Jede Aktion nimmt ein optionales
+`entry_id`. Für die Ziel-Auflösung gibt es genau **zwei** Muster, und sie
+unterscheiden sich im Fehlerbild:
+
+- **Einzelziel-Aktionen** (`import_bootstrap`, `rollback_learners`,
+  `reset_day_ahead_bias`, `install_dashboard`, `suggest_shade_groups`,
+  `get_shade_profile`, `get_issued_forecast`, `run_bootstrap`) lösen über
+  `_resolve_single_coordinator` genau **einen** Coordinator auf und verlangen
+  bei mehreren Anlagen ein explizites `entry_id`. Das betrifft **alle
+  schreibenden** Aktionen und zusätzlich die drei lesenden, die sich auf genau
+  eine Anlage beziehen müssen. Kein Entry eingerichtet, unbekanntes `entry_id`
+  oder mehrere Anlagen ohne `entry_id` ⇒ `ServiceValidationError` mit Klartext,
+  nie ein Traceback.
+- **Fan-out-Leser** (`get_forecast`, `dump_shademap`) lösen **nicht** auf: sie
+  iterieren über `hass.data[DOMAIN]` und antworten je Anlage unter
+  `entries[<entry_id>]`; ein übergebenes `entry_id` wirkt hier als **Filter**,
+  nicht als Pflichtangabe. Ist kein Entry eingerichtet (oder filtert `entry_id`
+  alles weg), ist die Antwort das **leere** `{"entries": {}}` — **kein Fehler**.
+  Das ist Absicht: ein Read/Dump darf ein Dashboard oder eine Diagnose nicht mit
+  einer Exception abbrechen. `dump_shademap` kapselt zusätzlich **jeden Entry
+  einzeln** (`_services._dump_one`): ein Coordinator ohne
+  `get_shademap_state` liefert `{"channels": {}, "available": false}`, eine
+  Ausnahme beim Auslesen `{"channels": {}, "error": <repr>}` **innerhalb der
+  Antwort** statt als geworfener Fehler — die übrigen Anlagen bleiben unberührt.
+  Konsumenten dieser beiden Aktionen müssen also auf eine leere bzw. je Entry
+  als fehlerhaft markierte Antwort prüfen, nicht auf eine Exception.
 
 | Aktion | Antwort | Wirkung | Definition |
 |---|---|---|---|
