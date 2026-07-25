@@ -372,8 +372,10 @@ Die Bias-Zellen werden gegen eine bestimmte **prognoserelevante Konfiguration**
 gelernt; ein `config_fingerprint` (SHA-256-Kurzhash über je Ebene Azimut /
 Neigung / Wp / Wirkungsgrad / Ross-Koeffizient / Horizont — je Zeile Azimut,
 Elevation UND die Transmittanzfelder `tau` / `seasonal` / `tau_leafed` /
-`tau_bare`, denn die Horizontzeilen SIND die τ-tragenden „Screens“ dieser
-Konfiguration (eine τ-Änderung 0→0,4 formt den Direktstrahl um) —, die Albedo,
+`tau_bare` sowie die inlinen Elevationsprofile `tau_points` / `tau_points_bare`
+(v0.22, nur-wenn-gesetzt gehasht), denn die Horizontzeilen SIND die τ-tragenden
+„Screens“ dieser Konfiguration (eine τ-Änderung 0→0,4 ODER ein `tau_points`-
+Knoten-Edit formt den Direktstrahl um) —, die Albedo,
 den bifazialen Beam-Gain (`bifacial_beam_gain`, T6 — der A1-Rollout 1,0→1,25
 skaliert den Direkt-POA-Anteil standortweit), die
 AC-Grenzen der WR-Gruppen und `CLASSIFIER_VERSION`) wird neben dem Bias-State

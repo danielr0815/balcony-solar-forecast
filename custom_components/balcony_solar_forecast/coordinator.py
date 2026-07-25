@@ -786,8 +786,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         Covers exactly the config the day-ahead bias cells are conditioned on:
         each plane's azimuth / tilt / wp / efficiency / ross_coeff / horizon
         profile (per row: elevation AND the transmittance fields tau / seasonal /
-        tau_leafed / tau_bare — the horizon rows ARE the tau-carrying "screens" of
-        SPEC §5, so a τ 0→0.4 edit reshapes the modeled beam and MUST re-seed),
+        tau_leafed / tau_bare AND the v0.22 inline elevation profiles
+        tau_points / tau_points_bare — the horizon rows ARE the tau-carrying
+        "screens" of SPEC §5, so a τ 0→0.4 edit OR a tau_points knot edit
+        reshapes the modeled beam by +50–150 Wh/day mornings (ADR-2) and MUST
+        re-seed),
         the site albedo, the bifacial beam gain (T6 — the A1 1.0→1.25 rollout runs
         through here and changes the direct-POA share site-wide), every inverter
         group's AC limit, and the cloud-classification taxonomy version
@@ -800,13 +803,28 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """
         import hashlib
 
+        def _pts(pts) -> str:
+            # Serialise an inline (el, tau) elevation profile, rounded like the
+            # scalars so a float re-serialisation can never spuriously flip the
+            # hash. Emitted ONLY when the profile is set (mirrors the
+            # nur-wenn-gesetzt to_dict rule), so a row without tau_points keeps
+            # its exact pre-0.22 signature — a config whose modeled curve is
+            # byte-identical after upgrade keeps its fingerprint and is NOT
+            # re-seeded; adding/editing a knot appends the segment and flips it.
+            return "/".join(f"{round(el, 2)}:{round(t, 4)}" for el, t in pts)
+
         def _hz_row(r) -> str:
             tl = "-" if r.tau_leafed is None else f"{round(r.tau_leafed, 4)}"
             tb = "-" if r.tau_bare is None else f"{round(r.tau_bare, 4)}"
-            return (
+            s = (
                 f"{round(r.azimuth_deg, 2)},{round(r.elevation_deg, 2)}"
                 f",t{round(r.tau, 4)},s{int(r.seasonal)},tl{tl},tb{tb}"
             )
+            if r.tau_points is not None:
+                s += f",tp{_pts(r.tau_points)}"
+            if r.tau_points_bare is not None:
+                s += f",tpb{_pts(r.tau_points_bare)}"
+            return s
 
         def _plane_sig(p) -> str:
             hz = ";".join(_hz_row(r) for r in p.horizon)

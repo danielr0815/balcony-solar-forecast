@@ -22,6 +22,7 @@ import pytest
 from balcony_solar_forecast.const import DEFAULT_SITE
 from balcony_solar_forecast.core import engine
 from balcony_solar_forecast.core.types import (
+    HorizonRow,
     InverterGroup,
     PlaneConfig,
     SiteConfig,
@@ -830,3 +831,87 @@ class TestBifacialBeamGain:
         # Garbage degrades to None (default applies), never raises.
         d_junk = dict(d_none, **{CONF_SITE_BEAM_GAIN: "lots"})
         assert SiteConfig.from_dict(d_junk).bifacial_beam_gain is None
+
+
+class TestTauPointsThroughEngine:
+    """The engine must forward ``sun_el`` to ``horizon.transmittance_at`` so an
+    inline ``tau_points`` elevation profile actually reshapes the served beam
+    (V1 item 4 — the one line that makes tau_points effective in production).
+
+    These tests use the REAL horizon module (not the analytic fakes) with a plane
+    carrying the ADR-2.4 crown profile. The transposition and sun-position deps
+    are still faked so two chosen slots share an azimuth but differ in sun
+    elevation, isolating the elevation gate. If the engine dropped ``sun_el`` from
+    the ``transmittance_at`` call, a profiled row would resolve at its topmost
+    knot (tau=1.0) for BOTH slots and the two would be identical — so each assert
+    below fails under that mutation.
+    """
+
+    # Two live slots at the SAME azimuth (inside the az52..89 crown bracket) but
+    # different sun elevations, both BELOW the elevation_deg=10 edge so the gate
+    # trips. Every other slot is put below the horizon (skipped).
+    _SLOT_LOW = 40   # sun_el = 5 deg  -> profile tau ~0.125
+    _SLOT_HIGH = 41  # sun_el = 9 deg  -> profile tau ~0.95
+    _CROWN_AZ = 70.0
+    _PROFILE = ((4.5, 0.0), (5.5, 0.25), (6.5, 0.45), (8.0, 0.85), (9.5, 1.0))
+
+    def _sun(self, dt_utc, lat, lon):
+        idx = _slot_index(dt_utc)
+        if idx == self._SLOT_LOW:
+            return (self._CROWN_AZ, 5.0)
+        if idx == self._SLOT_HIGH:
+            return (self._CROWN_AZ, 9.0)
+        return (self._CROWN_AZ, -5.0)  # night everywhere else
+
+    @staticmethod
+    def _flat_beam_poa(ghi, dni, dhi, sun_az, sun_el, plane_az, plane_tilt,
+                       albedo, doy=None):
+        # Constant beam, no diffuse/ground and no cos_theta key (IAM skipped), so
+        # the ONLY thing that can vary the plane's output between the two slots is
+        # the static tau gate driven by the tau_points profile.
+        return {"beam": 500.0, "circumsolar": 0.0, "isotropic": 0.0, "ground": 0.0}
+
+    def _crown_plane(self, with_profile: bool):
+        pts = self._PROFILE if with_profile else None
+        rows = (
+            HorizonRow(azimuth_deg=52.0, elevation_deg=10.0, tau=0.0, tau_points=pts),
+            HorizonRow(azimuth_deg=89.0, elevation_deg=10.0, tau=0.0, tau_points=pts),
+        )
+        return PlaneConfig(
+            name="M", azimuth_deg=90.0, tilt_deg=30.0, wp=430.0, horizon=rows
+        )
+
+    def _site(self, with_profile: bool):
+        plane = self._crown_plane(with_profile)
+        group = InverterGroup(name="WR", plane_names=("M",), ac_limit_w=5000.0)
+        return SiteConfig(
+            latitude=48.5, longitude=12.2, planes=(plane,), groups=(group,)
+        )
+
+    def _run(self, monkeypatch, with_profile: bool):
+        monkeypatch.setattr(engine.solpos, "sun_position", self._sun)
+        monkeypatch.setattr(engine.transpose, "hay_davies_poa", self._flat_beam_poa)
+        # NB: horizon left REAL on purpose.
+        weather = _clear_sky_series()
+        res = engine.compute_forecast(self._site(with_profile), weather, now=_TEST_DATE)
+        watts = next(p.watts for p in res.plane_results if p.name == "M")
+        return watts[self._SLOT_LOW], watts[self._SLOT_HIGH]
+
+    def test_profile_gates_beam_by_sun_elevation(self, monkeypatch):
+        low, high = self._run(monkeypatch, with_profile=True)
+        # Same azimuth, same (constant) beam POA, same temperature: the ONLY
+        # difference is the elevation-resolved tau (0.125 at 5 deg vs 0.95 at
+        # 9 deg), so the higher-elevation slot must transmit far more beam.
+        assert low > 0.0
+        assert high > low
+        # tau ratio 0.95/0.125 ~= 7.6; watts are linear in the gated beam here,
+        # so require a large, unambiguous separation (mutation gives ratio 1.0).
+        assert high > 3.0 * low
+
+    def test_no_profile_is_elevation_agnostic(self, monkeypatch):
+        # Same rows WITHOUT tau_points: scalar tau=0 gates the beam to zero at
+        # both elevations (elevation-independent), confirming the difference above
+        # comes from the profile and not from the faked transposition.
+        low, high = self._run(monkeypatch, with_profile=False)
+        assert low == pytest.approx(0.0)
+        assert high == pytest.approx(0.0)

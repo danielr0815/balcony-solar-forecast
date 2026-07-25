@@ -587,6 +587,61 @@ def test_config_fingerprint_tracks_relevant_fields_only():
     )
     assert c._config_fingerprint() != tau0
 
+    # v0.22 inline elevation profile: ADDING tau_points to a row (the 0.22
+    # tau_points migration, and every later knot edit) reshapes the modeled
+    # beam +50-150 Wh/day mornings (ADR-2) while az/elevation/tau/seasonal stay
+    # put, so it MUST flip the fingerprint or the automatic n-Deckelung never
+    # fires and the learned bias goes stale against a shifted raw curve.
+    c._site = _site()
+    bare = HorizonRow(azimuth_deg=52.0, elevation_deg=10.0, tau=0.0)
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(bare,)), c._site.planes[1]),
+    )
+    no_pts = c._config_fingerprint()
+    profiled = replace(
+        bare,
+        tau_points=((4.5, 0.0), (5.5, 0.25), (6.5, 0.45), (8.0, 0.85), (9.5, 1.0)),
+    )
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(profiled,)), c._site.planes[1]),
+    )
+    with_pts = c._config_fingerprint()
+    assert with_pts != no_pts
+    # A knot-value edit (operator re-measures the crown) flips it again.
+    edited = replace(
+        profiled,
+        tau_points=((4.5, 0.0), (5.5, 0.30), (6.5, 0.45), (8.0, 0.85), (9.5, 1.0)),
+    )
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(edited,)), c._site.planes[1]),
+    )
+    assert c._config_fingerprint() != with_pts
+    # Adding the winter tau_points_bare profile is a distinct raw-curve change.
+    seasonal = replace(
+        profiled,
+        seasonal=True,
+        tau_bare=0.0,
+        tau_leafed=0.0,
+        tau_points_bare=((4.5, 0.1), (5.5, 0.4), (6.5, 0.6), (8.0, 0.9), (9.5, 1.0)),
+    )
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(seasonal,)), c._site.planes[1]),
+    )
+    seasonal_fp = c._config_fingerprint()
+    seasonal_no_bare = replace(seasonal, tau_points_bare=None)
+    c._site = replace(
+        c._site,
+        planes=(
+            replace(c._site.planes[0], horizon=(seasonal_no_bare,)),
+            c._site.planes[1],
+        ),
+    )
+    assert c._config_fingerprint() != seasonal_fp
+
     # bifacial beam-gain change (the A1 1.0->1.25 rollout via the options flow)
     # scales the direct-POA share site-wide -> different fingerprint.
     c._site = _site()
