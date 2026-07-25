@@ -28,6 +28,7 @@ degradation is never silent (SPEC §5 Schutzmechanismen).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import deque
 from dataclasses import dataclass
@@ -348,6 +349,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._weather_cache: tuple[dict, WeatherSeries] | None = None
 
         self._unsub_nightly = None
+
+        # Serialises the nightly training job against the in-process
+        # ``run_bootstrap`` action (SPEC §6): both mutate the persisted learner
+        # state, so the nightly wrapper and the bootstrap handler acquire this
+        # ONE lock. A second concurrent ``run_bootstrap`` sees ``locked()`` and
+        # is rejected with a clear ServiceValidationError (see _bootstrap.py).
+        self._bootstrap_lock = asyncio.Lock()
 
         # --- FAST learner: transient intraday state (NEVER persisted) -------
         # Re-init to 1.0 on construction => on every HA restart / reload the
@@ -2313,8 +2321,22 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     # ------------------------------------------------------------------
 
     async def _async_nightly_job(self, now: datetime | None = None) -> None:
-        """Snapshot today's issued forecast, log actuals, train + guard."""
-        return await _nightly.async_nightly_job(self, now)
+        """Snapshot today's issued forecast, log actuals, train + guard.
+
+        Acquires the shared bootstrap lock so the nightly training never
+        interleaves its learner-state writes with an in-process ``run_bootstrap``
+        import (and vice-versa); it WAITS for a bootstrap in flight rather than
+        skipping, so no night's training is lost (SPEC §6). Tests call
+        ``_nightly.async_nightly_job`` directly and so bypass the lock.
+        """
+        # __init__ sets the lock; a __new__-built test double may not, so ensure
+        # it lazily (the same attribute the run_bootstrap handler acquires).
+        lock = getattr(self, "_bootstrap_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._bootstrap_lock = lock
+        async with lock:
+            return await _nightly.async_nightly_job(self, now)
 
     def _catchup_days(self, latest: date) -> list[date]:
         """Closed local days to (re)process, oldest first, bounded/idempotent."""

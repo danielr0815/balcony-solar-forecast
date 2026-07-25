@@ -1,6 +1,15 @@
 """Integration-wide services: ``get_forecast``, ``import_bootstrap``,
-``dump_shademap``, ``rollback_learners``, ``install_dashboard``,
-``suggest_shade_groups``, ``get_shade_profile`` and ``get_issued_forecast``.
+``run_bootstrap``, ``dump_shademap``, ``rollback_learners``,
+``install_dashboard``, ``suggest_shade_groups``, ``get_shade_profile`` and
+``get_issued_forecast``.
+
+  * ``run_bootstrap`` (SPEC §6, ``SupportsResponse.ONLY``): rebuild the learner
+    bootstrap IN-PROCESS from the live config — no token, no ``site.json``, no
+    dev machine — and (only on an explicit ``dry_run: false``) import it via the
+    same ``coordinator.async_import_bootstrap`` path as ``import_bootstrap``. The
+    heavy fetch/reconstruct/import lives in ``_bootstrap.py``; this layer only
+    registers it. Serialised against the nightly job by the coordinator's
+    ``_bootstrap_lock``.
 
   * ``get_issued_forecast`` (SPEC §15.4, ``SupportsResponse.ONLY``): return the
     forecast AS IT WAS ISSUED for one past LOCAL date, read straight from the
@@ -99,6 +108,7 @@ from .const import (
     SERVICE_INSTALL_DASHBOARD,
     SERVICE_RESET_DAY_AHEAD_BIAS,
     SERVICE_ROLLBACK_LEARNERS,
+    SERVICE_RUN_BOOTSTRAP,
     SERVICE_SUGGEST_SHADE_GROUPS,
     SHADE_SIM_MAX_MEAN_DIFF,
     SHADE_SIM_MIN_COMMON_BINS,
@@ -118,6 +128,9 @@ ATTR_MAX_DIFF = "max_diff"
 ATTR_MIN_COMMON_BINS = "min_common_bins"
 ATTR_MODULE = "module"
 ATTR_DATE = "date"
+ATTR_START_DATE = "start_date"
+ATTR_END_DATE = "end_date"
+ATTR_DRY_RUN = "dry_run"
 
 # The default UI dashboard URL the operator is told to create (must contain a
 # hyphen — Home Assistant rejects single-word storage-dashboard url_paths).
@@ -181,6 +194,19 @@ ROLLBACK_LEARNERS_SCHEMA = vol.Schema(
 
 RESET_DAY_AHEAD_BIAS_SCHEMA = vol.Schema({vol.Optional(ATTR_ENTRY_ID): str})
 
+RUN_BOOTSTRAP_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_ENTRY_ID): str,
+        # ISO dates (YYYY-MM-DD). Defaults resolved in the handler: end = local
+        # yesterday, start = today - BOOTSTRAP_DEFAULT_MAX_DAYS.
+        vol.Optional(ATTR_START_DATE): str,
+        vol.Optional(ATTR_END_DATE): str,
+        # Versehens-Schutz: dry_run defaults TRUE — only an explicit
+        # ``dry_run: false`` imports the rebuilt bootstrap into the live learners.
+        vol.Optional(ATTR_DRY_RUN, default=True): bool,
+    }
+)
+
 INSTALL_DASHBOARD_SCHEMA = vol.Schema(
     {
         vol.Optional(ATTR_ENTRY_ID): str,
@@ -231,6 +257,24 @@ def async_register_services(hass: HomeAssistant) -> None:
             _import_bootstrap,
             schema=IMPORT_BOOTSTRAP_SCHEMA,
             supports_response=SupportsResponse.OPTIONAL,
+        )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_RUN_BOOTSTRAP):
+
+        async def _run_bootstrap(call: ServiceCall) -> ServiceResponse:
+            # Lazy import: the handler pulls in aiohttp + recorder helpers and the
+            # heavy bootstrap core; importing it at module load would drag those
+            # in before HA needs them (and _bootstrap imports back from here).
+            from ._bootstrap import async_run_bootstrap
+
+            return await async_run_bootstrap(hass, call)
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_RUN_BOOTSTRAP,
+            _run_bootstrap,
+            schema=RUN_BOOTSTRAP_SCHEMA,
+            supports_response=SupportsResponse.ONLY,
         )
 
     if not hass.services.has_service(DOMAIN, SERVICE_DUMP_SHADEMAP):

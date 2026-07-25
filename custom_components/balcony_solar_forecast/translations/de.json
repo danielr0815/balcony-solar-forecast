@@ -166,6 +166,28 @@
         }
       }
     },
+    "run_bootstrap": {
+      "name": "Learner neu bootstrappen (in-process)",
+      "description": "Baut die Day-Ahead-Bias-, Shademap- und Quantil-Lernzustände aus deiner Messhistorie neu auf – in-process, ohne Token und mit der Live-Konfig dieser Installation (kein externes Backfill-Skript). Standardmäßig sicher: dry_run ist AN, der erste Aufruf liefert nur eine Zusammenfassung; erneut mit dry_run AUS aufrufen, um zu importieren (ein Rollback-Snapshot wird angelegt). Dauert einige Minuten; ein zweiter gleichzeitiger Aufruf wird abgewiesen.",
+      "fields": {
+        "entry_id": {
+          "name": "Konfigurationseintrag",
+          "description": "Ziel-Konfigurationseintrag. Nur weglassen, wenn ein einziger Standort konfiguriert ist."
+        },
+        "start_date": {
+          "name": "Startdatum",
+          "description": "Erster zu rekonstruierender Tag, ISO JJJJ-MM-TT. Leer lassen für Standard ~400 Tage zurück (Tage ohne Messhistorie werden übersprungen)."
+        },
+        "end_date": {
+          "name": "Enddatum",
+          "description": "Letzter zu rekonstruierender Tag, ISO JJJJ-MM-TT. Leer lassen für Standard: gestern."
+        },
+        "dry_run": {
+          "name": "Probelauf",
+          "description": "AN lassen (Standard), um zu holen, zu rekonstruieren und die Zusammenfassung zurückzugeben, ohne die Learner zu verändern. AUS schalten, um den neu gebauten Bootstrap zu importieren."
+        }
+      }
+    },
     "dump_shademap": {
       "name": "Shademap ausgeben",
       "description": "Gibt die gelernte Shademap als Polartabelle (Sonnenazimut x Elevation) je Kanal aus, zum visuellen Abgleich mit bekannten Hindernissen.",

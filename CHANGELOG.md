@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-07-25
+
+The 320-day re-bootstrap is now a Home Assistant action —
+**`balcony_solar_forecast.run_bootstrap`** in Developer Tools → Actions — so the
+learner history can be rebuilt entirely in-process. No Long-Lived Token, no
+`scripts/backfill.py`, no `site.json`: it uses this install's **live config**,
+fetches Open-Meteo Previous-Runs weather through the integration's own aiohttp
+session, and reads the recorder's long-term statistics directly. The offline CLI
+still works unchanged; both paths now share the same HA-free reconstruction core.
+
+### Added
+
+- **Action `run_bootstrap` (`SupportsResponse.ONLY`).** Rebuilds the day-ahead
+  bias, shademap and quantile learner states from the measured history in-process.
+  Optional `entry_id` (omit for a single site), `start_date` / `end_date`
+  (ISO `YYYY-MM-DD`; default ~400 days ago → yesterday, days without measured
+  history are skipped), and `dry_run`. **`dry_run` defaults to `true`**, so the
+  first call only fetches, reconstructs and returns a summary WITHOUT touching the
+  learners; call again with `dry_run: false` to import (a rollback snapshot is
+  taken, exactly like `import_bootstrap`). The reconstruction runs in the executor
+  with progress logs and takes a few minutes; a second concurrent call — or one
+  overlapping the nightly job — is rejected via a per-coordinator bootstrap lock.
+  The in-process actuals read follows the epoch-**seconds** recorder-statistics
+  convention (`_actuals._stat_row_hour_key`), not the WS-API milliseconds.
+- **HA-free `core/bootstrap_build.py` and `core/openmeteo_backfill.py`.** The pure
+  reconstruction/bootstrap math and the Open-Meteo Previous-Runs fetch were lifted
+  out of `scripts/backfill.py` into token-free, HA-independent core modules shared
+  by both the CLI and the new action. `scripts/backfill.py` stays a thin CLI
+  wrapper (re-exports the core names) with byte-identical output.
+
+### Changed
+
+- **0.22 config campaign is now one click.** For the pending 0.22 config work the
+  flow is simply: edit the config, then run `run_bootstrap` with `dry_run: false`.
+  No external script, token or `site.json` round-trip.
+
 ## [0.22.0] - 2026-07-25
 
 Elevation-dependent horizon τ + a diffuse-radiance override for blocked sectors
