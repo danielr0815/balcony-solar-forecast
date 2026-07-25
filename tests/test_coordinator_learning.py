@@ -587,6 +587,91 @@ def test_config_fingerprint_tracks_relevant_fields_only():
     )
     assert c._config_fingerprint() != tau0
 
+    # v0.22 inline elevation profile: ADDING tau_points to a row (the 0.22
+    # tau_points migration, and every later knot edit) reshapes the modeled
+    # beam +50-150 Wh/day mornings (ADR-2) while az/elevation/tau/seasonal stay
+    # put, so it MUST flip the fingerprint or the automatic n-Deckelung never
+    # fires and the learned bias goes stale against a shifted raw curve.
+    c._site = _site()
+    bare = HorizonRow(azimuth_deg=52.0, elevation_deg=10.0, tau=0.0)
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(bare,)), c._site.planes[1]),
+    )
+    no_pts = c._config_fingerprint()
+    profiled = replace(
+        bare,
+        tau_points=((4.5, 0.0), (5.5, 0.25), (6.5, 0.45), (8.0, 0.85), (9.5, 1.0)),
+    )
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(profiled,)), c._site.planes[1]),
+    )
+    with_pts = c._config_fingerprint()
+    assert with_pts != no_pts
+    # A knot-value edit (operator re-measures the crown) flips it again.
+    edited = replace(
+        profiled,
+        tau_points=((4.5, 0.0), (5.5, 0.30), (6.5, 0.45), (8.0, 0.85), (9.5, 1.0)),
+    )
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(edited,)), c._site.planes[1]),
+    )
+    assert c._config_fingerprint() != with_pts
+    # Adding the winter tau_points_bare profile is a distinct raw-curve change.
+    seasonal = replace(
+        profiled,
+        seasonal=True,
+        tau_bare=0.0,
+        tau_leafed=0.0,
+        tau_points_bare=((4.5, 0.1), (5.5, 0.4), (6.5, 0.6), (8.0, 0.9), (9.5, 1.0)),
+    )
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(seasonal,)), c._site.planes[1]),
+    )
+    seasonal_fp = c._config_fingerprint()
+    seasonal_no_bare = replace(seasonal, tau_points_bare=None)
+    c._site = replace(
+        c._site,
+        planes=(
+            replace(c._site.planes[0], horizon=(seasonal_no_bare,)),
+            c._site.planes[1],
+        ),
+    )
+    assert c._config_fingerprint() != seasonal_fp
+
+    # v0.22 per-row diffuse override: setting diffuse_tau on a wall row (the
+    # ADR-3.5 campaign) lifts the modeled iso-diffuse floor +0.1-0.2 kWh/day
+    # site-wide while az/elevation/tau are byte-identical -> it MUST flip the
+    # fingerprint, or the automatic A4 n-Deckelung never fires and every
+    # follower without a manual reset_day_ahead_bias runs stale bias against the
+    # new raw physics. It is exactly the field class tau_points was added for.
+    c._site = _site()
+    wall = HorizonRow(azimuth_deg=195.0, elevation_deg=90.0, tau=0.0)
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(wall,)), c._site.planes[1]),
+    )
+    no_diff = c._config_fingerprint()
+    walled = replace(wall, diffuse_tau=0.5)
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(walled,)), c._site.planes[1]),
+    )
+    with_diff = c._config_fingerprint()
+    assert with_diff != no_diff
+    # A diffuse_tau value edit (0.5 -> 0.4) is a distinct raw-curve change.
+    c._site = replace(
+        c._site,
+        planes=(
+            replace(c._site.planes[0], horizon=(replace(walled, diffuse_tau=0.4),)),
+            c._site.planes[1],
+        ),
+    )
+    assert c._config_fingerprint() != with_diff
+
     # bifacial beam-gain change (the A1 1.0->1.25 rollout via the options flow)
     # scales the direct-POA share site-wide -> different fingerprint.
     c._site = _site()
@@ -604,6 +689,85 @@ def test_config_fingerprint_tracks_relevant_fields_only():
         ),
     )
     assert c._config_fingerprint() == base
+
+
+def _legacy_v021_site() -> SiteConfig:
+    """A representative PRE-0.22 site: every horizon field the fingerprint hashed
+    at v0.21.0 (azimuth/elevation/tau/seasonal/tau_leafed/tau_bare), plus albedo,
+    bifacial_beam_gain, ross_coeff and a group — but NONE of the v0.22 additions
+    (tau_points / tau_points_bare / diffuse_tau). Its fingerprint is the golden
+    invariant below.
+    """
+    return SiteConfig(
+        latitude=48.13,
+        longitude=11.57,
+        albedo=0.2,
+        bifacial_beam_gain=1.0,
+        planes=(
+            PlaneConfig(
+                name="M2", azimuth_deg=115.0, tilt_deg=70.0, wp=430.0,
+                efficiency=0.96, ross_coeff=0.045,
+                horizon=(
+                    HorizonRow(azimuth_deg=52.0, elevation_deg=10.0, tau=0.0),
+                    HorizonRow(
+                        azimuth_deg=205.0, elevation_deg=90.0, tau=0.2,
+                        seasonal=True, tau_leafed=0.2, tau_bare=0.5,
+                    ),
+                ),
+                actual_entity="sensor.m2",
+            ),
+            PlaneConfig(
+                name="M4", azimuth_deg=205.0, tilt_deg=80.0, wp=430.0,
+                efficiency=0.96,
+                horizon=(
+                    HorizonRow(azimuth_deg=195.0, elevation_deg=90.0, tau=0.0),
+                ),
+                actual_entity="sensor.m4",
+            ),
+        ),
+        groups=(
+            InverterGroup(name="g1", plane_names=("M2", "M4"), ac_limit_w=800.0),
+        ),
+    )
+
+
+def test_config_fingerprint_legacy_config_is_byte_stable():
+    """GOLDEN: a config WITHOUT any v0.22 field hashes to the exact v0.21.0 value.
+
+    The v0.22 fields (tau_points / tau_points_bare / diffuse_tau) are appended to
+    the fingerprint's row segment ONLY when set (mirroring the nur-wenn-gesetzt
+    to_dict rule), so a legacy row's hash input string is byte-for-byte the
+    pre-0.22 string. This pins that: if the base format ever silently shifts, an
+    upgrade would spontaneously re-seed every follower's day-ahead bias against an
+    UNCHANGED raw curve (ADR §1: 'kein Spontan-Reseed beim Upgrade'). The golden
+    was computed from the v0.21.0 ``_config_fingerprint`` algorithm; it must only
+    change on a DELIBERATE fingerprint-format bump (CLASSIFIER_VERSION or a
+    documented schema change), never as a side effect of adding an optional field.
+    """
+    c = _make_coordinator()
+    c._site = _legacy_v021_site()
+    assert c._config_fingerprint() == "48f218a3ca86ee54"
+
+
+def test_config_fingerprint_legacy_bytes_ignore_v022_none_fields():
+    """A legacy row and a row that merely DEFAULTS the v0.22 fields to None hash
+    identically — proof the 'only-when-set' appends never fire for a None field
+    (the mechanism the golden above relies on)."""
+    from dataclasses import replace
+
+    c = _make_coordinator()
+    c._site = _legacy_v021_site()
+    golden = c._config_fingerprint()
+    # Re-materialise every row through ``replace`` (all v0.22 fields stay None):
+    # the fingerprint must be unchanged.
+    c._site = replace(
+        c._site,
+        planes=tuple(
+            replace(p, horizon=tuple(replace(r) for r in p.horizon))
+            for p in c._site.planes
+        ),
+    )
+    assert c._config_fingerprint() == golden
 
 
 async def test_async_reset_day_ahead_bias_clears_persists_and_refreshes():

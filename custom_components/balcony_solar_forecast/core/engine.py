@@ -338,7 +338,10 @@ def _plane_poa_components(
     # learned tau exactly as intended.
     horizon_elev = horizon.interp_elevation(plane, sun_az)
     if sun_el <= horizon_elev:
-        static_tau = horizon.transmittance_at(plane, sun_az, doy)
+        # Pass sun_el so an inline tau_points elevation profile resolves at the
+        # true sun elevation (v0.22); rows without a profile ignore it and the
+        # result is the pre-0.22 scalar tau.
+        static_tau = horizon.transmittance_at(plane, sun_az, doy, sun_el=sun_el)
     else:
         static_tau = 1.0
 

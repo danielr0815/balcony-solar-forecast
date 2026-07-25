@@ -126,6 +126,43 @@ the import consistently.
 
 ---
 
+## Re-bootstrap after a config campaign (v0.22 and later)
+
+A **forecast-relevant config edit** — the v0.22 `tau_points` crown migration, a
+`diffuse_tau` wall row, a τ / albedo / bifacial-beam-gain change — reshapes the
+**RAW** physics curve that every learner is conditioned on. Two things must
+follow it:
+
+1. **Day-ahead bias**: handled automatically. `tau_points`, `tau_points_bare`
+   and `diffuse_tau` are part of the config fingerprint, so editing them re-opens
+   (n-caps) the day-ahead bias cells for fast re-adaptation on the next start
+   (SPEC §5, A4). You can also force it with `reset_day_ahead_bias`.
+
+2. **Shademap**: **re-bootstrap recommended.** The learned transmittance `T` is
+   trained against the modeled diffuse floor and ungated beam; a `tau_points` /
+   `diffuse_tau` edit changes both references, so bins learned under the OLD prior
+   carry a now-stale meaning (e.g. a morning bin that absorbed the missing diffuse
+   floor as phantom beam gain). Re-run the backfill **against the new site config**
+   and import it — the `BOOTSTRAP_MAX_BIN_N` cap makes this low-risk (a few weeks
+   of live 15-min data outweigh the seed regardless), and the rollback snapshot
+   lets you undo it if needed:
+
+   ```sh
+   # export the EDITED site object to site.json first (config-flow shape), then:
+   py -3.14 scripts/backfill.py --ha-url http://homeassistant.local:8123 \
+       --token "$HA_TOKEN" --start 2024-07-01 --end 2026-07-01 \
+       --site site.json --out bootstrap.json
+   ```
+
+   Import as above. Expect a short transition where the served 04–06Z curve
+   overshoots for a few clear days while the bias cells re-learn — this is the
+   documented settle, **not** a reason to roll back (ADR §2.7).
+
+The interim az-ramp (τ(az) sun-path projection) is **deprecated**: migrate it to
+`tau_points`, do **not** re-anchor it monthly (SPEC §13, ADR §2.7.6).
+
+---
+
 ## What it computes (and why it is coarse)
 
 - **Reconstruction runs at HOURLY resolution.** The Previous-Runs / Historical

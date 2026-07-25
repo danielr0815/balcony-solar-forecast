@@ -128,7 +128,15 @@ def effective_tau_at(
     """
     horizon_elev = horizon_mod.interp_elevation(plane, sun_az)
     if sun_el <= horizon_elev:
-        static_prior = horizon_mod.transmittance_at(plane, sun_az, doy)
+        # Pass sun_el so an inline tau_points elevation profile resolves at the
+        # true sun elevation (v0.22): the profile makes the static prior vary
+        # DOWN each azimuth column (a low-sun crown gap is transmissive, its
+        # canopy opaque), so the drawn sun-path transmittance is now correct per
+        # (az, el) sample instead of constant per az. A legacy row without a
+        # profile ignores sun_el -> bit-identical to the pre-0.22 diagram.
+        static_prior = horizon_mod.transmittance_at(
+            plane, sun_az, doy, sun_el=sun_el
+        )
     else:
         static_prior = 1.0
     if pool is not None and tuple(pool) != (channel,):
@@ -170,20 +178,30 @@ def shade_horizon_at(
     Robust to a non-monotone learned field (it takes the top-most shaded slice,
     not the first crossover).
 
-    The elevation-independent lookups (horizon line + static transmittance) are
-    hoisted out of the elevation loop so the whole azimuth grid stays cheap. The
-    effective tau uses the READ-TIME POOL (SPEC §5) when ``pool`` is wider than
-    ``(channel,)``, so the drawn shade horizon matches the pooled sun-path curve.
+    The horizon-line lookup is hoisted out of the elevation loop so the whole
+    azimuth grid stays cheap. The static transmittance below the line is resolved
+    PER elevation step (v0.22): with an inline ``tau_points`` profile the static
+    prior varies with the sun elevation, so it cannot be hoisted — a legacy row
+    without a profile returns the same scalar tau at every el, so the extra
+    lookups are bit-identical to the pre-0.22 hoisted value. The effective tau
+    uses the READ-TIME POOL (SPEC §5) when ``pool`` is wider than ``(channel,)``,
+    so the drawn shade horizon matches the pooled sun-path curve.
     """
     horizon_elev = horizon_mod.interp_elevation(plane, sun_az)
-    tau_below = horizon_mod.transmittance_at(plane, sun_az, doy)
     step = el_scan_deg if el_scan_deg > 0.0 else SHADE_PROFILE_EL_SCAN_DEG
     pooled = pool is not None and tuple(pool) != (channel,)
     channels = tuple(pool) if pooled else ()
     shade_top = 0.0
     el = 0.0
     while el <= _EL_SCAN_MAX_DEG + 1e-9:
-        static_prior = tau_below if el <= horizon_elev else 1.0
+        if el <= horizon_elev:
+            # el-dependent tau_points resolve at this scan elevation (v0.22);
+            # a legacy scalar row is unchanged.
+            static_prior = horizon_mod.transmittance_at(
+                plane, sun_az, doy, sun_el=el
+            )
+        else:
+            static_prior = 1.0
         if pooled:
             tau = shademap_mod.effective_tau_pooled(
                 state,

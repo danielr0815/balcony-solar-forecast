@@ -182,7 +182,17 @@ Pipeline (reine Funktionen über 15-min-Slots × N Ebenen, <50 ms/Lauf):
    Profil; Nahfeld je Ebene differenziert (Gebäudekante hart bei
    az ≈ 212° für S-Ebenen, Baumsektor az ~135–175° auf P3/P6 mit
    **saisonaler Transmittanz** ≈ 0,8 kahl / ≈ 0,45 belaubt, Kosinus-Rampe
-   April/November — **alle Startwerte messdatenbasiert, §13**). Unter Horizontlinie:
+   April/November — **alle Startwerte messdatenbasiert, §13**).
+   **Elevationsprofil τ(Sonnen-el) (v0.22, optional):** eine Horizontzeile kann
+   zusätzlich `tau_points: [[el, τ], …]` tragen — τ als stückweise lineare
+   Funktion der **Sonnen-Elevation** UNTERHALB der `elevation_deg`-Kante (über
+   der Kante gilt τ=1 wie bisher). Pro az-Nachbarzeile wird zuerst τ(el)
+   ausgewertet, dann in az interpoliert („resolve vor interpolate"); `sun_el`
+   wird von der Engine durchgereicht (fehlt es, gilt der oberste Knoten).
+   Saisonal blendet `tau_points_bare` (gleiches el-Raster) pro Knoten gegen das
+   belaubte Profil. Zeilen ohne `tau_points` sind byte-identisch zum Verhalten
+   vor v0.22. Das ersetzt die az-Rampe (Sonnenpfad-Projektion) durch die echte
+   physikalische Größe und beseitigt deren Saisondrift. Unter Horizontlinie:
    Beam+zirkumsolar × Transmittanz; Iso-Diffus × ebenen-eigenem SVF (behebt
    E4). **Halbtransparenter Horizont fürs Diffus (v0.5.x, audit #11):** der
    Himmel UNTER der Horizontlinie geht mit der (saisonal per `doy` aufgelösten)
@@ -362,8 +372,12 @@ Die Bias-Zellen werden gegen eine bestimmte **prognoserelevante Konfiguration**
 gelernt; ein `config_fingerprint` (SHA-256-Kurzhash über je Ebene Azimut /
 Neigung / Wp / Wirkungsgrad / Ross-Koeffizient / Horizont — je Zeile Azimut,
 Elevation UND die Transmittanzfelder `tau` / `seasonal` / `tau_leafed` /
-`tau_bare`, denn die Horizontzeilen SIND die τ-tragenden „Screens“ dieser
-Konfiguration (eine τ-Änderung 0→0,4 formt den Direktstrahl um) —, die Albedo,
+`tau_bare` sowie die inlinen Elevationsprofile `tau_points` / `tau_points_bare`
+und den Diffus-Radianz-Ersatz `diffuse_tau` (v0.22, nur-wenn-gesetzt gehasht),
+denn die Horizontzeilen SIND die τ-tragenden „Screens“ dieser Konfiguration
+(eine τ-Änderung 0→0,4 ODER ein `tau_points`-Knoten-Edit formt den Direktstrahl
+um; ein `diffuse_tau`-Edit hebt den iso-Diffus-Floor +0,1–0,2 kWh/Tag
+standortweit) —, die Albedo,
 den bifazialen Beam-Gain (`bifacial_beam_gain`, T6 — der A1-Rollout 1,0→1,25
 skaliert den Direkt-POA-Anteil standortweit), die
 AC-Grenzen der WR-Gruppen und `CLASSIFIER_VERSION`) wird neben dem Bias-State
@@ -737,6 +751,49 @@ Zeilen, 2024-07 … 2026-07) → **P90 je (Monat × Stunde)** ≈ Klartag-Profil
    Eine belaubte Baumreihe (τ 0,45) verdunkelt das Diffus im Sommer stärker als
    kahl (τ 0,8), also ist der Sommer-SVF der S-Module kleiner als im Winter;
    die harte Hauswand (τ0) dunkelt Beam UND Diffus weiterhin voll ab.
+   **Elevationsabhängige Baumkronen-Transmittanz (v0.22, `tau_points`):** die
+   Ost-Baumkronen (az ~52–89) sind halbtransparent mit elevationsabhängiger
+   τ_eff (gepoolte 4-Tage-Messung Juli 2026: el 5–6 ≈ 0,25 · 6–7 ≈ 0,45 ·
+   8–9 ≈ 0,85 · ≥9 ≈ 1). Statt diese Rampe als τ(az) entlang des Sonnenpfads
+   eines Ankertags zu kodieren (Saisondrift ~0,3°/Tag, Phantom-Beam im
+   Spätsommer), trägt die Zeile ein Inline-Profil `tau_points: [[el, τ], …]`
+   unterhalb der Kronen-Oberkante (`elevation_deg`). τ hängt damit an der
+   Sonnen-Elevation, nicht am Datum — driftfrei und je Baumsektor
+   wiederverwendbar. Das Profil wirkt auch im SVF: der blockierte Keil `[0, h]`
+   wird an den Profilknoten segmentiert und pro Segment mit seiner
+   Mittelpunkts-τ gewichtet (Band-Integral, geschlossene Form, O(360)
+   memoisiert). Der oberste Knoten wird per Konvention auf τ=1 an der Kante
+   gelegt, damit am Gate-Übergang keine Sprungstelle entsteht. Validierung:
+   1–12 Paare, el streng aufsteigend und in `[0, elevation_deg]`, τ∈[0,1], kein
+   Monotoniezwang; `tau_points_bare` (gleiches el-Raster) optional für den
+   saisonalen Winter (`bad_tau_points` / `tau_points_above_edge` /
+   `seasonal_points_mismatch`).
+   **Deprecated: die Interim-az-Rampe** (τ als τ(az) entlang des Sonnenpfads
+   eines Ankertags) ist abgelöst und wird **nicht mehr nachgeankert** — eine
+   bestehende Rampe wird **einmalig zu `tau_points` migriert, nicht monatlich
+   neu verankert** (ADR §2.7.6). Sie driftet strukturell (~0,3°/Tag) und
+   erzeugt im Spätsommer Phantom-Beam in der Dämmerung; `tau_points` hängt an
+   der Sonnen-Elevation und ist driftfrei. Nach der Migration einmal
+   `reset_day_ahead_bias` fahren (die Config-Fingerprint-Deckelung, A4, tut das
+   ab v0.22 automatisch, weil `tau_points`/`tau_points_bare`/`diffuse_tau` in
+   den Fingerprint eingehen) und ein LTS-Re-Bootstrap empfohlen (docs/BACKFILL.md).
+   **Diffus-Radianz-Ersatz des blockierten Sektors (v0.22, `diffuse_tau`):** Ein
+   optionales `diffuse_tau` je Horizont-Zeile ist die **effektive Radianz des
+   blockierten Sektors relativ zum offenen Himmel** — für eine helle Putzwand
+   ~ ihre Reflektanz 0,5. Es wirkt **nur** im SVF (der blockierte Keil trägt
+   `diffuse_tau` statt der Beam-τ seines offenen Werts); der Beam-Pfad bleibt
+   byte-unberührt (die Wand bleibt für Beam mit τ0 opak). Damit hebt eine helle
+   Wand den isotropen Diffus-Floor (M4/M8-Morgen/-Nachmittag), ohne Phantom-Beam
+   zu erzeugen. **Achtung: `diffuse_tau` ist KEINE Transmission** — es ist ein
+   Effektiv-/Reflexionswert; wer es als „Durchlässigkeit der Wand“ liest,
+   missversteht das Feld. Default = unbenutzt ⇒ Diffus nutzt wie bisher die
+   Beam-τ (`tau`/`tau_points`); die Zeile ist dann byte-identisch zu vor v0.22.
+   `diffuse_tau` ist unabhängig von `tau`/`tau_points` (eine halbtransparente
+   Baumzeile darf es zusätzlich tragen: Beam weiter τ(el), Diffus dann
+   `diffuse_tau`). Validierung: `0 ≤ diffuse_tau ≤ 0,8` (`bad_diffuse_tau`); die
+   Obergrenze 0,8 ist eine Kaschier-Leitplanke — Werte nahe 1 („Sektor für
+   Diffus unsichtbar“) würden den beam-gebundenen Rest verstecken, den das Feld
+   bewusst NICHT abdecken soll (ADR §3.4/§4.4). Serialisierung nur-wenn-gesetzt.
 5. **Verschattungsgruppen:** Weil Hang, Baumsektor und Hauswandkante
    Standort-Geometrie sind (Befunde 1–3, nicht modulspezifisch), können
    gleich verschattete Ebenen desselben Balkons über eine gemeinsame

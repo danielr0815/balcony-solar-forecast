@@ -28,11 +28,14 @@ from balcony_solar_forecast.const import (
     CONF_GROUPS,
     CONF_HORIZON,
     CONF_HZ_AZIMUTH,
+    CONF_HZ_DIFFUSE_TAU,
     CONF_HZ_ELEVATION,
     CONF_HZ_SEASONAL,
     CONF_HZ_TAU,
     CONF_HZ_TAU_BARE,
     CONF_HZ_TAU_LEAFED,
+    CONF_HZ_TAU_POINTS,
+    CONF_HZ_TAU_POINTS_BARE,
     CONF_PLANE_NAME,
     CONF_PLANES,
     CONF_ROSS_COEFF,
@@ -367,6 +370,225 @@ def test_seasonal_row_out_of_range_tau() -> None:
 
 
 # --------------------------------------------------------------------------
+# tau_points inline elevation profile (ADR §2.5, v0.22)
+# --------------------------------------------------------------------------
+
+
+def _profile_row(**overrides) -> dict:
+    row = {
+        CONF_HZ_AZIMUTH: 80.0,
+        CONF_HZ_ELEVATION: 10.0,
+        CONF_HZ_TAU: 0.0,
+        CONF_HZ_TAU_POINTS: [[4.5, 0.0], [6.5, 0.45], [9.5, 1.0]],
+    }
+    row.update(overrides)
+    return row
+
+
+def test_tau_points_valid_profile_accepted() -> None:
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [_profile_row()]
+    assert validate_site(site) is not None
+
+
+def test_tau_points_empty_list_rejected() -> None:
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [_profile_row(**{CONF_HZ_TAU_POINTS: []})]
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "bad_tau_points"
+
+
+def test_tau_points_too_many_pairs_rejected() -> None:
+    site = _site()
+    pts = [[float(i) * 0.5, 0.5] for i in range(13)]  # 13 pairs, strictly ascending
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        _profile_row(**{CONF_HZ_ELEVATION: 20.0, CONF_HZ_TAU_POINTS: pts})
+    ]
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "bad_tau_points"
+
+
+def test_tau_points_not_ascending_rejected() -> None:
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        _profile_row(**{CONF_HZ_TAU_POINTS: [[4.5, 0.0], [4.5, 0.3], [9.5, 1.0]]})
+    ]
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "bad_tau_points"
+
+
+def test_tau_points_above_edge_rejected() -> None:
+    site = _site()
+    # Last knot 11.0 sits above the row's elevation_deg edge of 10.0.
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        _profile_row(**{CONF_HZ_TAU_POINTS: [[4.5, 0.0], [11.0, 1.0]]})
+    ]
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "tau_points_above_edge"
+
+
+def test_tau_points_negative_elevation_rejected() -> None:
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        _profile_row(**{CONF_HZ_TAU_POINTS: [[-1.0, 0.0], [9.5, 1.0]]})
+    ]
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "tau_points_above_edge"
+
+
+@pytest.mark.parametrize("tau", [-0.01, 1.5])
+def test_tau_points_tau_out_of_range_rejected(tau) -> None:
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        _profile_row(**{CONF_HZ_TAU_POINTS: [[4.5, tau], [9.5, 1.0]]})
+    ]
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "bad_tau"
+
+
+def test_tau_points_non_monotone_allowed() -> None:
+    # A canopy gap: tau dips at a higher knot. The validator must NOT enforce
+    # monotonicity (ADR §2.5 rule 5).
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        _profile_row(**{CONF_HZ_TAU_POINTS: [[4.5, 0.2], [6.5, 0.5], [8.0, 0.41], [9.5, 1.0]]})
+    ]
+    assert validate_site(site) is not None
+
+
+def test_tau_points_bare_valid_seasonal_accepted() -> None:
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        _profile_row(
+            **{
+                CONF_HZ_SEASONAL: True,
+                CONF_HZ_TAU_LEAFED: 0.0,
+                CONF_HZ_TAU_BARE: 0.5,
+                CONF_HZ_TAU_POINTS: [[4.5, 0.0], [6.5, 0.45], [9.5, 1.0]],
+                CONF_HZ_TAU_POINTS_BARE: [[4.5, 0.2], [6.5, 0.7], [9.5, 1.0]],
+            }
+        )
+    ]
+    assert validate_site(site) is not None
+
+
+def test_tau_points_bare_raster_mismatch_rejected() -> None:
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        _profile_row(
+            **{
+                CONF_HZ_SEASONAL: True,
+                CONF_HZ_TAU_LEAFED: 0.0,
+                CONF_HZ_TAU_BARE: 0.5,
+                CONF_HZ_TAU_POINTS: [[4.5, 0.0], [6.5, 0.45], [9.5, 1.0]],
+                # different el at the middle knot -> raster mismatch
+                CONF_HZ_TAU_POINTS_BARE: [[4.5, 0.2], [7.0, 0.7], [9.5, 1.0]],
+            }
+        )
+    ]
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "seasonal_points_mismatch"
+
+
+def test_tau_points_bare_without_leafed_points_rejected() -> None:
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        {
+            CONF_HZ_AZIMUTH: 80.0,
+            CONF_HZ_ELEVATION: 10.0,
+            CONF_HZ_TAU: 0.45,
+            CONF_HZ_SEASONAL: True,
+            CONF_HZ_TAU_LEAFED: 0.45,
+            CONF_HZ_TAU_BARE: 0.8,
+            # bare profile but NO leafed tau_points to blend against
+            CONF_HZ_TAU_POINTS_BARE: [[4.5, 0.2], [9.5, 1.0]],
+        }
+    ]
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "seasonal_points_mismatch"
+
+
+def test_diffuse_tau_valid_wall_accepted() -> None:
+    # A bright-wall row: opaque beam (tau 0) + diffuse override 0.5 (ADR §3.5).
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        {CONF_HZ_AZIMUTH: 195.0, CONF_HZ_ELEVATION: 90.0, CONF_HZ_TAU: 0.0,
+         CONF_HZ_DIFFUSE_TAU: 0.5},
+        {CONF_HZ_AZIMUTH: 360.0, CONF_HZ_ELEVATION: 90.0, CONF_HZ_TAU: 0.0,
+         CONF_HZ_DIFFUSE_TAU: 0.5},
+    ]
+    assert validate_site(site) is not None
+
+
+@pytest.mark.parametrize("val", [0.0, 0.8])
+def test_diffuse_tau_boundaries_accepted(val) -> None:
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        {CONF_HZ_AZIMUTH: 195.0, CONF_HZ_ELEVATION: 90.0, CONF_HZ_TAU: 0.0,
+         CONF_HZ_DIFFUSE_TAU: val},
+        {CONF_HZ_AZIMUTH: 360.0, CONF_HZ_ELEVATION: 90.0, CONF_HZ_TAU: 0.0},
+    ]
+    assert validate_site(site) is not None
+
+
+@pytest.mark.parametrize("val", [-0.01, 0.81, 1.0])
+def test_diffuse_tau_out_of_range_rejected(val) -> None:
+    # ADR §3.7: the 0.8 cap is a guard-rail; >0.8 (and <0) is rejected.
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        {CONF_HZ_AZIMUTH: 195.0, CONF_HZ_ELEVATION: 90.0, CONF_HZ_TAU: 0.0,
+         CONF_HZ_DIFFUSE_TAU: val},
+        {CONF_HZ_AZIMUTH: 360.0, CONF_HZ_ELEVATION: 90.0, CONF_HZ_TAU: 0.0},
+    ]
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "bad_diffuse_tau"
+
+
+def test_diffuse_tau_valid_on_semi_transparent_tree_row() -> None:
+    # ADR §3.7 rule 2: diffuse_tau is valid independently of tau / tau_points.
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        {CONF_HZ_AZIMUTH: 60.0, CONF_HZ_ELEVATION: 10.0, CONF_HZ_TAU: 0.0,
+         CONF_HZ_TAU_POINTS: [[4.5, 0.0], [9.5, 1.0]], CONF_HZ_DIFFUSE_TAU: 0.5},
+        {CONF_HZ_AZIMUTH: 100.0, CONF_HZ_ELEVATION: 10.0, CONF_HZ_TAU: 0.0},
+    ]
+    assert validate_site(site) is not None
+
+
+def test_diffuse_tau_round_trip_stable() -> None:
+    from balcony_solar_forecast.core.types import HorizonRow
+
+    row = HorizonRow(195.0, 90.0, 0.0, diffuse_tau=0.5)
+    again = HorizonRow.from_dict(row.to_dict())
+    assert again.diffuse_tau == row.diffuse_tau
+    assert again.to_dict() == row.to_dict()
+    # Only-when-set: a row without the override emits no key (byte-identical).
+    plain = HorizonRow(195.0, 90.0, 0.0)
+    assert CONF_HZ_DIFFUSE_TAU not in plain.to_dict()
+
+
+def test_tau_points_round_trip_stable() -> None:
+    from balcony_solar_forecast.core.types import HorizonRow
+
+    row = HorizonRow(
+        80.0, 10.0, 0.0,
+        tau_points=((4.5, 0.0), (6.5, 0.45), (9.5, 1.0)),
+    )
+    again = HorizonRow.from_dict(row.to_dict())
+    assert again.tau_points == row.tau_points
+    assert again.to_dict() == row.to_dict()
+
+
+# --------------------------------------------------------------------------
 # Inverter-group checks.
 # --------------------------------------------------------------------------
 
@@ -485,6 +707,10 @@ _ALL_ERROR_CODES = {
     "bad_horizon_elevation",
     "bad_tau",
     "seasonal_missing_tau",
+    "bad_tau_points",
+    "tau_points_above_edge",
+    "seasonal_points_mismatch",
+    "bad_diffuse_tau",
     "group_no_name",
     "group_dup_name",
     "group_no_planes",

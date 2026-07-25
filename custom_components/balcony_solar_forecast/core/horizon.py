@@ -188,7 +188,92 @@ def _row_tau(row: HorizonRow, doy: int) -> float:
     return bare + (leafed - bare) * f
 
 
-def transmittance_at(plane: PlaneConfig, sun_az: float, doy: int) -> float:
+def _tau_at_el(points: tuple[tuple[float, float], ...], el: float) -> float:
+    """Piecewise-linear tau at sun elevation ``el`` over sorted (el, tau) knots.
+
+    Below the first knot the first value holds; above the last knot the last
+    value holds (the profile only describes tau *below* the horizon edge, and
+    the operator anchors the top knot on the edge). No monotonicity assumed.
+    """
+    if el <= points[0][0]:
+        return points[0][1]
+    if el >= points[-1][0]:
+        return points[-1][1]
+    for i in range(len(points) - 1):
+        e0, t0 = points[i]
+        e1, t1 = points[i + 1]
+        if e0 <= el <= e1:
+            span = e1 - e0
+            if span <= 0.0:
+                return t0
+            return t0 + (t1 - t0) * (el - e0) / span
+    return points[-1][1]  # pragma: no cover - covered by the >= last-knot guard
+
+
+def _row_tau_at(row: HorizonRow, sun_el: float | None, doy: int | None) -> float:
+    """Effective transmittance of one row at sun elevation ``sun_el`` on ``doy``.
+
+    Without ``tau_points`` this is exactly :func:`_row_tau` (elevation-independent
+    scalar), so a legacy row is bit-identical to the pre-0.22 behaviour. With
+    ``tau_points`` the tau is a piecewise-linear function of ``sun_el``:
+
+      - ``sun_el is None`` evaluates the profile at its topmost knot (== the last
+        value), the elevation-agnostic fallback for callers that do not supply an
+        elevation — so the old ``transmittance_at`` signature keeps reproducing a
+        deterministic per-row value.
+      - a non-seasonal row (or ``doy is None``) uses the leafed ``tau_points``
+        directly (the static profile, analogous to the scalar ``tau`` fallback).
+      - a seasonal row blends the bare and leafed profiles PER KNOT by the
+        foliage fraction ("resolve before interpolate"), then evaluates the
+        blended profile at ``sun_el``. ``tau_points_bare`` supplies the bare
+        knots (same el raster, validated); when absent the scalar ``tau_bare``
+        (or ``tau`` fallback) is the bare value at every knot.
+    """
+    pts = row.tau_points
+    if pts is None:
+        # Scalar fallback == the pre-0.22 path: a resolved seasonal/static tau
+        # for an int doy, or the static ``tau`` when doy is None (the SVF
+        # pure-caller default, matching :func:`_interp_diffuse_tau`).
+        return row.tau if doy is None else _row_tau(row, doy)
+    if sun_el is None:
+        sun_el = pts[-1][0]
+    if not row.seasonal or doy is None:
+        return _tau_at_el(pts, sun_el)
+    f = foliage_fraction(doy)
+    bare_pts = row.tau_points_bare
+    if bare_pts is None:
+        bare_scalar = row.tau if row.tau_bare is None else row.tau_bare
+        blended = tuple((el, bare_scalar + (t - bare_scalar) * f) for el, t in pts)
+    else:
+        blended = tuple(
+            (el, bt + (t - bt) * f)
+            for (el, t), (_be, bt) in zip(pts, bare_pts, strict=False)
+        )
+    return _tau_at_el(blended, sun_el)
+
+
+def _row_diffuse_tau_at(
+    row: HorizonRow, sun_el: float | None, doy: int | None
+) -> float:
+    """Effective DIFFUSE transmittance of one row for the SVF wedge (v0.22 D2).
+
+    When ``diffuse_tau`` is set it OVERRIDES the beam tau in the diffuse
+    sky-view integral only: the blocked wedge radiates ``diffuse_tau`` of the
+    open sky instead of the beam ``tau`` / ``tau_points`` value — the effective
+    radiance of the obstructed sector relative to open sky (a bright wall
+    reflects ~0.5). It is NOT a transmission (SPEC §13) and never touches the
+    beam gate. Default None == the diffuse keeps using the beam tau
+    (:func:`_row_tau_at`), the pre-0.22 behaviour, so a row the operator did not
+    mark is bit-identical and the beam path stays byte-untouched.
+    """
+    if row.diffuse_tau is not None:
+        return row.diffuse_tau
+    return _row_tau_at(row, sun_el, doy)
+
+
+def transmittance_at(
+    plane: PlaneConfig, sun_az: float, doy: int, sun_el: float | None = None
+) -> float:
     """Beam transmittance (0..1) at ``sun_az`` on day-of-year ``doy``.
 
     Interpolates the effective tau between horizon rows (with 360 wrap).
@@ -196,9 +281,16 @@ def transmittance_at(plane: PlaneConfig, sun_az: float, doy: int) -> float:
     interpolation (via the cosine foliage ramp), so a mixed seasonal/static
     neighbourhood blends correctly. Returns 1.0 (fully transparent) for an
     empty table. The result is clamped to [0, 1].
+
+    ``sun_el`` (v0.22) resolves a row's inline ``tau_points`` elevation profile:
+    for each az-bracketing row the tau is first evaluated at ``sun_el`` (piecewise
+    linear in elevation), THEN interpolated linearly in azimuth — a row without a
+    profile contributes its scalar tau unchanged. ``sun_el=None`` reproduces the
+    exact pre-0.22 behaviour: legacy rows use their scalar tau, a profiled row is
+    evaluated at its topmost knot.
     """
     val = _interp_rows(
-        _sorted_rows(plane.horizon), sun_az, lambda r: _row_tau(r, doy)
+        _sorted_rows(plane.horizon), sun_az, lambda r: _row_tau_at(r, sun_el, doy)
     )
     if val is None:
         return 1.0
@@ -292,12 +384,12 @@ def _interp_diffuse_tau(rows, az_deg: float, doy: int | None) -> float:  # noqa:
     Same effective-tau interpolation as :func:`transmittance_at` (seasonal rows
     resolved for ``doy`` BEFORE interpolation via the foliage ramp), but accepts
     ``doy=None`` to interpolate each row's STATIC ``tau`` — the sky-view factor's
-    pure-caller default. Returns 1.0 (fully transparent) for an empty table.
+    pure-caller default. A row's ``diffuse_tau`` (v0.22 D2), when set, OVERRIDES
+    its beam tau here (:func:`_row_diffuse_tau_at`); a row without it is
+    bit-identical to the pre-0.22 path (a wall-free / diffuse-free table
+    round-trips unchanged). Returns 1.0 (fully transparent) for an empty table.
     """
-    if doy is None:
-        val = _interp_rows(rows, az_deg, lambda r: r.tau)
-    else:
-        val = _interp_rows(rows, az_deg, lambda r: _row_tau(r, doy))
+    val = _interp_rows(rows, az_deg, lambda r: _row_diffuse_tau_at(r, None, doy))
     if val is None:
         return 1.0
     return 0.0 if val < 0.0 else 1.0 if val > 1.0 else val
@@ -326,6 +418,89 @@ def _semi_transparent_column(h_deg: float, tau: float, az_rad: float,
     return tau * full + (1.0 - tau) * above
 
 
+def _profile_knot_elevations(
+    rows: tuple[HorizonRow, ...],
+) -> tuple[float, ...]:
+    """Sorted unique interior knot elevations across all rows' ``tau_points``.
+
+    These are the elevations at which the diffuse band-integral segments the
+    blocked wedge (§2.1). Empty when no row carries a profile — the caller then
+    takes the fast scalar path. A superset (knots from every row, not just the
+    two az-bracketing ones) only ADDS segment boundaries where tau is already
+    continuous, so the midpoint quadrature stays correct.
+    """
+    els: set[float] = set()
+    for r in rows:
+        if r.tau_points is not None:
+            for el, _t in r.tau_points:
+                els.add(el)
+    return tuple(sorted(els))
+
+
+def _band_column(
+    h_deg: float, az_deg: float, az_rad: float, az_p_rad: float, beta_rad: float,
+    rows: tuple[HorizonRow, ...], doy: int | None, knot_els: tuple[float, ...],
+) -> float:
+    """Per-azimuth visible-sky contribution with an ELEVATION-PROFILED horizon.
+
+    The band generalisation of :func:`_semi_transparent_column`: the blocked
+    wedge ``[0, h]`` is segmented at the profile knots and each segment carries
+    its midpoint tau (az-interpolated at the segment-midpoint elevation via the
+    same machinery as :func:`transmittance_at`). Uses the closed-form
+    ``_inner_elevation_integral`` differences, so a segment ``[e0, e1]``
+    contributes ``tau_mid * (inner(e0) - inner(e1))``. The all-open / all-opaque
+    columns are returned by the same expressions the flat normaliser and the
+    opaque path use, so a uniform tau=1 profile yields SVF == 1 and a uniform
+    tau=0 profile reproduces the opaque reduction bit-exactly (the ADR extremes).
+    """
+    above = _inner_elevation_integral(h_deg, az_rad, az_p_rad, beta_rad)
+    if h_deg <= 0.0:
+        return above  # no wedge below the line (== the flat/open column)
+
+    bounds = [0.0]
+    for el in knot_els:
+        if 0.0 < el < h_deg:
+            bounds.append(el)
+    bounds.append(h_deg)
+
+    wedge = 0.0
+    all_zero = True
+    all_one = True
+    for i in range(len(bounds) - 1):
+        e0 = bounds[i]
+        e1 = bounds[i + 1]
+        if e1 <= e0:
+            continue
+        el_mid = 0.5 * (e0 + e1)
+        # Diffuse wedge: a row's ``diffuse_tau`` (v0.22 D2) overrides its beam tau
+        # here; a row without it keeps the beam ``tau_points`` profile unchanged,
+        # so a profile-only config is bit-identical to the pre-D2 band integral.
+        tau_mid = _interp_rows(
+            rows, az_deg, lambda r, _el=el_mid: _row_diffuse_tau_at(r, _el, doy)
+        )
+        if tau_mid is None:
+            tau_mid = 1.0
+        elif tau_mid < 0.0:
+            tau_mid = 0.0
+        elif tau_mid > 1.0:
+            tau_mid = 1.0
+        if tau_mid != 0.0:
+            all_zero = False
+        if tau_mid != 1.0:
+            all_one = False
+        band = (
+            _inner_elevation_integral(e0, az_rad, az_p_rad, beta_rad)
+            - _inner_elevation_integral(e1, az_rad, az_p_rad, beta_rad)
+        )
+        wedge += tau_mid * band
+    if all_zero:
+        return above  # opaque wedge, bit-identical to the fully-opaque column
+    if all_one:
+        # fully-open column, computed like the flat normaliser so SVF == 1 exactly
+        return _inner_elevation_integral(0.0, az_rad, az_p_rad, beta_rad)
+    return above + wedge
+
+
 def _diffuse_view_integral(
     plane: PlaneConfig, use_horizon: bool, doy: int | None = None
 ) -> float:
@@ -339,21 +514,31 @@ def _diffuse_view_integral(
     unobstructed case). ``doy`` resolves seasonal rows via the foliage ramp;
     None uses each row's static tau. Midpoint azimuth quadrature; the horizon is
     piecewise linear so 1-deg steps are ample.
+
+    When any row carries an elevation profile (``tau_points``) the blocked wedge
+    is integrated as an elevation BAND (:func:`_band_column`); otherwise the
+    fast scalar column (:func:`_semi_transparent_column`) is used unchanged, so a
+    plane without any profile is BIT-IDENTICAL to the pre-0.22 quadrature.
     """
     beta = math.radians(plane.tilt_deg)
     az_p = math.radians(plane.azimuth_deg)
     rows = _sorted_rows(plane.horizon)
+    knot_els = _profile_knot_elevations(rows) if use_horizon else ()
+    profiled = bool(knot_els)
     daz = 2.0 * math.pi / _SVF_AZ_SAMPLES
     acc = 0.0
     for i in range(_SVF_AZ_SAMPLES):
         az_deg = (i + 0.5) * (360.0 / _SVF_AZ_SAMPLES)
         az_rad = math.radians(az_deg)
-        if use_horizon:
+        if not use_horizon:
+            acc += _inner_elevation_integral(0.0, az_rad, az_p, beta)
+        elif profiled:
+            h = interp_elevation(plane, az_deg)
+            acc += _band_column(h, az_deg, az_rad, az_p, beta, rows, doy, knot_els)
+        else:
             h = interp_elevation(plane, az_deg)
             tau = _interp_diffuse_tau(rows, az_deg, doy)
             acc += _semi_transparent_column(h, tau, az_rad, az_p, beta)
-        else:
-            acc += _inner_elevation_integral(0.0, az_rad, az_p, beta)
     return acc * daz / math.pi
 
 

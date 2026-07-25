@@ -104,7 +104,7 @@ def make_fake_horizon(wall_planes, wall_az, wall_from_el=90.0):
             return wall_from_el
         return 0.0
 
-    def fake_transmittance_at(plane, sun_az, doy):
+    def fake_transmittance_at(plane, sun_az, doy, sun_el=None):
         if plane.name in wall_planes and sun_az >= wall_az:
             return 0.0
         return 1.0
@@ -550,7 +550,7 @@ class TestBeamRefSeries:
         def interp_a(plane, sun_az):
             return 90.0 if (plane.name == "S" and sun_az >= 200.0) else 0.0
 
-        def tau_a(plane, sun_az, doy):
+        def tau_a(plane, sun_az, doy, sun_el=None):
             return static_tau if (plane.name == "S" and sun_az >= 200.0) else 1.0
 
         monkeypatch.setattr(engine.horizon, "interp_elevation", interp_a)
