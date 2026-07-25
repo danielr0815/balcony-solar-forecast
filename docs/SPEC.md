@@ -1122,3 +1122,50 @@ nicht gesetzt, wird abgelehnt (kein Überschreiben fremd erstellter Dashboards);
 eine leere oder marker-tragende Konfig wird frei überschrieben — das ist der
 idempotente Refresh (z. B. nach einem Integrations-Update). Die Antwort meldet
 `dashboard`, `views`, `cards` und die weggelassenen `missing_entities`.
+
+### 15.6 Re-Bootstrap per Aktion (In-Process, ohne Token, §6)
+
+Der 320-Tage-Re-Bootstrap (§6) läuft ab v0.23 auch IN-PROCESS als Aktion
+`balcony_solar_forecast.run_bootstrap` in den Entwicklerwerkzeugen — ohne
+Long-Lived-Token, ohne `site.json`, mit der **Live-Config** dieser Installation.
+Der externe `scripts/backfill.py` bleibt der Offline-/CI-Weg; beide teilen sich
+denselben HA-freien Kern (`core/bootstrap_build.py` für die Mathematik,
+`core/openmeteo_backfill.py` für den Open-Meteo-Previous-Runs-Fetch), sodass die
+emittierten Bootstrap-Dicts byte-identisch sind.
+
+**Datenbeschaffung in-process:** (a) Wetter über die integrationseigene
+aiohttp-Session (`aiohttp_client.async_get_clientsession`) vom Previous-Runs-API
+(Fallback Historical-Forecast wie im CLI), in ~90-Tage-Fenster gechunkt, damit
+ein Mehrjahres-Request kein Provider-Limit reißt; (b) Actuals über einen
+**In-Process-`statistics_during_period`-Read im Recorder-Executor** (NICHT die
+WebSocket-API) über die `actual_entity` der Planes — numerische Zeilen-`start`
+sind hier Epoch-**SEKUNDEN**, der Reduce nutzt daher das
+`_actuals._stat_row_hour_key`-Muster (Größentest gegen den historischen
+Sekunden-vs-Millisekunden-Bug, regressionsgetestet). Die Site-Config kommt direkt
+vom Coordinator (`coordinator._site`).
+
+**Ausführung & Lock:** Der reine Rekonstruktions-Kern (`accumulate_days`) läuft
+im Executor (CPU-Job, ~90 s Desktop / 2–5 min im HA-Container für 320 Tage) mit
+INFO-Fortschrittslogs je ~50 Tage. Ein **einziger** `asyncio.Lock` je Coordinator
+(`_bootstrap_lock`) serialisiert den Lauf gegen den nächtlichen Trainingsjob (der
+Nightly-Wrapper hält denselben Lock und WARTET auf einen laufenden Bootstrap,
+statt zu überspringen — keine Trainingsnacht geht verloren); ein zweiter
+gleichzeitiger `run_bootstrap` sieht `locked()` und wird sofort mit einem klaren
+`ServiceValidationError` abgewiesen.
+
+**Sicherheit (dry_run-Default):** `dry_run` ist per **Default TRUE**
+(Versehens-Schutz) — der erste Aufruf holt, rekonstruiert und liefert nur die
+Summary, OHNE den Store zu berühren. Erst ein expliziter `dry_run: false`
+importiert über denselben Pfad wie `import_bootstrap`
+(`coordinator.async_import_bootstrap`: Rollback-Snapshot, Clamp/Cap, Quantile,
+Refresh), sodass die importierte Shademap sofort die nächste servierte Kurve
+formt. Die Aktion liefert IMMER die Summary
+`{days_used, days_skipped, date_range, weather_source, bias_cells,
+shademap_channels, shademap_bins, shademap_samples, quantile_bins,
+quantile_samples, imported, duration_s}`; im Dry-Run zusätzlich ein `hint` auf
+`dry_run: false`. Fehlerbilder (kein Recorder, keine Actuals im Zeitraum,
+Open-Meteo-Fehler, leerer/invertierter Zeitraum, keine `actual_entity`, keine
+nutzbaren Tage) werden als `ServiceValidationError` mit verständlicher Meldung
+zurückgegeben, nie als Traceback. Default-Zeitraum: `end` = gestern (lokal),
+`start` = heute − `BOOTSTRAP_DEFAULT_MAX_DAYS` (Deckel; Tage ohne Actuals werden
+übersprungen, ein zu weiter Start korrigiert sich selbst).

@@ -166,6 +166,28 @@
         }
       }
     },
+    "run_bootstrap": {
+      "name": "Re-bootstrap learners (in-process)",
+      "description": "Rebuild the day-ahead bias, shademap and quantile learner states from your measured history in-process, with no token and using this install's live config (no offline backfill script). Safe by default: dry_run is ON, so the first call only reports a summary; run again with dry_run off to import (a rollback snapshot is taken). Takes a few minutes; a second concurrent call is rejected.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "Target config entry. Omit only if a single site is configured."
+        },
+        "start_date": {
+          "name": "Start date",
+          "description": "First day to reconstruct, ISO YYYY-MM-DD. Omit to default to ~400 days ago (days without measured history are skipped)."
+        },
+        "end_date": {
+          "name": "End date",
+          "description": "Last day to reconstruct, ISO YYYY-MM-DD. Omit to default to yesterday."
+        },
+        "dry_run": {
+          "name": "Dry run",
+          "description": "Leave on (default) to fetch, reconstruct and return the summary without touching the learners. Turn off to import the rebuilt bootstrap."
+        }
+      }
+    },
     "dump_shademap": {
       "name": "Dump shademap",
       "description": "Return the learned shademap as a polar table (sun azimuth x elevation) per channel, for visual comparison against known obstructions.",

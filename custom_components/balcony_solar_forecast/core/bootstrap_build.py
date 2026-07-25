@@ -877,6 +877,7 @@ def accumulate_days(
     *,
     svf_by_plane: dict[str, float],
     tz: timezone | None = None,
+    progress_cb=None,
 ) -> BootstrapAccumulator:
     """Fold every processable UTC day into a fresh accumulator.
 
@@ -886,24 +887,34 @@ def accumulate_days(
     Pure given the fetched inputs — the network layer (Open-Meteo Previous-Runs
     + HA WebSocket / recorder LTS) lives in the callers. Returns the populated
     accumulator ready for :func:`build_bootstrap_json`.
+
+    ``progress_cb`` (optional) is invoked as ``progress_cb(done, total)`` after
+    each processed calendar day — the in-process ``run_bootstrap`` action uses it
+    to emit periodic INFO logs across a multi-minute reconstruction (the reduce
+    itself stays pure; the callback must not raise). ``None`` (the CLI) is a
+    no-op.
     """
     acc = BootstrapAccumulator()
     by_day = _group_by_day(weather)
-    for dkey in sorted(by_day.keys()):
+    day_keys = sorted(by_day.keys())
+    total = len(day_keys)
+    for done, dkey in enumerate(day_keys, start=1):
         day_weather = by_day[dkey]
         day_actuals = _filter_actuals_for_day(hourly_actuals, dkey)
         if not day_actuals:
             acc.days_skipped += 1
             _LOGGER.debug("Day %s: no measured actuals, skipped", dkey)
-            continue
-        used = process_day_hourly(
-            acc, site, day_weather, day_actuals,
-            svf_by_plane=svf_by_plane, tz=tz,
-        )
-        if used:
-            acc.days_used += 1
         else:
-            acc.days_skipped += 1
+            used = process_day_hourly(
+                acc, site, day_weather, day_actuals,
+                svf_by_plane=svf_by_plane, tz=tz,
+            )
+            if used:
+                acc.days_used += 1
+            else:
+                acc.days_skipped += 1
+        if progress_cb is not None:
+            progress_cb(done, total)
     return acc
 
 

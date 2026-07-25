@@ -1,9 +1,23 @@
 # Learner Bootstrap Backfill (SPEC §6)
 
-`scripts/backfill.py` warm-starts the three learner states (day-ahead bias,
-shademap, quantile bands) from ~2 years of history so the system does not meet
-its first live winter cold. It is a **one-shot, dev-machine** job (never runs on
-Home Assistant). It:
+The re-bootstrap warm-starts the three learner states (day-ahead bias, shademap,
+quantile bands) from ~2 years of history so the system does not meet its first
+live winter cold. There are **two ways to run it**, sharing one HA-free core so
+they emit byte-identical bootstraps:
+
+1. **`run_bootstrap` action (the standard way, v0.23+)** — in-process, from
+   Home Assistant's Developer Tools → Actions. No token, no `site.json`, no dev
+   machine: it uses this install's live config, fetches the weather itself and
+   reads your recorder statistics directly. **Start here** — see
+   [Re-bootstrap from Home Assistant](#re-bootstrap-from-home-assistant-run_bootstrap).
+
+2. **`scripts/backfill.py` CLI (offline / CI alternative)** — the original
+   one-shot dev-machine job that writes a `bootstrap.json` you then import with
+   the `import_bootstrap` action. Use it when you want the artefact on disk
+   (CI, review, archival) or to bootstrap an install you cannot reach the
+   Developer Tools of. The rest of this document covers the CLI.
+
+Both paths do the same thing. The CLI:
 
 1. fetches Open-Meteo **Previous-Runs** day-1-lead forecasts-as-issued for the
    site (archived since 01/2024);
@@ -26,6 +40,58 @@ integration runs fully without it. If the Previous-Runs radiation is
 unavailable, the script degrades to the plain **Historical Forecast API** and
 prints a loud warning that the data is *analysis, not as-issued forecast*
 (still useful for the geometric shademap, weaker for the weather-error bias).
+
+---
+
+## Re-bootstrap from Home Assistant (`run_bootstrap`)
+
+The **standard, no-token** path. In Home Assistant → Developer Tools → Actions,
+call `balcony_solar_forecast.run_bootstrap`. It runs the SAME reconstruction as
+the CLI but in-process: it fetches Open-Meteo Previous-Runs weather with the
+integration's own HTTP session and reads your recorder's long-term statistics for
+the planes' `actual_entity` ids directly — no long-lived token, no `site.json`
+(it uses this install's live config).
+
+**Safe by default:** `dry_run` is **ON**, so the first call only fetches,
+reconstructs and returns a summary — it does **not** touch the learners. Review
+the summary, then run again with `dry_run: false` to actually import (a rollback
+snapshot is taken first, exactly like `import_bootstrap`).
+
+```yaml
+# 1) Dry run — see what it would build (nothing changes):
+action: balcony_solar_forecast.run_bootstrap
+data:
+  dry_run: true          # the default; shown for clarity
+
+# 2) Apply it — imports into the live learners:
+action: balcony_solar_forecast.run_bootstrap
+data:
+  dry_run: false
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `entry_id` | no | Target config entry. Omit if a single site is configured. |
+| `start_date` | no | First day `YYYY-MM-DD`. Default: ~400 days ago (days without measured history are skipped). |
+| `end_date` | no | Last day `YYYY-MM-DD`. Default: yesterday (local). |
+| `dry_run` | no | **Default `true`.** `false` imports the rebuilt bootstrap. |
+
+The response is always a summary: `days_used`, `days_skipped`, `date_range`,
+`weather_source` (`as_issued` or `analysis_fallback`), `bias_cells`,
+`shademap_channels`/`shademap_bins`/`shademap_samples`, `quantile_bins`/
+`quantile_samples`, `imported` and `duration_s`; on a dry run it also carries a
+`hint` to re-run with `dry_run: false`.
+
+**Notes.** The run takes a few minutes (~2–5 min in the HA container for ~320
+days) and logs progress every ~50 reconstructed days; the CPU work runs off the
+event loop. It is serialised against the nightly training job by a per-site lock,
+and a second concurrent `run_bootstrap` is rejected with a clear error. Because it
+reads the recorder **in-process** (epoch-seconds statistics rows, not the
+WebSocket's milliseconds), it uses the same hour-key normalisation as the nightly
+actuals reader. A forecast-relevant config edit (see
+[Re-bootstrap after a config campaign](#re-bootstrap-after-a-config-campaign-v022-and-later))
+is the main reason to run it; the `BOOTSTRAP_MAX_BIN_N` cap keeps it low-risk and
+the rollback snapshot lets you undo it.
 
 ---
 
@@ -142,10 +208,13 @@ follow it:
    trained against the modeled diffuse floor and ungated beam; a `tau_points` /
    `diffuse_tau` edit changes both references, so bins learned under the OLD prior
    carry a now-stale meaning (e.g. a morning bin that absorbed the missing diffuse
-   floor as phantom beam gain). Re-run the backfill **against the new site config**
-   and import it — the `BOOTSTRAP_MAX_BIN_N` cap makes this low-risk (a few weeks
-   of live 15-min data outweigh the seed regardless), and the rollback snapshot
-   lets you undo it if needed:
+   floor as phantom beam gain). The **easiest** way is the `run_bootstrap` action
+   (above): it already uses the edited live config, so just call it with
+   `dry_run: false` — no export, no token. The offline CLI equivalent (when you
+   want the `bootstrap.json` on disk) re-runs the backfill **against the new site
+   config** and imports it — the `BOOTSTRAP_MAX_BIN_N` cap makes either low-risk (a
+   few weeks of live 15-min data outweigh the seed regardless), and the rollback
+   snapshot lets you undo it if needed:
 
    ```sh
    # export the EDITED site object to site.json first (config-flow shape), then:
@@ -226,10 +295,15 @@ side; planes without one are skipped.
 ## Tests
 
 The reconstruction / bootstrap **math** is a Home-Assistant-free core module —
-`custom_components/balcony_solar_forecast/core/bootstrap_build.py` — shared
-between this CLI and the in-process `run_bootstrap` action; `scripts/backfill.py`
-is the thin CLI wrapper that owns only the network fetch + JSON output (and
-re-exports the core names so `backfill.<name>` keeps working).
+`custom_components/balcony_solar_forecast/core/bootstrap_build.py` — and the
+Open-Meteo Previous-Runs weather fetch is likewise shared
+(`core/openmeteo_backfill.py`, session injected); both are used by this CLI AND
+the in-process `run_bootstrap` action. `scripts/backfill.py` is the thin CLI
+wrapper that owns only the aiohttp session + the WebSocket LTS pull + JSON output
+(and re-exports the shared names so `backfill.<name>` keeps working). The action
+itself is covered by `tests/test_run_bootstrap.py` (schema/registration, the
+dry_run default, the import path, the concurrency lock, range defaults, the
+seconds-epoch recorder reduce and every error picture).
 
 Pure-math coverage (no network) lives in
 `tests/core/test_backfill_math.py` — payload parsing, per-plane reconstruction,

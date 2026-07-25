@@ -54,6 +54,55 @@ import_bootstrap:
       selector:
         text:
 
+run_bootstrap:
+  name: Re-bootstrap learners (in-process)
+  description: >-
+    Rebuild the day-ahead bias, shademap and quantile learner states from your
+    measured history WITHOUT the offline backfill script — in-process, with no
+    token and using this install's live config. Fetches Open-Meteo Previous-Runs
+    weather and reads the recorder's long-term statistics for the planes'
+    measured entities, then reconstructs the bootstrap. Safe by default: dry_run
+    is ON, so the first call only reports a summary; run again with dry_run off
+    to actually import (a rollback snapshot is taken, exactly like
+    import_bootstrap). Runs for a few minutes; a second concurrent call is
+    rejected.
+  fields:
+    entry_id:
+      name: Config entry
+      description: >-
+        Target config entry. Omit only if a single site is configured.
+      example: "1234567890abcdef"
+      required: false
+      selector:
+        text:
+    start_date:
+      name: Start date
+      description: >-
+        First day to reconstruct, ISO YYYY-MM-DD. Omit to default to ~400 days
+        ago (days without measured history are skipped automatically).
+      example: "2024-07-01"
+      required: false
+      selector:
+        text:
+    end_date:
+      name: End date
+      description: >-
+        Last day to reconstruct, ISO YYYY-MM-DD. Omit to default to yesterday.
+      example: "2026-07-01"
+      required: false
+      selector:
+        text:
+    dry_run:
+      name: Dry run
+      description: >-
+        Leave ON (default) to fetch, reconstruct and return the summary WITHOUT
+        touching the learners. Turn OFF to import the rebuilt bootstrap into the
+        live learner states.
+      required: false
+      default: true
+      selector:
+        boolean:
+
 rollback_learners:
   name: Roll back learner state
   description: >-

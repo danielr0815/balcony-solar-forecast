@@ -641,6 +641,17 @@ SERVICE_SUGGEST_SHADE_GROUPS = "suggest_shade_groups"  # data-driven shade-group
 SERVICE_GET_SHADE_PROFILE = "get_shade_profile"  # read-only shade profile for a module/date (card compare)
 SERVICE_GET_ISSUED_FORECAST = "get_issued_forecast"  # read-only issued day-ahead curve for a past date (card)
 SERVICE_RESET_DAY_AHEAD_BIAS = "reset_day_ahead_bias"  # clear the day-ahead RLS bias cells (retrain from scratch)
+SERVICE_RUN_BOOTSTRAP = "run_bootstrap"  # in-process re-bootstrap (no token, live config)
+
+# run_bootstrap default look-back cap when no explicit start_date is given: the
+# earliest day the in-process re-bootstrap will fetch/reconstruct (today - N).
+# Days without measured actuals in the range are skipped, so an over-wide cap is
+# self-correcting; ~400 d covers a full year plus margin (SPEC §6).
+BOOTSTRAP_DEFAULT_MAX_DAYS = 400
+# Chunk width (days) for the in-process Open-Meteo weather fetch: the range is
+# split into consecutive windows so one huge multi-year request cannot trip a
+# provider limit, mirroring the CLI's WebSocket LTS chunking (SPEC §6).
+BOOTSTRAP_WEATHER_CHUNK_DAYS = 90
 
 # --- Bootstrap JSON schema (SPEC §6; scripts/backfill.py <-> store) ---------
 # The import service validates + clamps and REJECTS unknown schema versions.
