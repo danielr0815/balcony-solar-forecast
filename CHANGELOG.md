@@ -5,13 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.22.0] - 2026-07-25
 
 Elevation-dependent horizon τ + a diffuse-radiance override for blocked sectors
-(ADR "Elevationsabhängiges Horizont-tau + Diffus-Floor/Wand-SVF"). Both reshape
-the RAW physics curve, so they ship as one release with a single learning reset.
-Existing configs (no new fields) are **byte-identical** and are **not** re-seeded
-on upgrade.
+(ADR-0022 "Elevationsabhängiges Horizont-tau + Diffus-Floor/Wand-SVF", accepted).
+Both reshape the RAW physics curve, so they ship as one release with a single
+learning reset. Existing configs (no new fields) are **byte-identical** and are
+**not** re-seeded on upgrade.
 
 ### Added
 
@@ -53,6 +53,33 @@ on upgrade.
   (SPEC §13, ADR §2.7.6). After migrating, run `reset_day_ahead_bias` (or rely on
   the automatic fingerprint n-cap) and re-run the offline bootstrap
   (docs/BACKFILL.md).
+
+### Tests
+
+- Bit-identity property tests for legacy rows (`transmittance_at` /
+  `sky_view_factor` unchanged when neither `tau_points` nor `diffuse_tau` is set),
+  `tau_points` golden values (below/between/on-knot/above-knot/above-edge, az
+  interpolation between profile and scalar rows, wrap segment), SVF band-integral
+  vs. brute-force quadrature, and the seasonal **regression** tests: the
+  synthetic late-August dawn run yields ~0 beam with `tau_points` where the interim
+  az-ramp fabricated a phantom beam — the design's core proof — plus foliage-blend
+  per knot across the year boundary.
+
+### Migration (operator)
+
+- **One config campaign, one learning reset.** In the options flow (ObjectSelector)
+  replace the interim az-ramp rows with `tau_points` in all planes and add
+  `diffuse_tau` on the wall rows (M4/M8 az195–360, M1/M5 az295–360). Then run the
+  `reset_day_ahead_bias` service (or rely on the automatic config-fingerprint
+  n-cap) **and** re-run the offline LTS bootstrap so shademap bins that were
+  learned against the old τ=0 / missing-diffuse prior are rebuilt.
+- **Transition week expected.** The served 04–06Z curve overshoots for ~3–7 days
+  while the day-ahead-bias cells re-learn against the shifted raw curve — this is
+  the clamp cell settling, **not** a regression; do not roll back.
+- **Documented open gap.** After D2, clear-morning M4/M8 stays ~×3 underestimated
+  (~90–150 Wh/day site-wide, the beam-bound rear-pickup share). This is left to the
+  bias learner and to a future `rear_beam_fraction` (ADR-0022 Option D3, deferred);
+  it is intentionally **not** masked with inflated `diffuse_tau` values.
 
 ## [0.21.0] - 2026-07-25
 
