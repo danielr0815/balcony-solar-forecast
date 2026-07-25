@@ -21,6 +21,13 @@ Four guards, all pure (no Home Assistant, no fixtures — plain file reads):
   (d) **Signpost completeness.** Every top-level section of the SPEC is picked
       up by the SPEC §0 signpost (topic table or the historical list), so a new
       section cannot grow past the map that is supposed to route readers to it.
+  (e) **Document-reference integrity.** Every repo-relative ``docs/…`` path
+      named in a tracked markdown file, in ``custom_components/`` or in
+      ``tests/`` must resolve to a **tracked** file. Guard (a) protects section
+      numbers; this one protects the file paths around them — including the
+      case that motivated it, a finished ADR that lived only on the author's
+      disk while three tracked files (one of them shipped to users via HACS)
+      already pointed at it.
 
 Deliberately *lower bounds*: a mere word match proves the name appears, not
 that the prose is good. The point is that the mechanical gap — a field or an
@@ -31,7 +38,10 @@ fails a test instead of aging quietly.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 _REPO = Path(__file__).resolve().parents[1]
 _SPEC_PATH = _REPO / "docs" / "SPEC.md"
@@ -249,4 +259,91 @@ def test_every_top_level_section_is_covered_by_the_signpost():
         + "\n  ".join(uncovered)
         + "\n\nAdd a row to the topic table (normative) or an entry to the"
         " 'Historisch, nicht normativ' list."
+    )
+
+
+# ---------------------------------------------------------------------------
+# (e) Document-reference integrity.
+# ---------------------------------------------------------------------------
+
+# A repo-relative docs path. The lookbehind keeps foreign paths out: a quoted
+# `battery-manager-ha/docs/orders/…` belongs to another repository and must not
+# be resolved here. Trailing "*" / "…" mark an intentional family reference
+# ("docs/adr/ADR-0022-*"), a trailing "/" a directory.
+_DOC_REF_RE = re.compile(r"(?<![\w/.\-])docs/[A-Za-z0-9._/*…-]+")
+# Sentence punctuation that can cling to a path in prose ("see docs/SPEC.md.").
+_REF_TRAILERS = ".,;:)`'\"„“”"
+
+
+def _tracked_files() -> set[str]:
+    """Repo-relative POSIX paths of all git-tracked files."""
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=_REPO,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as err:  # pragma: no cover
+        pytest.skip(f"git not available for tracked-file lookup: {err}")
+    return {p for p in proc.stdout.split("\0") if p}
+
+
+def _scan_doc_refs() -> list[tuple[str, int, str]]:
+    """Every ``docs/…`` reference as ``(relative path, line, reference)``.
+
+    Scanned: tracked markdown anywhere plus the code/test sources already
+    covered by guard (a). CI workflows are deliberately excluded — they carry
+    anchored *grep patterns* over doc paths (with the dot backslash-escaped),
+    which are not references and would only produce false positives.
+    """
+    found: list[tuple[str, int, str]] = []
+    for rel in sorted(_tracked_files()):
+        suffix = Path(rel).suffix.lower()
+        is_source = rel.startswith(("custom_components/", "tests/"))
+        if not (suffix == ".md" or (is_source and suffix in _SCAN_SUFFIXES)):
+            continue
+        path = _REPO / rel
+        if not path.is_file():  # tracked but deleted in the working tree
+            continue
+        text = _read(path)
+        for m in _DOC_REF_RE.finditer(text):
+            ref = m.group(0).rstrip(_REF_TRAILERS)
+            found.append((rel, text.count("\n", 0, m.start()) + 1, ref))
+    return found
+
+
+def _doc_ref_resolves(ref: str, tracked: set[str]) -> bool:
+    if ref.endswith("/"):  # directory: at least one tracked file below it
+        prefix = ref
+        return any(f.startswith(prefix) for f in tracked)
+    if ref.endswith(("*", "…")):  # family reference: prefix match
+        prefix = ref.rstrip("*…")
+        return any(f.startswith(prefix) for f in tracked)
+    return ref in tracked
+
+
+def test_every_doc_reference_resolves_to_a_tracked_file():
+    """A ``docs/…`` path named in the repo must exist *in the repo*.
+
+    Existence on the author's machine is not enough: the reference is read by
+    someone with a fresh clone, so the target has to be committed. That is the
+    exact failure this guard was written for — const.py, SPEC §6 and the
+    changelog citing an ADR that was still untracked.
+    """
+    refs = _scan_doc_refs()
+    # Sanity: a broken regex or glob would make this test vacuously green.
+    assert len(refs) > 20, f"doc-reference scanner found only {len(refs)}"
+
+    tracked = _tracked_files()
+    dangling = sorted(
+        {(ref, rel, line) for rel, line, ref in refs
+         if not _doc_ref_resolves(ref, tracked)}
+    )
+    assert not dangling, (
+        "documents referenced in tracked files but not tracked themselves:\n"
+        + "\n".join(f"  {ref}  <- {rel}:{line}" for ref, rel, line in dangling)
+        + "\n\nFix by committing the referenced document, or by rewriting the"
+        " reference so it names no path."
     )

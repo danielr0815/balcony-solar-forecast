@@ -725,8 +725,9 @@ prüft erst beim **Import** und nur Lat/Lon + Ebenennamen. Deshalb gilt:
   `bifacial_beam_gain`- / `tau_points`- / `diffuse_tau`-Schlüssel, also
   `ALBEDO_DEFAULT` 0,2 und `BEAM_GAIN_DEFAULT` 1,0). Gibt man beides an, gewinnt
   `--site`. Die inhaltliche Neufassung des Auslieferungs-Defaults (neutraler
-  Minimal-Standort + Onboarding) ist Gegenstand von ADR-0023, nicht dieses
-  Abschnitts.
+  Minimal-Standort + Onboarding) ist Gegenstand von ADR-0023
+  (`docs/adr/ADR-0023-onboarding-standortkonfiguration.md`, Status *Proposed*),
+  nicht dieses Abschnitts.
 
 ### 6.1 Ensemble-Wetter-Unsicherheitsbänder (v0.16, optional, Standard AUS)
 

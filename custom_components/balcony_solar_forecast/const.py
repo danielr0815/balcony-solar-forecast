@@ -377,7 +377,7 @@ def _plane(name, az, tilt, wp, horizon, actual_entity):
 # The substantive rework — a neutral, entity-free minimal default plus a real
 # onboarding flow, so a foreign install does not inherit this plant's geometry
 # and its eight hardcoded Hoymiles entity ids — is the subject of
-# docs/adr/ADR-0023 (onboarding / site configuration) and NOT this comment.
+# docs/adr/ADR-0023-onboarding-standortkonfiguration.md and NOT this comment.
 # ===========================================================================
 DEFAULT_SITE = {
     CONF_LATITUDE: 48.547853,

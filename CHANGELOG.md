@@ -38,7 +38,8 @@ was never affected (it always uses the live config).
   and there are no `albedo` / `bifacial_beam_gain` / `tau_points` /
   `diffuse_tau` keys (so albedo 0.2 and beam gain 1.0 apply). **No geometry was
   changed** — the numbers stay the test anchor; the substantive rework of the
-  shipped default belongs to the onboarding ADR (ADR-0023).
+  shipped default belongs to the onboarding ADR
+  (`docs/adr/ADR-0023-onboarding-standortkonfiguration.md`).
 
 ### Docs
 
@@ -55,6 +56,16 @@ was never affected (it always uses the live config).
   be named in the SPEC, and every top-level section must be reachable from the
   §0 signpost. `CLAUDE.md`, `CONTRIBUTING.md`, the PR template and the CI
   workflow carry the matching reminder.
+- **ADR-0023 (onboarding / site configuration) is now in the repository**
+  (`docs/adr/ADR-0023-onboarding-standortkonfiguration.md`, status *Proposed*):
+  the analysis and staged plan behind the honest `DEFAULT_SITE` label — why the
+  shipped reference site blocks a general release (foreign geometry *and* eight
+  hardcoded entity ids that starve every learner), and the MVP/v1/expansion cut.
+  `const.py`, SPEC §6 and this file point at it, so the guard below applies.
+- **`tests/test_spec_integrity.py` gained a fifth guard:** every repo-relative
+  `docs/…` path named in a tracked markdown file, in `custom_components/` or in
+  `tests/` must resolve to a **tracked** file — a document that exists only on
+  the author's disk is a dangling link in every fresh clone.
 
 ## [0.23.0] - 2026-07-25
 
