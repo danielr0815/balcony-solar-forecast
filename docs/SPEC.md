@@ -956,6 +956,14 @@ P10/P50/P90-**Multiplikatoren** des Bins (`QUANTILE_P_LOW` / `QUANTILE_P_HIGH`).
   `n ≥ QUANTILE_MIN_SAMPLES` **und** Evidenz aus `days ≥ QUANTILE_MIN_DAYS`
   **verschiedenen Tagen**. Beides kommt aus demselben `ring_evidence`-Gate, das
   auch die Diagnose speist, damit Anzeige und Verhalten nicht auseinanderlaufen.
+- **Altzustand ohne Datumsstempel.** Ein Ring aus der Zeit vor dem Datumsfenster
+  enthält Samples ohne ISO-Datum. Diese zählen **nicht** als null Tage, sondern
+  über eine beweisbare Untergrenze mit: `quantiles.ring_evidence` liefert
+  `effective_days = |verschiedene Datumsstempel| + ⌈ungestempelt /
+  QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN⌉` — die wenigsten Tage, auf die sich so
+  viele per-Tag-gedeckelte Samples verteilt haben können. Ohne diese Regel
+  bliebe ein voll trainierter Alt-Ring dauerhaft unter dem Gate und alle Bänder
+  kollabiert.
 - **Cold Start:** ein Bin unter dem Gate kollabiert auf P50
   (p10 == p50 == p90) — **keine Fake-Spreizung und kein Fake-Shift**.
 - Nur Stunden, deren korrigierte Prognose `QUANTILE_MIN_FORECAST_WH`
@@ -1752,7 +1760,13 @@ pvlib/pandas erzeugt und als `tests/core/reference_vectors.json` eingecheckt;
 pvlib und pandas sind **niemals** Laufzeitabhängigkeiten (§2).
 
 **Sonnenstands-Anker:** gegen PVGIS verifizierte Referenzwerte mit dem
-Genauigkeitsziel < 0,3° aus §4.1, plus das Tiefstands-/Nachtverhalten.
+Genauigkeitsziel < 0,3° aus §4.1, plus das Tiefstands-/Nachtverhalten. Die
+verbindlichen Anker gelten für die Breite des Auslieferungs-Defaults (§7.8,
+≈ 48,55° N) und sind die Mittags-Elevationen der beiden Sonnenwenden:
+**Sommersonnenwende 64,9° ± 0,4** und **Wintersonnenwende 18,0° ± 0,4**; dazu
+die Konventionsanker Mittagsazimut ≈ 180° und Juni-Sonnenaufgangsazimut im
+NO-Quadranten (0 = Nord, §20.1). Die Toleranz ist absichtlich weiter als das
+Genauigkeitsziel, weil die Anker durch Abtasten der Tageskurve bestimmt werden.
 
 **HA-Freiheit des Kerns:** `tests/core/` importiert die Kernmodule direkt aus
 ihren Dateien und läuft mit bare pytest ohne HA — die Invariante aus §2 ist damit
