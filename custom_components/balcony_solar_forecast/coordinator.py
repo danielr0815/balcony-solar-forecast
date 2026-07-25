@@ -970,20 +970,41 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         config change reloads the entry (``_async_reload_entry``), so setup — and
         this check — runs again. While HA is still starting we defer to
         EVENT_HOMEASSISTANT_STARTED so the source integration has had its turn.
+
+        The deferred unsub is dropped once the event has fired: HA's
+        ``_OneTimeListener`` removes itself before invoking the callback
+        (core.py) and nulls its own handle, so a SECOND call of the same unsub —
+        which is exactly what a plain ``async_on_unload(async_listen_once(...))``
+        does on the next unload/reload — hits ``EventBus._async_remove_listener``
+        with a listener that is no longer in the list and logs
+        "Unable to remove unknown job listener" as an ERROR with traceback. That
+        would fire on the very path this tranche's repair card recommends
+        (cold boot -> card -> reconfigure -> entry reload). Guarding the unsub
+        keeps the unload path clean (an entry unloaded BEFORE HA finished
+        starting still detaches the listener) without the bogus second removal.
         """
         if self.hass.state is CoreState.running:
             self.async_check_actual_channels()
             return
 
+        fired = False
+
         @callback
         def _on_started(_event: Event) -> None:
+            nonlocal fired
+            fired = True
             self.async_check_actual_channels()
 
-        self.entry.async_on_unload(
-            self.hass.bus.async_listen_once(
-                EVENT_HOMEASSISTANT_STARTED, _on_started
-            )
+        unsub = self.hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STARTED, _on_started
         )
+
+        @callback
+        def _detach_if_pending() -> None:
+            if not fired:
+                unsub()
+
+        self.entry.async_on_unload(_detach_if_pending)
 
     @callback
     def async_check_actual_channels(self) -> dict[str, Any]:

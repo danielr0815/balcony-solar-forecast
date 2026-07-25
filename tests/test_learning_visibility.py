@@ -667,3 +667,200 @@ def test_nightly_records_the_outcome_of_every_actuals_read(monkeypatch):
     )
 
     assert calls == [(date(2026, 7, 20), True)]
+
+
+# ---------------------------------------------------------------------------
+# (7) Entry setup actually schedules the channel check — both branches.
+#
+# Without these, replacing the ``async_schedule_channel_health_check()`` call in
+# ``async_setup_entry`` with ``pass`` left the whole suite green: detector (1)
+# would run in NO real installation and nothing would notice. The deferral to
+# EVENT_HOMEASSISTANT_STARTED is the load-bearing part (it is the reason the
+# check does not hang off ``_reconcile_config_fingerprint``), so both branches
+# and the unsubscribe bookkeeping are pinned here.
+# ---------------------------------------------------------------------------
+
+
+class _OnceBus:
+    """``async_listen_once`` with HA's real removal semantics.
+
+    HA's ``_OneTimeListener`` removes itself BEFORE invoking the callback, so
+    the unsub handed back to the caller is already spent once the event fired;
+    calling it again reaches ``EventBus._async_remove_listener``, which logs
+    "Unable to remove unknown job listener" as an ERROR with traceback. This
+    fake raises on that second removal so the guard is tested, not assumed.
+    """
+
+    def __init__(self) -> None:
+        self.listeners: dict[str, list] = {}
+        self.unsub_calls = 0
+
+    def async_listen_once(self, event_type, callback_):
+        self.listeners.setdefault(event_type, []).append(callback_)
+
+        def _unsub() -> None:
+            self.unsub_calls += 1
+            self.listeners[event_type].remove(callback_)  # ValueError if spent
+
+        return _unsub
+
+    def fire(self, event_type, event=None) -> None:
+        for callback_ in list(self.listeners.get(event_type, ())):
+            self.listeners[event_type].remove(callback_)  # HA removes first
+            callback_(event)
+
+
+class _StartupHass:
+    def __init__(self, state) -> None:
+        self.state = state
+        self.bus = _OnceBus()
+
+
+class _StartupEntry:
+    def __init__(self) -> None:
+        self.unloads: list = []
+
+    def async_on_unload(self, func) -> None:
+        self.unloads.append(func)
+
+    def run_unloads(self) -> None:
+        for func in self.unloads:
+            func()
+
+
+def _scheduling_coordinator(state):
+    """Real ``async_schedule_channel_health_check`` on a bare coordinator."""
+    from custom_components.balcony_solar_forecast.coordinator import (
+        BalconySolarCoordinator,
+    )
+
+    coord = BalconySolarCoordinator.__new__(BalconySolarCoordinator)
+    coord.hass = _StartupHass(state)
+    coord.entry = _StartupEntry()
+    checks: list[int] = []
+    coord.async_check_actual_channels = lambda: checks.append(1)
+    return coord, checks
+
+
+def test_setup_entry_schedules_the_channel_health_check(monkeypatch):
+    """Wiring guard: detector (1) is inert unless entry setup arms it."""
+    import asyncio
+
+    from custom_components import balcony_solar_forecast as integration
+
+    calls: list[str] = []
+
+    class _StubCoordinator:
+        def __init__(self, hass, entry, *, fetcher, store) -> None:
+            self.hass = hass
+
+        async def async_prime_from_store(self) -> None:
+            pass
+
+        async def async_config_entry_first_refresh(self) -> None:
+            pass
+
+        def async_start_nightly_job(self) -> None:
+            calls.append("nightly")
+
+        def async_schedule_channel_health_check(self) -> None:
+            calls.append("channel_health")
+
+        async def async_startup_catchup(self) -> None:
+            pass
+
+    class _StubStore:
+        def __init__(self, hass, entry_id) -> None:
+            pass
+
+        async def async_load(self) -> None:
+            pass
+
+    class _ConfigEntries:
+        async def async_forward_entry_setups(self, entry, platforms) -> None:
+            pass
+
+    class _Hass:
+        def __init__(self) -> None:
+            self.data: dict = {}
+            self.bus = _OnceBus()
+            self.config_entries = _ConfigEntries()
+
+    class _Entry(_StartupEntry):
+        entry_id = "abc"
+
+        def async_create_background_task(self, hass, coro, name=None) -> None:
+            coro.close()  # never scheduled here; do not warn about it
+
+        def add_update_listener(self, listener):
+            return lambda: None
+
+    monkeypatch.setattr(integration, "OpenMeteoFetcher", lambda session: object())
+    monkeypatch.setattr(integration, "ForecastStore", _StubStore)
+    monkeypatch.setattr(integration, "BalconySolarCoordinator", _StubCoordinator)
+    monkeypatch.setattr(
+        integration, "async_get_clientsession", lambda hass: object()
+    )
+
+    assert asyncio.run(integration.async_setup_entry(_Hass(), _Entry())) is True
+    assert "channel_health" in calls
+
+
+def test_channel_check_runs_at_once_when_home_assistant_is_running():
+    from homeassistant.core import CoreState
+
+    coord, checks = _scheduling_coordinator(CoreState.running)
+    coord.async_schedule_channel_health_check()
+
+    assert checks == [1]
+    assert coord.hass.bus.listeners == {}  # nothing deferred
+    assert coord.entry.unloads == []
+
+
+def test_channel_check_is_deferred_until_home_assistant_started():
+    """Cold boot: checking before the inverter integration registered its
+    entities would raise a false 'channel missing' alarm on every restart."""
+    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+    from homeassistant.core import CoreState
+
+    coord, checks = _scheduling_coordinator(CoreState.starting)
+    coord.async_schedule_channel_health_check()
+
+    assert checks == []  # not yet — HA is still starting
+    assert len(coord.hass.bus.listeners[EVENT_HOMEASSISTANT_STARTED]) == 1
+
+    coord.hass.bus.fire(EVENT_HOMEASSISTANT_STARTED)
+
+    assert checks == [1]
+
+
+def test_unload_after_the_deferred_check_fired_does_not_unsubscribe_again():
+    """A spent one-time unsub called again logs an ERROR + traceback — on the
+    exact path the repair card recommends (boot -> reconfigure -> reload)."""
+    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+    from homeassistant.core import CoreState
+
+    coord, checks = _scheduling_coordinator(CoreState.starting)
+    coord.async_schedule_channel_health_check()
+    coord.hass.bus.fire(EVENT_HOMEASSISTANT_STARTED)
+
+    coord.entry.run_unloads()  # must not raise
+
+    assert checks == [1]
+    assert coord.hass.bus.unsub_calls == 0
+
+
+def test_unload_before_start_detaches_the_pending_listener():
+    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+    from homeassistant.core import CoreState
+
+    coord, checks = _scheduling_coordinator(CoreState.starting)
+    coord.async_schedule_channel_health_check()
+
+    coord.entry.run_unloads()
+
+    assert coord.hass.bus.unsub_calls == 1
+    assert coord.hass.bus.listeners[EVENT_HOMEASSISTANT_STARTED] == []
+
+    coord.hass.bus.fire(EVENT_HOMEASSISTANT_STARTED)
+    assert checks == []  # detached: a dead entry never runs the check
