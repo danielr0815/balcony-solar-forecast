@@ -284,10 +284,16 @@ check runs at **import** time and only compares lat/lon + plane names. So since
 **0.23.1** the CLI refuses to guess:
 
 - **`--site site.json` is required.** Export the site object your config flow
-  stored: Settings → Devices & Services → **Balcony Solar Forecast** →
-  *Configure* → the `site` object selector holds the live object; copy it into
-  `site.json`. (The same object sits on the HA host in
-  `.storage/core.config_entries` as the entry's `options.site`.) The shape is
+  stored: Settings → Devices & Services → **Balcony Solar Forecast** → the
+  entry's three-dot menu → **Reconfigure** (*Neu konfigurieren*) → the `site`
+  object selector holds the live object; copy it into `site.json`. It is
+  **not** behind the *Configure* button — that opens the options flow, which
+  renders the runtime tunables only (the site is *structural* config, same
+  reason as the AC meter in [DASHBOARD.md](DASHBOARD.md)). (On the HA host the
+  same object sits in `.storage/core.config_entries` as the entry's
+  `data.site`; structural keys live in `entry.data`, and the reconfigure flow
+  strips them out of `options`, so an `options.site` exists only on legacy
+  entries that were never reconfigured.) The shape is
   `SiteConfig.from_dict`: `latitude`, `longitude`, `planes[]` with
   `name`/`azimuth_deg`/`tilt_deg`/`wp`/`efficiency`/`horizon`/`actual_entity`/
   `shade_group`/`ross_coeff`, plus `groups[]`. Each plane needs its

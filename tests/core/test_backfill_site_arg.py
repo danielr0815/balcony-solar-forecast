@@ -61,6 +61,27 @@ def test_missing_site_raises_with_an_actionable_message():
     assert "--use-default-site" in msg
 
 
+def test_missing_site_message_points_at_reconfigure_and_data_site():
+    """The export recipe must match the flows this integration actually has.
+
+    ``CONF_SITE`` is structural: it is rendered ONLY by the reconfigure step
+    (three-dot menu -> Reconfigure / "Neu konfigurieren"), never by the
+    *Configure* button, whose options schema carries the runtime tunables
+    alone. And it is stored in ``entry.data`` — ``async_step_reconfigure``
+    even strips the structural keys out of ``entry.options`` — so on the HA
+    host the key is ``data.site``, not ``options.site``. Sending the operator
+    to *Configure* / ``options.site`` is a dead end on any current entry.
+    """
+    msg = bf.MISSING_SITE_MESSAGE
+
+    assert "Reconfigure" in msg
+    assert "data.site" in msg
+    # "Configure" may only appear as the explicit NOT-this warning.
+    for line in msg.splitlines():
+        if "Configure" in line and "Reconfigure" not in line:
+            assert "NOT" in line, line
+
+
 def test_main_exits_2_on_missing_site_without_touching_the_network(monkeypatch):
     """The CLI entry point reports the failure as exit code 2, not a traceback.
 
