@@ -523,7 +523,17 @@ def test_async_setup_docstring_matches_services_yaml():
         "services registered by async_setup but not named in its docstring: "
         + ", ".join(unnamed)
     )
-    assert re.search(rf"\b{len(services)}\b", doc), (
-        f"async_setup's docstring does not state the service count ({len(services)});"
-        " it read 'All six services' while services.yaml had ten."
+    # Bound to the SENTENCE that states the count, not to "a digit somewhere in
+    # the text": ``\b10\b`` was satisfied by any stray 10 (a §10 reference, a
+    # version, a count of something else), so the guard passed on a docstring
+    # that had gone stale.
+    stated = re.search(r"All (\w+) services\b", doc)
+    assert stated is not None, (
+        "async_setup's docstring must state the count as 'All <n> services ...' "
+        "so the count is machine-checkable"
+    )
+    assert stated.group(1) == str(len(services)), (
+        f"async_setup's docstring says 'All {stated.group(1)} services' while "
+        f"services.yaml registers {len(services)}; it read 'All six services' "
+        "for four releases while services.yaml had grown to ten."
     )

@@ -35,6 +35,14 @@ optional, self-gating (a missing/implausible meter falls back to the configured
 repair card next to the blocking one would dilute exactly the signal that needs
 action, so a missing AC meter is reported in the diagnostics dump and logged
 once — visible to whoever is debugging, silent to whoever is not.
+
+**One card per root cause.** The same argument applies BETWEEN the two
+detectors: a copied reference site raises (1) at once and would, a working week
+later, raise (2) on top of it — two cards, one root, one fix. So while (1)
+stands, (2) keeps counting and stays visible in the dump but raises no card of
+its own. Nothing is lost by that: the presence card already names the very
+channels the dead-channel gate trips over, and the suppression lifts the moment
+those channels resolve, so a streak with a genuinely different cause surfaces.
 """
 
 from __future__ import annotations
@@ -96,9 +104,14 @@ def check_actual_channels(coord) -> dict[str, object]:
     site = coord._site
     try:
         missing = missing_actual_entities(coord.hass, site)
-    except Exception:  # pragma: no cover - defensive
+    except Exception:
         _LOGGER.debug("Measurement-channel check failed", exc_info=True)
-        return {"available": False}
+        # Publish the failure instead of leaving the LAST successful summary
+        # standing: a stale "everything resolves" in the dump is the same lie
+        # this module exists to end. Honest unknown beats confident stale.
+        unknown: dict[str, object] = {"available": False}
+        coord._channel_health = unknown
+        return unknown
 
     configured = sum(
         1 for p in getattr(site, "planes", ()) or () if getattr(p, "actual_entity", None)
@@ -158,17 +171,25 @@ def record_actuals_outcome(coord, day: date, *, accepted: bool) -> None:
     """
     try:
         _record_actuals_outcome(coord, day, accepted=accepted)
-    except Exception:  # pragma: no cover - bookkeeping is never fatal
-        _LOGGER.debug("Learning-health bookkeeping failed for %s", day, exc_info=True)
+    except Exception:
+        # Never fatal — but never silent either. A store that cannot carry the
+        # streak means all three stalled cards are dead, so this must be
+        # findable in the log rather than swallowed at debug level.
+        _LOGGER.warning(
+            "Learning-health bookkeeping failed for %s; the discard streak did "
+            "not advance and the learning-stalled cards cannot fire",
+            day, exc_info=True,
+        )
 
 
 def _record_actuals_outcome(coord, day: date, *, accepted: bool) -> None:
+    # Deliberately NOT getattr-with-fallback: ``ForecastStore`` always carries
+    # this pair, so a silent skip would only ever mask a rename — the exact
+    # drift that leaves the streak permanently at zero while every test that
+    # uses a stand-in store stays green. A missing method now raises into the
+    # caller's handler above, which logs it.
     store = coord._store
-    getter = getattr(store, "get_learning_health", None)
-    setter = getattr(store, "set_learning_health", None)
-    if getter is None or setter is None:
-        return  # older store schema in flight: skip, never crash
-    health = dict(getter())
+    health = dict(store.get_learning_health())
     iso = day.isoformat()
 
     if accepted:
@@ -185,7 +206,7 @@ def _record_actuals_outcome(coord, day: date, *, accepted: bool) -> None:
             last_discard_day=None,
             last_accepted_day=iso,
         )
-        setter(health)
+        store.set_learning_health(health)
         _clear_stalled_issues(coord)
         return
 
@@ -216,9 +237,21 @@ def _record_actuals_outcome(coord, day: date, *, accepted: bool) -> None:
         last_discard_modules=modules,
         last_discard_day=iso,
     )
-    setter(health)
+    store.set_learning_health(health)
 
     if streak < LEARNING_STALLED_STREAK_DAYS:
+        return
+    if _presence_card_stands(coord):
+        # The channel-presence card is already up and points at the SAME root
+        # (a channel that does not exist cannot deliver rows, so the dead-channel
+        # gate fires forever). A second card next to it would dilute exactly the
+        # signal that needs action — the same argument the AC meter loses on.
+        # The streak itself keeps counting and stays visible in the dump.
+        _LOGGER.debug(
+            "Streak of %d suppressed: the channel-presence card already names "
+            "the missing channel(s) %s", streak, coord._channel_health.get("missing"),
+        )
+        _clear_stalled_issues(coord)
         return
     reason = str(dropout.get("reason"))
     issue_id = ISSUE_LEARNING_STALLED_BY_REASON.get(reason)
@@ -242,6 +275,18 @@ def _record_actuals_outcome(coord, day: date, *, accepted: bool) -> None:
     )
 
 
+def _presence_card_stands(coord) -> bool:
+    """True when detector (1) already raised the missing-channel card.
+
+    Read off the summary detector (1) published (``coord._channel_health``), so
+    there is no second lookup path that could disagree with the card on screen.
+    """
+    health = getattr(coord, "_channel_health", None)
+    if not isinstance(health, dict) or not health.get("available"):
+        return False
+    return bool(health.get("missing"))
+
+
 def _clear_stalled_issues(coord, *, keep: str | None = None) -> None:
     """Delete every learning-stalled repair issue except ``keep``."""
     for issue_id in ISSUE_LEARNING_STALLED_BY_REASON.values():
@@ -256,13 +301,10 @@ def _day_was_ours(coord, iso: str) -> bool:
     back over pre-install history finds no issued snapshot for those days and
     stays silent, while a running install that discards day after day does not.
     """
-    getter = getattr(coord._store, "get_issued", None)
-    if not callable(getter):
-        return False
-    try:
-        return getter(iso) is not None
-    except Exception:  # pragma: no cover - defensive
-        return False
+    # Direct, not getattr-with-fallback: ``ForecastStore.get_issued`` always
+    # exists, and a silent ``False`` here would mean NO day ever counts — the
+    # detector would be permanently, invisibly off. The caller's handler logs.
+    return coord._store.get_issued(iso) is not None
 
 
 def learning_health_summary(coord) -> dict[str, object]:
@@ -271,13 +313,12 @@ def learning_health_summary(coord) -> dict[str, object]:
     Remote diagnosis without log access: WHY the last day was thrown away, which
     channels caused it, how many days in a row, and when a day was last accepted.
     """
-    getter = getattr(coord._store, "get_learning_health", None)
-    if not callable(getter):
-        return {"available": False}
     try:
-        health = dict(getter())
+        health = dict(coord._store.get_learning_health())
     except Exception as err:  # noqa: BLE001 -- diagnostics must not raise
-        return {"error": repr(err)}
+        # Honest unknown WITH the cause, never a bare ``available: False`` that
+        # reads like "the feature is off" when the accessor is actually broken.
+        return {"available": False, "error": repr(err)}
     health["available"] = True
     health["streak_threshold"] = LEARNING_STALLED_STREAK_DAYS
     return health

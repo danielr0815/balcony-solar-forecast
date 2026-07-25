@@ -744,6 +744,16 @@ Lern-Blocker. Eine zweite Repair-Karte neben der blockierenden würde genau das
 Signal verwässern, das Handlung erfordert; ein fehlender AC-Zähler erscheint
 daher im Diagnose-Dump (`actual_channels.ac_missing`) und einmal im Log.
 
+**Eine Karte je Ursache (verbindlich).** Dasselbe Argument gilt **zwischen**
+(a) und (b): Ein kopierter Referenzstandort löst (a) sofort aus und würde eine
+Arbeitswoche später zusätzlich (b) auslösen — zwei Karten, eine Wurzel, ein
+Handgriff. Solange die Präsenzkarte `actual_entity_missing` steht, zählt die
+Strähne daher weiter und bleibt im Dump sichtbar, setzt aber **keine** eigene
+`learning_stalled_*`-Karte. Es geht dabei nichts verloren: Die Präsenzkarte
+nennt genau die Kanäle, über die das Dead-Channel-Gate stolpert, und die
+Unterdrückung endet, sobald die Kanäle auflösen — eine Strähne mit wirklich
+anderer Ursache erscheint also weiterhin.
+
 ## 6. Unsicherheit (Phase 4, optional)
 
 Nichtparametrische historische Simulation: empirische P10/P50/P90 aus dem

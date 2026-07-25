@@ -58,6 +58,12 @@ every single night — forever — while the status entities kept reporting
   **additively inside schema v3, no version bump**, following the same pattern
   as `inverter_cal_state` and `config_fingerprint`: a store written before
   0.23.1 reads back neutral and every other section stays byte-faithful.
+- **One repair card per root cause.** A copied reference site would otherwise
+  collect two cards for one fix: `actual_entity_missing` at setup, and a week
+  later `learning_stalled_dead_channel` on top of it. While the missing-channel
+  card stands, the streak keeps counting and stays visible in the diagnostics
+  dump but raises no card of its own; the suppression lifts as soon as the
+  channels resolve, so a stall with a genuinely different cause still surfaces.
 - **The diagnostics dump answers "why is nothing being learned?"** through the
   accessors it already used, not a third code path:
   `store.learning_health` (cause, modules, streak, threshold, last accepted day)

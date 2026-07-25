@@ -81,6 +81,31 @@ class _FakeHass:
         self.states = _FakeStates(known)
 
 
+class _FakeEntityRegistry:
+    def __init__(self, known: set[str]) -> None:
+        self._known = set(known)
+
+    def async_get(self, entity_id: str):
+        return object() if entity_id in self._known else None
+
+
+class _RegistryHass(_FakeHass):
+    """``hass`` whose ENTITY REGISTRY is reachable, unlike :class:`_FakeHass`.
+
+    ``er.async_get`` is a ``@singleton(DATA_REGISTRY)`` lookup in ``hass.data``,
+    so seeding that key hands ``_entity_known`` a real registry hit instead of
+    the ``except`` path every other fake here falls into.
+    """
+
+    def __init__(
+        self, states: set[str] | None = None, registered: set[str] | None = None
+    ) -> None:
+        from homeassistant.helpers import entity_registry as er
+
+        super().__init__(states)
+        self.data: dict = {er.DATA_REGISTRY: _FakeEntityRegistry(registered or set())}
+
+
 class _HealthStore:
     """Store stand-in for the learning-health section + the issued ring."""
 
@@ -257,6 +282,80 @@ def test_missing_ac_meter_is_diagnostics_only_no_repair_issue():
     assert summary["ac_missing"] is True
 
 
+def test_present_ac_meter_is_not_reported_missing():
+    """The true negative. Without it, ``ac_missing = bool(ac_entity)`` — every
+    configured AC meter flagged as absent — passes, and the dump (the ONLY
+    carrier of this verdict, since it deliberately raises no card) lies."""
+    coord = _Coord(
+        site=_site(ac_entity="sensor.ac_meter"),
+        hass=_FakeHass({"sensor.m1", "sensor.m2", "sensor.ac_meter"}),
+    )
+
+    summary = coord_check(coord)
+
+    assert summary["ac_configured"] is True
+    assert summary["ac_missing"] is False
+
+
+def test_no_ac_meter_configured_is_not_missing():
+    """``ac_configured`` false must not drag ``ac_missing`` true with it."""
+    coord = _Coord(hass=_FakeHass({"sensor.m1", "sensor.m2"}))
+
+    summary = coord_check(coord)
+
+    assert summary["ac_configured"] is False
+    assert summary["ac_missing"] is False
+
+
+def test_entity_known_only_to_the_registry_counts_as_present():
+    """THE cold-start false-alarm guard, on the branch that implements it.
+
+    A disabled / restoring entity has a registry entry but NO state object. The
+    docstring promises that counts as PRESENT — otherwise every restart, and
+    every entity the operator disabled on purpose, raises "channel missing".
+    Every other fake in this module has no ``hass.data``, so the registry lookup
+    lands in ``except`` and returns False: this branch was never executed.
+    """
+    coord = _Coord(hass=_RegistryHass(states=set(), registered={"sensor.m1",
+                                                               "sensor.m2"}))
+
+    summary = coord_check(coord)
+
+    assert coord.raised == []
+    assert summary["missing"] == []
+
+
+def test_entity_in_neither_states_nor_registry_is_missing():
+    """The other side: with a WORKING registry, an unknown id is still missing —
+    the registry branch must answer, not merely never say no."""
+    coord = _Coord(hass=_RegistryHass(states={"sensor.m1"}, registered=set()))
+
+    summary = coord_check(coord)
+
+    assert summary["missing"] == ["M2 (sensor.m2)"]
+    assert _issue_ids(coord) == [ISSUE_ACTUAL_ENTITY_MISSING]
+
+
+def test_a_failed_check_publishes_unknown_instead_of_last_nights_summary():
+    """Honest unknown beats confident stale: if the check itself blows up, the
+    diagnostics dump must not keep serving the previous run's verdict."""
+
+    class _ExplodingSite:
+        @property
+        def planes(self):
+            raise RuntimeError("boom")
+
+    coord = _Coord(hass=_FakeHass({"sensor.m1", "sensor.m2"}))
+    good = coord_check(coord)
+    assert good["available"] is True  # a summary IS standing
+
+    coord._site = _ExplodingSite()
+    summary = coord_check(coord)
+
+    assert summary == {"available": False}
+    assert coord._channel_health == {"available": False}
+
+
 def coord_check(coord) -> dict:
     return _channel_health.check_actual_channels(coord)
 
@@ -398,7 +497,12 @@ def test_read_failure_without_a_dropout_reason_is_not_counted():
 
 
 def test_store_without_the_health_section_is_a_noop():
-    """An older store schema in flight must never crash the nightly job."""
+    """A store that cannot carry the section must never crash the nightly job.
+
+    It must also not be swallowed silently: the streak is the only thing that
+    makes the three stalled cards fire, so a store that cannot hold it is a
+    defect that belongs in the log at WARNING, not at debug.
+    """
 
     class _Bare:
         pass
@@ -411,9 +515,188 @@ def test_store_without_the_health_section_is_a_noop():
     assert coord.raised == []
 
 
+def test_bookkeeping_failure_is_logged_loudly(caplog):
+    """Regression guard for the silent-skip design this replaced."""
+    import logging
+
+    class _Bare:
+        pass
+
+    coord = _Coord(store=_Bare())
+    coord._last_actuals_dropout = {"reason": DROPOUT_REASON_DEAD_CHANNEL}
+
+    with caplog.at_level(logging.WARNING, logger=_channel_health.__name__):
+        coord._record_actuals_outcome(_DAY, accepted=False)
+
+    assert any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# (2b) One card per root cause: the presence card outranks the streak card.
+# ---------------------------------------------------------------------------
+
+
+def test_streak_card_is_suppressed_while_the_presence_card_stands():
+    """A copied reference site has ONE root and needs ONE card.
+
+    The missing channel raises ``actual_entity_missing`` at setup and then
+    trips the dead-channel gate every night forever; adding a second card a
+    working week later dilutes the signal without adding a single fact — the
+    presence card already names those exact channels (SPEC §5.1).
+    """
+    coord = _Coord()
+    coord._channel_health = {
+        "available": True,
+        "configured": 2,
+        "missing": ["M2 (sensor.m2)"],
+    }
+
+    _run_streak(coord, DROPOUT_REASON_DEAD_CHANNEL, LEARNING_STALLED_STREAK_DAYS)
+
+    assert coord.raised == []
+    # Suppressed, NOT unmeasured: the dump still carries the full streak.
+    assert coord._store.health["discard_streak"] == LEARNING_STALLED_STREAK_DAYS
+    assert coord._store.health["last_discard_reason"] == DROPOUT_REASON_DEAD_CHANNEL
+
+
+def test_streak_card_appears_once_the_channels_resolve():
+    """The suppression must lift, or fixing the ids would hide a REAL stall.
+
+    Same store, same streak: the only thing that changed is that the presence
+    check now finds every channel — a streak that persists past that has a
+    different cause and must get its own card.
+    """
+    coord = _Coord()
+    coord._channel_health = {"available": True, "configured": 2, "missing": []}
+
+    _run_streak(coord, DROPOUT_REASON_FROZEN_CHANNEL, LEARNING_STALLED_STREAK_DAYS)
+
+    assert _issue_ids(coord) == [ISSUE_LEARNING_STALLED_FROZEN_CHANNEL]
+
+
+def test_suppression_needs_a_completed_presence_check():
+    """An unavailable summary is not evidence of a missing channel — treating
+    "we do not know" as "the other card has it" would suppress forever."""
+    coord = _Coord()
+    coord._channel_health = {"available": False, "missing": ["M2 (sensor.m2)"]}
+
+    _run_streak(coord, DROPOUT_REASON_DEAD_CHANNEL, LEARNING_STALLED_STREAK_DAYS)
+
+    assert _issue_ids(coord) == [ISSUE_LEARNING_STALLED_DEAD_CHANNEL]
+
+
 # ---------------------------------------------------------------------------
 # (3) Persistence across a restart, through the REAL store validators.
 # ---------------------------------------------------------------------------
+
+
+class _DiskStub:
+    """The four ``Store`` coroutines ``ForecastStore`` injects in tests."""
+
+    def __init__(self) -> None:
+        self.delay_saves = 0
+
+    async def async_load(self):
+        return None
+
+    def async_delay_save(self, data_func, delay) -> None:
+        self.delay_saves += 1
+
+    async def async_save(self, data) -> None:  # pragma: no cover - unused
+        pass
+
+    async def async_remove(self) -> None:  # pragma: no cover - unused
+        pass
+
+
+def _real_store():
+    """A REAL ``ForecastStore`` on an in-memory disk stub (no hass needed)."""
+    from custom_components.balcony_solar_forecast.store import ForecastStore
+
+    return ForecastStore(None, "entry", store=_DiskStub())  # type: ignore[arg-type]
+
+
+def test_detector_runs_on_the_real_forecast_store_not_just_a_stand_in():
+    """THE binding test: the detector against the SHIPPED store object.
+
+    Every other test here hands the detector a hand-written stand-in, so a
+    rename of ``ForecastStore.get_learning_health`` / ``set_learning_health``
+    — or a set-method that quietly stops writing — left the whole suite green
+    while in the real installation the streak never advances, all three
+    ``learning_stalled_*`` cards are dead and ``store_stats()`` reports
+    ``learning_health.available: false`` forever. That is exactly the
+    "falsely unavailable" lie SPEC §8 records as fixed.
+    """
+    from datetime import timedelta
+
+    store = _real_store()
+    coord = _Coord(store=store)
+
+    for offset in range(LEARNING_STALLED_STREAK_DAYS):
+        day = _DAY + timedelta(days=offset)
+        store.record_issued(day.isoformat(), {"status": "ok"})  # a day we ran
+        coord._last_actuals_dropout = {
+            "reason": DROPOUT_REASON_DEAD_CHANNEL,
+            "modules": ["M2"],
+            "entities": ["sensor.m2"],
+        }
+        coord._record_actuals_outcome(day, accepted=False)
+
+    last_day = _DAY + timedelta(days=LEARNING_STALLED_STREAK_DAYS - 1)
+
+    # (a) The real store actually holds what the detector wrote.
+    health = store.get_learning_health()
+    assert health["discard_streak"] == LEARNING_STALLED_STREAK_DAYS
+    assert health["last_discard_reason"] == DROPOUT_REASON_DEAD_CHANNEL
+    assert health["last_discard_modules"] == ["M2"]
+    assert health["last_discard_day"] == last_day.isoformat()
+
+    # (b) The diagnostics accessor reads it back through the same real store.
+    summary = coord.learning_health_summary()
+    assert summary["available"] is True
+    assert summary["discard_streak"] == LEARNING_STALLED_STREAK_DAYS
+    assert summary["last_discard_reason"] == DROPOUT_REASON_DEAD_CHANNEL
+    assert summary["last_discard_day"] == last_day.isoformat()
+
+    # (c) The card fired off real persisted state.
+    assert _issue_ids(coord) == [ISSUE_LEARNING_STALLED_DEAD_CHANNEL]
+
+    # (d) An accepted day resets it — through the real setter.
+    good_day = last_day + timedelta(days=1)
+    coord._record_actuals_outcome(good_day, accepted=True)
+
+    health = store.get_learning_health()
+    assert health["discard_streak"] == 0
+    assert health["last_discard_reason"] is None
+    assert health["last_accepted_day"] == good_day.isoformat()
+    assert coord.learning_health_summary()["last_accepted_day"] == (
+        good_day.isoformat()
+    )
+    # And the write was scheduled, not just kept in memory.
+    assert store._store.delay_saves > 0
+
+
+def test_fresh_install_guard_reads_the_real_issued_ring():
+    """``_day_was_ours`` must ask the SHIPPED ring, not a fake ``get_issued``.
+
+    Same real store, same dropouts — but nothing recorded in the issued ring,
+    so none of the days were ours and the streak must stay at zero.
+    """
+    from datetime import timedelta
+
+    store = _real_store()
+    coord = _Coord(store=store)
+
+    for offset in range(LEARNING_STALLED_STREAK_DAYS * 2):
+        coord._last_actuals_dropout = {
+            "reason": DROPOUT_REASON_DEAD_CHANNEL,
+            "modules": ["M2"],
+            "entities": ["sensor.m2"],
+        }
+        coord._record_actuals_outcome(_DAY + timedelta(days=offset), accepted=False)
+
+    assert store.get_learning_health()["discard_streak"] == 0
+    assert coord.raised == []
 
 
 def test_learning_health_survives_a_restart():
