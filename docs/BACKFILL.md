@@ -225,12 +225,20 @@ side; planes without one are skipped.
 
 ## Tests
 
+The reconstruction / bootstrap **math** is a Home-Assistant-free core module —
+`custom_components/balcony_solar_forecast/core/bootstrap_build.py` — shared
+between this CLI and the in-process `run_bootstrap` action; `scripts/backfill.py`
+is the thin CLI wrapper that owns only the network fetch + JSON output (and
+re-exports the core names so `backfill.<name>` keeps working).
+
 Pure-math coverage (no network) lives in
 `tests/core/test_backfill_math.py` — payload parsing, per-plane reconstruction,
 the quasi-clear gate / bin key / half-year helpers, daily→hourly
 disaggregation, per-day accumulation, the n-credit cap, the bootstrap-JSON
-contract shape, and the LTS statistics-row parser. Run:
+contract shape, and the LTS statistics-row parser.
+`tests/core/test_backfill_parity.py` additionally proves the pure core and the
+(fetch-mocked) CLI path emit byte-identical bootstrap dicts. Run:
 
 ```sh
-py -3.14 -m pytest tests/core/test_backfill_math.py -q
+py -3.14 -m pytest tests/core/test_backfill_math.py tests/core/test_backfill_parity.py -q
 ```
