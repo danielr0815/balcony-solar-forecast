@@ -51,6 +51,7 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     ISSUE_LEARNING_STALLED_DEAD_CHANNEL,
     ISSUE_LEARNING_STALLED_FROZEN_CHANNEL,
     ISSUE_LEARNING_STALLED_LOW_COVERAGE,
+    ISSUE_TRANSLATION_PLACEHOLDERS,
     LEARNING_STALLED_STREAK_DAYS,
     STORE_KEY_LEARNING_HEALTH,
 )
@@ -864,3 +865,223 @@ def test_unload_before_start_detaches_the_pending_listener():
 
     coord.hass.bus.fire(EVENT_HOMEASSISTANT_STARTED)
     assert checks == []  # detached: a dead entry never runs the check
+
+
+# ---------------------------------------------------------------------------
+# (8) The recorder read actually PUBLISHES its verdict to the coordinator.
+#
+# ``async_read_actuals`` computes the dropout dict inside the recorder executor
+# and hands it over with a single assignment to ``coord._last_actuals_dropout``.
+# That assignment is the ONLY bridge to detector (2): without it the slot stays
+# None forever, ``record_actuals_outcome`` takes its "no gate fired" early exit
+# every night, the streak never advances and all three repair cards are dead
+# code in every real installation. Deleting the line left the whole suite green,
+# because every test above either calls ``_actuals_from_stats`` directly or sets
+# the slot by hand. These drive the real function end to end instead.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRecorderInstance:
+    """Recorder stand-in: runs the executor job inline."""
+
+    async def async_add_executor_job(self, target, *args):
+        return target(*args)
+
+
+def _patch_recorder_statistics(monkeypatch, stats_by_entity: dict[str, list[dict]]):
+    """Patch both lookups ``async_read_actuals`` resolves at call time."""
+    import homeassistant.components.recorder as rec_mod
+    import homeassistant.components.recorder.statistics as stats_mod
+
+    monkeypatch.setattr(rec_mod, "get_instance", lambda hass: _FakeRecorderInstance())
+
+    def _fake_statistics_during_period(
+        hass, start, end, stat_ids, period, units, types
+    ):
+        return {
+            eid: rows for eid, rows in stats_by_entity.items() if eid in stat_ids
+        }
+
+    monkeypatch.setattr(
+        stats_mod, "statistics_during_period", _fake_statistics_during_period
+    )
+
+
+def _full_day_rows(value: float = 100.0) -> list[dict]:
+    """24 varying hourly rows: clears the coverage gate whatever the season."""
+    return _rows(24, value, start_hour=0)
+
+
+def test_async_read_actuals_publishes_the_dropout_to_the_coordinator(monkeypatch):
+    """THE bridge. A day the gates discarded must leave the reason on the
+    coordinator, or the streak detector can never count a single day."""
+    import asyncio
+
+    from custom_components.balcony_solar_forecast._actuals import async_read_actuals
+
+    coord = _Coord()
+    # sensor.m2 delivers nothing at all -> dead-channel gate.
+    _patch_recorder_statistics(monkeypatch, {"sensor.m1": _full_day_rows()})
+
+    daily, hourly = asyncio.run(async_read_actuals(coord, _DAY))
+
+    assert (daily, hourly) == ({}, {})
+    assert coord._last_actuals_dropout == {
+        "reason": DROPOUT_REASON_DEAD_CHANNEL,
+        "modules": ["M2"],
+        "entities": ["sensor.m2"],
+    }
+
+
+def test_async_read_actuals_clears_the_slot_on_an_accepted_day(monkeypatch):
+    """The other direction: a good day must not leave last night's verdict
+    standing, or one bad night would count forever."""
+    import asyncio
+
+    from custom_components.balcony_solar_forecast._actuals import async_read_actuals
+
+    coord = _Coord()
+    coord._last_actuals_dropout = {
+        "reason": DROPOUT_REASON_FROZEN_CHANNEL,
+        "modules": ["M2"],
+        "entities": ["sensor.m2"],
+    }
+    _patch_recorder_statistics(
+        monkeypatch,
+        {"sensor.m1": _full_day_rows(), "sensor.m2": _full_day_rows(50.0)},
+    )
+
+    daily, hourly = asyncio.run(async_read_actuals(coord, _DAY))
+
+    assert set(daily) == {"M1", "M2"} and daily["M1"] > 0.0
+    assert set(hourly) == {"M1", "M2"}
+    assert coord._last_actuals_dropout is None
+
+
+def test_async_read_actuals_without_channels_clears_the_slot(monkeypatch):
+    """The early exit (no plane carries an ``actual_entity``) is not a gate
+    verdict either — a stale reason surviving it would be counted as one."""
+    import asyncio
+
+    from custom_components.balcony_solar_forecast._actuals import async_read_actuals
+
+    coord = _Coord(site=_site(entities=(None, None)))
+    coord._last_actuals_dropout = {"reason": DROPOUT_REASON_LOW_COVERAGE}
+    _patch_recorder_statistics(monkeypatch, {})
+
+    assert asyncio.run(async_read_actuals(coord, _DAY)) == ({}, {})
+    assert coord._last_actuals_dropout is None
+
+
+# ---------------------------------------------------------------------------
+# (9) The placeholders survive the trip into the issue registry — and the
+#     translations actually have a slot for every one of them.
+#
+# Every test above monkeypatches ``_raise_repair_issue``, so dropping
+# ``translation_placeholders=`` from the real one left the suite green while the
+# repair dialog would render "{count} of {configured} configured measurement
+# channels ..." verbatim. Naming the plane, the entity id and the day count is
+# the entire value of these cards, so both halves are pinned here: the kwarg
+# reaches ``ir.async_create_issue``, and the shipped en/de text formats with
+# exactly those keys and no leftover slot.
+# ---------------------------------------------------------------------------
+
+
+class _FakeIssueRegistry:
+    """``ir`` stand-in that records what the coordinator hands the registry."""
+
+    def __init__(self, severity) -> None:
+        self.created: list[dict] = []
+        self.deleted: list[str] = []
+        self.IssueSeverity = severity
+
+    def async_create_issue(self, hass, domain, issue_id, **kwargs) -> None:
+        self.created.append({"domain": domain, "issue_id": issue_id, **kwargs})
+
+    def async_delete_issue(self, hass, domain, issue_id) -> None:
+        self.deleted.append(issue_id)
+
+
+def _registry_coordinator(monkeypatch, *, hass=None, site=None):
+    """Real coordinator methods (incl. ``_raise_repair_issue``), fake registry."""
+    from homeassistant.helpers import issue_registry as real_ir
+
+    from custom_components.balcony_solar_forecast import coordinator as coord_mod
+
+    registry = _FakeIssueRegistry(real_ir.IssueSeverity)
+    monkeypatch.setattr(coord_mod, "ir", registry)
+
+    coord = coord_mod.BalconySolarCoordinator.__new__(coord_mod.BalconySolarCoordinator)
+    coord.hass = hass if hass is not None else _FakeHass({"sensor.m1"})
+    coord._site = site if site is not None else _site()
+    coord._store = _HealthStore()
+    coord._last_actuals_dropout = None
+    coord._channel_health = {"available": False}
+    coord.entry = _RegistryEntry()
+    return coord, registry
+
+
+class _RegistryEntry:
+    entry_id = "entry42"
+
+
+def _render(issue_key: str, placeholders: dict, lang: str) -> str:
+    """Format the SHIPPED translation with the captured placeholders.
+
+    ``str.format`` raises on a slot the code does not fill, which is exactly the
+    "renders as a raw slug" failure this pins — and the returned text is then
+    asserted to carry the concrete, actionable values.
+    """
+    import json
+    from pathlib import Path
+
+    import custom_components.balcony_solar_forecast as pkg
+
+    path = Path(pkg.__file__).parent / "translations" / f"{lang}.json"
+    entry = json.loads(path.read_text(encoding="utf-8"))["issues"][issue_key]
+    return f"{entry['title']}\n{entry['description']}".format(**placeholders)
+
+
+@pytest.mark.parametrize("lang", ("en", "de"))
+def test_missing_channel_card_reaches_the_registry_fully_rendered(monkeypatch, lang):
+    """Detector (1), through the REAL ``_raise_repair_issue``."""
+    coord, registry = _registry_coordinator(monkeypatch)  # sensor.m2 unknown
+
+    coord.async_check_actual_channels()
+
+    assert len(registry.created) == 1
+    created = registry.created[0]
+    assert created["issue_id"] == f"{ISSUE_ACTUAL_ENTITY_MISSING}_entry42"
+    assert created["translation_key"] == ISSUE_ACTUAL_ENTITY_MISSING
+    placeholders = created["translation_placeholders"]
+    assert set(placeholders) == set(
+        ISSUE_TRANSLATION_PLACEHOLDERS[ISSUE_ACTUAL_ENTITY_MISSING]
+    )
+    text = _render(ISSUE_ACTUAL_ENTITY_MISSING, placeholders, lang)
+    assert "M2 (sensor.m2)" in text  # the row of the editor to fix
+    assert "{" not in text
+
+
+@pytest.mark.parametrize("lang", ("en", "de"))
+def test_stalled_card_reaches_the_registry_fully_rendered(monkeypatch, lang):
+    """Detector (2), same path: the day count and the channel must survive."""
+    coord, registry = _registry_coordinator(
+        monkeypatch, hass=_FakeHass({"sensor.m1", "sensor.m2"})
+    )
+
+    _run_streak(coord, DROPOUT_REASON_FROZEN_CHANNEL, LEARNING_STALLED_STREAK_DAYS)
+
+    created = [
+        c
+        for c in registry.created
+        if c["translation_key"] == ISSUE_LEARNING_STALLED_FROZEN_CHANNEL
+    ]
+    assert len(created) == 1
+    placeholders = created[0]["translation_placeholders"]
+    assert set(placeholders) == set(
+        ISSUE_TRANSLATION_PLACEHOLDERS[ISSUE_LEARNING_STALLED_FROZEN_CHANNEL]
+    )
+    text = _render(ISSUE_LEARNING_STALLED_FROZEN_CHANNEL, placeholders, lang)
+    assert str(LEARNING_STALLED_STREAK_DAYS) in text
+    assert "M2 (sensor.m2)" in text
+    assert "{" not in text

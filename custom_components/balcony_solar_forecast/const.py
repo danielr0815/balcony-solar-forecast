@@ -810,6 +810,24 @@ ISSUE_LEARNING_STALLED_BY_REASON = {
 # short enough to beat the 14-day scoreboard window to the punch.
 LEARNING_STALLED_STREAK_DAYS = 5
 
+# The ``{slot}`` names each repair card's translation carries — the declared
+# contract between the code that builds the placeholder dict and the two shipped
+# translation files. Guarded from BOTH sides (tests): the translations must not
+# open a slot nobody fills, and the code must not fill a slot nobody opened.
+# An unfilled slot renders verbatim in the repair dialog ("{count} of
+# {configured} configured measurement channels ..."), i.e. the same "shows a raw
+# slug" failure as a missing translation key, one level deeper — and naming the
+# concrete plane, entity id and day count is the entire value of these cards.
+ISSUE_TRANSLATION_PLACEHOLDERS: dict[str, frozenset[str]] = {
+    ISSUE_FAST_LEARNER_DISABLED: frozenset(),
+    ISSUE_SLOW_LEARNER_DISABLED: frozenset(),
+    ISSUE_CONFIG_CHANGED_BIAS_RESEED: frozenset(),
+    ISSUE_ACTUAL_ENTITY_MISSING: frozenset({"count", "configured", "channels"}),
+    ISSUE_LEARNING_STALLED_DEAD_CHANNEL: frozenset({"days", "channels", "last_day"}),
+    ISSUE_LEARNING_STALLED_FROZEN_CHANNEL: frozenset({"days", "channels", "last_day"}),
+    ISSUE_LEARNING_STALLED_LOW_COVERAGE: frozenset({"days", "channels", "last_day"}),
+}
+
 
 # ===========================================================================
 # v0.4 CONTRACT: SKILL SCOREBOARD + QUANTILES P10/P50/P90 (SPEC §6, §9, §10, §14)

@@ -29,10 +29,14 @@ Seven guards, all pure (no Home Assistant, no fixtures — plain file reads):
       disk while three tracked files (one of them shipped to users via HACS)
       already pointed at it.
   (f) **Repair-issue coverage.** Every ``ISSUE_*`` id in ``const.py`` is named
-      in the SPEC **and** carries an ``issues`` translation in *both* shipped
-      languages. A repair card is the loudest thing this integration can say to
-      an operator; one that ships with an untranslated key renders as a raw
-      slug, and one the SPEC never mentions is a behaviour nobody agreed to.
+      in the SPEC, carries an ``issues`` translation in *both* shipped
+      languages, and opens exactly the ``{slot}`` names that
+      ``ISSUE_TRANSLATION_PLACEHOLDERS`` declares. A repair card is the loudest
+      thing this integration can say to an operator; one that ships with an
+      untranslated key renders as a raw slug, one whose slot nobody fills
+      renders that slot verbatim ("{count} of {configured} configured
+      measurement channels ..."), and one the SPEC never mentions is a
+      behaviour nobody agreed to.
   (g) **Action-count integrity.** The ``async_setup`` docstring must name every
       service in ``services.yaml`` and state their number. Written after that
       docstring claimed "All six services" for four releases while the manifest
@@ -46,6 +50,7 @@ fails a test instead of aging quietly.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import subprocess
@@ -426,6 +431,68 @@ def test_every_repair_issue_is_translated(lang: str):
     assert not incomplete, (
         f"repair issues with an incomplete translations/{lang}.json entry"
         " (title + description are both required):\n  " + "\n  ".join(incomplete)
+    )
+
+
+# ``{count}``, ``{last_day}`` — the placeholder slots Home Assistant fills from
+# ``translation_placeholders``. Deliberately narrow so ordinary prose braces
+# could never be mistaken for one.
+_PLACEHOLDER_SLOT_RE = re.compile(r"\{([a-z][a-z0-9_]*)\}")
+
+
+def _const_module():
+    """Import ``const.py`` standalone — no package ``__init__``, so no HA.
+
+    ``const.py`` is import-free by design, which is what lets this pure guard
+    read the DECLARED constant instead of re-parsing its literal text.
+    """
+    spec = importlib.util.spec_from_file_location("_bsf_const_guard", _CONST_PY)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("lang", _LANGUAGES)
+def test_every_repair_issue_slot_matches_the_declared_placeholders(lang: str):
+    """A slot nobody fills renders verbatim in the repair dialog.
+
+    Same failure class as an untranslated key, one level deeper: HA substitutes
+    ``translation_placeholders`` into the ``{slot}``\\ s, and a slot the code
+    never passes stays in the text as ``{count}``. The actionable half of these
+    cards — which plane, which entity id, how many days — is their entire
+    reason to exist, so ``const.ISSUE_TRANSLATION_PLACEHOLDERS`` declares the
+    contract once and BOTH sides are checked against it (this guard for the
+    translations; ``test_learning_visibility`` for the code that fills them).
+    """
+    declared = _const_module().ISSUE_TRANSLATION_PLACEHOLDERS
+    issues = _repair_issue_ids()
+
+    undeclared = sorted(set(issues.values()) - set(declared))
+    assert not undeclared, (
+        "repair issues missing from const.ISSUE_TRANSLATION_PLACEHOLDERS:\n  "
+        + "\n  ".join(undeclared)
+        + "\n\nDeclare the placeholder names the code passes (an empty"
+        " frozenset() for a card without slots)."
+    )
+
+    blob = json.loads(_read(_TRANSLATIONS / f"{lang}.json"))
+    translated = blob.get("issues") or {}
+    mismatched = []
+    for key in sorted(issues.values()):
+        entry = translated.get(key) or {}
+        text = f"{entry.get('title', '')}\n{entry.get('description', '')}"
+        slots = set(_PLACEHOLDER_SLOT_RE.findall(text))
+        if slots != set(declared[key]):
+            mismatched.append(
+                f"{key}: {lang}.json opens {sorted(slots)}, "
+                f"const declares {sorted(declared[key])}"
+            )
+    assert not mismatched, (
+        f"repair-issue placeholder mismatch between translations/{lang}.json and"
+        " const.ISSUE_TRANSLATION_PLACEHOLDERS:\n  "
+        + "\n  ".join(mismatched)
+        + "\n\nAn undeclared slot renders verbatim to the operator; a declared"
+        " one the text never uses is a placeholder built for nothing."
     )
 
 
