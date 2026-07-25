@@ -1,6 +1,6 @@
 """Tests for the per-plane horizon module (pure, HA-free).
 
-Covers (SPEC §4 step 5 / §13, task brief):
+Covers (SPEC §5):
   - linear interpolation of the horizon-line elevation, including endpoints,
     midpoints and the 360 -> 0 wrap segment;
   - defensive sorting of a mis-ordered table;
@@ -363,7 +363,7 @@ def test_default_site_loads_and_all_functions_run():
 
 
 def test_default_farfield_slope_matches_spec():
-    # SPEC §13.4: az 60..100 -> 13 deg, az 100..150 -> 16 deg on all planes.
+    # SPEC §7.8: az 60..100 -> 13 deg, az 100..150 -> 16 deg on all planes.
     site = SiteConfig.from_dict(DEFAULT_SITE)
     m1 = site.plane_by_name("M1")  # north/front plane, far-field only
     assert H.interp_elevation(m1, 80.0) == pytest.approx(13.0)

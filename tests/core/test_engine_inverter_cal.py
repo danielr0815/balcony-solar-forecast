@@ -1,6 +1,6 @@
 """Engine tests for the learned inverter efficiency override (AC-side Phase 3).
 
-Plain pytest, no Home Assistant imports (SPEC §4). ``LearnerHooks`` gained a
+Plain pytest, no Home Assistant imports (SPEC §2). ``LearnerHooks`` gained a
 site-level LEARNED ``inverter_efficiency`` that OVERRIDES the per-group config
 eta on the AC curve when present (None => the per-group config eta stands). The
 DC path (total_watts / hourly_wh / daily_kwh / raw / per-plane / bands) MUST

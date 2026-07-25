@@ -1,10 +1,10 @@
-"""Serve + auto-register the bundled Lovelace cards (SPEC §15 + power history).
+"""Serve + auto-register the bundled Lovelace cards (SPEC §18.5 + power history).
 
 Owner: glue/frontend. End users no longer need any HACS frontend resource for
 the integration's two bundled cards:
 
   * ``frontend/shade_profile_card.js`` — the sun-path-vs-learned-shade diagram
-    (SPEC §15), replacing the opt-in ``apexcharts-card`` snippet;
+    (SPEC §18.5), replacing the opt-in ``apexcharts-card`` snippet;
   * ``frontend/power_history_card.js`` — the energy-dashboard-style stacked
     hourly production-per-module bars + forecast line.
 

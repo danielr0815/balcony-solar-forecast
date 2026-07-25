@@ -1,11 +1,11 @@
 """Config and options flow for the Balcony Solar Forecast integration.
 
-One config entry per named site (SPEC §4). The user step collects the site
+One config entry per named site (SPEC §2). The user step collects the site
 name, latitude/longitude (defaulting to ``hass.config``), the fetch/recompute
 cadences, and a single ``site`` object (config-flow object selector) whose
 default is the full operator reference site from ``const.DEFAULT_SITE`` — so
 the operator sets it up in one click, but every plane, horizon table and
-inverter group stays fully editable and generic (SPEC D-P9).
+inverter group stays fully editable and generic (SPEC §2, §7.8).
 
 The submitted ``site`` object is validated by round-tripping it through
 ``SiteConfig.from_dict`` plus explicit range checks (azimuth 0..360, tilt
@@ -24,9 +24,9 @@ reader uses.
 
 The options flow is therefore slimmed to RUNTIME TUNABLES only: the three
 learner kill switches (fast learner / shademap learning / day-ahead bias —
-SPEC §5 "Kill-Switches je Lernschicht im Options-Flow"; all default ON per the
+SPEC §9 "Kill-Switches je Lernschicht im Options-Flow"; all default ON per the
 2026-07-06 operator decision to build v0.3 early), the v0.4 quantile kill
-switch (SPEC §6) and the editable comparison-sensors list (SPEC §9/§10). Modern
+switch (SPEC §11.2) and the editable comparison-sensors list (SPEC §15.3). Modern
 HA 2026 pattern: the framework supplies ``self.config_entry`` as a read-only
 property — we never assign it. Turning a switch off writes ``False`` into the
 entry options; the coordinator resolves every tunable via ``LearnerConfig`` from
@@ -34,7 +34,7 @@ entry options; the coordinator resolves every tunable via ``LearnerConfig`` from
 
 Azimuth here is the INTERNAL convention (0 = North, clockwise). The rany2 UI
 uses the same 0=N numbers; conversions to Open-Meteo / PVGIS conventions live
-in the fetcher, not here (SPEC Anhang A).
+in the fetcher, not here (SPEC §20.1).
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ def _bool_selector() -> selector.Selector:
 
 
 def _comparison_sensors_selector() -> selector.Selector:
-    """Editable list of comparison-forecast entries (SPEC §9/§10, D-P9).
+    """Editable list of comparison-forecast entries (SPEC §15.3).
 
     Each row is a structured object with a required operator label and a
     required daily-kWh forecast sensor (domain ``sensor``). The field keys are
@@ -289,9 +289,9 @@ def _options_schema(
     """Schema for the options step: RUNTIME TUNABLES only.
 
     Structural setup lives in the reconfigure flow (see the module docstring).
-    What remains here are the three per-layer learner kill switches (SPEC §5),
-    the v0.4 quantile kill switch (SPEC §6), the v0.16 ensemble-band kill switch
-    (SPEC §6, default OFF) and the editable comparison-sensors list (SPEC §9/§10).
+    What remains here are the three per-layer learner kill switches (SPEC §9),
+    the v0.4 quantile kill switch (SPEC §11.2), the v0.16 ensemble-band kill switch
+    (SPEC §11.3, default OFF) and the editable comparison-sensors list (SPEC §15.3).
     Every switch is a plain boolean toggle (no NumberSelector, so the HA-2026
     ``step >= 1e-3`` selector rule cannot bite here). The learner/quantile
     switches default ON; the ensemble switch defaults OFF (opt-in). The comparison
@@ -417,7 +417,7 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
             if not name:
                 errors[CONF_NAME] = "name_required"
             else:
-                # One entry per name (SPEC §4: one instance per name).
+                # One entry per name (SPEC §2: one instance per name).
                 await self.async_set_unique_id(name.casefold())
                 self._abort_if_unique_id_configured()
 
@@ -508,7 +508,7 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class BalconySolarForecastOptionsFlow(OptionsFlow):
-    """Edit the RUNTIME TUNABLES of a live install (SPEC §5/§6/§9/§10).
+    """Edit the RUNTIME TUNABLES of a live install (SPEC §9/§11/§15).
 
     Structural setup (location, cadences, the site object) is edited through the
     reconfigure flow into ``entry.data``, NOT here — see the module docstring.
@@ -528,10 +528,10 @@ class BalconySolarForecastOptionsFlow(OptionsFlow):
             # the next reconfigure, not by an options save. Only the five runtime
             # tunables below are (re)written on top.
             #
-            # The learner kill switches (SPEC §5) round-trip as plain booleans;
+            # The learner kill switches (SPEC §9) round-trip as plain booleans;
             # a missing key falls back to the shipped ON default so an older
             # entry that predates a switch keeps that layer active. The
-            # comparison list (SPEC §9/§10) is normalised through
+            # comparison list (SPEC §15.3) is normalised through
             # ComparisonConfig so half-filled / malformed rows are dropped and
             # only clean {name, daily_entity} objects are persisted.
             data = {
@@ -552,13 +552,13 @@ class BalconySolarForecastOptionsFlow(OptionsFlow):
                         DEFAULT_DAY_AHEAD_BIAS_ENABLED,
                     )
                 ),
-                # v0.4 quantile kill switch (SPEC §6, default ON).
+                # v0.4 quantile kill switch (SPEC §11.2, default ON).
                 CONF_QUANTILES_ENABLED: bool(
                     user_input.get(
                         CONF_QUANTILES_ENABLED, DEFAULT_QUANTILES_ENABLED
                     )
                 ),
-                # v0.16 ensemble-band kill switch (SPEC §6, default OFF/opt-in).
+                # v0.16 ensemble-band kill switch (SPEC §11.3, default OFF/opt-in).
                 CONF_ENSEMBLE_ENABLED: bool(
                     user_input.get(
                         CONF_ENSEMBLE_ENABLED, DEFAULT_ENSEMBLE_ENABLED

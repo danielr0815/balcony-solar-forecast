@@ -1,4 +1,4 @@
-# Learner Bootstrap Backfill (SPEC §6)
+# Learner Bootstrap Backfill (SPEC §12)
 
 The re-bootstrap warm-starts the three learner states (day-ahead bias, shademap,
 quantile bands) from ~2 years of history so the system does not meet its first
@@ -35,7 +35,7 @@ Both paths do the same thing. The CLI:
    `balcony_solar_forecast.import_bootstrap` service ingests
    (validate + clamp, rejects unknown schema).
 
-The backfill is **"mandatory to attempt, not a blocker"** (SPEC §6): the
+The backfill is **"mandatory to attempt, not a blocker"** (SPEC §12.1): the
 integration runs fully without it. If the Previous-Runs radiation is
 unavailable, the script degrades to the plain **Historical Forecast API** and
 prints a loud warning that the data is *analysis, not as-issued forecast*
@@ -210,7 +210,7 @@ follow it:
 1. **Day-ahead bias**: handled automatically. `tau_points`, `tau_points_bare`
    and `diffuse_tau` are part of the config fingerprint, so editing them re-opens
    (n-caps) the day-ahead bias cells for fast re-adaptation on the next start
-   (SPEC §5, A4). You can also force it with `reset_day_ahead_bias`.
+   (SPEC §7.7, A4). You can also force it with `reset_day_ahead_bias`.
 
 2. **Shademap**: **re-bootstrap recommended.** The learned transmittance `T` is
    trained against the modeled diffuse floor and ungated beam; a `tau_points` /
@@ -236,7 +236,7 @@ follow it:
    documented settle, **not** a reason to roll back (ADR §2.7).
 
 The interim az-ramp (τ(az) sun-path projection) is **deprecated**: migrate it to
-`tau_points`, do **not** re-anchor it monthly (SPEC §13, ADR §2.7.6).
+`tau_points`, do **not** re-anchor it monthly (SPEC §5.2, ADR §2.7.6).
 
 ---
 
@@ -246,7 +246,7 @@ The interim az-ramp (τ(az) sun-path projection) is **deprecated**: migrate it t
   Forecast APIs only expose hourly radiation, so the script evaluates the same
   physics as the live engine at each **hour midpoint** and treats the result as
   the hour's mean power (Wh = mean W × 1 h). Sub-hour geometry is lost — this
-  is exactly why the backfilled bin `n` is capped (SPEC §6).
+  is exactly why the backfilled bin `n` is capped (SPEC §12.5).
 
 - **Shademap bins**: for each plane/hour that passes the **quasi-clear gate**
   (elevation-ramped `k_c` band, modeled beam share > 5 % of Wp,

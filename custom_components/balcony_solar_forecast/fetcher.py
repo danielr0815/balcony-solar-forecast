@@ -2,7 +2,7 @@
 
 Owner: glue. One call every 30 min pulls the raw irradiance components
 (GHI/DNI/DHI + 2 m temperature) at 15-min resolution plus the hourly
-cloud / visibility / snow context. We transpose locally (SPEC §4), so the
+cloud / visibility / snow context. We transpose locally (SPEC §3), so the
 fetch does NOT use Open-Meteo's server-side GTI param — hence there is no
 azimuth conversion here; the only API-boundary convention in play is
 ``timezone=UTC`` and the fixed ``models=icon_seamless``.
@@ -43,14 +43,14 @@ from .core.types import WeatherSeries, WeatherSlot
 
 _LOGGER = logging.getLogger(__name__)
 
-# Retry policy (SPEC §4: backoff with jitter, bounded tries).
+# Retry policy (SPEC §3: backoff with jitter, bounded tries).
 MAX_TRIES = 3
 _BASE_BACKOFF_SECONDS = 1.0
 _MAX_BACKOFF_SECONDS = 20.0
 _REQUEST_TIMEOUT_SECONDS = 30.0
 # A server-requested wait (429 Retry-After) longer than this must NOT stall the
 # recompute tick — raise immediately; the coordinator keeps serving the
-# last-good cache and retries on its own cadence (SPEC §7 degradation ladder).
+# last-good cache and retries on its own cadence (SPEC §13 degradation ladder).
 _RETRY_AFTER_MAX_INLINE_SECONDS = 30.0
 
 # Near-term window (in 15-min samples) that must carry at least one non-null
@@ -87,7 +87,7 @@ class FetchError(Exception):
 
 
 def build_params(latitude: float, longitude: float, forecast_days: int) -> dict[str, str]:
-    """Build the Open-Meteo query params (SPEC §4, one call).
+    """Build the Open-Meteo query params (SPEC §3, one call).
 
     Kept as an ordered dict of *strings* so it is trivially comparable in
     tests and free of client-library quirks. No azimuth/tilt params: we
@@ -135,7 +135,7 @@ def _require_array(block: dict, key: str, expected_len: int | None) -> list:
 
 
 def validate_payload(payload: object) -> None:
-    """Validate the SHAPE of an Open-Meteo response (SPEC §4: not just 200).
+    """Validate the SHAPE of an Open-Meteo response (SPEC §3: not just 200).
 
     Checks that the ``minutely_15`` and ``hourly`` blocks exist, that every
     requested variable array is present, that each array matches its own
@@ -164,7 +164,7 @@ def validate_payload(payload: object) -> None:
     for var in OPEN_METEO_HOURLY:
         _require_array(hourly, var, nh)
 
-    # HTTP-200-with-nulls guard (SPEC §4/§7: validate beyond HTTP status,
+    # HTTP-200-with-nulls guard (SPEC §3/§13: validate beyond HTTP status,
     # never degrade silently). Open-Meteo returns 200 with all-null value
     # arrays on a model outage and for the tail beyond the model horizon.
     # A structurally intact but content-empty payload must NOT be treated as
@@ -291,12 +291,12 @@ def parse_weather(payload: dict) -> WeatherSeries:
 
 
 # ---------------------------------------------------------------------------
-# Ensemble weather (v0.16, SPEC §6) — separate endpoint, pure URL + parse
+# Ensemble weather (v0.16, SPEC §11.3) — separate endpoint, pure URL + parse
 # ---------------------------------------------------------------------------
 
 
 def build_ensemble_params(latitude: float, longitude: float) -> dict[str, str]:
-    """Build the Open-Meteo ENSEMBLE query params (v0.16, SPEC §6).
+    """Build the Open-Meteo ENSEMBLE query params (v0.16, SPEC §11.3).
 
     Only ``shortwave_radiation`` is requested (the members' GHI); the beam /
     diffuse recomposition per member is second-order and deliberately skipped —
@@ -455,7 +455,7 @@ class OpenMeteoFetcher:
     async def async_fetch_ensemble_raw(
         self, latitude: float, longitude: float
     ) -> dict:
-        """Fetch + SHAPE-validate one ENSEMBLE payload (v0.16, SPEC §6).
+        """Fetch + SHAPE-validate one ENSEMBLE payload (v0.16, SPEC §11.3).
 
         Shares the main fetch's bounded-retry / backoff / 429 machinery but
         targets the ensemble endpoint and validates the ensemble shape. Raises
@@ -478,7 +478,7 @@ class OpenMeteoFetcher:
         it is short enough (<= ``_RETRY_AFTER_MAX_INLINE_SECONDS``) to hold the
         recompute tick open; a longer wait is re-raised immediately so the
         coordinator keeps serving the last-good cache and retries on its own
-        cadence (SPEC §7). Non-retryable errors (other 4xx, malformed body)
+        cadence (SPEC §13). Non-retryable errors (other 4xx, malformed body)
         fail fast.
         """
         params = build_params(latitude, longitude, forecast_days)
@@ -511,7 +511,7 @@ class OpenMeteoFetcher:
                 if not err.retryable or attempt == MAX_TRIES:
                     raise
                 if err.retry_after is not None:
-                    # A too-long server wait must not stall the tick (SPEC §7).
+                    # A too-long server wait must not stall the tick (SPEC §13).
                     if err.retry_after > _RETRY_AFTER_MAX_INLINE_SECONDS:
                         raise
                     delay = err.retry_after

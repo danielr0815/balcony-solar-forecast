@@ -1,4 +1,4 @@
-"""Tests for the v0.4 platform layer (SPEC §6, §9, §10).
+"""Tests for the v0.4 platform layer (SPEC §11/§15).
 
 Covers the skill-scoreboard sensors (engine daily/hourly MAE, per-comparison
 MAE, engine-vs-best-baseline percent), the kill-gate binary sensor, the daily
@@ -10,8 +10,8 @@ quantile summaries.
 All read the coordinator's flat ``self.data`` v0.4 keys and must:
   * stay available where they are diagnostics (never vanish);
   * report ``None`` — never a fabricated zero — when the scoreboard/quantiles
-    are absent, disabled or cold-started (SPEC §9 "no premature verdict",
-    SPEC §6 "no fake spread");
+    are absent, disabled or cold-started (SPEC §15.4 "no premature verdict",
+    SPEC §11.1 "no fake spread");
   * tolerate missing / malformed values without raising.
 
 Needs Home Assistant; skipped on the plain-core path.

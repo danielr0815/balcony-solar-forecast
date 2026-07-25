@@ -24,14 +24,17 @@ numpy/pandas/pvlib.
    `core/openmeteo_backfill.py` fasst Netzwerk an — mit **lazy** `aiohttp`-Import
    und injizierter Session, weiterhin ohne HA-Import. Neue Mathematik gehört in
    `core/`, neuer HA-Glue eine Ebene darüber.
-3. **`docs/SPEC.md` ist der Vertrag.** Jede Verhaltensänderung zieht die SPEC im
-   **selben PR** nach. Neues gehört thematisch einsortiert (§0
-   „Änderungsregel"), **bestehende Abschnittsnummern werden nie umnummeriert** —
-   der Code zitiert sie hundertfach als `SPEC §x.y`.
+3. **`docs/SPEC.md` ist der Vertrag — und eine reine Ist-Spec.** Sie
+   beschreibt ausschließlich das Verhalten der aktuellen Version; Historie und
+   Herleitung liegen in `docs/HISTORIE.md`. Jede Verhaltensänderung zieht die
+   SPEC im **selben PR** nach, thematisch einsortiert (§1.3 „Änderungsregeln");
+   **Abschnittsnummern sind append-only** — der Code zitiert sie hundertfach als
+   `SPEC §x.y`. Der Kopfstempel „Gilt für Version" wird beim Release mitgezogen.
    `tests/test_spec_integrity.py` erzwingt das maschinell: Zitate müssen
    auflösen, jede Aktion aus `services.yaml` und jedes `site`-Config-Feld aus
    `const.py` muss in der SPEC vorkommen, jeder Top-Level-Abschnitt im
-   Wegweiser stehen.
+   Wegweiser (§1.2) stehen, und der Versionsstempel muss zu
+   `INTEGRATION_VERSION` passen.
 4. **Version an drei Stellen, synchron, VOR dem Tag:**
    `custom_components/balcony_solar_forecast/manifest.json` (`version`),
    `pyproject.toml` (`[project] version`),
@@ -63,7 +66,7 @@ numpy/pandas/pvlib.
    Lernzustand zurück. Spiegelbildlich im Fingerprint
    (`coordinator._config_fingerprint`): nur-wenn-gesetzt anhängen, Werte runden,
    Sentinels kollisionsfrei wählen. **Ein Feld, das die RAW-Kurve verändert,
-   MUSS in den Fingerprint** (Feldliste + Fingerprint-Spalte: SPEC §4.1).
+   MUSS in den Fingerprint** (Feldliste + Fingerprint-Spalte: SPEC §7.6).
    Store-Migrationen sind additiv: der äußere Store-Envelope bleibt für immer
    Version 1, migriert wird die innere `schema_version`, alte Schlüssel gehen
    byte-treu durch. Eine Migration, die Lernzustand verwirft, ist ein

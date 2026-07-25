@@ -1,4 +1,4 @@
-"""Skill scoreboard — the kill-gate the whole v0.4 plan hinges on (SPEC §9/§10).
+"""Skill scoreboard — the kill-gate the whole v0.4 plan hinges on (SPEC §15.2/§15.1).
 
 Owner: scoreboard. Pure, HA-free (stdlib only). This module implements the
 FROZEN public contract (signatures + docstrings) the coordinator, the sensors,
@@ -24,7 +24,7 @@ THIS pure module, which owns only the ERROR MATH: per-day absolute errors,
 rolling-window aggregation into daily-kWh MAE (engine + per comparison), engine
 hourly MAE, engine_vs_best_baseline_pct, the per-weather-stratum breakdown, and
 the kill-gate verdict. Keeping the maths pure lets it be golden-tested with bare
-pytest (SPEC §4) and keeps the fairness contract auditable in one place.
+pytest (SPEC §2) and keeps the fairness contract auditable in one place.
 
 Frozen public contract (implementers depend on these EXACT signatures):
 
@@ -49,7 +49,7 @@ Frozen public contract (implementers depend on these EXACT signatures):
 
 All tunables come from const. Every path is validate-and-clamp: an empty window
 or a comparison with no scored days yields ``None`` / an absent entry rather than
-a fabricated zero (SPEC §9: a partial window can never assert the kill-gate).
+a fabricated zero (SPEC §15.2: a partial window can never assert the kill-gate).
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def _finite_nonneg(value: float) -> float:
     """Coerce ``value`` to a finite, non-negative float (validate-and-clamp).
 
     A NaN / inf / negative input degrades to 0.0 rather than propagating an
-    exception or a nonsensical negative error up into the aggregates (SPEC §5
+    exception or a nonsensical negative error up into the aggregates (SPEC §9
     clamp ethos, applied to the scoreboard maths). Used ONLY for already-scored
     per-day error values on the aggregation path, never to coerce a raw
     comparison/measured input (see :func:`_finite_or_none`).
@@ -89,7 +89,7 @@ def _finite_or_none(value: object) -> float | None:
 
     Unlike :func:`_finite_nonneg` this does NOT fabricate a 0.0 for a NaN / inf /
     negative / non-numeric input — the caller drops the value instead (a missing
-    comparison is ABSENT, never a fabricated zero-kWh forecast; SPEC §9).
+    comparison is ABSENT, never a fabricated zero-kWh forecast; SPEC §15.2).
     """
     if value is None:
         return None
@@ -204,7 +204,7 @@ def hourly_mae(
     issued_corrected_hourly: dict[str, float],
     measured_hourly: dict[str, float],
 ) -> float | None:
-    """Mean absolute per-hour Wh error for one day (engine hourly MAE, SPEC §10).
+    """Mean absolute per-hour Wh error for one day (engine hourly MAE, SPEC §15.1).
 
     ``issued_corrected_hourly`` is the engine's AS-ISSUED corrected hourly curve
     for the day (keyed by ISO-8601 UTC hour, already sliced to the local day);
@@ -220,7 +220,7 @@ def hourly_mae(
         issued_corrected_hourly = {}
     if not isinstance(measured_hourly, dict):
         measured_hourly = {}
-    # DAYLIGHT restriction (SPEC §10 Taglicht-Stunden-MAE): restrict the union to
+    # DAYLIGHT restriction (SPEC §15.1 Taglicht-Stunden-MAE): restrict the union to
     # hours where EITHER side is materially non-zero. Night / twilight rows
     # (issued ~0 dark slots, measured 0-W LTS mean rows around the clock) would
     # otherwise contribute |0-0|=0 and dilute the denominator by the night/day
@@ -278,7 +278,7 @@ def engine_daily_kwh_mae(
 
     Mean of ``DayScore.engine_daily_abs_err`` across the window. Returns None
     when the window has no scored days (never a fabricated zero). This is the
-    ``engine_daily_kwh_mae`` sensor value (SPEC §10) and the numerator of the
+    ``engine_daily_kwh_mae`` sensor value (SPEC §15.1) and the numerator of the
     kill-gate comparison.
     """
     return _engine_daily_kwh_mae_for_days(_window_days_list(state, window_days))
@@ -289,7 +289,7 @@ def comparison_daily_kwh_mae(
     *,
     window_days: int,
 ) -> dict[str, float]:
-    """Per-comparison daily-kWh MAE over the window (SPEC §10).
+    """Per-comparison daily-kWh MAE over the window (SPEC §15.1).
 
     Returns ``{comparison_name: mae}`` averaging each comparison's
     ``comparison_daily_abs_err`` over ONLY the days that comparison was actually
@@ -313,7 +313,7 @@ def engine_hourly_mae(
     Averages ``DayScore.engine_hourly_mae`` across the days in the window that
     HAVE an hourly MAE (days where hourly actuals were unavailable are skipped,
     not counted as zero). Returns None when no day in the window has an hourly
-    MAE. Backs the ``engine_hourly_mae`` sensor (SPEC §10 second metric).
+    MAE. Backs the ``engine_hourly_mae`` sensor (SPEC §15.1 second metric).
     """
     days = _window_days_list(state, window_days)
     vals = [
@@ -330,9 +330,9 @@ def engine_vs_best_baseline_pct(
     window_days: int,
     min_paired_days: int = 1,
 ) -> float | None:
-    """Percent the engine beats the BEST baseline on daily-kWh MAE (SPEC §10).
+    """Percent the engine beats the BEST baseline on daily-kWh MAE (SPEC §15.1).
 
-    MATCHED-PAIR (fairness, SPEC §9): for each comparison, the engine MAE and the
+    MATCHED-PAIR (fairness, SPEC §15.2): for each comparison, the engine MAE and the
     comparison MAE are both computed over ONLY the days on which that comparison
     was scored (the intersection), and the best baseline is the comparison whose
     PAIRED engine-vs-comparison delta is largest — never a comparison judged on a
@@ -430,7 +430,7 @@ def stratified_breakdown(
     *,
     window_days: int,
 ) -> dict[str, dict]:
-    """Per-weather-stratum error breakdown over the window (SPEC §9/§10).
+    """Per-weather-stratum error breakdown over the window (SPEC §15.2/§15.1).
 
     Returns ``{weather_class: {...}}`` for each class in const.CLOUD_CLASSES that
     has at least one scored day in the window, each inner dict carrying at least:
@@ -501,7 +501,7 @@ def kill_gate_passed(
 
     The gate PASSES when the window holds at least ``window_days`` scored days
     (and at least SCOREBOARD_MIN_WINDOW_DAYS overall — a partial window can never
-    assert the gate, SPEC §9 "over a full window"), the ring is not STALE (its
+    assert the gate, SPEC §15.2 "over a full window"), the ring is not STALE (its
     newest scored day is within SCOREBOARD_MAX_STALENESS_DAYS of ``today`` when
     ``today`` is supplied), AND the matched-pair
     ``engine_vs_best_baseline_pct >= gate_margin * 100`` for at least one

@@ -2,7 +2,7 @@
 
 This module imports NOTHING from Home Assistant. Everything here is a plain,
 frozen dataclass over plain Python data so the physics core is testable with
-bare pytest (SPEC §4).
+bare pytest (SPEC §2).
 
 Conventions (all internal):
   - Azimuth 0 = North, clockwise (90 = East, 180 = South).
@@ -110,7 +110,7 @@ class HorizonRow:
 
     When ``seasonal`` is True the effective tau ramps between ``tau_bare``
     (winter/leafless) and ``tau_leafed`` (summer) via a cosine foliage ramp
-    (SPEC §13); ``tau`` then holds the leafed value as a static fallback.
+    (SPEC §5.1); ``tau`` then holds the leafed value as a static fallback.
 
     ``tau_points`` (optional, v0.22) is an inline elevation profile
     ``((el, tau), ...)`` that makes the transmittance a piecewise-linear
@@ -126,7 +126,7 @@ class HorizonRow:
     DIFFUSE sky-view integral ONLY: it is the effective radiance of the blocked
     sector relative to the open sky (a bright wall reflects ~0.5), so a walled
     row can lift the isotropic diffuse floor while its beam stays fully opaque.
-    It is NOT a transmission (SPEC §13). Default None == the diffuse keeps using
+    It is NOT a transmission (SPEC §5.1). Default None == the diffuse keeps using
     the beam ``tau`` / ``tau_points`` (pre-0.22 behaviour); the beam path is
     byte-untouched regardless. Independent of ``tau``/``tau_points`` (a
     semi-transparent tree row MAY carry it too).
@@ -219,7 +219,7 @@ class PlaneConfig:
     plane. The obstruction geometry (a building edge, a tree line) is a property
     of the SITE, not of one module — all planes on the same balcony see the same
     sky occlusion; only the IMPACT differs by orientation, which the engine
-    already handles per plane via the beam share (SPEC §5). Default None ==
+    already handles per plane via the beam share (SPEC §9.2). Default None ==
     per-plane channel (backward compatible). :attr:`shade_channel` is THE single
     definition of the plane→channel mapping.
 
@@ -242,7 +242,7 @@ class PlaneConfig:
 
     @property
     def shade_channel(self) -> str:
-        """The shademap channel this plane trains / reads (SPEC §5).
+        """The shademap channel this plane trains / reads (SPEC §9.2).
 
         ``shade_group`` when set, else the plane name — so grouped planes pool
         their shade learning into one channel while a plain plane keeps its own
@@ -517,7 +517,7 @@ class PlaneResult:
     tests) is unchanged. The additive fields below carry the raw physics
     breakdown the SLOW learner (shademap) needs to train the beam-referenced
     transmittance ``T = (P_measured - P_diffuse_modeled) / P_beam_modeled``
-    (SPEC §5) and the attribution diagnostics (raw vs corrected, SPEC §9).
+    (SPEC §9.1) and the attribution diagnostics (raw vs corrected, SPEC §16.2).
     All additive fields default to empty so v0.1 constructions still work.
 
       - ``raw_watts``: pure-physics per-plane clamped power (learner OFF).
@@ -535,7 +535,7 @@ class PlaneResult:
     beam_watts: tuple[float, ...] = ()     # modeled DC from beam+circumsolar POA
     diffuse_watts: tuple[float, ...] = ()  # modeled DC from diffuse+ground POA
     kc: tuple[float, ...] = ()             # clear-sky index per slot (gate)
-    # --- SLOW-learner training reference (SPEC §5, FIX-3) ---
+    # --- SLOW-learner training reference (SPEC §9.1, FIX-3) ---
     # The shademap trains T = (P_measured - P_diffuse) / P_beam where the beam
     # reference must be the UNGATED, unclamped, un-factored beam+circumsolar DC
     # (raw physics with static tau := 1). Sourcing the trainer from the gated /
@@ -580,7 +580,7 @@ class ForecastResult:
     ac_watts: tuple[float, ...] = ()  # per-slot site AC total, aligned to slot_starts
     ac_hourly_wh: dict[str, float] = field(default_factory=dict)  # {iso_utc_hour: Wh}
     ac_daily_kwh: dict[str, float] = field(default_factory=dict)  # {iso_date: kWh}
-    # --- Dual-curve attribution (v0.2.0 + v0.3.0, SPEC §5/§9) ---
+    # --- Dual-curve attribution (v0.2.0 + v0.3.0, SPEC §9/§16.2) ---
     # ``total_watts`` / ``hourly_wh`` / ``daily_kwh`` above are the CORRECTED
     # (served) curve. The additive fields below carry the pure-physics RAW
     # curve so the coordinator can snapshot BOTH nightly, expose raw-vs-
@@ -599,11 +599,11 @@ class ForecastResult:
     # clamped slot (where dividing the intraday factor back out would understate
     # the headline — the factor never reached the served value) from an
     # unclamped one. Empty () on a v0.1 / older cached result => strip falls back
-    # to divide-always (SPEC §8).
+    # to divide-always (SPEC §14.1).
     corrected_unclamped_watts: tuple[float, ...] = ()
     # Physical AC-clamp ceiling per slot, aligned to ``slot_starts``: the group
     # DC limits + the ungrouped (ceiling-free) planes' corrected DC watts. The
-    # day-ahead headline strip (SPEC §8) caps a re-clamped slot's SCALAR-FREE
+    # day-ahead headline strip (SPEC §14.1) caps a re-clamped slot's SCALAR-FREE
     # value at this ceiling (``min(corrected_unclamped/factor, ceiling)``) instead
     # of keeping the served, scalar-inflated ceiling — dividing the factor out on
     # a clamped slot understated the headline, keeping the served ceiling ballooned
@@ -613,7 +613,7 @@ class ForecastResult:
     # Which learner layer(s) shaped ``total_watts`` this cycle
     # (const.CORRECTION_SOURCE_*). Empty string == not yet set by the engine.
     correction_source: str = ""
-    # --- Quantile bands (v0.4, SPEC §6/§10) ---
+    # --- Quantile bands (v0.4, SPEC §11.2) ---
     # Plane-agnostic TOTAL site power band curves, aligned to ``slot_starts``,
     # in the SAME 15-min instantaneous-watts frame as ``total_watts``. The
     # engine fills these only when a QuantileState is injected via hooks;
@@ -638,7 +638,7 @@ class ForecastResult:
     # ``ac_corrected_unclamped_watts[i] - ac_watts[i] > 0`` is one where the AC
     # clamp bit; the coordinator's AC day-ahead strip reads it to tell a clamped
     # slot (ceiling kept) from an unclamped one (factor divided out). Empty () on a
-    # v0.1 / older cached result => strip falls back to divide-always (SPEC §8).
+    # v0.1 / older cached result => strip falls back to divide-always (SPEC §14.1).
     ac_corrected_unclamped_watts: tuple[float, ...] = ()
     # AC analogue of ``slot_ceilings``: the group AC limits + the ungrouped
     # planes' served AC watts per slot. Feeds the AC day-ahead headline strip.
@@ -670,12 +670,12 @@ def default_albedo() -> float:
 
 
 # ===========================================================================
-# LEARNING CONTRACT dataclasses (v0.2.0 + v0.3.0 — SPEC §5, §6, §7, §9)
+# LEARNING CONTRACT dataclasses (v0.2.0 + v0.3.0 — SPEC §9/§11/§16.2)
 # ---------------------------------------------------------------------------
 # All frozen, plain-JSON (de)serialisable, HA-free. Owners (bias / shademap /
 # engine / store / coordinator) share ONLY these types + the const tunables.
 # Every load path is validate-and-clamp: a corrupt blob yields a neutral
-# state (factors 1.0 / empty bins), NEVER a raised exception (SPEC §5 "Store
+# state (factors 1.0 / empty bins), NEVER a raised exception (SPEC §16.4 "Store
 # validate-and-clamp beim Laden — korrupt => Faktoren 1,0, nie Setup-Crash").
 # ===========================================================================
 
@@ -694,7 +694,7 @@ def _clamp(v: float, lo: float, hi: float) -> float:
 def _safe_int(v: object, default: int = 0, *, minimum: int | None = None) -> int:
     """Coerce ``v`` to an int, returning ``default`` on any garbage.
 
-    The validate-and-clamp contract (SPEC §5) forbids a raised exception on
+    The validate-and-clamp contract (SPEC §16.4) forbids a raised exception on
     load: a corrupt blob with a string / NaN / None where an int belongs must
     degrade to the default, NEVER propagate a ValueError up through
     ``store.validate_state`` into setup. ``minimum`` (when given) floors the
@@ -811,7 +811,7 @@ class PlaneSlotBreakdown:
 
     The engine emits this per plane per slot so the SLOW learner can train the
     beam-referenced transmittance and the intraday learner can normalise in
-    k_c space (SPEC §5). ``beam_dc_w`` / ``diffuse_dc_w`` are the modeled DC
+    k_c space (SPEC §9.4). ``beam_dc_w`` / ``diffuse_dc_w`` are the modeled DC
     power split (pre-AC-clamp) attributable to beam+circumsolar vs.
     diffuse+ground POA; their sum is the plane's unclamped DC power.
     ``sun_az`` / ``sun_el`` are the slot-midpoint sun position (0=N internal);
@@ -830,13 +830,13 @@ class PlaneSlotBreakdown:
 # ---------------------------------------------------------------------------
 # FAST learner: day-ahead RLS bias (intraday scalar is NEVER persisted, so it
 # has no dataclass here — it lives transiently in the coordinator/engine and
-# re-inits to 1.0 on restart, SPEC §5).
+# re-inits to 1.0 on restart, SPEC §9.4).
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class BiasCell:
-    """One recursive-least-squares scalar-bias cell (SPEC §5 day-ahead).
+    """One recursive-least-squares scalar-bias cell (SPEC §9.5 day-ahead).
 
     A single-parameter RLS estimator of the multiplicative bias for one
     (cloud class x day part) cell: ``theta`` is the current estimate (applied,
@@ -924,13 +924,13 @@ class BiasState:
 
 @dataclass(frozen=True, slots=True)
 class ShademapBin:
-    """One EMA cell of beam-referenced transmittance (SPEC §5 slow learner).
+    """One EMA cell of beam-referenced transmittance (SPEC §9.1 slow learner).
 
     ``tau`` is the learned transmittance (clamped [SHADEMAP_TAU_MIN, MAX]);
     ``n`` is the effective sample count driving the cold-start shrinkage
     ``w = n / (n + SHADEMAP_SHRINKAGE_K)`` toward the static horizon prior.
     Backfilled bins have ``n`` capped at BOOTSTRAP_MAX_BIN_N so live data
-    overrides quickly (SPEC §6).
+    overrides quickly (SPEC §12.5).
     """
 
     tau: float
@@ -960,7 +960,7 @@ class ShademapState:
     SHADEMAP_AZ_BIN_DEG), el_idx = floor(sun_el / SHADEMAP_EL_BIN_DEG) and
     half in {0,1} (0 = before summer solstice, 1 = after). The learned tau
     REPLACES the static horizon tau of the matched bin, blended by shrinkage
-    against the static prior for that bin's centre azimuth (SPEC §5).
+    against the static prior for that bin's centre azimuth (SPEC §9.1).
     """
 
     channels: dict[str, dict[str, ShademapBin]] = field(default_factory=dict)
@@ -1041,7 +1041,7 @@ class InverterCalState:
 
 @dataclass(frozen=True, slots=True)
 class DriftState:
-    """Rolling drift-monitor state per learner layer (SPEC §5).
+    """Rolling drift-monitor state per learner layer (SPEC §9.8).
 
     ``daily_mae`` holds recent per-day daylight MAE triples keyed by ISO date:
     ``{iso_date: {"raw": mae, "corrected": mae, "baseline": mae}}`` (trimmed to
@@ -1061,7 +1061,7 @@ class DriftState:
     fast_disabled: bool = False
     slow_disabled: bool = False
     # Last-seen option value at the previous rebuild (the OFF->ON transition
-    # detector's memory, SPEC §5). ``None`` == never recorded (legacy blob /
+    # detector's memory, SPEC §9.8). ``None`` == never recorded (legacy blob /
     # pre-upgrade): a rebuild with all-default options must NOT be treated as a
     # user re-enable, so a drift auto-disable survives a restart untouched.
     fast_option_seen: bool | None = None
@@ -1120,14 +1120,14 @@ class DriftState:
 
 @dataclass(frozen=True, slots=True)
 class LearnerSnapshot:
-    """One rollback snapshot of the persisted learner state (SPEC §5).
+    """One rollback snapshot of the persisted learner state (SPEC §9.8).
 
     A date-stamped copy of BiasState + ShademapState + QuantileState taken by the
     nightly job (and the bootstrap import) BEFORE it applies that night's
     training, so a drifting/unwanted layer can be rolled back to a prior good
     state. The coordinator keeps the last DRIFT_ROLLBACK_SNAPSHOTS in a ring.
 
-    The ``quantile`` field is ADDITIVE (SPEC §6): a legacy snapshot dict without
+    The ``quantile`` field is ADDITIVE (SPEC §16.2): a legacy snapshot dict without
     it loads with an empty QuantileState, so pre-existing rollback rings and
     stored snapshots keep working, and ``rollback_learners`` restores the
     quantile ring in step with the other two learners.
@@ -1159,14 +1159,14 @@ class LearnerSnapshot:
         # snapshot (or a snapshot taken while the ring was empty) round-trips
         # BYTE-FAITHFUL through from_dict/to_dict — the v2->v3 store migration
         # requires the learner_snapshots ring to be carried through unchanged
-        # (SPEC §14.4). A restored empty section is the pre-quantile behaviour.
+        # (SPEC §16.2). A restored empty section is the pre-quantile behaviour.
         if self.quantile.bins:
             out["quantile"] = self.quantile.to_dict()
         return out
 
 
 # ---------------------------------------------------------------------------
-# Issued snapshot v2 (attribution) — SPEC §9, operator decision 2026-07-06
+# Issued snapshot v2 (attribution) — SPEC §16.2, operator decision 2026-07-06
 # ---------------------------------------------------------------------------
 
 
@@ -1175,7 +1175,7 @@ class PlaneHourlyModeled:
     """Per-plane per-hour modeled curves stored in the issued snapshot v2.
 
     Enables training the shademap from HOURLY long-term statistics (the
-    backfill and the nightly LTS path both work at hourly resolution, SPEC §6).
+    backfill and the nightly LTS path both work at hourly resolution, SPEC §12.4).
     Each dict is keyed by ISO-8601 UTC hour start.
       - ``beam_wh`` / ``diffuse_wh``: modeled DC energy split for the plane;
       - ``ghi_wh`` proxy and ``kc``: the mean clear-sky index that hour, so the
@@ -1225,7 +1225,7 @@ class PlaneHourlyModeled:
 
 @dataclass(frozen=True, slots=True)
 class IssuedSnapshot:
-    """The v2 forecast-as-issued snapshot (one per calendar day, SPEC §9).
+    """The v2 forecast-as-issued snapshot (one per calendar day, SPEC §16.2).
 
     Stores BOTH hourly curves plus the per-plane modeled beam/diffuse/ghi/kc
     the shademap trainer needs. Round-trips through the issued ring in the
@@ -1248,7 +1248,7 @@ class IssuedSnapshot:
     raw_daily_kwh: dict[str, float] = field(default_factory=dict)
     corrected_daily_kwh: dict[str, float] = field(default_factory=dict)
     per_plane: dict[str, PlaneHourlyModeled] = field(default_factory=dict)
-    # Forecast cloud class per ISO-UTC hour (SPEC §5 day-ahead conditioning): so
+    # Forecast cloud class per ISO-UTC hour (SPEC §8 day-ahead conditioning): so
     # the nightly RLS trainer can key the (cloud class x day part) cell on the
     # ACTUAL forecast weather, not a fixed "clear" label. Empty on legacy/v0.1.
     cloud_class_by_hour: dict[str, str] = field(default_factory=dict)
@@ -1339,21 +1339,21 @@ class IssuedSnapshot:
 
 
 # ===========================================================================
-# v0.4 CONTRACT dataclasses — SKILL SCOREBOARD + QUANTILES (SPEC §6, §9, §10)
+# v0.4 CONTRACT dataclasses — SKILL SCOREBOARD + QUANTILES (SPEC §11/§15)
 # ---------------------------------------------------------------------------
 # All frozen, plain-JSON (de)serialisable, HA-free. Owners (quantiles /
 # scoreboard / store / coordinator / sensor / diagnostics) share ONLY these
 # types + the const tunables. Every load path is validate-and-clamp: a corrupt
 # blob yields a neutral state (empty rings / neutral 1.0 bands), NEVER a raised
-# exception (SPEC §5 validate-and-clamp-on-load, extended to v0.4 sections).
+# exception (SPEC §16.4 validate-and-clamp-on-load, extended to v0.4 sections).
 # ===========================================================================
 
 
 @dataclass(frozen=True, slots=True)
 class ComparisonConfig:
-    """One configured external comparison forecast (SPEC §9/§10 scoreboard).
+    """One configured external comparison forecast (SPEC §15.3 scoreboard).
 
-    GENERIC + CONFIGURABLE (D-P9): ``name`` is the operator-chosen label and
+    GENERIC + CONFIGURABLE (SPEC §15.3): ``name`` is the operator-chosen label and
     ``daily_entity`` is the HA sensor whose STATE is that comparison's daily-kWh
     forecast for today. The scoreboard reads its RECORDER HISTORY for yesterday
     (the value AS IT STOOD during yesterday — no leakage), never its live state.
@@ -1427,10 +1427,10 @@ class ComparisonConfig:
 
 @dataclass(frozen=True, slots=True)
 class DayScore:
-    """One scored day in the rolling scoreboard window (SPEC §9/§10).
+    """One scored day in the rolling scoreboard window (SPEC §15.2).
 
     All errors are ABSOLUTE daily-kWh deviations from the measured site energy
-    for ``iso_date`` (the operator's primary metric, B9). NO-LEAKAGE contract:
+    for ``iso_date`` (the primary metric, SPEC §15.1). NO-LEAKAGE contract:
       * ``engine_kwh`` is the engine forecast AS ISSUED for this date (read from
         the issued ring's snapshot logged during that day) — NEVER recomputed
         with today's learned state;
@@ -1507,7 +1507,7 @@ class DayScore:
 
 @dataclass(frozen=True, slots=True)
 class ScoreboardState:
-    """Rolling window of scored days + the kill-gate verdict (SPEC §9/§10).
+    """Rolling window of scored days + the kill-gate verdict (SPEC §15.2).
 
     ``days`` maps ``{iso_date: DayScore}``; the store/scoreboard trims it to the
     configured window (SCOREBOARD_WINDOW_DAYS). Aggregates (engine daily-kWh MAE,
@@ -1546,8 +1546,8 @@ class QuantileBands:
 
     Multiplicative factors applied to the corrected forecast Wh of an hour in
     this bin: ``p50`` is the empirical median relative error, ``p10`` / ``p90``
-    the 10th / 90th percentiles (SPEC §6). ``n`` is the sample count backing the
-    bin. COLD START (SPEC §6/§10 "no fake spread"): a bin with n <
+    the 10th / 90th percentiles (SPEC §11.1). ``n`` is the sample count backing the
+    bin. COLD START (SPEC §11.1 "no fake spread"): a bin with n <
     QUANTILE_MIN_SAMPLES collapses to P50 (p10 == p50 == p90), and an empty bin
     is the neutral identity (1.0/1.0/1.0). Always p10 <= p50 <= p90 by
     construction (the producer sorts them). This is a DERIVED view emitted by
@@ -1587,7 +1587,7 @@ class QuantileState:
     to QUANTILE_RING_DAYS and the collapse gate can count distinct days, not just
     correlated hours (owner: quantiles / store). ``bands(bin_key)`` (in
     quantiles.py) computes the empirical QuantileBands with the cold-start
-    collapse rule (SPEC §6).
+    collapse rule (SPEC §11.1).
 
     LEGACY tolerance: ``from_dict`` accepts a bare number per entry (a pre-fix,
     un-dated sample) and normalises it to ``["", relerr]`` (empty date == unknown

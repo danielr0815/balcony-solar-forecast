@@ -1,4 +1,4 @@
-"""Learning-visibility gates (0.23.1) — SPEC §5/§7/§8.
+"""Learning-visibility gates (0.23.1) — SPEC §10/§9.8/§14.6.
 
 Owner: glue (``_channel_health``). The failure these guard is a status LIE, not
 a crash: ``const.DEFAULT_SITE`` ships eight of the reference plant's Hoymiles
@@ -542,7 +542,7 @@ def test_streak_card_is_suppressed_while_the_presence_card_stands():
     The missing channel raises ``actual_entity_missing`` at setup and then
     trips the dead-channel gate every night forever; adding a second card a
     working week later dilutes the signal without adding a single fact — the
-    presence card already names those exact channels (SPEC §5.1).
+    presence card already names those exact channels (SPEC §10).
     """
     coord = _Coord()
     coord._channel_health = {
@@ -625,7 +625,7 @@ def test_detector_runs_on_the_real_forecast_store_not_just_a_stand_in():
     while in the real installation the streak never advances, all three
     ``learning_stalled_*`` cards are dead and ``store_stats()`` reports
     ``learning_health.available: false`` forever. That is exactly the
-    "falsely unavailable" lie SPEC §8 records as fixed.
+    "falsely unavailable" lie SPEC §14.6 records as fixed.
     """
     from datetime import timedelta
 
@@ -738,7 +738,7 @@ def test_store_predating_the_feature_reads_back_neutral():
 
 
 def test_corrupt_health_section_degrades_to_neutral():
-    """validate-and-clamp on load (SPEC §5): garbage never crashes setup."""
+    """validate-and-clamp on load (SPEC §16.4): garbage never crashes setup."""
     from custom_components.balcony_solar_forecast.store import (
         _empty_state,
         validate_state,
@@ -766,7 +766,7 @@ def test_corrupt_health_section_degrades_to_neutral():
 
 
 def test_learning_health_summary_carries_cause_modules_streak_and_threshold():
-    """Remote diagnosis without log access is the whole point (SPEC §8)."""
+    """Remote diagnosis without log access is the whole point (SPEC §14.6)."""
     coord = _Coord()
     _run_streak(coord, DROPOUT_REASON_FROZEN_CHANNEL, 2)
 
@@ -782,7 +782,7 @@ def test_learning_health_summary_carries_cause_modules_streak_and_threshold():
 
 def test_diagnostics_blocks_carry_learning_health_and_channel_presence():
     """The two accessors the diagnostics dump already uses must carry the new
-    fields — no third code path (SPEC §8)."""
+    fields — no third code path (SPEC §14.6)."""
     from custom_components.balcony_solar_forecast.coordinator import (
         BalconySolarCoordinator,
     )

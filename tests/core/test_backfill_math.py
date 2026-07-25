@@ -1,4 +1,4 @@
-"""Pure-math tests for scripts/backfill.py (NO network — SPEC §6 task brief).
+"""Pure-math tests for scripts/backfill.py (NO network — SPEC §12.3/§12.4).
 
 Covers only the importable, deterministic parts of the backfill:
 
@@ -158,7 +158,7 @@ def test_parse_broken_payload_raises():
 # ---------------------------------------------------------------------------
 #
 # The backfill reconstructs the SLOW-reference / day-ahead-bias physics with the
-# SAME core/ functions the live engine runs (SPEC §6 mirror invariant). These
+# SAME core/ functions the live engine runs (SPEC §12.4 mirror invariant). These
 # tests pin that byte-for-byte on the v0.22 additions: an inline ``tau_points``
 # elevation profile (the beam gate must resolve at the true sun elevation in BOTH
 # paths — the parity break the sun_el fix closed), a ``diffuse_tau`` wall row (the
@@ -384,7 +384,7 @@ def test_reconstruct_shaded_plane_keeps_ungated_reference_beam(site: SiteConfig)
     The shademap learns a transmittance that REPLACES the static tau, so the
     reference beam must be the clear-horizon (ungated) beam — otherwise a fully
     shaded bin (static tau = 0) would have ~0 modeled beam, fail the beam-share
-    gate, and never learn the shade it exists to capture (SPEC §5).
+    gate, and never learn the shade it exists to capture (SPEC §9.1).
 
     At 2025-06-21 12:30 UTC the sun sits at az ~218 / el ~61 for the reference
     site, inside M4's hard building-wall sector (tau = 0), so the pure-physics
@@ -417,7 +417,7 @@ def test_reconstruct_shaded_bin_learns_full_occlusion(site: SiteConfig):
     Feeds a wall-occluded hour where the module measures only its diffuse floor
     (no beam gets through). The beam-referenced T = (P_meas - P_diffuse)/P_beam
     must be ~0, and the EMA bin seeds near SHADEMAP_TAU_MIN — full occlusion is
-    representable (SPEC §5 clamp [0.0, 1.1]).
+    representable (SPEC §9.1 clamp [0.0, 1.1]).
     """
     from balcony_solar_forecast.core import horizon
 
@@ -556,7 +556,7 @@ def test_process_day_populates_shademap_and_bias(site: SiteConfig):
 
 
 def test_backfill_accumulates_per_plane_even_when_grouped():
-    """The backfill stores learning PER PLANE, even for grouped planes (SPEC §5).
+    """The backfill stores learning PER PLANE, even for grouped planes (SPEC §9.2).
 
     Storage is always per plane (keyed by plane name); the group pooling happens
     later at READ time in the coordinator, so grouping stays fully reversible.
@@ -594,7 +594,7 @@ def test_process_day_daily_fallback_disaggregates(site: SiteConfig):
 
     Supplies one DAILY total per module; the accumulator must still produce
     shademap/bias samples (disaggregated across daylight hours), exercising the
-    coarse fallback branch (SPEC §6).
+    coarse fallback branch (SPEC §12.4).
     """
     from balcony_solar_forecast.core import horizon
 
@@ -991,7 +991,7 @@ def test_process_day_drops_frozen_module_only(site: SiteConfig):
 
 
 # ---------------------------------------------------------------------------
-# Quantile bootstrap seeding (A6 / SPEC §6) — the F7 cold-start fix
+# Quantile bootstrap seeding (A6 / SPEC §12.6) — the F7 cold-start fix
 # ---------------------------------------------------------------------------
 
 
@@ -1095,7 +1095,7 @@ def _highlat_single_plane_site() -> SiteConfig:
 
 def test_quantile_per_day_cap_bounds_correlated_hours():
     """A single (class x part) bin never takes more than
-    QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN samples from ONE day (SPEC §6): the
+    QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN samples from ONE day (SPEC §12.6): the
     hourly backfill's within-day hours are strongly correlated."""
     from datetime import date
     from datetime import datetime as _dt
@@ -1127,7 +1127,7 @@ def test_quantile_per_day_cap_bounds_correlated_hours():
 
 def test_build_bootstrap_windows_and_caps_quantile_ring(site: SiteConfig):
     """build_bootstrap_json re-windows every ring to QUANTILE_RING_DAYS relative
-    to the LAST backfill day and enforces the count-cap backstop (SPEC §6)."""
+    to the LAST backfill day and enforces the count-cap backstop (SPEC §12.6)."""
     from balcony_solar_forecast.core import quantiles as q
     from balcony_solar_forecast.core.types import QuantileState
 

@@ -33,7 +33,7 @@ Technische Eckdaten (alle am Code geprüft):
 | Aktueller Stand | `main` @ **v0.23.0**, `manifest.json` / `pyproject.toml` / `const.INTEGRATION_VERSION` synchron |
 | Laufzeit-Abhängigkeiten | **keine** (`manifest.json` → `requirements: []`) — reine stdlib, kein numpy/pandas/pvlib |
 | Architekturgrenze | `custom_components/balcony_solar_forecast/core/` importiert **nichts** aus `homeassistant`; genau eine dokumentierte Netz-Ausnahme (`core/openmeteo_backfill.py`, lazy `aiohttp`, injizierte Session) |
-| Vertrag | `docs/SPEC.md` (deutsch), Designentscheide in `docs/adr/`, Historie in `CHANGELOG.md` |
+| Vertrag | `docs/SPEC.md` (deutsch, Ist-Stand), Herleitung/Historie in `docs/HISTORIE.md`, Designentscheide in `docs/adr/`, Release-Chronik in `CHANGELOG.md` |
 | Plattformen in HA | `sensor`, `binary_sensor`, `select`, `date` — plus 10 Actions, Diagnostics, Energy-Dashboard-Hook, zwei mitgelieferte Lovelace-Karten |
 | Lernschichten | Intraday-Skalar (transient), Day-Ahead-RLS-Bias, Shademap (geometrisch), Quantil-Bänder, Inverter-η — dazu Scoreboard/Kill-Gate und Drift-Monitor als Wächter |
 
@@ -116,7 +116,7 @@ praktischen Fallen (Windows/PowerShell, Floats, DC/AC in Diagnostics).
 | **Code ändern** | `07-entwicklung-tests-release.md` (Regeln, Tests, Contracts) | `01-…` für die Modul-Landkarte; das Fachdokument des betroffenen Bereichs (`02`/`03`/`04`); `docs/SPEC.md` für den Vertrag |
 | **Ein Prognoseproblem diagnostizieren** | `05-anlage-und-betrieb-runbook.md` §5 (Diagnose-Kochbuch) | `03-…` (welche Schicht kann das verursachen), `02-…` (ist schon RAW schief?), `04-…` (welches Attribut/welche Action zeigt es), `06-…` (ist das ein bekannter offener Punkt) |
 | **Die Anlage umkonfigurieren** | `05-…` §4.2–§4.4 (Reconfigure, Re-Bootstrap, Übergangsphase) | `02-…` §6/§8 (Horizontzeilen korrekt schreiben und validieren), `03-…` §10/§12 (Fingerprint, Reihenfolge Physik → Reset → Bootstrap) |
-| **Ein Release bauen** | `07-…` §6 (Versionsnummer an drei Stellen, Reihenfolge, CI-Guards) | `CHANGELOG.md` + `docs/SPEC.md` (Nachtrag), `06-…` §4 für den Status offener Punkte |
+| **Ein Release bauen** | `07-…` §6 (Versionsnummer an drei Stellen, Reihenfolge, CI-Guards) | `CHANGELOG.md` + `docs/SPEC.md` (Versionsstempel + betroffene Abschnitte), `06-…` §4 für den Status offener Punkte |
 | **Die Physik verstehen** | `02-physik-und-horizontmodell.md` komplett | `01-…` §3 (Begriffe RAW/CORRECTED/DC/AC), `docs/adr/ADR-0022-*` für die Herleitung des Horizont-/Diffus-Modells |
 | **Den Stand der offenen Punkte kennen** | `06-…` §4 (Tabelle O1–O9) | `05-…` §6 (bewusst nicht modelliert), `CHANGELOG.md` für das, was seither gelandet ist |
 
@@ -163,10 +163,13 @@ ARBEITSREGELN (hart)
    fasst Netzwerk an — mit lazy aiohttp-Import und injizierter Session, weiterhin
    ohne HA-Import. Neue Mathematik gehört in core/, neuer HA-Glue eine Ebene
    darüber.
-4. docs/SPEC.md IST DER VERTRAG (deutsch). Jede Verhaltensänderung wird im
-   selben PR in der SPEC nachgezogen, neues Verhalten als nummerierter
-   versionierter Nachtrag. Verschiebst du Abschnitte, korrigiere die "SPEC §…"-
-   Zitate im Code — sie sind tragend.
+4. docs/SPEC.md IST DER VERTRAG (deutsch) und eine reine IST-Spezifikation:
+   sie beschreibt nur das Verhalten der aktuellen Version, ihr Kopf nennt
+   "Gilt für Version: <X>". Jede Verhaltensänderung wird im selben PR in der
+   SPEC nachgezogen, neues Verhalten thematisch einsortiert. Historie und
+   Herleitung stehen in docs/HISTORIE.md (nicht normativ, inkl.
+   Übergangstabelle alt→neu). Verschiebst du Abschnitte, korrigiere die
+   "SPEC §…"-Zitate im Code — sie sind tragend.
 5. DIE VERSION STEHT AN DREI STELLEN und muss synchron sein:
    custom_components/balcony_solar_forecast/manifest.json (version),
    pyproject.toml ([project] version),

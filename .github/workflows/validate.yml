@@ -32,7 +32,7 @@ jobs:
         uses: "home-assistant/actions/hassfest@master"
 
   # Advisory ONLY — never a gate. docs/SPEC.md is the project's contract
-  # (SPEC §0: every behavioural change updates it in the SAME PR), but "was the
+  # (SPEC §1.3: every behavioural change updates it in the SAME PR), but "was the
   # SPEC edit actually needed?" is a judgement call no workflow can make. So
   # this job prints a GitHub warning annotation and stops there: no failing
   # status, no required check. The hard, machine-checkable half of the contract
@@ -61,7 +61,7 @@ jobs:
           code="$(printf '%s\n' "$changed" | grep -c '^custom_components/' || true)"
           spec="$(printf '%s\n' "$changed" | grep -c '^docs/SPEC\.md$' || true)"
           if [ "$code" -gt 0 ] && [ "$spec" -eq 0 ]; then
-            echo "::warning title=SPEC not updated::This PR changes custom_components/ ($code file(s)) but not docs/SPEC.md. Pull the SPEC along in the same PR (SPEC §0 change rule), or say in the PR description why no contract change is needed (pure refactor, test-only, tooling)."
+            echo "::warning title=SPEC not updated::This PR changes custom_components/ ($code file(s)) but not docs/SPEC.md. Pull the SPEC along in the same PR (SPEC §1.3 change rule), or say in the PR description why no contract change is needed (pure refactor, test-only, tooling)."
           else
             echo "SPEC reminder: nothing to flag (code files changed: $code, SPEC changed: $spec)."
           fi

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot Previous-Runs backfill -> learner bootstrap JSON (SPEC §6).
+"""One-shot Previous-Runs backfill -> learner bootstrap JSON (SPEC §12.3).
 
 DEV-MACHINE script (NOT run on Home Assistant). It reconstructs a warm start
 for the two learning layers from ~2 years of history so the system does not
@@ -24,7 +24,7 @@ face its first live winter cold:
 
 Robust to gaps: any day missing weather or actuals is skipped with a warning.
 
-W1 refactor (SPEC §6): the reconstruction / bootstrap MATH is now a HA-free
+W1 refactor (SPEC §12.4): the reconstruction / bootstrap MATH is now a HA-free
 core module — ``balcony_solar_forecast.core.bootstrap_build`` — shared with the
 in-process ``run_bootstrap`` HA action. The Open-Meteo Previous-Runs weather
 fetch + payload parse is likewise shared, in the HA-free
@@ -101,7 +101,7 @@ from balcony_solar_forecast.core import horizon  # noqa: E402
 
 # Re-export the pure bootstrap core so the existing tests (and any downstream
 # importer) keep addressing these via ``backfill.<name>`` after the W1 refactor
-# moved the math into core/bootstrap_build.py (SPEC §6). The CLI wrapper below
+# moved the math into core/bootstrap_build.py (SPEC §12.4). The CLI wrapper below
 # only owns fetching + JSON output.
 from balcony_solar_forecast.core.bootstrap_build import (  # noqa: E402,F401
     BootstrapAccumulator,
@@ -532,7 +532,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description=(
             "Backfill the balcony_solar_forecast learner bootstrap from "
             "Open-Meteo Previous-Runs forecasts + HA long-term statistics "
-            "(SPEC §6). Run on the DEV machine, not on HA."
+            "(SPEC §12.3). Run on the DEV machine, not on HA."
         ),
     )
     p.add_argument("--ha-url", required=True,

@@ -1,8 +1,8 @@
 """Tests for Hay-Davies plane-of-array transposition.
 
-Pure pytest, no Home Assistant imports (SPEC §4). Owner: irradiance.
+Pure pytest, no Home Assistant imports (SPEC §2). Owner: irradiance.
 
-Covers the SPEC §4 physics musts and silent-error traps:
+Covers the SPEC §4.3 physics musts and silent-error traps:
   - all four components non-negative;
   - vertical-plane cases (70/80 deg planes are near-vertical);
   - Rb cap <= 10 and circumsolar = 0 below 3 deg (low-sun no-explosion);
@@ -155,7 +155,7 @@ def test_vertical_south_plane_beam_matches_dni_cos_theta():
     assert c["beam"] == pytest.approx(expected_beam, rel=1e-9)
 
 
-# --- azimuth-sign trap on the 25 deg planes (SPEC Anhang A) ---------------
+# --- azimuth-sign trap on the 25 deg planes (SPEC §20.1) ------------------
 
 
 def test_azimuth_sign_trap_behind_plane_no_beam():

@@ -1,6 +1,6 @@
-"""Pure tests for core/quantiles.py — P10/P50/P90 historical simulation (SPEC §6/§10).
+"""Pure tests for core/quantiles.py — P10/P50/P90 historical simulation (SPEC §11.1).
 
-Plain pytest, no Home Assistant imports (SPEC §4). These cover:
+Plain pytest, no Home Assistant imports (SPEC §2). These cover:
 
   * empirical_percentile math on known samples (type-7 interpolation), the
     empty/single-element edge cases, and pct clamping;

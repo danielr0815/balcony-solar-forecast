@@ -38,7 +38,7 @@ Frozen public contract (the nightly trainer + coordinator depend on these):
     update(state, ratios) -> InverterCalState
     effective_eta(state) -> float | None
 
-Every function is pure and NEVER raises (validate-and-clamp ethos, SPEC §5):
+Every function is pure and NEVER raises (validate-and-clamp ethos, SPEC §9.6):
 garbage inputs degrade to None / an unchanged state, never an exception.
 """
 

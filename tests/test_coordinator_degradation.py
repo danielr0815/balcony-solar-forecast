@@ -1,4 +1,4 @@
-"""Tests for the degradation ladder (SPEC §7) + learner-hook composition.
+"""Tests for the degradation ladder (SPEC §13) + learner-hook composition.
 
 Covers the previously untested fault-tolerance core of the coordinator:
 
@@ -241,7 +241,7 @@ async def test_try_fetch_success_persists_and_advances_both_anchors():
 
 
 async def test_try_fetch_coverage_refusal_keeps_payload_age():
-    """REGRESSION (SPEC §7): keeping the richer stored payload must not stamp
+    """REGRESSION (SPEC §13): keeping the richer stored payload must not stamp
     the served weather as fresh — the payload anchor stays, only the scheduler
     anchor advances, so the age keeps climbing through the ladder."""
     store = _PayloadStore()

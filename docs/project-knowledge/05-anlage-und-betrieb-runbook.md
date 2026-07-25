@@ -25,7 +25,7 @@ Strahlungskomponenten (GHI/DNI/DHI) und **transponiert lokal**
 lat/lon, `minutely_15`, `hourly`, `models`, `forecast_days`, `timezone`). Eine
 Umrechnung auf die Open-Meteo-GTI-Konvention (0=S) oder auf PVGIS findet im Code
 **nicht** statt; PVGIS wird gar nicht abgefragt. Die abweichenden Konventionen in
-SPEC Anhang A betreffen die historische rany2-Baseline bzw. manuell importierte
+SPEC §20.1 betreffen die historische rany2-Baseline bzw. manuell importierte
 PVGIS-Horizonte. (Der Modul-Docstring von `config_flow.py` behauptet noch das
 Gegenteil — veraltet.)
 

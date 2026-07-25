@@ -6,7 +6,7 @@ submodule the normal way (``import balcony_solar_forecast.core.horizon``)
 would execute that root ``__init__`` first and fail with
 ``ModuleNotFoundError: homeassistant`` outside a HA checkout.
 
-The core itself imports NOTHING from Home Assistant (SPEC §4 hard invariant),
+The core itself imports NOTHING from Home Assistant (SPEC §2 hard invariant),
 so we make it importable for bare pytest by registering
 ``balcony_solar_forecast`` as a *namespace-style* package object whose
 ``__path__`` points at the real directory, WITHOUT running its ``__init__``.

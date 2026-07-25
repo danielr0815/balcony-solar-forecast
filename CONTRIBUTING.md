@@ -32,17 +32,21 @@ surrounding code and keep the intent comments accurate.
 **[docs/SPEC.md](docs/SPEC.md)** (German) is the project's binding
 specification. It is not background reading — it is the source of truth the code
 is written against, and comments throughout the code cite it (`SPEC §4`,
-`§9/§10`, …).
+`SPEC §9.1`, …).
 
+- It is a **current-state specification**: it describes only what the shipped
+  version does. Its header carries "Gilt für Version: <X>", checked against
+  `const.INTEGRATION_VERSION`. Provenance, decision logs and the old→new section
+  mapping live in **[docs/HISTORIE.md](docs/HISTORIE.md)** (not normative).
 - Any feature or behavioural change **must update the SPEC in the same PR**.
 - **File it by topic, not by release.** New behaviour becomes a subsection at
-  the end of the section that owns the topic (see the signpost table in **§0**),
-  or a new top-level section with a thematic title. The historical
-  **§14 (v0.4)** / **§15 (v0.5)** addendum sections are exactly the pattern §0
-  replaced — do not grow new ones.
-- **Section numbers are immutable.** Never renumber, delete or re-use an
+  the end of the section that owns the topic (see the signpost table in
+  **§1.2**), or a new top-level section with a thematic title. No version-keyed
+  addendum sections, no "since v0.x" in the prose.
+- **Section numbers are append-only.** Never renumber, delete or re-use an
   existing number; the code cites them. Retitling and rewriting the content is
-  fine.
+  fine. Behaviour that no longer holds is **replaced**, not marked historical —
+  move the reasoning to `docs/HISTORIE.md`.
 - When you change behaviour that an existing section describes, update that
   section so the SPEC and the code never disagree.
 - Keep the **`SPEC §…` citations in code comments accurate**. If you move logic
@@ -57,10 +61,12 @@ up now:
 
 - **[`tests/test_spec_integrity.py`](tests/test_spec_integrity.py)** (runs in
   the normal suite, **fails the build**): every `SPEC §…` citation under
-  `custom_components/` and `tests/` must resolve to a real heading; every
-  service in `services.yaml` and every public `site` config field in `const.py`
-  must be named in the SPEC; every top-level section must be covered by the §0
-  signpost. When it fails, the message names the exact citation site or field.
+  `custom_components/`, `tests/`, `scripts/`, `dashboards/` and `docs/` must
+  resolve to a real heading; every service in `services.yaml` and every public
+  `site` config field in `const.py` must be named in the SPEC; every top-level
+  section must be covered by the §1.2 signpost; the version stamp must match
+  `INTEGRATION_VERSION`. When it fails, the message names the exact citation
+  site or field.
 - **The `spec-reminder` CI job** (advisory, `continue-on-error`, never a gate):
   on a PR that touches `custom_components/` without touching `docs/SPEC.md`, it
   prints a warning annotation. Pull the SPEC along, or say in the PR why the
@@ -69,7 +75,7 @@ up now:
   **[`CLAUDE.md`](CLAUDE.md)** carry the same checklist for humans and for
   AI-assisted sessions.
 
-New operator-visible config fields have a home: the **§4.1** schema table
+New operator-visible config fields have a home: the **§7** schema tables
 (field name, meaning, range/default, and whether it enters the config
 fingerprint). Add the row in the same PR — guard (c) above checks the field
 name is there at all.

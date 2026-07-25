@@ -1,6 +1,6 @@
 """Tests for the shade-profile builder (pure, HA-free).
 
-Covers (SPEC §15):
+Covers (SPEC §17):
   - a clear plane (empty horizon + empty shademap): full transmittance, flat
     zero horizon lines, daylight-only monotonic sun path;
   - engine-exact gate replication: every sun-path transmittance equals an
@@ -36,7 +36,7 @@ from balcony_solar_forecast.core.types import (
     ShademapState,
 )
 
-# Landshut / operator reference site (SPEC §4 self-test coordinates).
+# Landshut / operator reference site (SPEC §4.1 self-test coordinates).
 LAT = 48.3
 LON = 12.1
 # Fixed CET offset (no DST) so the tests never depend on tzdata/zoneinfo being
@@ -477,7 +477,7 @@ def test_sample_n_is_pooled_two_channel_sum_and_matches_helper():
 
 
 # ---------------------------------------------------------------------------
-# Year-stable x-axis: widest daylight azimuth span of the whole year (SPEC §15)
+# Year-stable x-axis: widest daylight azimuth span of the whole year (SPEC §17.1)
 # ---------------------------------------------------------------------------
 
 

@@ -1,4 +1,4 @@
-"""Making "this install is not learning" VISIBLE — SPEC §5.1 (gates: SPEC §5).
+"""Making "this install is not learning" VISIBLE — SPEC §10 (gates: SPEC §9.8).
 
 Owner: glue (learning visibility). Two independent detectors, both surfacing
 through HA repair issues and the diagnostics dump instead of a log line nobody
@@ -13,7 +13,7 @@ reads:
       seconds, at setup, before a single night is wasted.
 
   (2) **Discard streak** (:func:`record_actuals_outcome`). ``_actuals`` applies
-      the SPEC §5 label gates and discards the WHOLE day for BOTH learners as
+      the SPEC §9.8 label gates and discards the WHOLE day for BOTH learners as
       soon as ONE configured channel is unusable. Repeated night after night
       that means the system NEVER learns — while the status entities keep
       reporting ``cold_start`` and the learners keep reporting "active". This
@@ -31,7 +31,7 @@ permanently dead channel still trips the streak within a working week.
 
 The AC meter (``ac_actual_entity``) is deliberately NOT a repair issue: it is
 optional, self-gating (a missing/implausible meter falls back to the configured
-η and the DC learning is untouched, SPEC §5) and never blocks learning. A second
+η and the DC learning is untouched, SPEC §9.6) and never blocks learning. A second
 repair card next to the blocking one would dilute exactly the signal that needs
 action, so a missing AC meter is reported in the diagnostics dump and logged
 once — visible to whoever is debugging, silent to whoever is not.
@@ -99,7 +99,7 @@ def check_actual_channels(coord) -> dict[str, object]:
     """Verify every configured measurement channel exists; raise/clear the issue.
 
     Returns the summary the diagnostics dump publishes. Never raises: a broken
-    check must not take down setup (SPEC §5).
+    check must not take down setup (SPEC §9.8).
     """
     site = coord._site
     try:
@@ -124,7 +124,7 @@ def check_actual_channels(coord) -> dict[str, object]:
             "as one channel is unusable, so NOTHING will ever be learned until "
             "these are fixed. Enter your own inverter sensors via Reconfigure — "
             "the shipped default site is a reference example and carries a "
-            "stranger's sensor ids (SPEC §5)",
+            "stranger's sensor ids (SPEC §7.8)",
             len(missing), configured, listed,
         )
         coord._raise_repair_issue(
@@ -167,7 +167,7 @@ def record_actuals_outcome(coord, day: date, *, accepted: bool) -> None:
     ``accepted`` is True when the day cleared every label gate (usable per-module
     energy came back). Idempotent per day: the catch-up sweep re-processes a
     discarded day every night until it is recorded, so only a day NEWER than the
-    last counted one advances the streak. Never raises (SPEC §5).
+    last counted one advances the streak. Never raises (SPEC §10).
     """
     try:
         _record_actuals_outcome(coord, day, accepted=accepted)
@@ -263,7 +263,7 @@ def _record_actuals_outcome(coord, day: date, *, accepted: bool) -> None:
     ) or ", ".join(modules)
     _LOGGER.warning(
         "Nightly training has discarded the whole day %d times in a row (last: "
-        "%s, reason %s, channel(s) %s). NOTHING is being learned (SPEC §5)",
+        "%s, reason %s, channel(s) %s). NOTHING is being learned (SPEC §10)",
         streak, iso, reason, channels,
     )
     # Exactly one stalled-issue at a time: if the dominant cause changed
@@ -308,7 +308,7 @@ def _day_was_ours(coord, iso: str) -> bool:
 
 
 def learning_health_summary(coord) -> dict[str, object]:
-    """Persisted discard-streak state for the diagnostics dump (SPEC §8).
+    """Persisted discard-streak state for the diagnostics dump (SPEC §14.6).
 
     Remote diagnosis without log access: WHY the last day was thrown away, which
     channels caused it, how many days in a row, and when a day was last accepted.

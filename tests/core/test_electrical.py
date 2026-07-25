@@ -1,6 +1,6 @@
 """Unit tests for core/electrical.py: Ross DC model + AC group clamp.
 
-Plain pytest, no Home Assistant imports (SPEC §4). Physics constants are
+Plain pytest, no Home Assistant imports (SPEC §2). Physics constants are
 pulled from const.py so the tests track any calibrated change of the model.
 """
 

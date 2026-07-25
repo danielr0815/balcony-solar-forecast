@@ -4,7 +4,7 @@ A ready-to-paste Lovelace dashboard for Balcony Solar Forecast, using **only
 built-in Home Assistant cards** — it needs zero custom cards and zero HACS
 frontend resources. It surfaces the v0.4 skill scoreboard (the kill-gate), the
 P10/P50/P90 uncertainty band, the learner/drift/degradation status, and a
-best-effort shademap view (SPEC §9/§10/§14.3).
+best-effort shademap view (SPEC §15/§18.1).
 
 The dashboard file is [`dashboards/balcony_solar_forecast.yaml`](../dashboards/balcony_solar_forecast.yaml).
 
@@ -101,7 +101,7 @@ state.
 ## 2. Configure the comparison baselines (the scoreboard's opponents)
 
 The scoreboard ships with **no comparison baselines** configured — they are
-generic and configurable, never hardcoded (D-P9). Add them so the kill-gate has
+generic and configurable, never hardcoded (SPEC §15.3). Add them so the kill-gate has
 something to beat:
 
 1. **Settings → Devices & Services → Balcony Solar Forecast → Configure**.
@@ -187,10 +187,9 @@ without the bundled frontend resources.
 
 - **Kill-gate verdict** (markdown) — PASSED / not passed / window-not-full,
   derived from `binary_sensor.…_kill_gate_passed` and the engine-vs-baseline
-  percent. This is the gate the whole plan hangs on (SPEC §9/§10): once it is
+  percent. This is the gate the whole plan hangs on (SPEC §15.4): once it is
   green, it is safe to consider re-pointing consumers (e.g. battery_manager) at
-  the engine sensors. **The battery_manager cutover stays deferred until then**
-  (D-P11).
+  the engine sensors.
 - **Engine vs best baseline** (gauge) — bound to
   `sensor.…_vs_best_baseline_pct`; positive = engine better on daily-kWh MAE.
 - **Skill scoreboard** (entities) — engine daily-kWh MAE, engine hourly MAE,
@@ -232,7 +231,7 @@ without the bundled frontend resources.
   > charts `mean`: the `actual_entity` sensors are power sensors (W,
   > `state_class: measurement`), for which the recorder keeps mean/min/max and
   > no sum, so charting `sum` yields an empty card.
-- **Today's forecast band** (entities) — P10 / P50 / P90 for today (SPEC §6).
+- **Today's forecast band** (entities) — P10 / P50 / P90 for today (SPEC §11.2).
 - **Learners, drift & degradation** (entities) — source status, degraded flag,
   weather-image age, each learner's status, the applied intraday scalar, and
   the corrected-vs-physics drift MAE.
@@ -261,7 +260,7 @@ To pull the full polar table:
    from that JSON (e.g. a small script or a notebook), or fed to a custom card
    if you later install one.
 
-Eyeball the learned τ against the known obstructions (SPEC §13):
+Eyeball the learned τ against the known obstructions (SPEC §7.8):
 
 - **East hill** — reduced τ at low elevation, sun-azimuth ~60–100° (morning),
   all channels.
@@ -492,4 +491,4 @@ tweak the look. It changes no state.
   statistics (LTS). Modules must have `state_class` (they do — LTS since
   2024-07) for the statistics graph to have data.
 - The dashboard is read-only observability; it changes no state and touches no
-  consumer (battery_manager is untouched — D-P11).
+  consumer (no consumer is touched).

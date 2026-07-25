@@ -1,6 +1,6 @@
 """Solar position (NOAA closed-form, stdlib ``math`` only).
 
-Owner: solpos. Pure, HA-free. Accuracy target < 0.3 deg (SPEC §4/§13,
+Owner: solpos. Pure, HA-free. Accuracy target < 0.3 deg (SPEC §4.1/§21,
 self-test: Landshut/operator site June noon 64.9 deg, Dec 18.0 deg).
 
 Algorithm: the NOAA Solar Calculator formulation of Meeus' *Astronomical

@@ -1,4 +1,4 @@
-"""Tests for the learning-layer diagnostic entities (SPEC §5, §9).
+"""Tests for the learning-layer diagnostic entities (SPEC §9/§14.7).
 
 Covers the intraday-scalar sensor, the drift-MAE sensor (state + attributes),
 the per-layer learner-status ENUM sensors, and the fast/slow learner-active

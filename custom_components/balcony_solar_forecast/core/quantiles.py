@@ -1,11 +1,11 @@
-"""Quantile bands P10/P50/P90 — historical-simulation uncertainty (SPEC §6/§10).
+"""Quantile bands P10/P50/P90 — historical-simulation uncertainty (SPEC §11.1).
 
 Owner: quantiles. Pure, HA-free (stdlib only). This module implements the
 FROZEN public contract (signatures + docstrings) that the engine hook, the
 store, the coordinator, the sensors, the diagnostics and the pure tests depend
 on.
 
-Design (SPEC §6, nonparametric historical simulation)
+Design (SPEC §11.1, nonparametric historical simulation)
 -----------------------------------------------------
 Maintain a 90-day ring (QUANTILE_RING_DAYS) of hourly RELATIVE errors
 
@@ -20,7 +20,7 @@ as a hard backstop. At FORECAST time, for each hour, look up the matching bin's
 empirical P10/P50/P90 multipliers and apply them to that hour's corrected
 forecast Wh to produce the band curves.
 
-COLD START (SPEC §6/§10, "no fake spread"): a bin collapses its band to P50
+COLD START (SPEC §11.1, "no fake spread"): a bin collapses its band to P50
 (p10 == p50 == p90) unless it has BOTH >= QUANTILE_MIN_SAMPLES samples AND
 evidence from >= QUANTILE_MIN_DAYS distinct days — hourly samples within one day
 are strongly correlated, so a few bursty days are not enough independent
@@ -33,7 +33,7 @@ forecast Wh exceeds QUANTILE_MIN_FORECAST_WH, clamped to
 [QUANTILE_REL_ERR_MIN, QUANTILE_REL_ERR_MAX], appended to its bin's ring.
 
 All tunables come from const. Every path is validate-and-clamp: a corrupt/absent
-state or an empty bin degrades to the neutral band, never an exception (SPEC §5).
+state or an empty bin degrades to the neutral band, never an exception (SPEC §16.4).
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ __all__ = [
 # Per-bin ring cap. The ring holds hourly samples and a single bin can receive a
 # whole day-part's worth per day (~8 daylight hours in summer), so the cap is
 # QUANTILE_RING_DAYS x QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN — sizing the FIFO to
-# ~90 days of a frequently-hit bin rather than ~2 weeks (SPEC §6 "90-day ring").
+# ~90 days of a frequently-hit bin rather than ~2 weeks (SPEC §11.1 "90-day ring").
 # Samples are now date-stamped, so the primary trim is the DATE window; this
 # COUNT cap is a hard backstop applied AFTER it (oldest-first, un-dated first).
 _BIN_RING_CAP = QUANTILE_RING_DAYS * QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN
@@ -122,7 +122,7 @@ def ring_evidence(ring: object) -> tuple[int, int]:
     un-dated (legacy) samples span (``ceil(undated / cap)``, the fewest days that
     many capped samples could have come from). This is the SINGLE source of the
     cold-start gate used by both :func:`bands_for_bin` (spread vs. neutral) and
-    the coordinator's diagnostics summary (SPEC §6/§10), so the two can never
+    the coordinator's diagnostics summary (SPEC §11.1), so the two can never
     diverge. A non-sequence / empty ring yields ``(0, 0)``. Never raises.
     """
     if not isinstance(ring, (list, tuple)):
@@ -290,13 +290,13 @@ def bands_for_bin(
     cloud_class: str,
     day_part: str,
 ) -> QuantileBands:
-    """Empirical P10/P50/P90 multipliers for one (class x part) bin (SPEC §6).
+    """Empirical P10/P50/P90 multipliers for one (class x part) bin (SPEC §11.1).
 
     Looks up the bin's relative-error ring in ``state``; sorts it; returns a
     QuantileBands with p10 / p50 / p90 = empirical_percentile at
     QUANTILE_P_LOW / QUANTILE_P_MID / QUANTILE_P_HIGH and ``n`` = ring length.
 
-    COLD START (SPEC §6/§10, "no fake spread AND no fake shift"): a bin returns
+    COLD START (SPEC §11.1, "no fake spread AND no fake shift"): a bin returns
     ``QuantileBands.neutral()`` (1.0/1.0/1.0) unless it has BOTH
     >= QUANTILE_MIN_SAMPLES samples AND >= QUANTILE_MIN_DAYS effective days. A
     single clamped outlier — or a handful of correlated hours from a few bursty
@@ -320,7 +320,7 @@ def bands_for_bin(
     # bare-number entry shapes (the loader normalises, but a directly constructed
     # QuantileState may carry either). Junk entries are dropped. The sample count
     # and the effective-days evidence come from the SHARED ``ring_evidence`` gate
-    # (SPEC §6/§10) so this reader and the diagnostics summary cannot diverge.
+    # (SPEC §11.1) so this reader and the diagnostics summary cannot diverge.
     vals: list[float] = [
         parsed[1]
         for entry in ring
@@ -365,7 +365,7 @@ def train_quantiles(
     *,
     training_date: str = "",
 ) -> QuantileState:
-    """Append hourly relative-error samples into their bins' rings (SPEC §6).
+    """Append hourly relative-error samples into their bins' rings (SPEC §11.1).
 
     For each sample with ``corrected_wh`` > QUANTILE_MIN_FORECAST_WH, form
     ``relerr = measured_wh / corrected_wh`` clamped to
@@ -452,7 +452,7 @@ def apply_bands(
     hourly_wh: dict[str, float],
     band_by_hour: dict[str, QuantileBands],
 ) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
-    """Apply per-hour bands to a corrected hourly Wh curve (SPEC §6).
+    """Apply per-hour bands to a corrected hourly Wh curve (SPEC §11.1).
 
     ``hourly_wh`` is the corrected curve keyed by ISO-8601 UTC hour;
     ``band_by_hour`` maps the same hour keys to their QuantileBands. Returns
@@ -491,7 +491,7 @@ def band_curve_from_corrected(
 ) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
     """Per-slot P10/P50/P90 watts curves from the corrected 15-min curve.
 
-    The engine hook path (SPEC §6/§10): for each slot, multiply the corrected
+    The engine hook path (SPEC §11.1): for each slot, multiply the corrected
     ``slot_watts[i]`` by the QuantileBands looked up for ``slot_starts[i]`` in
     ``band_by_slot`` (keyed by the identical slot-start datetime the engine
     iterates). Returns ``(p10_watts, p50_watts, p90_watts)`` aligned to

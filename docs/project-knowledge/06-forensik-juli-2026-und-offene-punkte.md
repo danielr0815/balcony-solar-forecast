@@ -194,7 +194,7 @@ vorher zeigte ein Stratum mit n = 2 absurde −480 %.
 p10 == p90. Nur die drei `overcast`-Bins waren trainiert; `clear|morning` (n = 17) und
 `clear|midday` (n = 4) nicht.
 
-**Ursache:** SPEC §6 versprach, der Offline-Bootstrap fülle „Bias- **und Quantilspeicher**" —
+**Ursache:** SPEC §12.6 versprach, der Offline-Bootstrap fülle „Bias- **und Quantilspeicher**" —
 implementiert war nur Bias + Shademap. Der Quantil-Ring startete leer, und `bands_for_bin` liefert
 ohne `QUANTILE_MIN_SAMPLES` (20) **und** `QUANTILE_MIN_DAYS` (5) ein neutrales Band, das der
 Coordinator weglässt ⇒ p10 = p50 = p90. Kein day-0-Codepfad-Bug (die Bänder werden jeden Tick für
@@ -228,7 +228,7 @@ Weiche wie `_actuals`) plus der letzten θ-korrigierten Kurve. Die modellierte S
 die **gemeterten** Planes beschränkt (nur die mit `actual_entity` — exakt die Teilmenge, die der
 Site-Total-Sensor summiert); ohne diese Einschränkung halbierte eine teilbemessene Anlage den
 rekonstruierten Scalar bis auf den Clamp-Boden. Fehlen Statistiken oder Cache, degradiert der
-Pfad sauber auf neutral. Persistiert wird nach wie vor **nichts davon**: SPEC §5 verbietet allein
+Pfad sauber auf neutral. Persistiert wird nach wie vor **nichts davon**: SPEC §9.4 verbietet allein
 die Persistenz des **Skalars** als Zustand; die Trailing-Samples sind neu bewertbare Rohdaten und
 werden nach einem Neustart einmalig rekonstruiert statt gespeichert.
 

@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> **SPEC section numbers in entries below 0.23.2 refer to the OLD SPEC
+> structure.** `docs/SPEC.md` was rewritten as a current-state-only
+> specification and renumbered once; the old→new mapping is the transition
+> table in [docs/HISTORIE.md](docs/HISTORIE.md) §H13. Historical entries are
+> deliberately left untouched.
+
+## [Unreleased]
+
+### Changed
+
+- **`docs/SPEC.md` is now a current-state specification.** On the operator's
+  instruction the contract describes only the requirements of the shipped
+  version — no founding context, no delivery plan, no decision log, no
+  measurement-analysis snapshots, no "since v0.x" provenance. The document was
+  rewritten thematically (§1 contract and change rules · §2–§8 system, weather,
+  physics, horizon, electrics, configuration, weather classes · §9–§12 learning,
+  learning visibility, uncertainty, bootstrap · §13–§16 degradation, consumer
+  interfaces, metrics/kill-gate, persistence · §17–§21 shade diagram, dashboard,
+  actions, conventions, QA) and carries a **version stamp** in its header
+  ("Gilt für Version: 0.23.1") that a new guard checks against
+  `const.INTEGRATION_VERSION`.
+- **New `docs/HISTORIE.md`** (explicitly NOT normative) holds everything the SPEC
+  shed — founding context, the 2026-07-05 findings, the strategy decision, the
+  phase plan, D-P1…D-P11, B1…B12, the LTS measurement analysis, the dated
+  snapshots and the superseded structural rules — plus, in §H13, the **old→new
+  section transition table**. Entries below in this changelog cite the OLD
+  numbering; §H13 translates them.
+- **All 626 `SPEC §…` citation runs were remapped in one pass** across
+  `custom_components/`, `tests/`, `scripts/`, `dashboards/`, `docs/`, `CLAUDE.md`,
+  `CONTRIBUTING.md` and the PR template. Citations whose old target was
+  historical were moved to the section that owns the behaviour today (e.g. the
+  scoreboard gate criteria from the phase plan now cite §15.1/§15.4, the horizon
+  field semantics from the measurement chapter now cite §5.1). `CHANGELOG.md`
+  and `docs/orders/` were deliberately left untouched and carry a pointer to
+  §H13 instead.
+- **`tests/test_spec_integrity.py` gained two guards and a wider scan.** (h) the
+  header version stamp must equal `INTEGRATION_VERSION`; (i) the SPEC must carry
+  no historical flags or provenance chapters, and `docs/HISTORIE.md` must keep
+  its transition table. The citation scan now also covers `scripts/`,
+  `dashboards/` and `docs/` (excluding `docs/orders/`), so the citations nobody
+  used to test can no longer rot.
+
 ## [0.23.1] - 2026-07-25
 
 A trap in the offline backfill CLI: `--site` was optional, and omitting it

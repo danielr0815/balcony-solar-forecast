@@ -317,7 +317,7 @@ lokalen Trainingstag geschnittene Stundensumme minus der gemessenen Tagesenergie
 als Betrag — dieselbe Einheit wie die Schwelle `DRIFT_LOSS_MIN_ABS_WH` und wie der
 Sensor `drift_mae_corrected` (Einheit Wh, `MEASUREMENT`, kein `device_class`, weil
 ein Fehlermaß keine Energiemenge ist). „Tages-kWh" meint im Code-Kommentar nur die
-*Metrik-Familie* (Tagesenergie statt Stunden-MAE, SPEC §10), nicht die Einheit; der
+*Metrik-Familie* (Tagesenergie statt Stunden-MAE, SPEC §15.1), nicht die Einheit; der
 Ring `daily_mae` speichert Wh, auf 2 Nachkommastellen gerundet. Das Fenster ist
 `DRIFT_WINDOW_DAYS` (7). Fehlt die
 slow_only-Kurve (Legacy-Snapshot oder Slow inaktiv), treibt das alte gemeinsame

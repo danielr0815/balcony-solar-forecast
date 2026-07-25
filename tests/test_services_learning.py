@@ -1,4 +1,4 @@
-"""Tests for the learner services (import_bootstrap / dump_shademap, SPEC §5/§6).
+"""Tests for the learner services (import_bootstrap / dump_shademap, SPEC §9.1/§12.5).
 
 The pure polar-table builder is exercised directly (bin-centre math, malformed
 input tolerance, deterministic ordering). The two service handlers are driven
@@ -590,7 +590,7 @@ def test_suggest_shade_groups_unsupported_coordinator_raises():
 
 
 # --------------------------------------------------------------------------
-# get_shade_profile handler (SPEC §15): read-only module/date profile for the
+# get_shade_profile handler (SPEC §17): read-only module/date profile for the
 # card's comparison-date overlay. Defaults module/date to the coordinator's
 # current selection; NEVER mutates that selection.
 # --------------------------------------------------------------------------
@@ -696,7 +696,7 @@ def test_get_shade_profile_unsupported_coordinator_raises():
 
 
 # --------------------------------------------------------------------------
-# get_issued_forecast handler (SPEC §15.4): read-only ISSUED day-ahead curve
+# get_issued_forecast handler (SPEC §18.4): read-only ISSUED day-ahead curve
 # from the store's 90-day ring for the power-history card's past-day line.
 # Found → curves sliced to the local day (same helper the nightly scorer uses);
 # missing → available:false (NOT an error); bad date → ServiceValidationError.

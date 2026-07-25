@@ -107,7 +107,7 @@ rollback_learners:
   name: Roll back learner state
   description: >-
     Restore the day-ahead bias and shademap learner states from the nightly
-    rollback ring (SPEC §5). Restores state only — the per-layer enable
+    rollback ring (SPEC §9.8). Restores state only — the per-layer enable
     switches and any drift auto-disable stay untouched; re-enable a layer in
     the integration options afterwards if needed.
   fields:
@@ -156,7 +156,7 @@ dump_shademap:
   description: >-
     Return the learned shademap as a polar table (sun azimuth x elevation) per
     measurement channel, for visual comparison against known obstructions
-    (SPEC §5). Read-only diagnostic; returns a response.
+    (SPEC §9.1). Read-only diagnostic; returns a response.
   fields:
     entry_id:
       name: Config entry
@@ -212,7 +212,7 @@ suggest_shade_groups:
     Compare every module's individually-learned shade map bin-by-bin and suggest
     which planes share the same shading, so grouping is data-driven instead of
     eyeballed. Returns a similarity matrix, a grouping proposal and the current
-    grouping for comparison (SPEC §5). Read-only diagnostic; returns a response.
+    grouping for comparison (SPEC §9.3). Read-only diagnostic; returns a response.
   fields:
     entry_id:
       name: Config entry
@@ -256,7 +256,7 @@ get_shade_profile:
     Return the sun-path + learned-shade profile (the shade-profile diagram's
     curve arrays) for one module on one local date, without changing the live
     diagram selection. Read-only diagnostic used by the card's comparison-date
-    overlay; returns a response (SPEC §15).
+    overlay; returns a response (SPEC §17).
   fields:
     entry_id:
       name: Config entry
@@ -295,7 +295,7 @@ get_issued_forecast:
     DC curves (hourly_wh, raw_hourly_wh) plus hourly_wh_ac (= DC x the issue-time
     eta; eta_source flags "snapshot" vs. a "current"-eta fallback for legacy
     snapshots), cloud_class_by_hour and applied_factor_by_hour. Returns a response
-    (SPEC §15.4).
+    (SPEC §18.4).
   fields:
     entry_id:
       name: Config entry

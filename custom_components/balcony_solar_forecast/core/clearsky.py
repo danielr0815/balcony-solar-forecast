@@ -1,7 +1,7 @@
 """Clear-sky GHI (Haurwitz) and clear-sky index (stdlib math only).
 
 Owner: irradiance. Used only as a learning gate / normaliser, never as a
-forecast source (SPEC §4 step 3, §5). HA-free, pure.
+forecast source (SPEC §4.2; gate use in §8/§9.1). HA-free, pure.
 
 Haurwitz (1945) is a single-parameter clear-sky model driven only by the
 solar zenith angle:
@@ -50,7 +50,7 @@ def clear_sky_index(ghi: float, elevation_deg: float) -> float:
 
     Returns 0.0 when the clear-sky reference is 0 (sun at/below horizon).
     Haurwitz is coarse at low sun, so callers gate k_c elevation-dependently
-    (SPEC §5).
+    (SPEC §9.1).
     """
     reference = haurwitz_ghi(elevation_deg)
     if reference <= 0.0:

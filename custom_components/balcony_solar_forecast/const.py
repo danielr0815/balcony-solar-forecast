@@ -4,11 +4,11 @@ Single source of truth for the domain, config-flow keys, defaults, storage
 keys and the shipped operator reference site (8 modules on 4 Hoymiles
 HMS-800W-2T micro-inverters). The reference site is a *default*, not a
 hardcode: every plane, horizon table and inverter group is editable in the
-config flow (SPEC §4, D-P9).
+config flow (SPEC §2, §7.8).
 
 Azimuth convention here and everywhere INTERNAL: 0 = North, clockwise
 (90 = East, 180 = South, 270 = West). Conversions to API conventions live
-only at the boundaries (SPEC Anhang A).
+only at the boundaries (SPEC §20.1).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ DOMAIN = "balcony_solar_forecast"
 INTEGRATION_NAME = "Balcony Solar Forecast"
 INTEGRATION_VERSION = "0.23.1"
 
-# --- Update behaviour (SPEC §4: fetch 30 min, recompute 15 min) ---
+# --- Update behaviour (SPEC §2: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
 RECOMPUTE_INTERVAL_SECONDS = 900  # engine re-run cadence (15-min slots)
 SLOT_MINUTES = 15  # forecast resolution
@@ -29,11 +29,11 @@ SLOT_MINUTES = 15  # forecast resolution
 # at 01:00 local). One extra day always covers the local 3-day horizon.
 FORECAST_DAYS = 4
 
-# --- Data validity / degradation ladder (SPEC §7) ---
+# --- Data validity / degradation ladder (SPEC §13) ---
 MAX_PAYLOAD_AGE_HOURS = 24  # last-good weather still trusted for fresh curve
 MAX_PHYSICS_FALLBACK_AGE_HOURS = 72  # pure-physics curve from last weather image
 
-# --- Open-Meteo endpoint (SPEC §4, one call) ---
+# --- Open-Meteo endpoint (SPEC §3, one call) ---
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_MODEL = "icon_seamless"
 OPEN_METEO_MINUTELY_15 = (
@@ -174,13 +174,13 @@ INVERTER_CAL_MIN_SAMPLES = 20  # distinct eligible hours before the learned eta 
 # meter glitch cannot both pass the gate and corrupt the ratio.
 INVERTER_CAL_CLIP_HEADROOM_FRAC = 0.90
 
-# Seasonal foliage ramp (SPEC §13: cosine ramp over April / November).
+# Seasonal foliage ramp (SPEC §5.2: cosine ramp over April / November).
 # Day-of-year anchors for the leafed (summer) plateau; outside is bare.
 FOLIAGE_LEAF_ON_DOY = 105  # ~mid-April: bare -> leafed ramp centre
 FOLIAGE_LEAF_OFF_DOY = 315  # ~mid-November: leafed -> bare ramp centre
 FOLIAGE_RAMP_DAYS = 30  # cosine half-ramp width around each anchor
 
-# --- Storage (SPEC §4: one versioned Store, async_delay_save) ---
+# --- Storage (SPEC §16.3: one versioned Store, async_delay_save) ---
 STORAGE_VERSION = 1  # Store envelope major (pin forever; migrate via inner)
 STORAGE_KEY = f"{DOMAIN}.data"
 STORAGE_DATA_VERSION = 1  # inner schema version
@@ -190,17 +190,17 @@ STORAGE_SAVE_DELAY_SECONDS = 300  # bundle writes, eMMC-friendly
 # call, so without a hard time-gate the payload would be rewritten every 30
 # min (~48 writes/day). We hold the in-memory copy fresh and only let a
 # payload change hit the disk at most every ~6 h; the nightly job and the
-# unload/HA-stop flush guarantee eventual persistence (SPEC §4: <=3 bundled
+# unload/HA-stop flush guarantee eventual persistence (SPEC §16.3: <=3 bundled
 # writes/day; a hard crash may lose a few hours of last-good cache).
 PAYLOAD_MIN_SAVE_INTERVAL_SECONDS = 6 * 3600
 STORE_KEY_LAST_PAYLOAD = "last_payload"  # last-good Open-Meteo payload
 STORE_KEY_ISSUED_LOG = "forecast_issued_log"  # forecast-as-issued ring
 STORE_KEY_ACTUALS_LOG = "daily_actuals_log"  # measured DC per module per day
 
-# --- Services (SPEC §8) ---
+# --- Services (SPEC §19) ---
 SERVICE_GET_FORECAST = "get_forecast"
 
-# --- Sensor / entity keys (SPEC §8) ---
+# --- Sensor / entity keys (SPEC §14) ---
 SENSOR_ENERGY_TODAY = "energy_production_today"
 SENSOR_ENERGY_TOMORROW = "energy_production_tomorrow"
 SENSOR_ENERGY_D2 = "energy_production_d2"
@@ -224,7 +224,7 @@ SENSOR_MEASURED_AC_POWER = "measured_ac_power"
 BINARY_SENSOR_DEGRADED = "degraded"
 
 # --- Shade-profile visualisation entities (sun path vs learned shade) -------
-# A per-date sun-path + learned-shade diagram (SPEC §15): the sensor exposes the
+# A per-date sun-path + learned-shade diagram (SPEC §17): the sensor exposes the
 # curve arrays as attributes; a `select` picks the module/plane and a `date`
 # picks the day to visualise. See core/shadeprofile.py + docs/DASHBOARD.md.
 SENSOR_SHADE_PROFILE = "shade_profile"
@@ -243,12 +243,12 @@ STATUS_UNAVAILABLE = "unavailable"
 
 
 # ---------------------------------------------------------------------------
-# Reference site (SPEC §2, §4, §13): 8 modules, 4 inverter groups.
+# Reference site (SPEC §7.8): 8 modules, 4 inverter groups.
 # Azimuth 0=N clockwise; tilt from horizontal. Horizon rows are
 # (azimuth_deg, elevation_deg, tau) with optional seasonal foliage fields.
 # ---------------------------------------------------------------------------
 
-# Far-field horizon shared by all planes (SPEC §13.4): the eastern slope.
+# Far-field horizon shared by all planes (SPEC §7.8): the eastern slope.
 # az 60..100 -> 13 deg (tau 0), az 100..150 -> 16 deg (tau 0), "sonst
 # PVGIS-Profil" (i.e. open elsewhere until real PVGIS rows are imported).
 #
@@ -293,7 +293,7 @@ def _wall_row(az: float) -> dict:
 # M4 = lower balcony (tree elev 40, wall from az 212), M8 = upper (tree 30).
 #
 # The sorted breakpoints the interpolator sees must be a clean sequence of
-# non-overlapping sectors (SPEC §13.4), NOT the far-field rows with the tree
+# non-overlapping sectors (SPEC §7.8), NOT the far-field rows with the tree
 # and wall appended (that leaves the far-field 150-deg row *inside* the tree
 # sector 135-175, and no boundary between the tree top (175, el 40/30) and
 # the wall (212, el 90) — so the line would dip to 16 deg mid-tree and then
@@ -370,9 +370,9 @@ def _plane(name, az, tilt, wp, horizon, actual_entity):
 #     none of the 0.22 horizon refinements are exercised by the default.
 #
 # Consequences: never bootstrap a real install against this object. The
-# in-process action `balcony_solar_forecast.run_bootstrap` (SPEC §15.6) always
+# in-process action `balcony_solar_forecast.run_bootstrap` (SPEC §12.2) always
 # uses the LIVE config; `scripts/backfill.py` requires `--site` and gates this
-# object behind the explicit `--use-default-site` opt-in (SPEC §6).
+# object behind the explicit `--use-default-site` opt-in (SPEC §12.3).
 #
 # The substantive rework — a neutral, entity-free minimal default plus a real
 # onboarding flow, so a foreign install does not inherit this plant's geometry
@@ -416,10 +416,10 @@ DEFAULT_SITE = {
 
 
 # ===========================================================================
-# LEARNING CONTRACT (v0.2.0 + v0.3.0 — SPEC §5, §6, §7, §9, §13)
+# LEARNING CONTRACT (v0.2.0 + v0.3.0 — SPEC §9)
 # ---------------------------------------------------------------------------
 # Two learning layers, both numpy-free, both clamped/gated/disable-able and
-# never silently degrading (SPEC §5 Schutzmechanismen). The FAST learner
+# never silently degrading (SPEC §9.8 Schutzmechanismen). The FAST learner
 # (core/bias.py) has an intraday clear-sky-index scalar + a nightly day-ahead
 # RLS bias per (cloud class x day part). The SLOW learner (core/shademap.py)
 # is a per-channel, per-(sun-az x sun-el x half-year) EMA of beam-referenced
@@ -430,7 +430,7 @@ DEFAULT_SITE = {
 # learner modules.
 # ===========================================================================
 
-# --- Kill switches / options-flow keys (SPEC §5: per-layer disable) --------
+# --- Kill switches / options-flow keys (SPEC §9: per-layer disable) --------
 # Both learners default ON (operator decision 2026-07-06: build v0.3 early).
 CONF_FAST_LEARNER_ENABLED = "fast_learner_enabled"
 CONF_SLOW_LEARNER_ENABLED = "slow_learner_enabled"
@@ -439,7 +439,7 @@ DEFAULT_FAST_LEARNER_ENABLED = True
 DEFAULT_SLOW_LEARNER_ENABLED = True
 DEFAULT_DAY_AHEAD_BIAS_ENABLED = True
 
-# --- FAST learner: intraday clear-sky-index scalar (SPEC §5) ---------------
+# --- FAST learner: intraday clear-sky-index scalar (SPEC §9.4) ---------------
 # s = exponentially decayed (tau ~ 90 min) ratio measured/forecast site energy
 # over a trailing window, computed in CLEAR-SKY-INDEX space, applied to the
 # next ~6 h with linear decay toward 1.0, clamped. Re-init to 1.0 on restart;
@@ -475,7 +475,7 @@ RLS_MIN_SAMPLES = 3             # cells with fewer trained days stay neutral
 # clears theta to neutral.
 DAY_AHEAD_BIAS_RESEED_N = 20
 
-# Cloud classes (SPEC §5/§6). "fog" = forecast visibility < FOG_VISIBILITY_M
+# Cloud classes (SPEC §8). "fog" = forecast visibility < FOG_VISIBILITY_M
 # OR (cloud_cover_low > FOG_CLOUD_LOW_PCT AND month in FOG_MONTHS).
 CLOUD_CLASS_CLEAR = "clear"
 CLOUD_CLASS_MIXED = "mixed"
@@ -517,7 +517,7 @@ FOG_MONTHS = (10, 11, 12, 1, 2)   # Oct-Feb
 # likewise advised (their stored per-class content is now semantically stale).
 CLASSIFIER_VERSION = 2
 
-# Day parts (SPEC §5). Boundaries in local solar/clock hours (coordinator maps
+# Day parts (SPEC §8). Boundaries in local solar/clock hours (coordinator maps
 # a slot's local hour to a part). Midday brackets solar noon.
 DAY_PART_MORNING = "morning"
 DAY_PART_MIDDAY = "midday"
@@ -549,7 +549,7 @@ DAY_PART_BLEND_HALFWIDTH_MIN = 45
 MIDDAY_SOLAR_HALFWIDTH_H = 2.0
 DAY_PART_SOLAR_BLEND_HALFWIDTH_H = 0.75  # 45 min, in solar hours
 
-# --- SLOW learner: shademap (SPEC §5, §13) ---------------------------------
+# --- SLOW learner: shademap (SPEC §9.1) ---------------------------------
 # Per measurement channel (module/plane name), per bin
 # (sun azimuth SHADEMAP_AZ_BIN_DEG x elevation SHADEMAP_EL_BIN_DEG x half-year
 # before/after summer solstice), an EMA of beam-referenced transmittance
@@ -564,11 +564,11 @@ SHADEMAP_TAU_MAX = 1.1
 SHADEMAP_SHRINKAGE_K = 20.0
 # Half-year key: True == "after summer solstice" (solstice .. next solstice).
 # Northern-hemisphere summer solstice ~ Jun 21 (doy 172). A sample's half is
-# derived from its day-of-year relative to this anchor (SPEC §5: April laublos
+# derived from its day-of-year relative to this anchor (SPEC §9.1: April laublos
 # vs. August belaubt must not alias).
 SUMMER_SOLSTICE_DOY = 172
 
-# Quasi-clear sample gate (SPEC §5): elevation-dependent k_c band, neighbour
+# Quasi-clear sample gate (SPEC §9.1): elevation-dependent k_c band, neighbour
 # slot stability, and a minimum modeled beam share of the plane's Wp.
 # k_c must fall inside [lo, hi]; the band tightens with elevation because
 # Haurwitz is crude at low sun (relax the LOW bound at low elevation).
@@ -579,7 +579,7 @@ SHADEMAP_KC_PIVOT_ELEV_DEG = 20.0  # elevation where the lo bound reaches HIGH_S
 SHADEMAP_NEIGHBOUR_STABILITY = 0.15  # max relative k_c change vs. adjacent slot
 SHADEMAP_MIN_BEAM_SHARE = 0.05     # modeled beam POA power must exceed 5% Wp
 
-# --- Shade-group similarity (suggest_shade_groups service, SPEC §5) ---------
+# --- Shade-group similarity (suggest_shade_groups service, SPEC §9.3) ---------
 # The suggest_shade_groups service compares two planes' per-channel shademaps
 # bin-wise (n-weighted mean |tau_a - tau_b| over the bins both channels visited)
 # and proposes a data-driven grouping via complete-linkage agglomeration.
@@ -591,17 +591,17 @@ SHADE_SIM_MAX_MEAN_DIFF = 0.06
 # pair below it is "insufficient" and never merged, however close its tau looks.
 SHADE_SIM_MIN_COMMON_BINS = 30
 
-# --- GUARDS (SPEC §5 all mandatory) ----------------------------------------
+# --- GUARDS (SPEC §9.8 all mandatory) ----------------------------------------
 # Label gates (trainer): frozen sensor detection.
 LABEL_FROZEN_STALE_SECONDS = 3 * 3600   # unchanged value + last_updated older => missing
 LABEL_MONOTONIC_TOLERANCE_WH = 1.0      # energy must be non-decreasing within tol
 # Nightly LTS frozen-channel gate: a channel whose hourly means repeat the SAME
 # non-zero value for at least this many consecutive daylight hours is a frozen
 # Hoymiles/DTU sensor holding a value (the operator's known failure mode) — the
-# whole day is discarded for both learners (SPEC §5 channel dropout).
+# whole day is discarded for both learners (SPEC §9.8 channel dropout).
 LABEL_FROZEN_MIN_REPEATS = 4
 # Channel dropout: if a channel is missing/frozen for the day, discard WHOLE
-# day for BOTH learners (SPEC §5).
+# day for BOTH learners (SPEC §9.8).
 # Day-completeness gate: a recorder/LTS gap (HA restart or recorder outage
 # mid-day) yields a partial-hour sum that must NOT be recorded as the day's
 # ground truth (it would score every forecast against a phantom-low measured
@@ -624,13 +624,13 @@ DRIFT_ROLLBACK_SNAPSHOTS = 3     # legacy alias; the live ring depth is LEARNER_
 DRIFT_LOSS_MARGIN = 0.02
 DRIFT_LOSS_MIN_ABS_WH = 50.0
 
-# Collapse detector (SPEC §5): all channels ~0 while forecast high => snow /
+# Collapse detector (SPEC §9.8): all channels ~0 while forecast high => snow /
 # total dropout => freeze BOTH learners for the day; only the clamped intraday
 # scalar reacts.
 COLLAPSE_MEASURED_MAX_FRAC = 0.05   # measured site energy < 5% of forecast
 COLLAPSE_FORECAST_MIN_WH = 500.0    # ...only when the forecast day is non-trivial
 
-# --- Storage schema v2 (SPEC §5/§9 attribution; §6 backfill) ----------------
+# --- Storage schema v2 (SPEC §16.2 attribution; SPEC §12 backfill) ---------
 # Bump the INNER schema; the outer HA Store envelope (STORAGE_VERSION) stays 1.
 # store.py migrates v1 -> v2 in-place (v1 rings preserved, learner state added).
 STORAGE_DATA_VERSION_V2 = 2
@@ -662,10 +662,10 @@ NIGHTLY_CATCHUP_MAX_DAYS = 3
 # Measured-side quasi-clear gate: a candidate training day must have measured
 # site energy at least this fraction of the modeled forecast, otherwise the
 # forecast wrongly called the day clear and the sample is pure weather error
-# (would darken the geometric shademap). SPEC §5 label gate.
+# (would darken the geometric shademap). SPEC §9.1 label gate.
 SHADEMAP_MEASURED_CLEAR_MIN_FRAC = 0.8
 
-# --- New services (SPEC §5 diagnose, §6 backfill) --------------------------
+# --- New services (SPEC §9.1 diagnose, SPEC §12 backfill) ------------------
 SERVICE_IMPORT_BOOTSTRAP = "import_bootstrap"   # ingest scripts/backfill.py JSON
 SERVICE_DUMP_SHADEMAP = "dump_shademap"         # polar-table diagnostic export
 SERVICE_ROLLBACK_LEARNERS = "rollback_learners"  # restore learner state from the ring
@@ -679,14 +679,14 @@ SERVICE_RUN_BOOTSTRAP = "run_bootstrap"  # in-process re-bootstrap (no token, li
 # run_bootstrap default look-back cap when no explicit start_date is given: the
 # earliest day the in-process re-bootstrap will fetch/reconstruct (today - N).
 # Days without measured actuals in the range are skipped, so an over-wide cap is
-# self-correcting; ~400 d covers a full year plus margin (SPEC §6).
+# self-correcting; ~400 d covers a full year plus margin (SPEC §12.2).
 BOOTSTRAP_DEFAULT_MAX_DAYS = 400
 # Chunk width (days) for the in-process Open-Meteo weather fetch: the range is
 # split into consecutive windows so one huge multi-year request cannot trip a
-# provider limit, mirroring the CLI's WebSocket LTS chunking (SPEC §6).
+# provider limit, mirroring the CLI's WebSocket LTS chunking (SPEC §12.2).
 BOOTSTRAP_WEATHER_CHUNK_DAYS = 90
 
-# --- Bootstrap JSON schema (SPEC §6; scripts/backfill.py <-> store) ---------
+# --- Bootstrap JSON schema (SPEC §12.5; scripts/backfill.py <-> store) ---------
 # The import service validates + clamps and REJECTS unknown schema versions.
 BOOTSTRAP_SCHEMA_VERSION = 1
 BOOTSTRAP_KEY_SCHEMA = "schema_version"
@@ -697,10 +697,10 @@ BOOTSTRAP_KEY_SHADEMAP = "shademap_state"       # per-channel bins
 BOOTSTRAP_KEY_QUANTILE = "quantile_state"       # per-(class x part) relerr rings
 # Backfill n-credit cap: hourly-smeared backfilled bins are less trustworthy,
 # so their initial EMA sample count is capped so live 15-min data overrides
-# quickly (SPEC §6).
+# quickly (SPEC §12.5).
 BOOTSTRAP_MAX_BIN_N = 5
 
-# --- Attribution / diagnostics (operator decision 2026-07-06, SPEC §9) ------
+# --- Attribution / diagnostics (operator decision 2026-07-06, SPEC §16.2) ------
 # The engine computes BOTH curves each cycle; the nightly issued snapshot v2
 # stores hourly values of both plus per-plane modeled beam/diffuse/ghi/kc so
 # the shademap can be trained from hourly LTS. Diagnostics expose daily MAE of
@@ -719,13 +719,13 @@ DATA_KEY_BIAS_CELLS = "bias_cells"                # dict: {"class|part": {theta,
 DATA_KEY_DRIFT_MAE = "drift_mae"                  # dict: {raw, corrected, baseline, +slow when attributed} rolling MAE
 DATA_KEY_CORRECTION_SOURCE = "correction_source"  # one of CORRECTION_SOURCE_*
 
-# --- New diagnostic entities (SPEC §8) -------------------------------------
+# --- New diagnostic entities (SPEC §14) -------------------------------------
 SENSOR_INTRADAY_SCALAR = "intraday_scalar"
 SENSOR_DRIFT_MAE_CORRECTED = "drift_mae_corrected"
 BINARY_SENSOR_FAST_LEARNER = "fast_learner_active"
 BINARY_SENSOR_SLOW_LEARNER = "slow_learner_active"
 
-# --- Per-layer learner status strings (SPEC §5) ----------------------------
+# --- Per-layer learner status strings (SPEC §14.7) ----------------------------
 # The coordinator writes exactly these into DATA_KEY_LEARNER_STATUS[<layer>]
 # ("fast" / "slow" / "day_ahead"); the LearnerStatusSensor / LearnerActiveSensor
 # read them back. sensor.py re-exports these names for its own display code.
@@ -749,7 +749,7 @@ LEARNER_STATUS_VALUES = (
     LEARNER_STATUS_COLD_START,
 )
 
-# --- Repair issue ids (SPEC §5/§7) -----------------------------------------
+# --- Repair issue ids (SPEC §9.8/§10) -----------------------------------------
 ISSUE_FAST_LEARNER_DISABLED = "fast_learner_auto_disabled"
 ISSUE_SLOW_LEARNER_DISABLED = "slow_learner_auto_disabled"
 # Raised when the forecast-relevant site config changed and the day-ahead bias
@@ -780,7 +780,7 @@ ISSUE_LEARNING_STALLED_DEAD_CHANNEL = "learning_stalled_dead_channel"
 ISSUE_LEARNING_STALLED_FROZEN_CHANNEL = "learning_stalled_frozen_channel"
 ISSUE_LEARNING_STALLED_LOW_COVERAGE = "learning_stalled_low_coverage"
 
-# --- Nightly whole-day discard reasons (SPEC §5 label gates) ---------------
+# --- Nightly whole-day discard reasons (SPEC §9.8 label gates) ---------------
 # Which gate in `_actuals._actuals_from_stats` discarded the day. Persisted in
 # the store's learning-health section and surfaced in diagnostics + the
 # `learning_stalled` repair issue, because the remedies differ: a dead channel
@@ -830,18 +830,16 @@ ISSUE_TRANSLATION_PLACEHOLDERS: dict[str, frozenset[str]] = {
 
 
 # ===========================================================================
-# v0.4 CONTRACT: SKILL SCOREBOARD + QUANTILES P10/P50/P90 (SPEC §6, §9, §10, §14)
+# v0.4 CONTRACT: SKILL SCOREBOARD + QUANTILES P10/P50/P90 (SPEC §11/§15/§16)
 # ---------------------------------------------------------------------------
-# D-P11 (operator 2026-07-06): build the skill scoreboard, the P10/P50/P90
-# quantile bands and the observability dashboard; DEFER the battery_manager
-# cutover until the scoreboard confirms the kill-gate. Everything below is NEW;
-# no existing key above is touched. Owners import their tunables from here
+# The skill scoreboard, the P10/P50/P90 quantile bands and the observability
+# dashboard. Owners import their tunables from here
 # (single source of truth); no magic numbers in the scoreboard / quantile
 # modules. Runtime stays stdlib-only; the store schema bumps v2 -> v3 ADDITIVELY
 # (STORAGE_VERSION envelope pinned at 1, inner schema only).
 # ===========================================================================
 
-# --- SKILL SCOREBOARD (SPEC §9/§10 — the kill-gate) ------------------------
+# --- SKILL SCOREBOARD (SPEC §15 — the kill-gate) ------------------------
 # Nightly, per yesterday: compute the daily-kWh error of (a) the ENGINE forecast
 # AS ISSUED for yesterday (from the issued ring — NEVER recomputed with today's
 # learned state), (b) each configured external COMPARISON forecast AS IT STOOD
@@ -854,20 +852,20 @@ ISSUE_TRANSLATION_PLACEHOLDERS: dict[str, frozenset[str]] = {
 CONF_SCOREBOARD_ENABLED = "scoreboard_enabled"
 DEFAULT_SCOREBOARD_ENABLED = True
 CONF_SCOREBOARD_WINDOW_DAYS = "scoreboard_window_days"
-DEFAULT_SCOREBOARD_WINDOW_DAYS = 14  # rolling window length (SPEC §9 kill-gate)
+DEFAULT_SCOREBOARD_WINDOW_DAYS = 14  # rolling window length (SPEC §15.4 kill-gate)
 # The kill-gate passes when the engine is at least this fraction better than the
-# best baseline on daily-kWh MAE over a FULL window (SPEC §9: >=10% under the
-# 8-entry baseline is the primary Phase-1 gate, B9-weighted).
+# best baseline on daily-kWh MAE over a FULL window (SPEC §15.4: >=10% better
+# than the best configured baseline on the primary daily-kWh metric).
 CONF_SCOREBOARD_GATE_MARGIN = "scoreboard_gate_margin"
 DEFAULT_SCOREBOARD_GATE_MARGIN = 0.10
 # Minimum scored days before the gate can pass at all (a partial window can
-# never assert the kill-gate; SPEC §9 "over a full window").
+# never assert the kill-gate; SPEC §15.4 "over a full window").
 SCOREBOARD_MIN_WINDOW_DAYS = 1
 # Minimum number of PAIRED days (days on which BOTH the engine and the
 # candidate comparison were scored) before that comparison is eligible to set
 # the best-baseline bar for the gate. A comparison scored on a single lucky day
 # must not decide the whole verdict; the gate is a matched-pair comparison over
-# the days both sides cover (fixes non-paired evaluation, SPEC §9).
+# the days both sides cover (fixes non-paired evaluation, SPEC §15.2).
 SCOREBOARD_MIN_PAIRED_DAYS = 1
 # Staleness bound (local days): the newest scored day must be within this many
 # days of "today" for the gate to assert at all, else the verdict is suspended
@@ -889,7 +887,7 @@ SCOREBOARD_STRATUM_MIN_N = 3
 # scoreboard reads its RECORDER HISTORY for yesterday (the value AS IT STOOD
 # during yesterday — no leakage). Ships EMPTY by default: the operator's two
 # comparisons are DOCUMENTED (docs/DASHBOARD.md + config example), never
-# hardcoded in the runtime defaults (D-P9 generic-not-hardcoded).
+# hardcoded in the runtime defaults (SPEC §15.3: generic, not hardcoded).
 #
 #   Documented example (operator's live site — see docs/DASHBOARD.md):
 #     - name "8-Entry Baseline" -> sensor.pv_prognose_heute_alle_module
@@ -897,7 +895,7 @@ SCOREBOARD_STRATUM_MIN_N = 3
 CONF_COMPARISON_SENSORS = "comparison_sensors"
 CONF_COMPARISON_NAME = "name"
 CONF_COMPARISON_DAILY_ENTITY = "daily_entity"
-DEFAULT_COMPARISON_SENSORS: list[dict] = []  # EMPTY by default (D-P9)
+DEFAULT_COMPARISON_SENSORS: list[dict] = []  # EMPTY by default (SPEC §15.3)
 # The comparison entity's daily-kWh value for yesterday is read from recorder
 # history. We take the LAST recorded state on yesterday's LOCAL calendar day
 # (the settled end-of-day forecast the consumer saw). Unit assumed kWh (the
@@ -905,7 +903,7 @@ DEFAULT_COMPARISON_SENSORS: list[dict] = []  # EMPTY by default (D-P9)
 # unavailable last state -> that comparison is unscored for the day (not zero).
 SCOREBOARD_COMPARISON_UNIT_KWH = True
 
-# --- QUANTILES P10/P50/P90 (SPEC §6/§10) -----------------------------------
+# --- QUANTILES P10/P50/P90 (SPEC §11.1) -----------------------------------
 # Historical-simulation bands: a 90-day ring of hourly RELATIVE errors
 # (measured / corrected-forecast) keyed by (weather class x day part). At
 # forecast time the empirical P10/P50/P90 multipliers of the matching bin are
@@ -914,24 +912,24 @@ SCOREBOARD_COMPARISON_UNIT_KWH = True
 # default ON, kill switch in the options flow.
 CONF_QUANTILES_ENABLED = "quantiles_enabled"
 DEFAULT_QUANTILES_ENABLED = True
-# 90-day ring of hourly relative-error samples (SPEC §6).
+# 90-day ring of hourly relative-error samples (SPEC §11.1).
 QUANTILE_RING_DAYS = 90
 # A single (class x day part) bin can receive up to a day-part's worth of hourly
 # samples per day (~8 daylight hours in summer), so the per-bin FIFO cap is
 # QUANTILE_RING_DAYS x this, not QUANTILE_RING_DAYS itself — otherwise a
 # frequently-hit summer bin (~6 samples/day) would hold only ~2-3 weeks of
-# history and the bands would snap shut after any calm stretch (SPEC §6 90-day
+# history and the bands would snap shut after any calm stretch (SPEC §11.1 90-day
 # climatology). Samples now carry the trained day's ISO date, so the ring is
 # date-windowed to QUANTILE_RING_DAYS (relative to the training day); this COUNT
 # cap is the hard backstop after the date trim. It also bounds the per-day
 # contribution to one bin, which underwrites the effective-days lower bound the
 # day-diversity collapse gate uses for legacy un-dated samples (QUANTILE_MIN_DAYS).
 QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN = 8
-# The three band percentiles (SPEC §6: P10/P50/P90 -> 80% central band).
+# The three band percentiles (SPEC §11.1: P10/P50/P90 -> 80% central band).
 QUANTILE_P_LOW = 10.0
 QUANTILE_P_MID = 50.0
 QUANTILE_P_HIGH = 90.0
-# Cold start (SPEC §6/§10 "no fake spread"): a bin with fewer than this many
+# Cold start (SPEC §11.1 "no fake spread"): a bin with fewer than this many
 # samples collapses its band to P50 (low == mid == high multiplier), so a thin
 # bin never fabricates an interval. A bin at/above the floor emits the empirical
 # spread. P50 itself, when the bin is empty, defaults to the neutral 1.0.
@@ -943,18 +941,18 @@ QUANTILE_MIN_SAMPLES = 20
 # band. effective_days = (# distinct sample dates) + ceil(# undated / the per-day
 # cap); the undated term is a PROVABLE lower bound on the days a legacy (pre-fix,
 # un-dated) ring spans, since the trainer never adds more than
-# QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN to one bin on one day (SPEC §6).
+# QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN to one bin on one day (SPEC §11.1).
 QUANTILE_MIN_DAYS = 5
 QUANTILE_NEUTRAL_MULT = 1.0
 # The per-hour relative error = measured_wh / corrected_forecast_wh, clamped to a
 # sane band so a divide-by-near-zero dawn/dusk hour cannot inject a 100x
-# multiplier into the ring (SPEC §5 clamp ethos). Only hours whose corrected
+# multiplier into the ring (SPEC §9 clamp ethos). Only hours whose corrected
 # forecast Wh exceeds QUANTILE_MIN_FORECAST_WH are sampled.
 QUANTILE_MIN_FORECAST_WH = 5.0
 QUANTILE_REL_ERR_MIN = 0.0
 QUANTILE_REL_ERR_MAX = 5.0
 
-# --- Storage schema v3 (ADDITIVE over v2; SPEC §14) ------------------------
+# --- Storage schema v3 (ADDITIVE over v2; SPEC §16.1) ------------------------
 # Bump the INNER schema v2 -> v3; the outer HA Store envelope (STORAGE_VERSION)
 # stays 1. store.py migrates v2 -> v3 ADDITIVELY: every v2 key (the three v1
 # rings + the four learner sections + hourly actuals + trained_days) is carried
@@ -994,7 +992,7 @@ STORE_KEY_CONFIG_FINGERPRINT = "config_fingerprint"  # str | None
 # last_accepted_day: iso | None}.
 STORE_KEY_LEARNING_HEALTH = "learning_health"
 
-# --- New diagnostic sensors / binary sensors (SPEC §8/§10) -----------------
+# --- New diagnostic sensors / binary sensors (SPEC §14/§15.5) -----------------
 # Entity object_ids are unprefixed: the device slug already carries
 # "balcony_solar_forecast", so these ARE the forecast's own metrics (baselines
 # are the comparison_* sensors). Avoids the balcony_solar_forecast_forecast_*
@@ -1007,12 +1005,12 @@ SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX = "comparison_daily_kwh_mae"
 # Positive percent = the integration's own forecast is better than the best
 # baseline on daily-kWh MAE.
 SENSOR_FORECAST_VS_BEST_BASELINE_PCT = "vs_best_baseline_pct"
-# Optional daily P10 / P90 energy sensors (today's band), SPEC §6/§10.
+# Optional daily P10 / P90 energy sensors (today's band), SPEC §11.2.
 SENSOR_ENERGY_TODAY_P10 = "energy_production_today_p10"
 SENSOR_ENERGY_TODAY_P90 = "energy_production_today_p90"
 BINARY_SENSOR_KILL_GATE_PASSED = "kill_gate_passed"
 
-# --- Quantile curve attributes on the energy sensors (SPEC §6/§8) ----------
+# --- Quantile curve attributes on the energy sensors (SPEC §11.2/§14.4) ----------
 # Additive to the existing ATTR_WATTS / ATTR_WH_PERIOD. Each is a {iso_utc: Wh}
 # 15-min band curve, excluded from the recorder like the existing curve attrs.
 ATTR_WH_PERIOD_P10 = "wh_period_p10"
@@ -1032,7 +1030,7 @@ DATA_KEY_ENERGY_TODAY_AC_P10 = "energy_today_kwh_ac_p10"
 DATA_KEY_SCOREBOARD = "scoreboard"                # dict: engine_mae / per-comparison mae / vs_best_pct / gate / strata
 DATA_KEY_KILL_GATE_PASSED = "kill_gate_passed"    # bool | None (None == not enough window yet)
 
-# --- get_forecast service response additions (SPEC §6/§8) ------------------
+# --- get_forecast service response additions (SPEC §11.2/§14.4) ------------------
 # The extended get_forecast response carries plane-agnostic TOTAL p10/p50/p90
 # 15-min and hourly curves alongside the existing p50 curve. These keys name the
 # blocks in the ServiceResponse dict (see _services.py / services.yaml).
@@ -1040,7 +1038,7 @@ FORECAST_RESP_KEY_P10 = "p10"
 FORECAST_RESP_KEY_P50 = "p50"
 FORECAST_RESP_KEY_P90 = "p90"
 
-# --- Shade-profile visualisation tunables (SPEC §15) -----------------------
+# --- Shade-profile visualisation tunables (SPEC §17.3) -----------------------
 # The sun-path-vs-learned-shade diagram (core/shadeprofile.py). The sun path is
 # sampled over the visualised local day at SHADE_PROFILE_STEP_MINUTES; the two
 # horizon lines (static config horizon + learned shade horizon) are sampled on a
@@ -1059,20 +1057,20 @@ SHADE_PROFILE_EL_SCAN_DEG = 1.0    # elevation scan step locating the shade hori
 ATTR_SP_AZIMUTH = "azimuth"                 # [deg] sun azimuth per sun-path sample
 ATTR_SP_SUN_ELEVATION = "sun_elevation"     # [deg] sun elevation per sample
 ATTR_SP_TRANSMITTANCE = "transmittance"     # [0..1] effective beam tau per sample (pooled)
-# Per-sample effective tau of the MODULE'S OWN channel only (SPEC §5 read-time
+# Per-sample effective tau of the MODULE'S OWN channel only (SPEC §9.2 read-time
 # pooling): the operator can compare each module's individual learned shading
 # against the pooled group view to decide groupings. Empty list when the module
 # is ungrouped (== the pooled view), so the attribute stays shape-stable.
 ATTR_SP_TRANSMITTANCE_INDIVIDUAL = "transmittance_individual"
 # Pooled shademap-bin sample count per sun-path sample (0 = static prior only):
 # the learned evidence behind that sample's effective tau, summed over the read
-# pool's channels (SPEC §5). The card sizes each dot by it (confidence viz).
+# pool's channels (SPEC §9.2). The card sizes each dot by it (confidence viz).
 ATTR_SP_SAMPLE_N = "sample_n"
 ATTR_SP_TIME = "time"                       # [local ISO] time per sample
 ATTR_SP_HORIZON_AZIMUTH = "horizon_azimuth"  # [deg] azimuth grid for the horizon lines
 ATTR_SP_SHADE_HORIZON = "shade_horizon"     # [deg] learned shade horizon per grid azimuth
 ATTR_SP_STATIC_HORIZON = "static_horizon"   # [deg] config horizon per grid azimuth
-# Year-stable x-axis bounds (SPEC §15): the widest daylight sun-azimuth span of
+# Year-stable x-axis bounds (SPEC §17.1): the widest daylight sun-azimuth span of
 # the whole year at the site (both solstices), so the diagram's x-axis does NOT
 # rescale with the season and curves stay comparable across dates. Constant site
 # geometry (a function of lat/lon/year only) — excluded from the recorder too.
@@ -1081,7 +1079,7 @@ ATTR_SP_AXIS_AZ_MAX = "axis_azimuth_max"    # [deg] max daylight azimuth over th
 
 
 # ===========================================================================
-# v0.16 CONTRACT: ENSEMBLE-WEATHER UNCERTAINTY BANDS (SPEC §6)
+# v0.16 CONTRACT: ENSEMBLE-WEATHER UNCERTAINTY BANDS (SPEC §11.3)
 # ---------------------------------------------------------------------------
 # Today's learned P10/P50/P90 (core/quantiles.py) come from a residual ring per
 # (cloud class x day part): well calibrated ON AVERAGE per weather class, but

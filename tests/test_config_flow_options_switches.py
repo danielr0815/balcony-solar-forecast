@@ -1,4 +1,4 @@
-"""Tests for the (slim) options-flow learner kill switches (SPEC §5).
+"""Tests for the (slim) options-flow learner kill switches (SPEC §9).
 
 The options step exposes the three per-layer learner toggles (fast learner,
 shademap learner, day-ahead bias — all default ON), pre-fills them from the

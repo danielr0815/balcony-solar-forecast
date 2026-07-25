@@ -1,6 +1,6 @@
-"""Dual-curve + learner-hook tests for core/engine.py (SPEC §5 / §9).
+"""Dual-curve + learner-hook tests for core/engine.py (SPEC §9/§16.2).
 
-Plain pytest, no Home Assistant imports (SPEC §4). These tests exercise the
+Plain pytest, no Home Assistant imports (SPEC §2). These tests exercise the
 v0.2.0/v0.3.0 additions to ``compute_forecast``:
 
   * RAW vs CORRECTED dual curve, with both learner hooks neutral => corrected
@@ -427,7 +427,7 @@ class TestSlotFactor:
 
     def test_throwing_slot_factor_degrades_to_neutral(self, patched_physics):
         """A slot_factor that raises must not crash the engine; that slot falls
-        back to the neutral 1.0 factor (SPEC §5: never silently degrade INTO a
+        back to the neutral 1.0 factor (SPEC §9: never silently degrade INTO a
         crash)."""
         site = _two_plane_site()
         weather = _clear_sky_series()

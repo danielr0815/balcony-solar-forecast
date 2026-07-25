@@ -1,4 +1,4 @@
-"""Nightly skill-scoreboard scorer (the kill-gate) — SPEC §9/§10.
+"""Nightly skill-scoreboard scorer (the kill-gate) — SPEC §15.2.
 
 Owner: scoreboard (glue). The LEAK-FREE IO around the pure ``core/scoreboard.py``
 math: score each closed local day's engine forecast AS ISSUED (from the issued
@@ -61,7 +61,7 @@ _SCOREBOARD_ISSUE_CUTOFF_HOUR = 6
 async def score_scoreboard_day(coord, day: date) -> None:
     """Score one closed local ``day`` into the rolling scoreboard window.
 
-    NO-LEAKAGE (SPEC §9, the whole point of the gate):
+    NO-LEAKAGE (SPEC §15.2, the whole point of the gate):
       * the ENGINE number is the forecast AS ISSUED for ``day`` — read from
         the issued ring's snapshot logged during that day (the CORRECTED
         served curve, sliced to the local day), NEVER recomputed with today's
@@ -88,7 +88,7 @@ async def score_scoreboard_day(coord, day: date) -> None:
         return
 
     snap = IssuedSnapshot.from_dict(issued)
-    # LEAKAGE GUARD (SPEC §9): only score a day whose snapshot was issued
+    # LEAKAGE GUARD (SPEC §15.2): only score a day whose snapshot was issued
     # before the early-morning cutoff of that local day. A snapshot issued
     # later (a mid-day startup catch-up recomputed from a fresh weather fetch
     # that has assimilated the scored day's observed weather) is a
@@ -182,7 +182,7 @@ def issued_after_cutoff(coord, snap: IssuedSnapshot, day: date) -> bool:
 
 
 def dominant_weather_class(coord, snap: IssuedSnapshot, iso: str) -> str:
-    """Yesterday's DOMINANT cloud class from the issued snapshot (SPEC §9).
+    """Yesterday's DOMINANT cloud class from the issued snapshot (SPEC §15.2).
 
     The issued snapshot stores the forecast cloud class per ISO-UTC hour
     (``cloud_class_by_hour``); the dominant class is the one carrying the most
@@ -237,7 +237,7 @@ async def comparison_kwh_for_day(coord, day: date) -> dict[str, float]:
     configured comparison entity's recorder history for the day's LOCAL
     calendar and caches the result. A comparison with no usable recorded
     state that day is ABSENT from the returned map (that source is unscored
-    for the day, SPEC §9), never a fabricated zero.
+    for the day, SPEC §15.2), never a fabricated zero.
     """
     if not coord._comparisons:
         return {}
@@ -269,7 +269,7 @@ async def async_read_comparison_history(
 ) -> dict[str, float]:
     """Read each comparison's daily-kWh AT THE ENGINE'S HORIZON for ``day``.
 
-    FAIRNESS (SPEC §9, matched horizon): the engine is scored on its ~01:30
+    FAIRNESS (SPEC §15.2, matched horizon): the engine is scored on its ~01:30
     issued snapshot, so each comparison is read at the SAME day-ahead horizon
     — the FIRST usable (numeric, finite, non-unavailable) recorded state
     at/after the local issue time (01:30), NOT the settled end-of-day value.

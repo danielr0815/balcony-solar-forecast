@@ -1,5 +1,5 @@
 /**
- * Balcony Shade Profile card — sun path vs. learned shading (SPEC §15).
+ * Balcony Shade Profile card — sun path vs. learned shading (SPEC §18.3).
  *
  * OWNERSHIP: this file is SHIPPED AND SERVED BY THE INTEGRATION. The Python
  * side (`_frontend.py`) serves it as a static path under
@@ -42,7 +42,7 @@ const COLOR_SUN = "#f1c40f"; // sun-path polyline (+ comparison overlay, dashed)
 const COLOR_SHADE_FILL = "#7f8c8d"; // learned shade horizon fill
 const COLOR_STATIC_HORIZON = "#95a5a6"; // static config horizon (dashed)
 
-// Confidence visualisation (SPEC §5): each sun-path dot's radius encodes the
+// Confidence visualisation (SPEC §9.2): each sun-path dot's radius encodes the
 // pooled shademap-bin evidence n behind that sample. n=0 (static prior only) →
 // a small HOLLOW ring; n>0 → a filled dot whose radius ramps DOT_R_MIN..DOT_R_FULL
 // and SATURATES at N_SAT samples (beyond which more evidence adds no size). The
@@ -55,10 +55,10 @@ const N_SAT = 12; // evidence count at which the dot reaches full size
 const A_AZIMUTH = "azimuth";
 const A_SUN_ELEVATION = "sun_elevation";
 const A_TRANSMITTANCE = "transmittance";
-// The module's OWN-channel τ (read-time pooling, SPEC §5). Non-empty only when
+// The module's OWN-channel τ (read-time pooling, SPEC §9.2). Non-empty only when
 // the plane is grouped; drives the "Single" view of the group/single toggle.
 const A_TRANSMITTANCE_INDIVIDUAL = "transmittance_individual";
-// Pooled shademap-bin evidence n per sun-path sample (SPEC §5). Drives the
+// Pooled shademap-bin evidence n per sun-path sample (SPEC §9.2). Drives the
 // confidence dot sizing; a missing / short array falls back to fixed-size dots.
 const A_SAMPLE_N = "sample_n";
 const A_TIME = "time";
@@ -192,7 +192,7 @@ class BalconyShadeProfileCard extends HTMLElement {
     this._lastSensor = undefined;
     this._lastSelect = undefined;
     this._lastDate = undefined;
-    // Card-LOCAL comparison date (SPEC §15): a second sun path overlaid from the
+    // Card-LOCAL comparison date (SPEC §18.3): a second sun path overlaid from the
     // read-only get_shade_profile service, kept entirely in the card (it never
     // touches the shared date entity). `_compareDate` is the ISO string in the
     // input; `_compareData` the fetched profile dict; `_compareModule` the module
@@ -637,7 +637,7 @@ class BalconyShadeProfileCard extends HTMLElement {
       wrap.appendChild(field);
     }
 
-    // Card-LOCAL comparison date (SPEC §15): overlays a SECOND date's sun path
+    // Card-LOCAL comparison date (SPEC §18.3): overlays a SECOND date's sun path
     // via the read-only get_shade_profile service. Empty by default; the × button
     // clears it. It NEVER writes the shared date entity — it stays inside the card.
     {
@@ -671,7 +671,7 @@ class BalconyShadeProfileCard extends HTMLElement {
     }
 
     // Group/Single τ view toggle — only when the sensor exposes a non-empty
-    // individual (own-channel) τ array, i.e. this module is grouped (SPEC §5).
+    // individual (own-channel) τ array, i.e. this module is grouped (SPEC §9.2).
     const indiv = s.attributes[A_TRANSMITTANCE_INDIVIDUAL];
     if (isArray(indiv) && indiv.length > 0) {
       const field = document.createElement("div");
@@ -777,7 +777,7 @@ class BalconyShadeProfileCard extends HTMLElement {
     // Group/single toggle: colour the dots + drive the hover shading % by the
     // ACTIVE view's τ. The individual (own-channel) array is present only for a
     // grouped plane and runs parallel to the sun-path samples; otherwise the
-    // pooled τ is the only view and no suffix is shown (SPEC §5).
+    // pooled τ is the only view and no suffix is shown (SPEC §9.2).
     const hasIndiv = isArray(indiv) && indiv.length === nSun && nSun > 0;
     const activeSingle = this._view === "single" && hasIndiv;
     const activeTau = activeSingle ? indiv : tau;
@@ -785,7 +785,7 @@ class BalconyShadeProfileCard extends HTMLElement {
       ? `(${activeSingle ? t.viewSingle : t.viewGroup})`
       : "";
     // Confidence viz drives the dot sizing only when the sensor supplies a
-    // parallel sample_n array (SPEC §5); otherwise dots stay the fixed size.
+    // parallel sample_n array (SPEC §9.2); otherwise dots stay the fixed size.
     const hasSampleN = isArray(sampleN) && sampleN.length === nSun && nSun > 0;
 
     // --- domains ---------------------------------------------------------
@@ -1311,7 +1311,7 @@ class BalconyShadeProfileCard extends HTMLElement {
     const sector = ((Math.round(az / 45) % 8) + 8) % 8;
     const compass = (t.compass && t.compass[sector]) || "";
     const shadingPct = Math.round((1 - tau) * 100);
-    // Confidence: the pooled evidence n behind this sample (SPEC §5).
+    // Confidence: the pooled evidence n behind this sample (SPEC §9.2).
     const nTag = ctx.sampleN ? ` · n=${Number(ctx.sampleN[i]) || 0}` : "";
     // Group/single view tag, only when a distinct individual view exists.
     const suffix = ctx.viewSuffix ? ` · ${ctx.viewSuffix}` : "";

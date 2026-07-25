@@ -20,7 +20,7 @@ quantity (sun elevation) and cannot drift. Two checks:
       within +-40 Wh, and above the crown edge (el > 10) the beam gate never fires
       for EITHER config (transmittance == 1.0), so the beam physics is untouched.
 
-Plain pytest, no Home Assistant (SPEC §4).
+Plain pytest, no Home Assistant (SPEC §2).
 """
 
 from __future__ import annotations

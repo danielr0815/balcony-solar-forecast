@@ -2,7 +2,7 @@
 
 Dumps the config entry, the current degradation state (source status +
 payload age + issued time), a compact forecast summary and — for the two
-learning layers (v0.2.0 + v0.3.0, SPEC §5) — a compact learner-state summary
+learning layers (v0.2.0 + v0.3.0, SPEC §9) — a compact learner-state summary
 (status per layer, current intraday scalar, rolling drift MAE, and per-channel
 shademap bin counts) for bug reports.
 
@@ -12,7 +12,7 @@ whole-day-discard streak, its cause, the channels responsible and the last day
 actually accepted, while ``learner_state_summary()['actual_channels']`` says
 whether the configured measurement entities exist at all. Together they answer
 "why has this install learned nothing?" from a diagnostics download alone — no
-log access required (SPEC §8).
+log access required (SPEC §14.6).
 
 Coordinates are redacted (both the top-level entry lat/lon and the per-site
 copy). The learner summary is coordinate-free by construction — sun-azimuth /
@@ -91,7 +91,7 @@ async def async_get_config_entry_diagnostics(
     )
     # v0.4 skill scoreboard (per-weather-stratum breakdown + gate verdict) and
     # quantile bin counts — coordinate-free by construction, still routed
-    # through the redactor as defence in depth (SPEC §9/§10, §6).
+    # through the redactor as defence in depth (SPEC §15/§11).
     diagnostics["scoreboard"] = async_redact_data(
         _scoreboard_summary(coordinator, data), TO_REDACT
     )
@@ -100,7 +100,7 @@ async def async_get_config_entry_diagnostics(
     )
     # v0.16 ensemble-weather bands: enable flag, cached-payload age, member count
     # and hours covered. Coordinate-free (spread factors are per-hour ratios);
-    # still routed through the redactor as defence in depth (SPEC §6).
+    # still routed through the redactor as defence in depth (SPEC §11.3).
     diagnostics["ensemble"] = async_redact_data(
         _ensemble_summary(coordinator), TO_REDACT
     )
@@ -130,7 +130,7 @@ def _forecast_summary(data: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _learner_summary(coordinator: Any, data: dict[str, Any]) -> dict[str, Any]:
-    """Compact, coordinate-free learner-state summary (SPEC §5).
+    """Compact, coordinate-free learner-state summary (SPEC §14.6).
 
     Live fields come straight from the coordinator's ``self.data`` (status per
     layer, current intraday scalar, rolling drift MAE, correction source). The
@@ -162,7 +162,7 @@ def _learner_summary(coordinator: Any, data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _scoreboard_summary(coordinator: Any, data: dict[str, Any]) -> dict[str, Any]:
-    """Compact skill-scoreboard summary + per-stratum breakdown (SPEC §9/§10).
+    """Compact skill-scoreboard summary + per-stratum breakdown (SPEC §15.5).
 
     Reads the coordinator's ``DATA_KEY_SCOREBOARD`` summary (the shape
     ``core.scoreboard.scoreboard_summary`` emits): the engine daily-kWh / hourly
@@ -194,7 +194,7 @@ def _scoreboard_summary(coordinator: Any, data: dict[str, Any]) -> dict[str, Any
 
 
 def _quantile_summary(coordinator: Any) -> dict[str, Any]:
-    """Per-bin quantile sample counts (SPEC §6/§10).
+    """Per-bin quantile sample counts (SPEC §11.1).
 
     The quantile ring's per-bin sample counts come from an optional
     ``quantile_state_summary()`` accessor the coordinator/store exposes (mirrors
@@ -213,7 +213,7 @@ def _quantile_summary(coordinator: Any) -> dict[str, Any]:
 
 
 def _ensemble_summary(coordinator: Any) -> dict[str, Any]:
-    """Compact ensemble-weather diagnostics block (SPEC §6).
+    """Compact ensemble-weather diagnostics block (SPEC §11.3).
 
     Reads an optional ``ensemble_state_summary()`` accessor on the coordinator
     (mirrors ``quantile_state_summary`` / ``store_stats``): the enable flag, the

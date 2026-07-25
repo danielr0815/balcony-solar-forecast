@@ -1,6 +1,6 @@
 """BIT-EQUALITY proof for the audit-#9 engine double-pass refactor.
 
-Plain pytest, no Home Assistant imports (SPEC §4).
+Plain pytest, no Home Assistant imports (SPEC §2).
 
 Phase-D optimisation #1 replaced the per-plane/per-slot ``_plane_poa_split``
 (run TWICE — once for the RAW static-tau curve and once for the CORRECTED
