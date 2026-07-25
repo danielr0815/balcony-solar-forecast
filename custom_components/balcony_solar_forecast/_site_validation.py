@@ -17,7 +17,7 @@ import math
 from dataclasses import replace
 from typing import Any
 
-from .const import CONF_PLANES, CONF_SHADE_GROUP
+from .const import CONF_PLANES, CONF_SHADE_GROUP, HZ_DIFFUSE_TAU_MAX
 from .core.types import PlaneConfig, SiteConfig
 
 # Upper sanity bound for an inverter-group AC limit (W). Local guard only;
@@ -127,6 +127,15 @@ def _validate_horizon(horizon) -> tuple:
                 raise SiteValidationError("bad_tau")
         if row.seasonal and (row.tau_leafed is None or row.tau_bare is None):
             raise SiteValidationError("seasonal_missing_tau")
+        # Diffuse override (ADR §3.7, v0.22 D2): 0 <= diffuse_tau <= 0.8, valid
+        # independently of tau / tau_points. The 0.8 cap is a guard-rail — values
+        # near 1 ("sector invisible to the diffuse") would cloak the beam-bound
+        # rest the field is deliberately NOT meant to hide (ADR §3.4).
+        if row.diffuse_tau is not None and not (
+            math.isfinite(row.diffuse_tau)
+            and 0.0 <= row.diffuse_tau <= HZ_DIFFUSE_TAU_MAX
+        ):
+            raise SiteValidationError("bad_diffuse_tau")
         _validate_tau_points(row)
 
     return tuple(sorted(horizon, key=lambda r: r.azimuth_deg))

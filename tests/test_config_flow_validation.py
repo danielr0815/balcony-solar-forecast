@@ -28,6 +28,7 @@ from balcony_solar_forecast.const import (
     CONF_GROUPS,
     CONF_HORIZON,
     CONF_HZ_AZIMUTH,
+    CONF_HZ_DIFFUSE_TAU,
     CONF_HZ_ELEVATION,
     CONF_HZ_SEASONAL,
     CONF_HZ_TAU,
@@ -515,6 +516,66 @@ def test_tau_points_bare_without_leafed_points_rejected() -> None:
     assert exc.value.code == "seasonal_points_mismatch"
 
 
+def test_diffuse_tau_valid_wall_accepted() -> None:
+    # A bright-wall row: opaque beam (tau 0) + diffuse override 0.5 (ADR §3.5).
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        {CONF_HZ_AZIMUTH: 195.0, CONF_HZ_ELEVATION: 90.0, CONF_HZ_TAU: 0.0,
+         CONF_HZ_DIFFUSE_TAU: 0.5},
+        {CONF_HZ_AZIMUTH: 360.0, CONF_HZ_ELEVATION: 90.0, CONF_HZ_TAU: 0.0,
+         CONF_HZ_DIFFUSE_TAU: 0.5},
+    ]
+    assert validate_site(site) is not None
+
+
+@pytest.mark.parametrize("val", [0.0, 0.8])
+def test_diffuse_tau_boundaries_accepted(val) -> None:
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        {CONF_HZ_AZIMUTH: 195.0, CONF_HZ_ELEVATION: 90.0, CONF_HZ_TAU: 0.0,
+         CONF_HZ_DIFFUSE_TAU: val},
+        {CONF_HZ_AZIMUTH: 360.0, CONF_HZ_ELEVATION: 90.0, CONF_HZ_TAU: 0.0},
+    ]
+    assert validate_site(site) is not None
+
+
+@pytest.mark.parametrize("val", [-0.01, 0.81, 1.0])
+def test_diffuse_tau_out_of_range_rejected(val) -> None:
+    # ADR §3.7: the 0.8 cap is a guard-rail; >0.8 (and <0) is rejected.
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        {CONF_HZ_AZIMUTH: 195.0, CONF_HZ_ELEVATION: 90.0, CONF_HZ_TAU: 0.0,
+         CONF_HZ_DIFFUSE_TAU: val},
+        {CONF_HZ_AZIMUTH: 360.0, CONF_HZ_ELEVATION: 90.0, CONF_HZ_TAU: 0.0},
+    ]
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "bad_diffuse_tau"
+
+
+def test_diffuse_tau_valid_on_semi_transparent_tree_row() -> None:
+    # ADR §3.7 rule 2: diffuse_tau is valid independently of tau / tau_points.
+    site = _site()
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        {CONF_HZ_AZIMUTH: 60.0, CONF_HZ_ELEVATION: 10.0, CONF_HZ_TAU: 0.0,
+         CONF_HZ_TAU_POINTS: [[4.5, 0.0], [9.5, 1.0]], CONF_HZ_DIFFUSE_TAU: 0.5},
+        {CONF_HZ_AZIMUTH: 100.0, CONF_HZ_ELEVATION: 10.0, CONF_HZ_TAU: 0.0},
+    ]
+    assert validate_site(site) is not None
+
+
+def test_diffuse_tau_round_trip_stable() -> None:
+    from balcony_solar_forecast.core.types import HorizonRow
+
+    row = HorizonRow(195.0, 90.0, 0.0, diffuse_tau=0.5)
+    again = HorizonRow.from_dict(row.to_dict())
+    assert again.diffuse_tau == row.diffuse_tau
+    assert again.to_dict() == row.to_dict()
+    # Only-when-set: a row without the override emits no key (byte-identical).
+    plain = HorizonRow(195.0, 90.0, 0.0)
+    assert CONF_HZ_DIFFUSE_TAU not in plain.to_dict()
+
+
 def test_tau_points_round_trip_stable() -> None:
     from balcony_solar_forecast.core.types import HorizonRow
 
@@ -649,6 +710,7 @@ _ALL_ERROR_CODES = {
     "bad_tau_points",
     "tau_points_above_edge",
     "seasonal_points_mismatch",
+    "bad_diffuse_tau",
     "group_no_name",
     "group_dup_name",
     "group_no_planes",

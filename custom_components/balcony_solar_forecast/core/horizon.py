@@ -252,6 +252,25 @@ def _row_tau_at(row: HorizonRow, sun_el: float | None, doy: int | None) -> float
     return _tau_at_el(blended, sun_el)
 
 
+def _row_diffuse_tau_at(
+    row: HorizonRow, sun_el: float | None, doy: int | None
+) -> float:
+    """Effective DIFFUSE transmittance of one row for the SVF wedge (v0.22 D2).
+
+    When ``diffuse_tau`` is set it OVERRIDES the beam tau in the diffuse
+    sky-view integral only: the blocked wedge radiates ``diffuse_tau`` of the
+    open sky instead of the beam ``tau`` / ``tau_points`` value — the effective
+    radiance of the obstructed sector relative to open sky (a bright wall
+    reflects ~0.5). It is NOT a transmission (SPEC §13) and never touches the
+    beam gate. Default None == the diffuse keeps using the beam tau
+    (:func:`_row_tau_at`), the pre-0.22 behaviour, so a row the operator did not
+    mark is bit-identical and the beam path stays byte-untouched.
+    """
+    if row.diffuse_tau is not None:
+        return row.diffuse_tau
+    return _row_tau_at(row, sun_el, doy)
+
+
 def transmittance_at(
     plane: PlaneConfig, sun_az: float, doy: int, sun_el: float | None = None
 ) -> float:
@@ -365,12 +384,12 @@ def _interp_diffuse_tau(rows, az_deg: float, doy: int | None) -> float:  # noqa:
     Same effective-tau interpolation as :func:`transmittance_at` (seasonal rows
     resolved for ``doy`` BEFORE interpolation via the foliage ramp), but accepts
     ``doy=None`` to interpolate each row's STATIC ``tau`` — the sky-view factor's
-    pure-caller default. Returns 1.0 (fully transparent) for an empty table.
+    pure-caller default. A row's ``diffuse_tau`` (v0.22 D2), when set, OVERRIDES
+    its beam tau here (:func:`_row_diffuse_tau_at`); a row without it is
+    bit-identical to the pre-0.22 path (a wall-free / diffuse-free table
+    round-trips unchanged). Returns 1.0 (fully transparent) for an empty table.
     """
-    if doy is None:
-        val = _interp_rows(rows, az_deg, lambda r: r.tau)
-    else:
-        val = _interp_rows(rows, az_deg, lambda r: _row_tau(r, doy))
+    val = _interp_rows(rows, az_deg, lambda r: _row_diffuse_tau_at(r, None, doy))
     if val is None:
         return 1.0
     return 0.0 if val < 0.0 else 1.0 if val > 1.0 else val
@@ -453,8 +472,11 @@ def _band_column(
         if e1 <= e0:
             continue
         el_mid = 0.5 * (e0 + e1)
+        # Diffuse wedge: a row's ``diffuse_tau`` (v0.22 D2) overrides its beam tau
+        # here; a row without it keeps the beam ``tau_points`` profile unchanged,
+        # so a profile-only config is bit-identical to the pre-D2 band integral.
         tau_mid = _interp_rows(
-            rows, az_deg, lambda r, _el=el_mid: _row_tau_at(r, _el, doy)
+            rows, az_deg, lambda r, _el=el_mid: _row_diffuse_tau_at(r, _el, doy)
         )
         if tau_mid is None:
             tau_mid = 1.0

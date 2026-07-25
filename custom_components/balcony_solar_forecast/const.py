@@ -109,6 +109,8 @@ CONF_HZ_TAU_LEAFED = "tau_leafed"  # summer transmittance when seasonal
 CONF_HZ_TAU_BARE = "tau_bare"  # winter transmittance when seasonal
 CONF_HZ_TAU_POINTS = "tau_points"  # optional [[el, tau], ...] tau(sun-el) profile below the edge (0.22)
 CONF_HZ_TAU_POINTS_BARE = "tau_points_bare"  # optional bare (winter) tau(el) profile, same el raster
+CONF_HZ_DIFFUSE_TAU = "diffuse_tau"  # optional 0..0.8 diffuse-only radiance of the blocked sector (0.22 D2)
+HZ_DIFFUSE_TAU_MAX = 0.8  # upper guard: >0.8 would let the field cloak the beam-bound rest (ADR §3.4/§3.7)
 # inverter-group fields
 CONF_GROUP_NAME = "name"
 CONF_GROUP_PLANES = "plane_names"  # plane names feeding this AC clamp

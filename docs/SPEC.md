@@ -766,6 +766,23 @@ Zeilen, 2024-07 … 2026-07) → **P90 je (Monat × Stunde)** ≈ Klartag-Profil
    Monotoniezwang; `tau_points_bare` (gleiches el-Raster) optional für den
    saisonalen Winter (`bad_tau_points` / `tau_points_above_edge` /
    `seasonal_points_mismatch`).
+   **Diffus-Radianz-Ersatz des blockierten Sektors (v0.22, `diffuse_tau`):** Ein
+   optionales `diffuse_tau` je Horizont-Zeile ist die **effektive Radianz des
+   blockierten Sektors relativ zum offenen Himmel** — für eine helle Putzwand
+   ~ ihre Reflektanz 0,5. Es wirkt **nur** im SVF (der blockierte Keil trägt
+   `diffuse_tau` statt der Beam-τ seines offenen Werts); der Beam-Pfad bleibt
+   byte-unberührt (die Wand bleibt für Beam mit τ0 opak). Damit hebt eine helle
+   Wand den isotropen Diffus-Floor (M4/M8-Morgen/-Nachmittag), ohne Phantom-Beam
+   zu erzeugen. **Achtung: `diffuse_tau` ist KEINE Transmission** — es ist ein
+   Effektiv-/Reflexionswert; wer es als „Durchlässigkeit der Wand“ liest,
+   missversteht das Feld. Default = unbenutzt ⇒ Diffus nutzt wie bisher die
+   Beam-τ (`tau`/`tau_points`); die Zeile ist dann byte-identisch zu vor v0.22.
+   `diffuse_tau` ist unabhängig von `tau`/`tau_points` (eine halbtransparente
+   Baumzeile darf es zusätzlich tragen: Beam weiter τ(el), Diffus dann
+   `diffuse_tau`). Validierung: `0 ≤ diffuse_tau ≤ 0,8` (`bad_diffuse_tau`); die
+   Obergrenze 0,8 ist eine Kaschier-Leitplanke — Werte nahe 1 („Sektor für
+   Diffus unsichtbar“) würden den beam-gebundenen Rest verstecken, den das Feld
+   bewusst NICHT abdecken soll (ADR §3.4/§4.4). Serialisierung nur-wenn-gesetzt.
 5. **Verschattungsgruppen:** Weil Hang, Baumsektor und Hauswandkante
    Standort-Geometrie sind (Befunde 1–3, nicht modulspezifisch), können
    gleich verschattete Ebenen desselben Balkons über eine gemeinsame

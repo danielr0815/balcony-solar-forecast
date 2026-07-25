@@ -32,6 +32,7 @@ from ..const import (
     CONF_GROUPS,
     CONF_HORIZON,
     CONF_HZ_AZIMUTH,
+    CONF_HZ_DIFFUSE_TAU,
     CONF_HZ_ELEVATION,
     CONF_HZ_SEASONAL,
     CONF_HZ_TAU,
@@ -120,6 +121,15 @@ class HorizonRow:
     ``tau_points`` keeps the scalar ``tau`` semantics exactly (backward
     compatible). Both are tuples of tuples so the frozen row stays hashable and
     the ``horizon.py`` ``lru_cache`` memos keep working.
+
+    ``diffuse_tau`` (optional, v0.22 D2) overrides the beam tau for the
+    DIFFUSE sky-view integral ONLY: it is the effective radiance of the blocked
+    sector relative to the open sky (a bright wall reflects ~0.5), so a walled
+    row can lift the isotropic diffuse floor while its beam stays fully opaque.
+    It is NOT a transmission (SPEC §13). Default None == the diffuse keeps using
+    the beam ``tau`` / ``tau_points`` (pre-0.22 behaviour); the beam path is
+    byte-untouched regardless. Independent of ``tau``/``tau_points`` (a
+    semi-transparent tree row MAY carry it too).
     """
 
     azimuth_deg: float
@@ -130,6 +140,7 @@ class HorizonRow:
     tau_bare: float | None = None
     tau_points: tuple[tuple[float, float], ...] | None = None
     tau_points_bare: tuple[tuple[float, float], ...] | None = None
+    diffuse_tau: float | None = None
 
     @staticmethod
     def _points_from(raw: object) -> tuple[tuple[float, float], ...] | None:
@@ -162,6 +173,10 @@ class HorizonRow:
             ),
             tau_points=cls._points_from(d.get(CONF_HZ_TAU_POINTS)),
             tau_points_bare=cls._points_from(d.get(CONF_HZ_TAU_POINTS_BARE)),
+            diffuse_tau=(
+                None if d.get(CONF_HZ_DIFFUSE_TAU) is None
+                else float(d[CONF_HZ_DIFFUSE_TAU])
+            ),
         )
 
     def to_dict(self) -> dict:
@@ -183,6 +198,11 @@ class HorizonRow:
             d[CONF_HZ_TAU_POINTS] = [[el, t] for el, t in self.tau_points]
         if self.tau_points_bare:
             d[CONF_HZ_TAU_POINTS_BARE] = [[el, t] for el, t in self.tau_points_bare]
+        # Only-when-set (v0.22 D2): a row without a diffuse override round-trips
+        # to the exact dict it came from — no new key — so old configs stay
+        # byte-identical.
+        if self.diffuse_tau is not None:
+            d[CONF_HZ_DIFFUSE_TAU] = self.diffuse_tau
         return d
 
 
