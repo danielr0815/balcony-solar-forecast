@@ -768,6 +768,15 @@ Zeilen, 2024-07 … 2026-07) → **P90 je (Monat × Stunde)** ≈ Klartag-Profil
    Monotoniezwang; `tau_points_bare` (gleiches el-Raster) optional für den
    saisonalen Winter (`bad_tau_points` / `tau_points_above_edge` /
    `seasonal_points_mismatch`).
+   **Deprecated: die Interim-az-Rampe** (τ als τ(az) entlang des Sonnenpfads
+   eines Ankertags) ist abgelöst und wird **nicht mehr nachgeankert** — eine
+   bestehende Rampe wird **einmalig zu `tau_points` migriert, nicht monatlich
+   neu verankert** (ADR §2.7.6). Sie driftet strukturell (~0,3°/Tag) und
+   erzeugt im Spätsommer Phantom-Beam in der Dämmerung; `tau_points` hängt an
+   der Sonnen-Elevation und ist driftfrei. Nach der Migration einmal
+   `reset_day_ahead_bias` fahren (die Config-Fingerprint-Deckelung, A4, tut das
+   ab v0.22 automatisch, weil `tau_points`/`tau_points_bare`/`diffuse_tau` in
+   den Fingerprint eingehen) und ein LTS-Re-Bootstrap empfohlen (docs/BACKFILL.md).
    **Diffus-Radianz-Ersatz des blockierten Sektors (v0.22, `diffuse_tau`):** Ein
    optionales `diffuse_tau` je Horizont-Zeile ist die **effektive Radianz des
    blockierten Sektors relativ zum offenen Himmel** — für eine helle Putzwand

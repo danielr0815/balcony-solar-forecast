@@ -420,7 +420,14 @@ def reconstruct_plane_hour(
     static_tau = 1.0
     horizon_elev = horizon.interp_elevation(plane, sun_az)
     if sun_el <= horizon_elev:
-        static_tau = horizon.transmittance_at(plane, sun_az, doy)
+        # Pass sun_el so an inline tau_points elevation profile resolves at the
+        # true sun elevation (v0.22) — byte-for-byte the engine's
+        # ``_plane_poa_components`` gate. A row without a profile ignores it and
+        # the result is the pre-0.22 scalar tau, so a legacy backfill is
+        # unchanged; a tau_points row now gates the reconstructed beam with the
+        # SAME el-dependent tau the live engine issues (the SLOW-reference /
+        # day-ahead-bias mirror invariant).
+        static_tau = horizon.transmittance_at(plane, sun_az, doy, sun_el=sun_el)
     beam_poa_gated = beam_poa_ungated * static_tau
 
     # Diffuse sky-view gate: static per-plane isotropic reduction. The ground

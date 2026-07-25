@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Elevation-dependent horizon τ + a diffuse-radiance override for blocked sectors
+(ADR "Elevationsabhängiges Horizont-tau + Diffus-Floor/Wand-SVF"). Both reshape
+the RAW physics curve, so they ship as one release with a single learning reset.
+Existing configs (no new fields) are **byte-identical** and are **not** re-seeded
+on upgrade.
+
+### Added
+
+- **Inline elevation profile `tau_points` per horizon row (Thema 1 / H-A).** An
+  optional `tau_points: [[el, τ], …]` makes the beam transmittance a piecewise-
+  linear function of the **sun elevation** below the row's `elevation_deg` edge,
+  so a semi-transparent tree crown is modeled at the physical quantity (sun
+  elevation) instead of a τ(az) sun-path projection anchored to one day. It drives
+  both the beam gate and the diffuse SVF (a band integral over the profile).
+  `tau_points_bare` (same el raster) optionally supplies the bare-winter profile
+  for a seasonal row. Validation: 1–12 pairs, `el` strictly ascending and within
+  `[0, elevation_deg]`, `τ ∈ [0, 1]`. Serialised only-when-set.
+- **Per-row diffuse override `diffuse_tau` (Thema 2 / D2).** An optional
+  `diffuse_tau` (0…0.8) is the effective diffuse radiance of the blocked sector
+  relative to the open sky (a bright plaster wall ≈ 0.5). It lifts the isotropic
+  diffuse floor in the SVF **only** — the beam path stays byte-untouched — so a
+  wall row can raise the M4/M8 morning/afternoon diffuse floor without
+  fabricating phantom beam. It is **not** a transmission. Serialised only-when-set.
+
+### Changed
+
+- **Config fingerprint (A4) now hashes `tau_points`, `tau_points_bare` and
+  `diffuse_tau`** (only-when-set, so a legacy config's fingerprint is unchanged).
+  Editing any of them re-opens (n-caps) the day-ahead bias cells so learning
+  re-accelerates against the shifted raw curve — no manual `reset_day_ahead_bias`
+  needed after a `tau_points` migration or a `diffuse_tau` campaign.
+- **Backfill parity.** `scripts/backfill.py::reconstruct_plane_hour` resolves the
+  horizon beam gate at the true sun elevation (mirroring the engine), so a
+  `tau_points` / `diffuse_tau` / `bifacial_beam_gain` setup reconstructs
+  byte-identically to the live engine.
+- **Shade-profile diagram** now resolves the static prior per elevation, so the
+  sun-path transmittance is correct per (azimuth, elevation) sample instead of
+  constant down each azimuth column.
+
+### Deprecated
+
+- **The interim az-ramp** (τ(az) sun-path projection anchored to one day) is
+  superseded by `tau_points`. Migrate it once; do **not** re-anchor it monthly
+  (SPEC §13, ADR §2.7.6). After migrating, run `reset_day_ahead_bias` (or rely on
+  the automatic fingerprint n-cap) and re-run the offline bootstrap
+  (docs/BACKFILL.md).
+
 ## [0.21.0] - 2026-07-25
 
 7-day forensic pass (17.–24.07.2026, the first week with working nightly

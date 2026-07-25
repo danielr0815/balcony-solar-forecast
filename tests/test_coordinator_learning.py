@@ -691,6 +691,85 @@ def test_config_fingerprint_tracks_relevant_fields_only():
     assert c._config_fingerprint() == base
 
 
+def _legacy_v021_site() -> SiteConfig:
+    """A representative PRE-0.22 site: every horizon field the fingerprint hashed
+    at v0.21.0 (azimuth/elevation/tau/seasonal/tau_leafed/tau_bare), plus albedo,
+    bifacial_beam_gain, ross_coeff and a group — but NONE of the v0.22 additions
+    (tau_points / tau_points_bare / diffuse_tau). Its fingerprint is the golden
+    invariant below.
+    """
+    return SiteConfig(
+        latitude=48.13,
+        longitude=11.57,
+        albedo=0.2,
+        bifacial_beam_gain=1.0,
+        planes=(
+            PlaneConfig(
+                name="M2", azimuth_deg=115.0, tilt_deg=70.0, wp=430.0,
+                efficiency=0.96, ross_coeff=0.045,
+                horizon=(
+                    HorizonRow(azimuth_deg=52.0, elevation_deg=10.0, tau=0.0),
+                    HorizonRow(
+                        azimuth_deg=205.0, elevation_deg=90.0, tau=0.2,
+                        seasonal=True, tau_leafed=0.2, tau_bare=0.5,
+                    ),
+                ),
+                actual_entity="sensor.m2",
+            ),
+            PlaneConfig(
+                name="M4", azimuth_deg=205.0, tilt_deg=80.0, wp=430.0,
+                efficiency=0.96,
+                horizon=(
+                    HorizonRow(azimuth_deg=195.0, elevation_deg=90.0, tau=0.0),
+                ),
+                actual_entity="sensor.m4",
+            ),
+        ),
+        groups=(
+            InverterGroup(name="g1", plane_names=("M2", "M4"), ac_limit_w=800.0),
+        ),
+    )
+
+
+def test_config_fingerprint_legacy_config_is_byte_stable():
+    """GOLDEN: a config WITHOUT any v0.22 field hashes to the exact v0.21.0 value.
+
+    The v0.22 fields (tau_points / tau_points_bare / diffuse_tau) are appended to
+    the fingerprint's row segment ONLY when set (mirroring the nur-wenn-gesetzt
+    to_dict rule), so a legacy row's hash input string is byte-for-byte the
+    pre-0.22 string. This pins that: if the base format ever silently shifts, an
+    upgrade would spontaneously re-seed every follower's day-ahead bias against an
+    UNCHANGED raw curve (ADR §1: 'kein Spontan-Reseed beim Upgrade'). The golden
+    was computed from the v0.21.0 ``_config_fingerprint`` algorithm; it must only
+    change on a DELIBERATE fingerprint-format bump (CLASSIFIER_VERSION or a
+    documented schema change), never as a side effect of adding an optional field.
+    """
+    c = _make_coordinator()
+    c._site = _legacy_v021_site()
+    assert c._config_fingerprint() == "48f218a3ca86ee54"
+
+
+def test_config_fingerprint_legacy_bytes_ignore_v022_none_fields():
+    """A legacy row and a row that merely DEFAULTS the v0.22 fields to None hash
+    identically — proof the 'only-when-set' appends never fire for a None field
+    (the mechanism the golden above relies on)."""
+    from dataclasses import replace
+
+    c = _make_coordinator()
+    c._site = _legacy_v021_site()
+    golden = c._config_fingerprint()
+    # Re-materialise every row through ``replace`` (all v0.22 fields stay None):
+    # the fingerprint must be unchanged.
+    c._site = replace(
+        c._site,
+        planes=tuple(
+            replace(p, horizon=tuple(replace(r) for r in p.horizon))
+            for p in c._site.planes
+        ),
+    )
+    assert c._config_fingerprint() == golden
+
+
 async def test_async_reset_day_ahead_bias_clears_persists_and_refreshes():
     """The reset service backend clears every cell, persists the empty state and
     requests a recompute so the correction disappears at once (v0.19)."""

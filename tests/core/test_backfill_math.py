@@ -154,6 +154,134 @@ def test_parse_broken_payload_raises():
 
 
 # ---------------------------------------------------------------------------
+# Engine mirror-invariant: reconstruct_plane_hour == engine raw plane physics
+# ---------------------------------------------------------------------------
+#
+# The backfill reconstructs the SLOW-reference / day-ahead-bias physics with the
+# SAME core/ functions the live engine runs (SPEC §6 mirror invariant). These
+# tests pin that byte-for-byte on the v0.22 additions: an inline ``tau_points``
+# elevation profile (the beam gate must resolve at the true sun elevation in BOTH
+# paths — the parity break the sun_el fix closed), a ``diffuse_tau`` wall row (the
+# SVF band integral), and the ``bifacial_beam_gain`` factor (the open 0.21 backlog
+# item). The engine slot is positioned so its midpoint equals the backfill hour's
+# midpoint (hour_start + 30 min), so both evaluate the sun at the same instant.
+
+
+def _engine_raw_plane_hour(
+    site: SiteConfig, plane_name: str, hour_start, wx: bf.HourlyWeather
+) -> tuple[float, float, float]:
+    """(raw_watts, diffuse_ref, beam_ref) for one plane from a single engine slot
+    whose midpoint == the backfill hour midpoint (hour_start + 30 min)."""
+    from datetime import timedelta
+
+    from balcony_solar_forecast.core.engine import compute_forecast
+    from balcony_solar_forecast.core.types import WeatherSeries, WeatherSlot
+
+    slot_start = hour_start + timedelta(minutes=30) - timedelta(minutes=7, seconds=30)
+    ws = WeatherSeries(
+        slots=(
+            WeatherSlot(
+                start=slot_start, ghi=wx.ghi, dni=wx.dni, dhi=wx.dhi,
+                temp_c=wx.temp_c, snow_depth_m=wx.snow_depth_m,
+            ),
+        )
+    )
+    res = compute_forecast(site, ws, hour_start, tz=UTC)
+    pr = next(p for p in res.plane_results if p.name == plane_name)
+    return pr.raw_watts[0], pr.diffuse_ref_watts[0], pr.beam_ref_watts[0]
+
+
+def _tau_points_diffuse_site() -> SiteConfig:
+    """East-facing plane with a v0.22 inline tau_points crown AND a diffuse_tau
+    wall row (single plane, no group, so no AC clamp masks the parity)."""
+    from balcony_solar_forecast.core.types import HorizonRow, PlaneConfig
+
+    tp = ((4.5, 0.0), (5.5, 0.25), (6.5, 0.45), (8.0, 0.85), (9.5, 1.0))
+    rows = (
+        HorizonRow(azimuth_deg=52.0, elevation_deg=10.0, tau=0.0, tau_points=tp),
+        HorizonRow(azimuth_deg=89.0, elevation_deg=10.0, tau=0.0, tau_points=tp),
+        HorizonRow(azimuth_deg=195.0, elevation_deg=90.0, tau=0.0, diffuse_tau=0.5),
+        HorizonRow(azimuth_deg=360.0, elevation_deg=90.0, tau=0.0, diffuse_tau=0.5),
+    )
+    return SiteConfig(
+        latitude=48.13, longitude=11.57,
+        planes=(
+            PlaneConfig(
+                name="M", azimuth_deg=115.0, tilt_deg=70.0, wp=430.0,
+                efficiency=0.96, horizon=rows, actual_entity="sensor.m",
+            ),
+        ),
+        groups=(),
+    )
+
+
+@pytest.mark.parametrize(
+    "hour_start_h, expected_tau_label",
+    [(4, "fully-gated (el<4.5 -> tau_points 0)"),
+     (5, "intermediate (below edge -> tau_points ~0.5)")],
+)
+def test_reconstruct_matches_engine_on_tau_points_diffuse(
+    hour_start_h, expected_tau_label
+):
+    """reconstruct_plane_hour == engine raw plane physics on a tau_points +
+    diffuse_tau setup (the v0.22 mirror invariant). Byte-for-byte: the gated
+    total (day-ahead-bias reference), the diffuse floor (SVF band integral with
+    diffuse_tau) and the ungated beam (SLOW reference)."""
+    from datetime import datetime
+
+    from balcony_solar_forecast.core import horizon
+
+    site = _tau_points_diffuse_site()
+    plane = site.plane_by_name("M")
+    svf = horizon.sky_view_factor(plane)
+    hour_start = datetime(2026, 8, 25, hour_start_h, 0, tzinfo=UTC)
+    wx = bf.HourlyWeather(
+        start=hour_start, ghi=200.0, dni=850.0, dhi=60.0, temp_c=15.0
+    )
+    r = bf.reconstruct_plane_hour(
+        plane, svf, wx, latitude=site.latitude, longitude=site.longitude
+    )
+    raw_w, diffuse_ref, beam_ref = _engine_raw_plane_hour(site, "M", hour_start, wx)
+
+    assert r.gated_total_wh == pytest.approx(raw_w, abs=1e-9), expected_tau_label
+    assert r.diffuse_wh == pytest.approx(diffuse_ref, abs=1e-9)
+    assert r.beam_wh == pytest.approx(beam_ref, abs=1e-9)
+
+
+def test_reconstruct_matches_engine_with_bifacial_beam_gain():
+    """The open 0.21-backlog parity item: reconstruct_plane_hour(beam_gain=g) ==
+    engine raw plane physics with site.bifacial_beam_gain=g. The factor multiplies
+    beam+circumsolar identically in both paths, so the gated total stays a mirror."""
+    from dataclasses import replace
+    from datetime import datetime
+
+    from balcony_solar_forecast.core import horizon
+
+    base = _tau_points_diffuse_site()
+    site = replace(base, bifacial_beam_gain=1.25)
+    plane = site.plane_by_name("M")
+    svf = horizon.sky_view_factor(plane)
+    hour_start = datetime(2026, 8, 25, 5, 0, tzinfo=UTC)
+    wx = bf.HourlyWeather(
+        start=hour_start, ghi=200.0, dni=850.0, dhi=60.0, temp_c=15.0
+    )
+    r = bf.reconstruct_plane_hour(
+        plane, svf, wx, latitude=site.latitude, longitude=site.longitude,
+        beam_gain=1.25,
+    )
+    raw_w, diffuse_ref, beam_ref = _engine_raw_plane_hour(site, "M", hour_start, wx)
+    assert r.gated_total_wh == pytest.approx(raw_w, abs=1e-9)
+    assert r.diffuse_wh == pytest.approx(diffuse_ref, abs=1e-9)
+    assert r.beam_wh == pytest.approx(beam_ref, abs=1e-9)
+    # Sanity: the gain actually lifted the beam (guards against a 1.0 no-op slip).
+    r1 = bf.reconstruct_plane_hour(
+        plane, svf, wx, latitude=site.latitude, longitude=site.longitude,
+        beam_gain=1.0,
+    )
+    assert r.beam_wh > r1.beam_wh * 1.2
+
+
+# ---------------------------------------------------------------------------
 # Bin key / half-year / quasi-clear gate (mirror the shademap contract)
 # ---------------------------------------------------------------------------
 

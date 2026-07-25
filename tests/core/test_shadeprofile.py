@@ -595,3 +595,47 @@ def test_default_module_edge_cases():
     # A tie in counts keeps the FIRST plane (config order) — deterministic.
     tie = (_plane("A", 90.0), _plane("B", 270.0))
     assert shadeprofile.default_module(tie) == "A"
+
+
+# ---------------------------------------------------------------------------
+# v0.22: the sun-path transmittance resolves the inline tau_points elevation
+# profile at the true sun elevation (was constant per az before the sun_el fix)
+# ---------------------------------------------------------------------------
+
+
+def _east_crown_plane() -> PlaneConfig:
+    """East-facing plane whose crown row carries a tau(sun-el) profile below the
+    edge (opaque under el 4.5, transmissive by el 9.5)."""
+    tp = ((4.5, 0.0), (5.5, 0.25), (6.5, 0.45), (8.0, 0.85), (9.5, 1.0))
+    return PlaneConfig(
+        name="M-east", azimuth_deg=115.0, tilt_deg=70.0, wp=430.0,
+        horizon=(
+            HorizonRow(azimuth_deg=52.0, elevation_deg=10.0, tau=0.0, tau_points=tp),
+            HorizonRow(azimuth_deg=89.0, elevation_deg=10.0, tau=0.0, tau_points=tp),
+        ),
+    )
+
+
+def test_effective_tau_at_resolves_tau_points_by_elevation():
+    """With an EMPTY shademap the diagnostic returns the STATIC prior, and that
+    prior now varies DOWN the azimuth column with the sun elevation (v0.22): a
+    low-sun crown gap is transmissive, its canopy opaque. Before the sun_el fix
+    every below-edge sample collapsed to the same (wrong) value per azimuth."""
+    plane = _east_crown_plane()
+    empty = ShademapState()
+    doy = 205  # summer; the crown row is not seasonal, so doy is irrelevant here
+    az = 70.0  # inside the 52..89 crown span
+
+    def tau(el: float) -> float:
+        return shadeprofile.effective_tau_at(
+            plane, empty, channel="M-east", sun_az=az, sun_el=el, doy=doy
+        )
+
+    # Below the first knot -> opaque; on the knots -> the knot values; above the
+    # edge -> fully transmissive (the gate does not fire).
+    assert tau(3.0) == pytest.approx(0.0, abs=1e-9)
+    assert tau(6.5) == pytest.approx(0.45, abs=1e-9)
+    assert tau(9.5) == pytest.approx(1.0, abs=1e-9)
+    assert tau(20.0) == pytest.approx(1.0, abs=1e-9)  # above el 10 edge
+    # Strictly monotone across the ramp -> genuinely elevation-resolved, not flat.
+    assert tau(5.5) < tau(6.5) < tau(8.0)
