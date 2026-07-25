@@ -642,6 +642,36 @@ def test_config_fingerprint_tracks_relevant_fields_only():
     )
     assert c._config_fingerprint() != seasonal_fp
 
+    # v0.22 per-row diffuse override: setting diffuse_tau on a wall row (the
+    # ADR-3.5 campaign) lifts the modeled iso-diffuse floor +0.1-0.2 kWh/day
+    # site-wide while az/elevation/tau are byte-identical -> it MUST flip the
+    # fingerprint, or the automatic A4 n-Deckelung never fires and every
+    # follower without a manual reset_day_ahead_bias runs stale bias against the
+    # new raw physics. It is exactly the field class tau_points was added for.
+    c._site = _site()
+    wall = HorizonRow(azimuth_deg=195.0, elevation_deg=90.0, tau=0.0)
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(wall,)), c._site.planes[1]),
+    )
+    no_diff = c._config_fingerprint()
+    walled = replace(wall, diffuse_tau=0.5)
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(walled,)), c._site.planes[1]),
+    )
+    with_diff = c._config_fingerprint()
+    assert with_diff != no_diff
+    # A diffuse_tau value edit (0.5 -> 0.4) is a distinct raw-curve change.
+    c._site = replace(
+        c._site,
+        planes=(
+            replace(c._site.planes[0], horizon=(replace(walled, diffuse_tau=0.4),)),
+            c._site.planes[1],
+        ),
+    )
+    assert c._config_fingerprint() != with_diff
+
     # bifacial beam-gain change (the A1 1.0->1.25 rollout via the options flow)
     # scales the direct-POA share site-wide -> different fingerprint.
     c._site = _site()

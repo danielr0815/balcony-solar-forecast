@@ -162,6 +162,24 @@ def _old_transmittance(plane, sun_az, doy):
     return 0.0 if val < 0.0 else 1.0 if val > 1.0 else val
 
 
+def _old_diffuse_tau(rows, az_deg, doy):
+    """Genuine pre-0.22 diffuse-tau interpolation (NOT via ``_interp_diffuse_tau``).
+
+    The pre-0.22 SVF resolved the wedge tau from each row's STATIC ``tau`` (doy
+    None) or its seasonally-resolved scalar ``_row_tau`` (int doy) — no
+    ``tau_points`` band, no D2 ``diffuse_tau`` override. Reconstructed inline so
+    the backward-compat property test does not call the v0.22 code path it is
+    meant to be independent of.
+    """
+    if doy is None:
+        val = H._interp_rows(rows, az_deg, lambda r: r.tau)
+    else:
+        val = H._interp_rows(rows, az_deg, lambda r: H._row_tau(r, doy))
+    if val is None:
+        return 1.0
+    return 0.0 if val < 0.0 else 1.0 if val > 1.0 else val
+
+
 def _old_svf(plane, doy):
     """Reconstruction of the pre-0.22 scalar SVF quadrature (no band path)."""
     beta = math.radians(plane.tilt_deg)
@@ -177,7 +195,7 @@ def _old_svf(plane, doy):
             az_rad = math.radians(az_deg)
             if use_horizon:
                 h = H.interp_elevation(plane, az_deg)
-                tau = H._interp_diffuse_tau(rows, az_deg, doy)
+                tau = _old_diffuse_tau(rows, az_deg, doy)
                 acc += H._semi_transparent_column(h, tau, az_rad, az_p, beta)
             else:
                 acc += H._inner_elevation_integral(0.0, az_rad, az_p, beta)

@@ -787,9 +787,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         each plane's azimuth / tilt / wp / efficiency / ross_coeff / horizon
         profile (per row: elevation AND the transmittance fields tau / seasonal /
         tau_leafed / tau_bare AND the v0.22 inline elevation profiles
-        tau_points / tau_points_bare — the horizon rows ARE the tau-carrying
-        "screens" of SPEC §5, so a τ 0→0.4 edit OR a tau_points knot edit
-        reshapes the modeled beam by +50–150 Wh/day mornings (ADR-2) and MUST
+        tau_points / tau_points_bare AND the v0.22 per-row diffuse override
+        diffuse_tau — the horizon rows ARE the tau-carrying "screens" of SPEC §5,
+        so a τ 0→0.4 edit OR a tau_points knot edit reshapes the modeled beam by
+        +50–150 Wh/day mornings (ADR-2), and setting diffuse_tau on the wall rows
+        lifts the modeled iso-diffuse floor by +0.1–0.2 kWh/day site-wide (ADR-3);
+        both reshape the RAW curve the bias cells are conditioned on and MUST
         re-seed),
         the site albedo, the bifacial beam gain (T6 — the A1 1.0→1.25 rollout runs
         through here and changes the direct-POA share site-wide), every inverter
@@ -824,6 +827,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 s += f",tp{_pts(r.tau_points)}"
             if r.tau_points_bare is not None:
                 s += f",tpb{_pts(r.tau_points_bare)}"
+            if r.diffuse_tau is not None:
+                # Only-when-set (mirrors the nur-wenn-gesetzt to_dict rule): a row
+                # the operator never marked keeps its exact pre-0.22 signature, so
+                # a byte-identical legacy config is NOT re-seeded; setting/editing
+                # diffuse_tau appends the segment and flips the fingerprint.
+                s += f",dt{round(r.diffuse_tau, 4)}"
             return s
 
         def _plane_sig(p) -> str:
