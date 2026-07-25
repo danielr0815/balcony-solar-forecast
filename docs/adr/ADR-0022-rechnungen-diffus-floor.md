@@ -96,6 +96,18 @@ SVF_eff ≈ 0,29 + 0,5·0,7 ≈ **0,64** (der Goldwert im ADR-Testplan; die
 restlichen 0,3 des blockierten Doms sind Baum-/Screen-Sektoren, die ihr
 eigenes — künftig el-abhängiges — tau behalten).
 
+> **Korrektur (25.07., mit Release-Code + unabhängiger Brute-Force-Quadratur):**
+> Die Zeile „SVF_eff ≈ 0,29 + 0,5·0,7 ≈ 0,64" ist **falsch**. Der Wandanteil ~0,7
+> ist ein Anteil des **blockierten** Doms (1−SVF ≈ 0,71), nicht des Gesamtdoms;
+> die Reflexion hebt nur diesen blockierten Anteil. Richtig lautet die Näherung
+> `SVF_eff ≈ SVF + ρ·wall_share·(1−SVF)` ≈ 0,29 + 0,5·0,7·0,71 ≈ **0,54**. Auf der
+> realen 17-Zeilen-M4-Geometrie liefert der Release-Code exakt **0,2879 → 0,5761**
+> (M8 0,2944 → 0,5852); der tatsächliche (open-gewichtete) Wandanteil am
+> blockierten Dom ist ~0,81, nicht 0,7. **Der korrekte Goldwert ist daher
+> 0,288 → 0,576±0,01**, nicht 0,64 — siehe Erratum in `ADR-0022-horizont-tau-und-
+> diffus-floor.md` §3.8/§3.5. Die Physik-Implementierung selbst ist verifiziert
+> korrekt; nur diese Überschlags-Schätzung war fehlerhaft.
+
 ## 5. Der beam-gebundene Rest (Option D3, zurückgestellt)
 
 Klar-minus-overcast: ≈ 65 − 20 = **~45 W/m²**, existiert nur bei DNI > 0.

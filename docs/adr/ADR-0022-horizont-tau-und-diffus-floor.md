@@ -532,6 +532,17 @@ Erwartete Wirkung (Rechnung §3.1 / Begleitdatei): M4-SVF 0,288 → ~0,64
 Beobachtung getroffen); wandverschatteter Nachmittag (12–17Z, gemessen
 24–31 W je Modul) steigt entsprechend; site-weit ~+0,1–0,2 kWh/Tag.
 
+> **Erratum / Implementierungsnotiz (0.22.0, korrigiert 25.07.):** Die obige
+> Wirkprognose ist zu optimistisch (derselbe Anteils-Rechenfehler wie §3.8 /
+> `rechnungen` §4). Real hebt `diffuse_tau 0.5` M4 von **0,2879 auf 0,5761**
+> (nicht ~0,64), der Wandanteil ist ~0,81 des *blockierten* Doms. Der iso-Diffus-
+> Anteil skaliert damit ~×2,0 statt ~×2,2 ⇒ **Modell-Diffus M4 04Z ~2,9 → ~5–7 W**
+> (nicht 7–9 W). Für die D2-Validierungswoche gilt entsprechend die revidierte
+> Operator-Erwartung: Overcast-Morgen (19.07., gemessen ~8 W) real **~5–7 W**;
+> das ±30 %-Kriterium aus §3.8 wird am Overcast-Tag damit **grenzwertig** erreicht
+> (nicht komfortabel). Richtung und Größenordnung des Fixes bleiben korrekt, der
+> Rest-Gap M4/M8 (~×3, beam-gebunden, D3) bleibt unverändert dokumentiert-offen.
+
 ### 3.6 Nebenwirkungs-Analyse (explizit gefordert)
 
 - **M1/M5 (Wand az295–360, tilt 70/80, az25):** SVF steigt ⇒ mehr iso-Diffus
@@ -581,8 +592,22 @@ Beobachtung getroffen); wandverschatteter Nachmittag (12–17Z, gemessen
 
 Unit:
 - SVF-Quadratur: Wand-Sektor mit `diffuse_tau 0,5` ⇒ M4-Geometrie-SVF
-  0,288 → 0,63±0,02 (Goldwert gegen Brute-Force); `diffuse_tau` None ⇒
+  0,288 → 0,576±0,01 (Goldwert gegen Brute-Force); `diffuse_tau` None ⇒
   bit-identisch heute; `diffuse_tau 0` ⇒ bit-identisch heute (Wand-Fall).
+
+> **Erratum / Implementierungsnotiz (0.22.0, korrigiert 25.07.):** Der ursprüngliche
+> Designwert „0,288 → 0,63±0,02" war zu hoch. Mit dem Release-Code auf der realen
+> 17-Zeilen-M4-Tabelle (az195/az360-Wandzeilen, `diffuse_tau 0.5`) ergibt sich
+> **0,2879 → 0,5761** (M8: **0,2944 → 0,5852**), unabhängig per Brute-Force-
+> Quadratur bestätigt und deckungsgleich mit dem Live-Diagnostics-Baseline 0,288.
+> Ursache ist der Anteils-Rechenfehler in `ADR-0022-rechnungen-diffus-floor.md` §4
+> (siehe dortige Korrektur): der Wandanteil zählt zum *blockierten* Dom, nicht zum
+> Gesamtdom (real ~0,81 des blockierten Doms). Der **realer** Goldwert ist damit
+> **0,288 → 0,576±0,01**. Der pytest-Goldwert wird bewusst auf einer *wall-only*-
+> Synthetik gepinnt (`tests/core/test_horizon_diffuse_tau.py`: 0,423 → 0,712,
+> geschlossene Blend-Identität `ρ + (1−ρ)·SVF₀`, unabhängig verifiziert), weil die
+> lineare Identität nur für einen reinen Wand-Dom gilt — die reale Tabelle trägt
+> zusätzlich Baum-/Screen-Sektoren, auf die `diffuse_tau` nicht wirkt.
 - Engine: Beam-Serien byte-identisch mit/ohne `diffuse_tau` (Diffus-only-Fix);
   `diffuse_ref_watts` (SLOW-Referenz) trägt den neuen Floor (Trainings-Label
   konsistent), `beam_ref_watts` unverändert.

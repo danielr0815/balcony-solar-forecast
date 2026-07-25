@@ -6,10 +6,12 @@ Covers (ADR §3.8 unit part):
     brute-force quadrature, and hits the closed golden pair 0.423 -> 0.712 for
     this M4 tilt/azimuth; it obeys the exact wall blend identity
     SVF(rho) == rho + (1 - rho) * SVF0 because the wall is the ENTIRE blocked
-    dome here.  NB: the live M4 diagnostic 0.288 -> ~0.64 is NOT reproduced by
-    this wall-only synthetic — the real M4 table also carries trees/screens, so
-    diffuse_tau lifts only the wall's share of that dome and the linear blend
-    identity does not apply to the live figure (only to a wall-only dome);
+    dome here.  NB: the live M4 diagnostic 0.288 -> 0.576 (release code + brute
+    force; the ADR erratum, NOT the superseded design estimate 0.64) is NOT
+    reproduced by this wall-only synthetic — the real M4 table also carries
+    trees/screens, so diffuse_tau lifts only the wall's share of that dome and
+    the linear blend identity does not apply to the live figure (only to a
+    wall-only dome);
   - ``diffuse_tau=None`` is BIT-IDENTICAL to the reconstructed pre-D2 diffuse
     path (the SVF resolved through the beam ``_row_tau_at`` resolver, which knows
     nothing of ``diffuse_tau``), not merely to a second identical call;
@@ -47,7 +49,7 @@ _WALL_HI = 360.0
 # Golden SVF pair for the wall-only dome at az 205 / tilt 70 (independently
 # reproduced by the brute-force quadrature below): the opaque wall floors the
 # sky-view at 0.423, and diffuse_tau 0.5 lifts it to 0.712 via the blend
-# identity 0.5 + 0.5 * 0.423.  (These are NOT the live M4 0.288/0.64 numbers —
+# identity 0.5 + 0.5 * 0.423.  (These are NOT the live M4 0.288 -> 0.576 numbers —
 # see the module docstring: the live table is not a wall-only dome.)
 _WALL_SVF_OPAQUE = 0.423
 _WALL_SVF_HALF = 0.712
@@ -139,7 +141,7 @@ def test_diffuse_tau_wall_blend_identity():
     # of 0, so SVF is exactly linear in rho: SVF(rho) == rho + (1 - rho) * SVF0.
     # This holds because the wall IS the entire blocked dome here; it does NOT
     # apply to the live M4 table (trees/screens block the rest of the dome, where
-    # diffuse_tau does not act), so the live 0.288 -> ~0.64 is a different figure.
+    # diffuse_tau does not act), so the live 0.288 -> 0.576 is a different figure.
     base = H.sky_view_factor(_wall_plane(None))
     for rho in (0.0, 0.3, 0.5, 0.8):
         got = H.sky_view_factor(_wall_plane(rho))
