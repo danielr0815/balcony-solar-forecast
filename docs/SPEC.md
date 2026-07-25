@@ -55,7 +55,8 @@ Verhalten steht am Ende dieses Wegweisers.
 | Aktionen (Services) | **§16** | §5, §6, §14.3, §15.4–§15.6 (je definierender Abschnitt) |
 | Scoreboard & Kill-Gate | **§14.1** | §9/§10 (Gate-Kriterien, Metrikdefinition) |
 | Store / Persistenz / Ringe | **§14.4** | §4 (Schreibsemantik), §6 (Quantilring), §5 (Rollback-Ring) |
-| Config-Schema, Validierung, Fingerprint | **§5** (Fingerprint/Reseed) | §13.4 (Horizont-Validierung), §4 (Generik), Anhang A |
+| Config-Schema (Feldnamen, Bereiche, Fehlercodes) | **§4.1** | §13.4 (Horizont-Validierung), Anhang A (Azimut) |
+| Fingerprint & Bias-Reseed | **§5** (Fingerprint/Reseed) | §4.1 (welches Feld zählt), §13.4 |
 | Backfill / Bootstrap / Re-Bootstrap | **§6** | §15.6 (In-Process-Aktion), §9 Phase 2 |
 | Dashboard & Frontend-Karten | **§14.3** | §15.4 (Karten), §15.5 (Installations-Aktion) |
 
@@ -328,6 +329,85 @@ Forecast-as-issued-Log. Schreibsemantik explizit: gebündelt per
 `async_delay_save` + Flush bei HA-Stop; nach einem **harten Crash**
 dürfen Last-Good-Cache und As-issued-Log bis zu einige Stunden
 verlieren — akzeptiert, die Degradationsleiter (§7) greift.
+
+### 4.1 Konfigurationsschema: die Felder des `site`-Objekts (Stand v0.23.0)
+
+Die „Generik statt Hardcoding"-Zusage oben ist nur so verbindlich wie die
+Feldnamen, in denen sie sich ausdrückt. Dieser Abschnitt trägt sie normativ
+nach: er benennt die **öffentliche Konfigurationsoberfläche** — die Schlüssel,
+die im Config-Entry persistiert werden, im Objekt-Editor der HA-UI von Hand
+editierbar sind und teils in den Config-Fingerprint (§5) eingehen. Die
+Bereichsprüfungen und ihre Fehlercodes (Übersetzungsschlüssel der
+Config-Flow-Feldfehler) liegen HA-frei in `_site_validation.py`
+(`validate_site`), die Typen in `core/types.py` (`SiteConfig`, `PlaneConfig`,
+`HorizonRow`, `InverterGroup`).
+
+Auf **Entry-Ebene** stehen `name`, `latitude`, `longitude`,
+`fetch_interval_seconds`, `recompute_interval_seconds` und das Objekt `site`;
+`latitude`/`longitude` werden zusätzlich **in** das `site`-Objekt gespiegelt,
+denn Fetcher und Sonnenstand lesen ausschließlich die site-eigenen Koordinaten.
+Nur Laufzeit-Schalter und die Vergleichsliste leben in den Options — ein
+strukturelles Feld dort verschattet `entry.data` dauerhaft.
+
+**`site` (Site-Ebene)**
+
+| Feld | Bedeutung | Bereich / Default | Fingerprint |
+|---|---|---|---|
+| `latitude`, `longitude` | Standort für Fetch + Sonnenstand | Pflicht | nein (aber Site-Signatur des Bootstrap-Imports, §6) |
+| `planes` | Liste der Modulebenen (≥ 1) | `no_planes` | — |
+| `groups` | Liste der Wechselrichter-Gruppen | darf leer sein | — |
+| `ac_actual_entity` | Entity-ID des **Gesamt**-AC-Zählers hinter allen WR (η-Kalibrierung, §5) | optional; leer ⇒ nicht konfiguriert | nein |
+| `ac_actual_invert` | negiert diesen Zähler einmalig an der Lesegrenze | optional, Default `false` | nein |
+| `albedo` | Bodenalbedo des Reflexterms | optional, geklemmt `[SITE_ALBEDO_MIN, SITE_ALBEDO_MAX]`; ungesetzt ⇒ `ALBEDO_DEFAULT`; Schnee überschreibt mit `ALBEDO_SNOW` | **ja** |
+| `bifacial_beam_gain` | Faktor auf **nur** Beam + Zirkumsolar (§4 Schritt 4) | optional, geklemmt `[SITE_BEAM_GAIN_MIN, SITE_BEAM_GAIN_MAX]`; ungesetzt ⇒ `BEAM_GAIN_DEFAULT` (Identität) | **ja** |
+
+**Ebene (`planes[]`)**
+
+| Feld | Bedeutung | Bereich / Default | Fingerprint |
+|---|---|---|---|
+| `name` | Ebenenname, eindeutig; zugleich Default-Shademap-Kanal | `plane_no_name`, `plane_dup_name` | **ja** |
+| `azimuth_deg` | Ebenenazimut, **0 = Nord im Uhrzeigersinn** (Anhang A) | 0…360, `bad_azimuth` | **ja** |
+| `tilt_deg` | Neigung gegen die Horizontale, 90 = senkrecht | 0…90, `bad_tilt` | **ja** |
+| `wp` | STC-Peakleistung des Moduls (W) | > 0, `bad_wp` | **ja** |
+| `efficiency` | DC-seitiger System-Wirkungsgrad | 0…1, Default `DEFAULT_EFFICIENCY`, `bad_efficiency` | **ja** |
+| `horizon` | Horizontzeilen dieser Ebene (§4 Schritt 5, §13.4) | wird an der Config-Grenze stabil nach Azimut sortiert | **ja** (zeilenweise) |
+| `actual_entity` | Entity-ID der gemessenen **DC**-Leistung dieses Kanals | optional | nein |
+| `shade_group` | poolt den langsamen Lerner: gleiche Gruppe ⇒ **ein** Shademap-Kanal (§5) | optional; leer ⇒ `shade_group_empty`; Namenskollision ⇒ `shade_group_collision` | nein |
+| `ross_coeff` | montageabhängiger Ross-Koeffizient (§4 Schritt 7) | optional, `[0,005; 0,12]`, `bad_ross_coeff`; ungesetzt ⇒ `ROSS_COEFF` | **ja** |
+
+**Horizontzeile (`planes[].horizon[]`)** — Semantik und Validierung ausführlich
+in §13.4, Wirkung in §4 Schritt 5:
+
+| Feld | Bereich / Regel |
+|---|---|
+| `azimuth_deg` | 0…360, `bad_horizon_azimuth` |
+| `elevation_deg` | 0…90, `bad_horizon_elevation` — die Horizontkante |
+| `tau` | 0…1, `bad_tau` (statisch bzw. belaubter Default) |
+| `seasonal` | Bool; wenn gesetzt, sind `tau_leafed` **und** `tau_bare` Pflicht (`seasonal_missing_tau`) |
+| `tau_leafed`, `tau_bare` | 0…1, `bad_tau` |
+| `tau_points` | optional 1…12 Paare `[el, τ]`, `el` streng steigend und ≤ `elevation_deg` (`bad_tau_points`, `tau_points_above_edge`); keine Monotonie in τ erzwungen |
+| `tau_points_bare` | optional, nur mit `seasonal` **und** `tau_points`, gleiche Länge und identisches el-Raster (`seasonal_points_mismatch`) |
+| `diffuse_tau` | optional 0…`HZ_DIFFUSE_TAU_MAX`, `bad_diffuse_tau` |
+
+**Wechselrichter-Gruppe (`groups[]`)**
+
+| Feld | Bereich / Regel | Fingerprint |
+|---|---|---|
+| `name` | eindeutig (`group_no_name`, `group_dup_name`) | **ja** |
+| `plane_names` | nicht leer, jeder Eintrag ein existierender Ebenenname (`group_no_planes`, `group_unknown_plane`) | nein |
+| `ac_limit_w` | > 0 und ≤ `AC_LIMIT_MAX_W` (`bad_ac_limit`) — der AC-Clamp der Gruppe | **ja** |
+| `inverter_efficiency` | optional, geklemmt `[INVERTER_EFFICIENCY_MIN, INVERTER_EFFICIENCY_MAX]`, Default `DEFAULT_INVERTER_EFFICIENCY`; DC→AC-Kette | nein (verschiebt nur die AC-Ausgabe, nicht die gelernte DC-Kurve) |
+
+**Zwei Regeln, die für jedes neue Feld gelten.** (1) *Nur-wenn-gesetzt
+serialisieren:* ein optionales Feld wird in `to_dict()` nur geschrieben, wenn
+der Betreiber es gesetzt hat — eine Alt-Config muss nach dem Upgrade
+**byte-identisch** dasselbe Dict ergeben, sonst kippt der Fingerprint ohne
+fachlichen Grund und setzt Lernzustand zurück. (2) *Fingerprint-Pflicht:* ein
+Feld, das die **RAW-Kurve** verändert, gehört in den Config-Fingerprint (§5) —
+mit gerundetem Wert und kollisionsfreiem Sentinel, ebenfalls nur-wenn-gesetzt
+angehängt. Felder, die die modellierte Kurve nicht verändern (Entity-IDs,
+Shade-Gruppierung, Zählervorzeichen), bleiben bewusst draußen, damit ein
+harmloser Edit kein Lernen zurücksetzt.
 
 ## 5. Lernschichten (beide numpy-frei, beide abschaltbar)
 
@@ -912,69 +992,81 @@ Zeilen, 2024-07 … 2026-07) → **P90 je (Monat × Stunde)** ≈ Klartag-Profil
    stärkste Stunden 10–12 h (Sonne az ~140–170°, el ~30–45°), M4-
    Transmittanz dort belaubt ≈ 0,3–0,6. → Baumsektor **az ~135–175°**,
    Baumkronen-Elevation von unten ~35–45°, von oben ~25–35°.
-4. **Initiale Horizonttabellen je Ebene** (Startwerte für §4 Schritt 5;
-   Transmittanz τ, saisonal wo markiert):
-   - Alle Ebenen, Fernfeld: az 60–100° el 13° τ0 · az 100–150° el 16° τ0
-     (Hang, PVGIS+Messung) · sonst PVGIS-Profil.
-   - P3/P6 (S): zusätzlich az 135–175° el 40°(unten)/30°(oben)
-     **τ 0,45 belaubt / 0,8 kahl** (Bäume, lernfähig) · az >212° el 90°
-     τ0 (Hauswand).
-   - P1/P4 (Front): az >205° irrelevant (Geometrie-Limit); keine
-     Zusatzeinträge nötig.
-   - P2/P5 (N): az >115° irrelevant; Fernfeld Ost besonders wichtig.
-   Seit v0.5.x (audit #11) wirken diese τ auch auf das **Diffus**: der Himmel
-   unter der Horizontlinie geht τ-gewichtet (saisonal per `doy`) in den SVF ein.
-   Eine belaubte Baumreihe (τ 0,45) verdunkelt das Diffus im Sommer stärker als
-   kahl (τ 0,8), also ist der Sommer-SVF der S-Module kleiner als im Winter;
-   die harte Hauswand (τ0) dunkelt Beam UND Diffus weiterhin voll ab.
-   **Elevationsabhängige Baumkronen-Transmittanz (v0.22, `tau_points`):** die
-   Ost-Baumkronen (az ~52–89) sind halbtransparent mit elevationsabhängiger
-   τ_eff (gepoolte 4-Tage-Messung Juli 2026: el 5–6 ≈ 0,25 · 6–7 ≈ 0,45 ·
-   8–9 ≈ 0,85 · ≥9 ≈ 1). Statt diese Rampe als τ(az) entlang des Sonnenpfads
-   eines Ankertags zu kodieren (Saisondrift ~0,3°/Tag, Phantom-Beam im
-   Spätsommer), trägt die Zeile ein Inline-Profil `tau_points: [[el, τ], …]`
-   unterhalb der Kronen-Oberkante (`elevation_deg`). τ hängt damit an der
-   Sonnen-Elevation, nicht am Datum — driftfrei und je Baumsektor
-   wiederverwendbar. Das Profil wirkt auch im SVF: der blockierte Keil `[0, h]`
-   wird an den Profilknoten segmentiert und pro Segment mit seiner
-   Mittelpunkts-τ gewichtet (Band-Integral, geschlossene Form, O(360)
-   memoisiert). Der oberste Knoten wird per Konvention auf τ=1 an der Kante
-   gelegt, damit am Gate-Übergang keine Sprungstelle entsteht. Validierung:
-   1–12 Paare, el streng aufsteigend und in `[0, elevation_deg]`, τ∈[0,1], kein
-   Monotoniezwang; `tau_points_bare` (gleiches el-Raster) optional für den
-   saisonalen Winter (`bad_tau_points` / `tau_points_above_edge` /
-   `seasonal_points_mismatch`).
-   **Deprecated: die Interim-az-Rampe** (τ als τ(az) entlang des Sonnenpfads
-   eines Ankertags) ist abgelöst und wird **nicht mehr nachgeankert** — eine
-   bestehende Rampe wird **einmalig zu `tau_points` migriert, nicht monatlich
-   neu verankert** (ADR §2.7.6). Sie driftet strukturell (~0,3°/Tag) und
-   erzeugt im Spätsommer Phantom-Beam in der Dämmerung; `tau_points` hängt an
-   der Sonnen-Elevation und ist driftfrei. Nach der Migration einmal
-   `reset_day_ahead_bias` fahren (die Config-Fingerprint-Deckelung, A4, tut das
-   ab v0.22 automatisch, weil `tau_points`/`tau_points_bare`/`diffuse_tau` in
-   den Fingerprint eingehen) und ein LTS-Re-Bootstrap empfohlen (docs/BACKFILL.md).
-   **Diffus-Radianz-Ersatz des blockierten Sektors (v0.22, `diffuse_tau`):** Ein
-   optionales `diffuse_tau` je Horizont-Zeile ist die **effektive Radianz des
-   blockierten Sektors relativ zum offenen Himmel** — für eine helle Putzwand
-   ~ ihre Reflektanz 0,5. Es wirkt **nur** im SVF (der blockierte Keil trägt
-   `diffuse_tau` statt der Beam-τ seines offenen Werts); der Beam-Pfad bleibt
-   byte-unberührt (die Wand bleibt für Beam mit τ0 opak). Damit hebt eine helle
-   Wand den isotropen Diffus-Floor (M4/M8-Morgen/-Nachmittag), ohne Phantom-Beam
-   zu erzeugen. **Achtung: `diffuse_tau` ist KEINE Transmission** — es ist ein
-   Effektiv-/Reflexionswert; wer es als „Durchlässigkeit der Wand“ liest,
-   missversteht das Feld. Default = unbenutzt ⇒ Diffus nutzt wie bisher die
-   Beam-τ (`tau`/`tau_points`); die Zeile ist dann byte-identisch zu vor v0.22.
-   `diffuse_tau` ist unabhängig von `tau`/`tau_points` (eine halbtransparente
-   Baumzeile darf es zusätzlich tragen: Beam weiter τ(el), Diffus dann
-   `diffuse_tau`). Validierung: `0 ≤ diffuse_tau ≤ 0,8` (`bad_diffuse_tau`); die
-   Obergrenze 0,8 ist eine Kaschier-Leitplanke — Werte nahe 1 („Sektor für
-   Diffus unsichtbar“) würden den beam-gebundenen Rest verstecken, den das Feld
-   bewusst NICHT abdecken soll (ADR §3.4/§4.4). Serialisierung nur-wenn-gesetzt.
-5. **Verschattungsgruppen:** Weil Hang, Baumsektor und Hauswandkante
-   Standort-Geometrie sind (Befunde 1–3, nicht modulspezifisch), können
-   gleich verschattete Ebenen desselben Balkons über eine gemeinsame
-   `shade_group` einem **Verschattungs-Pool** angehören (§5, Pooling beim
-   Lesen) — ein Sample eines Moduls kommt so allen Gruppenmitgliedern zugute.
+### 13.4 Initiale Horizonttabellen je Ebene — und die normative Feldsemantik der Horizontzeilen
+
+*Vierter Befund der Liste oben; als Überschrift geführt, weil Code und Tests
+diesen Abschnitt als `SPEC §13.4` zitieren.* **Initiale Horizonttabellen je
+Ebene** (Startwerte für §4 Schritt 5; Transmittanz τ, saisonal wo markiert):
+
+- Alle Ebenen, Fernfeld: az 60–100° el 13° τ0 · az 100–150° el 16° τ0
+  (Hang, PVGIS+Messung) · sonst PVGIS-Profil.
+- P3/P6 (S): zusätzlich az 135–175° el 40°(unten)/30°(oben)
+  **τ 0,45 belaubt / 0,8 kahl** (Bäume, lernfähig) · az >212° el 90°
+  τ0 (Hauswand).
+- P1/P4 (Front): az >205° irrelevant (Geometrie-Limit); keine
+  Zusatzeinträge nötig.
+- P2/P5 (N): az >115° irrelevant; Fernfeld Ost besonders wichtig.
+
+Seit v0.5.x (audit #11) wirken diese τ auch auf das **Diffus**: der Himmel
+unter der Horizontlinie geht τ-gewichtet (saisonal per `doy`) in den SVF ein.
+Eine belaubte Baumreihe (τ 0,45) verdunkelt das Diffus im Sommer stärker als
+kahl (τ 0,8), also ist der Sommer-SVF der S-Module kleiner als im Winter;
+die harte Hauswand (τ0) dunkelt Beam UND Diffus weiterhin voll ab.
+
+**Elevationsabhängige Baumkronen-Transmittanz (v0.22, `tau_points`):** die
+Ost-Baumkronen (az ~52–89) sind halbtransparent mit elevationsabhängiger
+τ_eff (gepoolte 4-Tage-Messung Juli 2026: el 5–6 ≈ 0,25 · 6–7 ≈ 0,45 ·
+8–9 ≈ 0,85 · ≥9 ≈ 1). Statt diese Rampe als τ(az) entlang des Sonnenpfads
+eines Ankertags zu kodieren (Saisondrift ~0,3°/Tag, Phantom-Beam im
+Spätsommer), trägt die Zeile ein Inline-Profil `tau_points: [[el, τ], …]`
+unterhalb der Kronen-Oberkante (`elevation_deg`). τ hängt damit an der
+Sonnen-Elevation, nicht am Datum — driftfrei und je Baumsektor
+wiederverwendbar. Das Profil wirkt auch im SVF: der blockierte Keil `[0, h]`
+wird an den Profilknoten segmentiert und pro Segment mit seiner
+Mittelpunkts-τ gewichtet (Band-Integral, geschlossene Form, O(360)
+memoisiert). Der oberste Knoten wird per Konvention auf τ=1 an der Kante
+gelegt, damit am Gate-Übergang keine Sprungstelle entsteht. Validierung:
+1–12 Paare, el streng aufsteigend und in `[0, elevation_deg]`, τ∈[0,1], kein
+Monotoniezwang; `tau_points_bare` (gleiches el-Raster) optional für den
+saisonalen Winter (`bad_tau_points` / `tau_points_above_edge` /
+`seasonal_points_mismatch`).
+
+**Deprecated: die Interim-az-Rampe** (τ als τ(az) entlang des Sonnenpfads
+eines Ankertags) ist abgelöst und wird **nicht mehr nachgeankert** — eine
+bestehende Rampe wird **einmalig zu `tau_points` migriert, nicht monatlich
+neu verankert** (ADR §2.7.6). Sie driftet strukturell (~0,3°/Tag) und
+erzeugt im Spätsommer Phantom-Beam in der Dämmerung; `tau_points` hängt an
+der Sonnen-Elevation und ist driftfrei. Nach der Migration einmal
+`reset_day_ahead_bias` fahren (die Config-Fingerprint-Deckelung, A4, tut das
+ab v0.22 automatisch, weil `tau_points`/`tau_points_bare`/`diffuse_tau` in
+den Fingerprint eingehen) und ein LTS-Re-Bootstrap empfohlen (docs/BACKFILL.md).
+
+**Diffus-Radianz-Ersatz des blockierten Sektors (v0.22, `diffuse_tau`):** Ein
+optionales `diffuse_tau` je Horizont-Zeile ist die **effektive Radianz des
+blockierten Sektors relativ zum offenen Himmel** — für eine helle Putzwand
+~ ihre Reflektanz 0,5. Es wirkt **nur** im SVF (der blockierte Keil trägt
+`diffuse_tau` statt der Beam-τ seines offenen Werts); der Beam-Pfad bleibt
+byte-unberührt (die Wand bleibt für Beam mit τ0 opak). Damit hebt eine helle
+Wand den isotropen Diffus-Floor (M4/M8-Morgen/-Nachmittag), ohne Phantom-Beam
+zu erzeugen. **Achtung: `diffuse_tau` ist KEINE Transmission** — es ist ein
+Effektiv-/Reflexionswert; wer es als „Durchlässigkeit der Wand“ liest,
+missversteht das Feld. Default = unbenutzt ⇒ Diffus nutzt wie bisher die
+Beam-τ (`tau`/`tau_points`); die Zeile ist dann byte-identisch zu vor v0.22.
+`diffuse_tau` ist unabhängig von `tau`/`tau_points` (eine halbtransparente
+Baumzeile darf es zusätzlich tragen: Beam weiter τ(el), Diffus dann
+`diffuse_tau`). Validierung: `0 ≤ diffuse_tau ≤ 0,8` (`bad_diffuse_tau`); die
+Obergrenze 0,8 ist eine Kaschier-Leitplanke — Werte nahe 1 („Sektor für
+Diffus unsichtbar“) würden den beam-gebundenen Rest verstecken, den das Feld
+bewusst NICHT abdecken soll (ADR §3.4/§4.4). Serialisierung nur-wenn-gesetzt.
+
+### 13.5 Verschattungsgruppen (`shade_group`)
+
+*Fünfter Befund der Liste oben; als Überschrift geführt, weil der Wegweiser
+(§0) auf §13.5 verweist.* **Verschattungsgruppen:** Weil Hang, Baumsektor und
+Hauswandkante Standort-Geometrie sind (Befunde 1–3, nicht modulspezifisch),
+können gleich verschattete Ebenen desselben Balkons über eine gemeinsame
+`shade_group` einem **Verschattungs-Pool** angehören (§5, Pooling beim
+Lesen) — ein Sample eines Moduls kommt so allen Gruppenmitgliedern zugute.
 
 ## Anhang A: Konventionen & Kommissionierungs-Checkliste
 
