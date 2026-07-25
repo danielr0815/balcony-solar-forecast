@@ -1177,3 +1177,72 @@ def test_backfill_classifies_by_kc_when_elevation_supplied():
     assert bf._classify_cloud(dim, elevation_deg=45.0) == const.CLOUD_CLASS_OVERCAST
     # No elevation -> layer-cover fallback -> clear (all covers zero).
     assert bf._classify_cloud(dim) == const.CLOUD_CLASS_CLEAR
+
+
+# ---------------------------------------------------------------------------
+# accumulate_days progress_cb plumbing (the in-process run_bootstrap uses it
+# for periodic INFO logs). Mutation-proof: deleting the ``progress_cb(done,
+# total)`` invocation must fail this test.
+# ---------------------------------------------------------------------------
+
+
+def _hours_on(day: int) -> list[bf.HourlyWeather]:
+    """A short clear midday window on 2025-06-<day> (UTC), like the noon fixture."""
+    out = []
+    for h in range(3):
+        out.append(
+            bf.HourlyWeather(
+                start=datetime(2025, 6, day, 9 + h, 0, tzinfo=UTC),
+                ghi=780.0, dni=820.0, dhi=120.0, temp_c=24.0,
+            )
+        )
+    return out
+
+
+def _tracking_actuals(
+    site: SiteConfig, weather: list[bf.HourlyWeather], svf: dict
+) -> dict[str, dict[str, float]]:
+    """Per-module hourly actuals that TRACK the modeled beam+diffuse (T ~ 1)."""
+    out: dict[str, dict[str, float]] = {}
+    for plane in site.planes:
+        hh: dict[str, float] = {}
+        for wx in weather:
+            r = bf.reconstruct_plane_hour(
+                plane, svf[plane.name], wx,
+                latitude=site.latitude, longitude=site.longitude,
+            )
+            total = r.beam_wh + r.diffuse_wh
+            if total > 0.0:
+                hh[wx.start.isoformat()] = total
+        if hh:
+            out[plane.name] = hh
+    return out
+
+
+def test_accumulate_days_progress_cb_fires_per_calendar_day(site: SiteConfig):
+    svf = _svf(site)
+    # Three UTC days; the MIDDLE day (21st) carries NO measured actuals -> it is
+    # skipped, but progress must still fire for it (counts skipped days too).
+    d20, d21, d22 = _hours_on(20), _hours_on(21), _hours_on(22)
+    weather = d20 + d21 + d22
+    actuals = _tracking_actuals(site, d20 + d22, svf)  # nothing for the 21st
+
+    calls: list[tuple[int, int]] = []
+
+    def _cb(done: int, total: int) -> None:
+        calls.append((done, total))
+
+    acc = bf.accumulate_days(
+        site, weather, actuals, svf_by_plane=svf, tz=None, progress_cb=_cb
+    )
+
+    # Fires exactly once per calendar day, done monotonically 1..total, total==3
+    # constant (skipped middle day included).
+    assert calls == [(1, 3), (2, 3), (3, 3)]
+    assert acc.days_skipped >= 1  # the actuals-less 21st was skipped, not dropped
+    assert acc.days_used >= 1
+
+    # Omitting progress_cb (the CLI path) still works and yields the same counts.
+    acc2 = bf.accumulate_days(site, weather, actuals, svf_by_plane=svf, tz=None)
+    assert acc2.days_used == acc.days_used
+    assert acc2.days_skipped == acc.days_skipped

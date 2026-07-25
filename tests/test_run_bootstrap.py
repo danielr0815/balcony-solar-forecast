@@ -10,6 +10,7 @@ provider, recorder or a multi-minute reconstruction.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -312,3 +313,115 @@ def test_reduce_stats_milliseconds_epoch_also_resolves():
     stats = {"sensor.p2": [{"start": h.timestamp() * 1000.0, "mean": 50.0}]}
     out = bs._reduce_stats(stats, {"M2": "sensor.p2"})
     assert out["M2"][h.isoformat()] == pytest.approx(50.0)
+
+
+# --------------------------------------------------------------------------
+# Error pictures at the REAL seams (one layer below the private wrappers) so
+# the two provider/recorder Fehlerbilder are genuinely exercised: the handler
+# tests above stub out ``_fetch_weather``/``_read_hourly_actuals`` wholesale,
+# which never runs the broad-except mapping in those wrappers.
+# --------------------------------------------------------------------------
+
+
+async def test_openmeteo_fetch_error_maps_to_validation_error(monkeypatch):
+    # Drive the REAL _fetch_weather: a provider failure in fetch_weather_range
+    # (even after the per-window degrade) must surface as a clean
+    # ServiceValidationError, NOT be swallowed by the broad-except.
+    monkeypatch.setattr(
+        bs.aiohttp_client, "async_get_clientsession", lambda hass: object()
+    )
+
+    async def _boom(session, **kwargs):
+        raise RuntimeError("provider 503")
+
+    monkeypatch.setattr(bs, "fetch_weather_range", _boom)
+    hass = _FakeHass({"e1": _FakeCoordinator()})
+    with pytest.raises(ServiceValidationError, match="Open-Meteo weather fetch failed"):
+        await bs.async_run_bootstrap(hass, _Call({}))
+
+
+async def test_missing_recorder_maps_to_validation_error(monkeypatch):
+    # Weather succeeds, but the recorder is not set up: get_instance raising
+    # inside the REAL _read_hourly_actuals must map to the recorder error.
+    import homeassistant.components.recorder as rec
+
+    monkeypatch.setattr(
+        bs.aiohttp_client, "async_get_clientsession", lambda hass: object()
+    )
+
+    async def _weather(session, **kwargs):
+        return ["wx"], True
+
+    monkeypatch.setattr(bs, "fetch_weather_range", _weather)
+
+    def _no_recorder(hass):
+        raise KeyError("recorder")
+
+    monkeypatch.setattr(rec, "get_instance", _no_recorder)
+    hass = _FakeHass({"e1": _FakeCoordinator()})
+    with pytest.raises(ServiceValidationError, match="recorder integration is not set up"):
+        await bs.async_run_bootstrap(hass, _Call({}))
+
+
+# --------------------------------------------------------------------------
+# Nightly-lock docking: the run_bootstrap lock IS the coordinator's shared
+# lock, and the nightly wrapper WAITS on it (not skips) — proving SPEC §15.6.
+# Exercises the REAL coordinator._async_nightly_job wrapper (mutation-proof:
+# deleting its ``async with self._bootstrap_lock`` breaks these).
+# --------------------------------------------------------------------------
+
+
+async def test_nightly_job_waits_for_held_bootstrap_lock(monkeypatch):
+    from custom_components.balcony_solar_forecast import _nightly
+    from custom_components.balcony_solar_forecast.coordinator import (
+        BalconySolarCoordinator,
+    )
+
+    coord = BalconySolarCoordinator.__new__(BalconySolarCoordinator)
+    coord._bootstrap_lock = asyncio.Lock()
+
+    ran: list = []
+
+    async def _fake_nightly(self, now=None):
+        ran.append(now)
+
+    monkeypatch.setattr(_nightly, "async_nightly_job", _fake_nightly)
+
+    await coord._bootstrap_lock.acquire()
+    task = asyncio.create_task(coord._async_nightly_job())
+    try:
+        await asyncio.sleep(0)  # let it reach — and block on — the lock
+        assert ran == []  # WAITS behind the held lock, has not run
+    finally:
+        coord._bootstrap_lock.release()
+    await task  # the wrapper acquires and runs — it waited, did not skip
+    assert len(ran) == 1
+
+
+async def test_run_bootstrap_rejected_while_nightly_holds_lock(monkeypatch):
+    from custom_components.balcony_solar_forecast import _nightly
+    from custom_components.balcony_solar_forecast.coordinator import (
+        BalconySolarCoordinator,
+    )
+
+    coord = BalconySolarCoordinator.__new__(BalconySolarCoordinator)
+    coord._bootstrap_lock = asyncio.Lock()
+    coord._site = SiteConfig.from_dict(DEFAULT_SITE)
+
+    gate = asyncio.Event()
+
+    async def _blocking_nightly(self, now=None):
+        await gate.wait()  # hold the shared lock until released
+
+    monkeypatch.setattr(_nightly, "async_nightly_job", _blocking_nightly)
+
+    nightly_task = asyncio.create_task(coord._async_nightly_job())
+    try:
+        await asyncio.sleep(0)  # let the nightly acquire the shared lock
+        assert coord._bootstrap_lock.locked()
+        hass = _FakeHass({"e1": coord})
+        with pytest.raises(ServiceValidationError, match="already running"):
+            await bs.async_run_bootstrap(hass, _Call({}))
+    finally:
+        gate.set()
+        await nightly_task
