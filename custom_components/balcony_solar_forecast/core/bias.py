@@ -27,7 +27,8 @@ Frozen public contract (7 implementers depend on these exact signatures):
     apply_intraday_scalar(hourly_wh, scalar, *, now) -> dict[str, float]
 
     # --- day-ahead RLS bias (persisted) ---
-    classify_cloud(*, cloud_low, cloud_mid, cloud_high, visibility_m, month) -> str
+    classify_cloud(*, cloud_low, cloud_mid, cloud_high, visibility_m, month,
+                   ghi=None, elevation_deg=None) -> str
     day_part_for_hour(local_hour) -> str
     train_day_ahead_bias(state, samples) -> BiasState
     apply_day_ahead_bias(state, *, cloud_class, day_part, wh) -> float
@@ -80,6 +81,9 @@ from ..const import (
     CLOUD_CLASS_MIXED,
     CLOUD_CLASS_OVERCAST,
     CLOUD_CLEAR_MAX_PCT,
+    CLOUD_KC_CLEAR_MIN,
+    CLOUD_KC_MIN_ELEVATION_DEG,
+    CLOUD_KC_OVERCAST_MAX,
     CLOUD_OVERCAST_MIN_PCT,
     DAY_AHEAD_BIAS_MAX,
     DAY_AHEAD_BIAS_MIN,
@@ -106,6 +110,7 @@ from ..const import (
     RLS_FORGETTING_FACTOR,
     RLS_INIT_COVARIANCE,
 )
+from .clearsky import clear_sky_index
 from .types import BiasCell, BiasState
 
 __all__ = [
@@ -121,6 +126,7 @@ __all__ = [
     "day_ahead_factor_solar",
     "train_day_ahead_bias",
     "apply_day_ahead_bias",
+    "reseed_day_ahead_bias",
 ]
 
 
@@ -212,10 +218,13 @@ def compute_intraday_scalar(
 
     Robustness: samples in the future or older than the trailing window are
     dropped; a clock jump that leaves every sample out-of-window collapses to
-    neutral rather than acting on stale data. The ratio is a ratio-of-sums
-    (energy-weighted) so the plane mix cancels; divide-by-near-zero is guarded
-    by the modeled-Wh gate plus a floor on the weighted modeled-k_c
-    denominator.
+    neutral rather than acting on stale data. The ratio is a ratio-of-sums of
+    the per-slot site k_c weighted ONLY by the exp(-age/tau) time decay — each
+    in-window sample counts with EQUAL energy weight (a low-production slot
+    weighs as much as a high-production one); it is not energy-weighted. The
+    plane mix cancels because measured and modeled are both site sums normalised
+    by the same clear-sky reference. Divide-by-near-zero is guarded by the
+    modeled-Wh gate plus a floor on the weighted modeled-k_c denominator.
     """
     if not samples:
         return INTRADAY_NEUTRAL
@@ -396,25 +405,35 @@ def classify_cloud(
     cloud_high: float,
     visibility_m: float,
     month: int,
+    ghi: float | None = None,
+    elevation_deg: float | None = None,
 ) -> str:
     """Cloud class in {clear, mixed, overcast, fog} (SPEC §5/§6).
 
-    Fog test FIRST (it overrides cover): fog when ``visibility_m`` <
+    Fog test FIRST (it overrides everything): fog when ``visibility_m`` <
     FOG_VISIBILITY_M OR (``cloud_low`` > FOG_CLOUD_LOW_PCT AND ``month`` in
-    FOG_MONTHS). Otherwise split by the random-overlap TOTAL cover
-    ``total = 100*(1 - (1-low/100)*(1-mid/100)*(1-high/100))`` (each layer
+    FOG_MONTHS).
+
+    Otherwise split by the CLEAR-SKY INDEX ``k_c = ghi / haurwitz_ghi(elevation)``
+    when both ``ghi`` and ``elevation_deg`` are supplied and the sun is at least
+    CLOUD_KC_MIN_ELEVATION_DEG above the horizon (below that the Haurwitz
+    reference is too coarse): k_c >= CLOUD_KC_CLEAR_MIN => clear,
+    k_c <= CLOUD_KC_OVERCAST_MAX => overcast, else mixed. k_c reflects the
+    irradiance that actually reaches the horizontal, so the shared taxonomy that
+    the RLS bias, the quantile bins and the scoreboard strata all key on stays
+    consistent — the previous random-overlap layer cover counted mid/high decks
+    at full weight and routed genuinely sunny hours into the overcast cell (A5).
+
+    FALLBACK (twilight / low sun / missing GHI): the random-overlap TOTAL layer
+    cover ``total = 100*(1 - (1-low/100)*(1-mid/100)*(1-high/100))`` (each layer
     clamped to [0, 100]): < CLOUD_CLEAR_MAX_PCT => clear,
-    > CLOUD_OVERCAST_MIN_PCT => overcast, else mixed. Returns one of the const
-    CLOUD_CLASS_* strings.
+    > CLOUD_OVERCAST_MIN_PCT => overcast, else mixed. Total (not the mean) so a
+    single opaque low deck (100/0/0) still overcasts rather than misfiling mixed.
 
-    The TOTAL cover — not the arithmetic mean of the three layers — is used
-    because cloud decks occlude cumulatively: a single opaque low deck (100/0/0)
-    fully overcasts the sky, yet its mean is only 33 and would misfile as mixed.
-    That misclassification would smear the shared taxonomy across the RLS bias,
-    the quantile bins and the scoreboard strata.
-
-    Non-finite inputs degrade gracefully: an unusable visibility does not fire
-    the fog rule, and unusable cover components are treated as 0.
+    Returns one of the const CLOUD_CLASS_* strings. Non-finite inputs degrade
+    gracefully: an unusable visibility does not fire the fog rule, an unusable
+    GHI / elevation falls back to the layer cover, and unusable cover components
+    are treated as 0.
     """
     vis = float(visibility_m) if _is_finite(visibility_m) else float("inf")
     low = float(cloud_low) if _is_finite(cloud_low) else 0.0
@@ -425,12 +444,27 @@ def classify_cloud(
     except (TypeError, ValueError):
         m = 0
 
-    # Fog first — it overrides the cover-based split.
+    # Fog first — it overrides both the k_c and the cover-based split.
     if vis < FOG_VISIBILITY_M or (low > FOG_CLOUD_LOW_PCT and m in FOG_MONTHS):
         return CLOUD_CLASS_FOG
 
-    # Random-overlap total cover: layers occlude cumulatively (a single full
-    # deck must classify overcast). Clamp each layer to [0, 100] first.
+    # Clear-sky-index split when GHI and a usable sun elevation are available.
+    if (
+        ghi is not None
+        and elevation_deg is not None
+        and _is_finite(ghi)
+        and _is_finite(elevation_deg)
+        and float(elevation_deg) >= CLOUD_KC_MIN_ELEVATION_DEG
+    ):
+        kc = clear_sky_index(float(ghi), float(elevation_deg))
+        if kc >= CLOUD_KC_CLEAR_MIN:
+            return CLOUD_CLASS_CLEAR
+        if kc <= CLOUD_KC_OVERCAST_MAX:
+            return CLOUD_CLASS_OVERCAST
+        return CLOUD_CLASS_MIXED
+
+    # Fallback: random-overlap total cover (layers occlude cumulatively; a single
+    # full deck must classify overcast). Clamp each layer to [0, 100] first.
     lc = _clamp(low, 0.0, 100.0)
     mc = _clamp(mid, 0.0, 100.0)
     hc = _clamp(high, 0.0, 100.0)
@@ -671,6 +705,36 @@ def train_day_ahead_bias(
         if updated is not cell:
             cells[key] = updated
 
+    return BiasState(cells=cells, version=state.version)
+
+
+def reseed_day_ahead_bias(state: BiasState, *, n_cap: int) -> BiasState:
+    """Re-open every day-ahead bias cell for fast re-adaptation (A4/FOR-4).
+
+    Called when the forecast-relevant site config changed: the learned theta of
+    each cell still fits the OLD geometry and, at RLS steady state (n ~ 100,
+    lambda RLS_FORGETTING_FACTOR), the gain has decayed so far that live days
+    only nudge theta ~0.001/day — months to re-converge. The learning-rate lever
+    is the RLS covariance P (the gain K = P*x/(lambda + x*P*x) depends on P, NOT
+    on n), so this resets every cell's ``covariance`` to RLS_INIT_COVARIANCE (the
+    same "large P0 => fast initial adaptation" seed a cold cell starts from) and
+    caps its effective sample count ``n`` at ``n_cap`` — keeping the current
+    theta as the starting point (strictly gentler than reset_day_ahead_bias,
+    which clears theta to neutral). A cell already at or below the cap keeps its
+    n; its covariance is re-opened regardless. Returns a NEW state; input
+    untouched. Empty input round-trips unchanged.
+    """
+    from dataclasses import replace
+
+    cap = max(0, int(n_cap))
+    cells: dict[str, BiasCell] = {}
+    src = state.cells if isinstance(state.cells, dict) else {}
+    for key, cell in src.items():
+        cells[key] = replace(
+            cell,
+            covariance=RLS_INIT_COVARIANCE,
+            n=min(int(cell.n), cap),
+        )
     return BiasState(cells=cells, version=state.version)
 
 

@@ -166,6 +166,17 @@ Pipeline (reine Funktionen über 15-min-Slots × N Ebenen, <50 ms/Lauf):
    ungegateten Trainer-Referenz, sonst absorbiert die Shademap den
    Glasreflexionsverlust (5–15 % bei AOI > 60°; auf den 70–80°-Fassaden
    großer Tagesanteil) als AOI-förmige Phantom-Verschattung.
+   **Bifazialer Beam-Gain (forensik T6):** optionaler Site-Faktor
+   `bifacial_beam_gain` (Default 1,0 = Identität; auf [1,0; 1,6] geklemmt) auf
+   **nur** die Beam+Zirkumsolar-POA (der direkte Anteil), angewandt in der
+   Engine **nach** dem IAM und **vor** der ungegateten Trainer-Referenz und dem
+   τ-Gate — wirkt damit identisch auf die RAW- und die korrigierte Kurve und
+   hebt den an klaren Morgen ehrlich unterschätzten Direktstrahl (bifaziale
+   Rückseite + steile Ost-Geometrie) in die Rohphysik, statt dass gedeckelte
+   Lerner (Transmittanz ≤ 1, Day-Ahead-Bias-Zellen) das Defizit als >1-Korrektur
+   auszudrücken versuchen. Iso-Diffus und Bodenreflex bleiben unberührt. Für den
+   Referenzstandort ≈ 1,23 validiert (Backtest 16.07.); Default 1,0 lässt das
+   Verhalten für Bestandsnutzer unverändert. Backfill rechnet denselben Faktor.
 5. **horizon.py** — je Ebene Tabelle `(Azimut, Elevation, Transmittanz)`
    in 10°-Schritten, linear interpoliert: Fernfeld aus PVGIS + Betreiber-
    Profil; Nahfeld je Ebene differenziert (Gebäudekante hart bei
@@ -298,8 +309,27 @@ Matrix, Vorschlag und die **aktuelle Gruppierung** zum direkten Abgleich.
 Verhältnis (τ ≈ 90 min) gemessen/prognostiziert der letzten 2–4 h,
 **im k_c-Raum konditioniert** (Geometrie/Saison herausnormiert), auf die
 nächsten ~6 h abklingend angewandt, Clamp [0,25 … 2,5], nach HA-Neustart
-Re-Init auf 1,0 (nie alten Zustand laden). Rettet Nebelmorgen ohne
-falsche Geometrie. Day-ahead-Bias (seit v0.2.0 implementiert, per Default
+Re-Init auf 1,0 (nie alten Zustand laden). Verboten ist allein die Persistenz
+des **Skalars** als Zustand; die Trailing-**Samples** sind neu bewertbare
+Rohdaten und dürfen beim Setup einmalig aus vorhandenen Quellen rekonstruiert
+werden (A7): 5-min-Recorder-Statistik des Gesamt-DC-Sensors als gemessene Seite,
+die zwischengespeicherte θ-korrigierte Kurve (ohne Intraday-Anteil) als
+modellierte Seite — **modellierte Seite auf die gemeterten Ebenen beschränkt**
+(nur Ebenen mit `actual_entity`, exakt die Teilmenge, die der Gesamt-DC-Sensor
+summiert; auf teilgemeterten Sites würde die volle Kurve die modellierte Seite
+sonst überhöhen und den Skalar nach jedem Reload auf den Clamp-Boden halbieren).
+Nur bei frischem (FRESH/CACHED) Wetter-Cache, sonst sauberer
+Abfall auf neutral. So läuft `compute_intraday_scalar` sofort organisch weiter,
+statt den Trailing-Fenster-Vorlauf neutral zu verbringen. Rettet Nebelmorgen ohne
+falsche Geometrie. Die **modellierte (prognostizierte) Seite** des Samples ist
+die **bias-referenzierte** Kurve — Roh-Watt × nächtlich eingefrorenem
+θ-Zellfaktor des Slots (`_day_factor`) —, **nicht** die reine Roh-Kurve: die
+ausgelieferte Kurve ist Roh × θ × Skalar, also würden θ (Day-ahead-Bias) und
+der Intraday-Skalar sonst denselben Fehler doppelt korrigieren. Der
+Intraday-Faktor selbst geht **nie** in die modellierte Seite ein (θ ist
+nächtlich eingefroren → keine Zirkularität); ist θ für den Slot inaktiv, ist
+der Faktor 1,0 und die modellierte Seite gleich der Roh-Kurve (die
+ausgelieferte Kurve trägt dann ebenfalls kein θ). Day-ahead-Bias (seit v0.2.0 implementiert, per Default
 aktiv): 1 RLS-Bias-Skalar je (Wolkenklasse × Tagesabschnitt), nächtlich
 trainiert und über den Options-Flow abschaltbar. Die Zellen sind ge*lernt*
 je Abschnitt, werden aber **stetig angewandt**: nahe einer internen
@@ -308,6 +338,47 @@ zeitlich linear überblendet (± `DAY_PART_BLEND_HALFWIDTH_MIN`), damit die
 Korrektur nie als harte Stufe springt — die Prognoseform kommt aus
 Wetter × Physik × Verschattung (stetig), also muss auch der aufgesetzte
 Residual-Korrektor stetig sein (`bias.day_ahead_factor`).
+Die **Wolkenklasse** eines Slots (`bias.classify_cloud`, gemeinsame Taxonomie
+für Day-ahead-Bias, Quantilbins und Scoreboard-Strata) wird — nach der stets
+vorrangigen Nebel-Regel — über den **Clear-Sky-Index** k_c = GHI /
+Haurwitz(Elevation) bestimmt: k_c ≥ `CLOUD_KC_CLEAR_MIN` → clear,
+k_c ≤ `CLOUD_KC_OVERCAST_MAX` → overcast, sonst mixed. k_c spiegelt die real
+ankommende Einstrahlung; die frühere Random-Overlap-Gesamtbedeckung wertete
+Mittel-/Hochwolken voll und routete sonnige Nachmittagsstunden in die
+overcast-Zelle (A5). Unterhalb `CLOUD_KC_MIN_ELEVATION_DEG` (Haurwitz-Referenz
+zu grob) oder ohne GHI fällt die Klassifikation auf die
+Random-Overlap-Schichtbedeckung zurück. Die Klassen-**Bedeutung** trägt eine
+Versionsnummer (`CLASSIFIER_VERSION`); ihre Änderung (Schichtbedeckung → k_c)
+gilt als Fingerprint-Änderung (s.u.) und veraltet die je Klasse gelernten
+Zellinhalte semantisch — Re-Bootstrap/Reset empfohlen.
+Die **modellierte Seite** des nächtlichen Day-ahead-Trainings ist die
+**Slow-only-Kurve** (Schattenkarte ∘ Physik, ohne Day-ahead-Faktor;
+`snap.slow_only_hourly_wh`), Fallback Roh (dann Korrigiert) bei inaktiver
+Slow-Schicht oder Alt-Snapshot: θ wird **auf** die schattenkarten-korrigierte
+Kurve aufgesetzt, also würde ein Training gegen die **reine** Roh-Kurve
+denselben Verschattungsfehler doppelt korrigieren, sobald die Schattenkarte
+lernt.
+Die Bias-Zellen werden gegen eine bestimmte **prognoserelevante Konfiguration**
+gelernt; ein `config_fingerprint` (SHA-256-Kurzhash über je Ebene Azimut /
+Neigung / Wp / Wirkungsgrad / Ross-Koeffizient / Horizont — je Zeile Azimut,
+Elevation UND die Transmittanzfelder `tau` / `seasonal` / `tau_leafed` /
+`tau_bare`, denn die Horizontzeilen SIND die τ-tragenden „Screens“ dieser
+Konfiguration (eine τ-Änderung 0→0,4 formt den Direktstrahl um) —, die Albedo,
+den bifazialen Beam-Gain (`bifacial_beam_gain`, T6 — der A1-Rollout 1,0→1,25
+skaliert den Direkt-POA-Anteil standortweit), die
+AC-Grenzen der WR-Gruppen und `CLASSIFIER_VERSION`) wird neben dem Bias-State
+persistiert. Weicht der
+Fingerprint beim Setup/Options-Reload vom gespeicherten ab, passt das gelernte θ
+nicht mehr zur Geometrie und würde bei RLS-Steady-State (λ = `RLS_FORGETTING_FACTOR`,
+n ≈ 100) nur ~0,001/Tag nachziehen; daher werden **alle** Zellen neu angesät
+(`bias.reseed_day_ahead_bias`): die RLS-Kovarianz jeder Zelle wird auf
+`RLS_INIT_COVARIANCE` **wieder geöffnet** (der eigentliche Lernraten-Hebel — die
+Verstärkung hängt an P, **nicht** an n) und ihr effektives n auf
+`DAY_AHEAD_BIAS_RESEED_N` gedeckelt, das aktuelle θ bleibt als Startwert erhalten
+(sanfter als `reset_day_ahead_bias`, das θ auf neutral löscht). Zusätzlich
+INFO-Log + HA-Repair-Issue (Re-Bootstrap/Reset empfohlen). Ein **Erststart** ohne
+gespeicherten Fingerprint (frische Installation oder erster Lauf nach Einführung
+des Features) speichert nur den aktuellen Fingerprint — nichts wird angesät.
 Alle Lerner-Korrekturen (Intraday-Skalar, Day-ahead-Bias) und die
 Quantilbänder (P10/P50/P90) werden als **letzte Stufe erneut auf das
 WR-AC-Limit geclampt** (`clamp_groups` läuft nach dem Slot-Faktor ein
@@ -383,6 +454,19 @@ Forecasts as-issued ab 01/2024 gegen LTS-Ist-Werte — einmaliger
 Offline-Job auf dem Dev-Rechner — füllt Bias-/Quantilspeicher vor dem
 ersten Live-Winter. Verbindlichkeit: **Pflicht zu versuchen, kein
 Blocker** — das System muss ohne diese API voll funktionieren.
+Der **Quantilspeicher** wird dabei über **denselben** `quantiles.train_quantiles`
+befüllt wie live: pro Stunde `relerr = gemessen / korrigiert` mit
+`korrigiert = clamp(θ_Zelle) · gegatetes-modelliertes-Wh` (θ nach dem Tages-RLS-
+Schritt) in die **(Wolkenklasse × Tagesabschnitt)**-Ringe (gleiche k_c-Taxonomie
+wie Bias/Scoreboard), datumsgefenstert auf `QUANTILE_RING_DAYS` relativ zum
+**letzten Backfill-Tag**, Ring-Cap und Per-Tag-Cap
+(`QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN`) wie live. Ohne dieses Seeding blieben am
+Tag 0 nur die overcast-Bins trainiert und alle anderen Bänder wochenlang auf P50
+kollabiert. Der Import (`store.import_bootstrap`) ist **additiv**: ein Payload
+ohne `quantile_state`-Schlüssel (Alt-Backfill) lässt den Live-Quantilring
+unangetastet, ein Payload mit dem Schlüssel ersetzt ihn wie die anderen beiden
+Lerner; der Rollback-Ring (`LearnerSnapshot`) trägt den Quantilzustand mit, damit
+`rollback_learners` alle drei Lerner konsistent zurücksetzt.
 
 ### 6.1 Ensemble-Wetter-Unsicherheitsbänder (v0.16, optional, Standard AUS)
 
@@ -426,6 +510,17 @@ Membern oder deterministischem GHI < 20 W/m² fällt auf das gelernte Band zurü
 Ein `band_source`-Attribut auf den P10/P90-Sensoren fasst die heutigen Slots
 zusammen: `learned` (nur Ring), `envelope` (Ensemble hat irgendwo geweitet) oder
 `ensemble` (gelernt überall kollabiert, Ensemble lieferte die ganze Spreizung).
+Ergänzend (SCT-4) liefert dasselbe Sensor-Attribut sowie die
+`get_forecast`-Antwort ein `band_source_by_day`: pro **lokalem Tag** die Zahl der
+Slots je Herkunft (`bin`/`envelope`/`ensemble`/`neutral`) — so ist sichtbar,
+welche Prognosetage tatsächlich ein trainiertes Band tragen, ohne eine
+384-Einträge-Slot-Karte in den Recorder zu schreiben (das Attribut ist per
+`_unrecorded_attributes` von der Historie ausgenommen). In der
+`get_forecast`-Antwort sind `band_source` **und** `band_source_by_day` an das
+Vorhandensein eines Band-Blocks (p10/p50/p90) gekoppelt: Ein
+quantiles-off-/Cold-Start-Zyklus liefert **weder** Band-Kurven **noch** ein
+`band_source` — die Antwort behauptet also keine Bandherkunft ohne begleitendes
+Band (kein Status-Widerspruch, analog zur Gatung des P10/P90-Sensors).
 
 ## 7. Degradationsleiter (nie still!)
 
@@ -450,9 +545,16 @@ Degradationsgrund — die Kurve läuft unverändert auf den gelernten Bändern w
   aktuellen Tages wieder herausgerechnet (die servierte `watts`/`wh_period`-Kurve
   behält ihn). **Clamp-Interaktion:** auf einem Slot, dessen hochkorrigierte
   Gruppenleistung die WR-AC-Obergrenze trifft (der Re-Clamp greift, servierter
-  Wert = Deckel), wird der Skalar NICHT herausdividiert, sondern der Deckelwert
-  unverändert übernommen — sonst würde eine nie angewandte Korrektur wieder
-  abgezogen und die Headline untertrieben (bis Faktor 2,5).
+  Wert = Deckel), ist der skalarfreie Wert `min(prereclamp/Faktor, Deckel)` —
+  `prereclamp` (`corrected_unclamped_watts` = erst-geklammert × Faktor) geteilt
+  durch den Faktor ergibt exakt den skalarfreien servierten Wert, am physischen
+  Deckel gekappt. So bleibt die Headline day-ahead-stabil: das bloße Behalten des
+  servierten Deckels ließ sie unter großem Skalar um die volle Faktor-Reserve
+  ballonieren (IRC-4/FOR-7; 20.07.: +3,27 kWh bei Skalar 2,355), das Herausdividieren
+  auf einem geklammerten Slot untertriebe sie. Klammert die Day-ahead-Kurve schon
+  allein (`prereclamp/Faktor ≥ Deckel`, klarer Mittag), liefert der Slot weiter den
+  Deckel. Ohne `slot_ceilings`/`corrected_unclamped_watts` (v0.1-Cache) bleibt der
+  servierte Deckel unverändert.
 - **AC-Standard (v0.17):** die Haupt-Sensoren (`energy_production_today /
   _tomorrow / _d2`, `power_production_now`, P10/P90-Bänder) melden die **AC**-Kurve
   (betreiberseitiger Standard hinter den Wechselrichtern). Das modellinterne
@@ -478,6 +580,17 @@ Degradationsgrund — die Kurve läuft unverändert auf den gelernten Bändern w
   **und** Service-with-Response `balcony_solar_forecast.get_forecast`
   (15-min/stündlich, P10/P50/P90 sobald vorhanden) — das saubere Muster
   nach dem Vorbild `weather.get_forecasts`.
+- **Diagnose-Dump (Config-Entry-Diagnostics, SPEC-2/SCT-4):** der
+  `store`-Block meldet echte Füllstände (`issued_days`, `actuals_days`,
+  `hourly_actuals_days`, `snapshot_ring`/`_capacity`, `schema_version`) und der
+  `learners.state`-Block echte Zählungen (`bias_cells`, `quantile_bins`,
+  `shademap_channels`, `shademap_bins` je Kanal) — die Blöcke sind **nicht mehr
+  fälschlich `available: false`**. Der `forecast`-Block trennt
+  `daily_kwh_dc` vs. `daily_kwh_ac` (statt eines mehrdeutigen `daily_kwh`). Der
+  `quantiles`-Block führt je Bin `n`, `days` und `trained` (= `n ≥
+  QUANTILE_MIN_SAMPLES` **und** `days ≥ QUANTILE_MIN_DAYS`, exakt das
+  Servier-Gate). Der `day_ahead_bias_status`-Sensor führt je Zelle zusätzlich
+  `clamped: true`, wenn θ am Band-Rand (`DAY_AHEAD_BIAS_MIN`/`MAX`) klebt.
 - **Energy-Dashboard:** Energy-Platform-Hook `async_get_solar_forecast`
   (`wh_hours`).
 - Perspektivisch kann battery_manager (separates Projekt, eigene
@@ -680,7 +793,11 @@ externen **Vergleichsprognose**, jeweils gegen die **gemessene** Ist-Summe des
 Standorts, plus die **Stunden-MAE** des Motors — **stratifiziert** nach der
 dominanten Wetterklasse des Vortags (clear/mixed/overcast/fog; der Koordinator
 klassifiziert diese bereits, wird wiederverwendet). Rollierendes Fenster
-(Default **14 Tage**, konfigurierbar).
+(Default **14 Tage**, konfigurierbar). Der **informative** Within-Stratum-Prozent
+`engine_vs_best_baseline_pct` wird bei weniger als `SCOREBOARD_STRATUM_MIN_N`
+gewerteten Tagen **nicht** ausgegeben (`null`) und die Zeile trägt `low_n: true`
+— ein einzelnes fehlgepaartes Paar erzeugte sonst absurde Werte (z. B. −480 %
+bei n = 2); Konsumenten blenden die Zeile aus (C1).
 
 **Fairness / kein Leakage (kritisch):**
 - die **Motor**-Zahl kommt aus der **as issued**-Prognose des Vortags (im
@@ -701,6 +818,15 @@ dagegen die `engine_*`-Form). Dazu `binary_sensor.kill_gate_passed` (Motor ≥
 **volles** Fenster; `None`, solange das Fenster nicht voll ist), plus eine
 **Diagnose-Aufschlüsselung je Wetterstratum**.
 
+**Erst-Urteil des Kill-Gates (forensik C3):** Das Gate braucht ein **volles**
+14-Tage-Fenster gewerteter Tage. Nach dem `_actuals`-Epoch-Fix (0.19.2) waren nur
+~3 Tage Catch-up nachholbar; **06.–12.07.2026 bleiben dauerhaft unscorebar** (für
+diese Tage existiert kein archivierter Issued-Snapshot mehr), daher füllt sich das
+rollierende Fenster erst danach und `kill_gate_passed` liefert erstmals **um den
+27.07.2026** ein Urteil statt `None`. Ein einmaliger Re-Score-Service für die
+rettbaren Issued-Tage wurde erwogen und zurückgestellt (der Issued-Ring hält die
+Daten). Bis dahin ist `kill_gate_passed = None` **korrekt**, kein Fehlschlag.
+
 **Vergleichs-Sensoren generisch + konfigurierbar** (`CONF_COMPARISON_SENSORS`:
 Liste von `{name, daily_entity}`), **leer** ausgeliefert (D-P9). Die zwei
 Vergleiche des Betreibers sind in `docs/DASHBOARD.md` + einem Config-Beispiel
@@ -717,7 +843,14 @@ empirischen P10/P50/P90-**Multiplikatoren** je Stunde auf die korrigierte Kurve
 angewandt. **Cold Start:** zu wenige Samples in einem Bin → Band kollabiert auf
 P50 (keine Fake-Spreizung). Ausgabe über die `get_forecast`-Service-Response
 (plane-agnostische Gesamt-P10/P50/P90 in 15 min + stündlich), optionale
-Tages-P10/P90-Sensoren, `wh_period`-P10/P90-Attribute. Enable-Flag Default
+Tages-P10/P90-Sensoren, `wh_period`-P10/P90-Attribute. **Intraday-Skalar am
+Tages-P10 asymmetrisch (FOR-7):** die servierte Band-Kurve behält den Skalar, aber
+das **Tages-P10-Aggregat** darf durch einen Hoch-Skalar nicht steigen (nach Spikes
+lag P10 an 3/6 Tagen über dem End-Ist). Je Slot wird das servierte AC-P10-Band mit
+`min(1, skalarfrei/serviert)` des zentralen AC-Strips skaliert — Faktor > 1 dividiert
+heraus, Faktor ≤ 1 behält das (herunterkorrigierte) servierte Band. Das **Tages-P90**
+behält den Skalar (eine Aufwärtskorrektur darf die optimistische Flanke weiten).
+Enable-Flag Default
 **AN**, Kill-Switch im Options-Flow. Nächtlich trainiert aus
 issued(korrigiert) vs. Ist — die bestehenden Ringe werden wiederverwendet.
 
@@ -865,6 +998,19 @@ Prognose-Markierung auf Höhe der Prognose-Tagessumme: vergangene Tage zeigen
 die **ausgegebene** Summe aus dem Ring, der heutige Tag die
 **Live**-`wh_period`-Summe, und Tage ohne archivierten Snapshot bleiben
 **ehrlich lückenhaft** (keine Markierung, nichts wird nachgerechnet).
+
+**`get_issued_forecast`-Antwort (Treffer, IRC-5/SCT-4):** `hourly_wh` (bedient/
+korrigiert) und `raw_hourly_wh` sind **explizit DC**. Zusätzlich liefert die
+Aktion `hourly_wh_ac` = DC × `eta`, wobei `eta` die DC→AC-Effizienz **zum
+Ausgabezeitpunkt** ist (in den Snapshot eingefroren, `eta_source: "snapshot"`);
+ältere Snapshots ohne gespeichertes eta fallen auf das **aktuelle** gelernte eta
+zurück und weisen das über `eta_source: "current"` aus (eine Site-Skalare —
+Datenblatt-Default bis die Kalibrierung vertraut ist; per-Gruppen-Overrides
+werden nicht abgebildet). `cloud_class_by_hour` (Day-ahead-Wetterklasse je
+Stunde) und `applied_factor_by_hour` (`hourly_wh / raw_hourly_wh`, Stunden mit
+raw≈0 ausgelassen) machen die angewandte Korrektur sichtbar. Die DC-Semantik
+hatte in der Forensik alle Issued-Ratios um ~8 % geschönt — der explizite
+AC-/DC-Ausweis behebt das.
 
 Seit v0.9 fixiert die Karte ihre x-Achse auf die **jahresstabile**
 Tageslicht-Azimutspanne (Minimum/Maximum aus beiden Sonnenwenden, Python-seitig

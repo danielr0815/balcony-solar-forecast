@@ -34,6 +34,8 @@ from balcony_solar_forecast.const import (  # noqa: E402
     ATTR_WH_PERIOD_P10,
     ATTR_WH_PERIOD_P90,
     CONF_COMPARISON_SENSORS,
+    DATA_KEY_BAND_SOURCE,
+    DATA_KEY_BAND_SOURCE_BY_DAY,
     DATA_KEY_KILL_GATE_PASSED,
     DATA_KEY_QUANTILE_CURVES,
     DATA_KEY_QUANTILE_CURVES_AC,
@@ -478,6 +480,8 @@ def test_forecast_response_includes_bands():
                 FORECAST_RESP_KEY_P50: {iso: 100.0},
                 FORECAST_RESP_KEY_P90: {iso: 120.0},
             },
+            DATA_KEY_BAND_SOURCE: "ensemble",
+            DATA_KEY_BAND_SOURCE_BY_DAY: {"2026-07-05": {"ensemble": 1}},
         }
     )
 
@@ -491,6 +495,9 @@ def test_forecast_response_includes_bands():
     # v0.4 band blocks added.
     assert entry[FORECAST_RESP_KEY_P10]["wh_period"] == {iso: 80.0}
     assert entry[FORECAST_RESP_KEY_P90]["hourly"][start.replace(minute=0).isoformat()] == pytest.approx(120.0)
+    # Band provenance rides along with the band block.
+    assert entry["band_source"] == "ensemble"
+    assert entry["band_source_by_day"] == {"2026-07-05": {"ensemble": 1}}
 
 
 def test_forecast_response_omits_bands_when_absent():
@@ -503,6 +510,10 @@ def test_forecast_response_omits_bands_when_absent():
             "plane_watts": {"M1": [400.0]},
             "hourly_wh": {iso: 100.0},
             "computed_at": iso,
+            # The coordinator always carries a band_source (default "learned")
+            # even on a quantiles-off / cold-start cycle; the response must NOT
+            # surface it without an accompanying band block (no status lie).
+            DATA_KEY_BAND_SOURCE: "learned",
         }
     )
 
@@ -512,6 +523,9 @@ def test_forecast_response_omits_bands_when_absent():
     entry = _build_forecast_response(_Hass(), None)["entries"]["abc123"]
     assert FORECAST_RESP_KEY_P10 not in entry
     assert FORECAST_RESP_KEY_P90 not in entry
+    # No band block -> no band provenance either (gated together).
+    assert "band_source" not in entry
+    assert "band_source_by_day" not in entry
 
 
 # ==========================================================================

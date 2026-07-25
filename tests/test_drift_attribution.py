@@ -246,3 +246,36 @@ def test_issued_snapshot_roundtrip_without_slow_only():
     # Store trim: the empty curve is omitted, and reads back as {}.
     assert "slow_only_hourly_wh" not in d
     assert IssuedSnapshot.from_dict(d).slow_only_hourly_wh == {}
+
+
+def test_issued_snapshot_roundtrip_with_eta():
+    """The issue-time DC->AC eta round-trips (IRC-5)."""
+    snap = IssuedSnapshot(issued_at="x", status="fresh", eta=0.9248)
+    d = snap.to_dict()
+    assert d["eta"] == 0.9248
+    assert IssuedSnapshot.from_dict(d).eta == 0.9248
+
+
+def test_issued_snapshot_roundtrip_without_eta_is_none():
+    """A legacy/omitted eta is trimmed from the dict and reads back as None."""
+    snap = IssuedSnapshot(issued_at="x", status="fresh")
+    d = snap.to_dict()
+    assert "eta" not in d
+    assert IssuedSnapshot.from_dict(d).eta is None
+    # A NaN in the stored dict degrades to None (validate-and-clamp).
+    assert IssuedSnapshot.from_dict({"eta": float("nan")}).eta is None
+
+
+async def test_snapshot_issued_stores_current_eta(monkeypatch):
+    """snapshot_issued freezes the coordinator's current eta into the snapshot."""
+    c = _make_coordinator()
+    h = "2026-07-01" + _HOUR
+    c.data = {
+        DATA_KEY_RAW_HOURLY_WH: {h: 1000.0},
+        DATA_KEY_CORRECTED_HOURLY_WH: {h: 1000.0},
+        "status": "fresh",
+    }
+    monkeypatch.setattr(c, "_effective_inverter_eta", lambda: 0.93)
+    await c._snapshot_issued(date(2026, 7, 1))
+    stored = IssuedSnapshot.from_dict(c._store.get_issued("2026-07-01"))
+    assert stored.eta == 0.93

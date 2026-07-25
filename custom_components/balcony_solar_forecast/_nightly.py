@@ -215,6 +215,9 @@ async def snapshot_issued(coord, today: date) -> None:
         # monitor's per-layer attribution (audit #13b); {} when the slow layer
         # is inactive (slow-only == raw, so nothing extra is stored).
         slow_only_hourly_wh=coord._slow_only_hourly(iso),
+        # Site DC->AC efficiency in effect right now, so the issued AC curve can be
+        # reconstructed later without hindsight (IRC-5/SCT-4).
+        eta=coord._effective_inverter_eta(),
     )
     coord._store.record_issued(iso, snapshot.to_dict())
 
@@ -231,16 +234,22 @@ def cloud_class_by_hour(coord, iso: str) -> dict[str, str]:
     weather = coord._cached_weather()
     if weather is None:
         return {}
+    lat = coord._site.latitude
+    lon = coord._site.longitude
     out: dict[str, str] = {}
     for slot in weather.slots:
         start = dt_util.as_utc(slot.start)
         if dt_util.as_local(start).date().isoformat() != iso:
             continue
         local = dt_util.as_local(start)
+        # Clear-sky-index classification (A5), consistent with the live coordinator
+        # loops: the nightly RLS must train the same (class x part) cell it serves.
+        _az, elev = solpos.sun_position(start, lat, lon)
         cc = bias_mod.classify_cloud(
             cloud_low=slot.cloud_low, cloud_mid=slot.cloud_mid,
             cloud_high=slot.cloud_high,
             visibility_m=slot.visibility_m, month=local.month,
+            ghi=slot.ghi, elevation_deg=elev,
         )
         hkey = _hour_key(start)
         # First writer per hour wins (slots within an hour share cloud data).
@@ -566,9 +575,10 @@ async def train_inverter_cal(coord, day: date) -> None:
 def train_day_ahead(
     coord, iso: str, issued: dict | None, actuals: dict | None
 ) -> None:
-    """Train the day-ahead RLS bias from the issued (raw) vs actuals day.
+    """Train the day-ahead RLS bias from the issued (slow-only) vs actuals day.
 
-    Aggregates the issued raw hourly curve and the measured site energy into
+    Aggregates the issued slow-only hourly curve (shademap ∘ physics; B2) and
+    the measured site energy into
     (cloud class x day part) day-parts and runs one RLS step per part. The
     cloud class is derived from the issued snapshot's per-plane k_c/ghi where
     available; absent that (v0.1 issued), we fall back to CLEAR so the RLS
@@ -580,10 +590,17 @@ def train_day_ahead(
     if not issued or not actuals:
         return
     snap = IssuedSnapshot.from_dict(issued)
-    # Defense-in-depth: an old-code snapshot's rings can span 4 days; slice
-    # the modeled curve to the training day before aggregating (FIX-2).
+    # The modeled side of the day-ahead RLS is the SLOW-ONLY curve (shademap ∘
+    # physics, no day-ahead factor) rather than pure raw (B2/SCT-3): theta is
+    # APPLIED on top of the shademap-corrected curve, so training it against pure
+    # raw would double-correct the same shading error once the shademap learns.
+    # slow_only is {} when the slow layer is inactive (slow-only == raw) or on a
+    # legacy snapshot -> fall back to raw (then corrected) so the RLS still trains.
+    # Defense-in-depth: an old-code snapshot's rings can span 4 days; slice the
+    # modeled curve to the training day before aggregating (FIX-2).
     raw_hourly = _filter_hourly_to_local_day(
-        snap.raw_hourly_wh or snap.corrected_hourly_wh, iso
+        snap.slow_only_hourly_wh or snap.raw_hourly_wh or snap.corrected_hourly_wh,
+        iso,
     )
     if not raw_hourly:
         return
@@ -639,8 +656,10 @@ def day_ahead_samples(
 ) -> list[_DayAheadSample]:
     """Build (cloud class x day part) RLS training samples for one day.
 
-    Modeled Wh per part comes from the issued raw hourly curve; the cloud
-    class is the forecast cloud class of each hour (snap.cloud_class_by_hour,
+    Modeled Wh per part comes from the issued SLOW-ONLY hourly curve (shademap ∘
+    physics; ``raw_hourly`` here is that curve, raw only as a legacy fallback —
+    see :func:`train_day_ahead`); the cloud class is the forecast cloud class of
+    each hour (snap.cloud_class_by_hour,
     SPEC §5) so a fog/overcast day trains its own cell, not a fixed "clear"
     one. When TRUE per-hour measured site energy is available
     (``site_measured_hourly``) each (class, part) cell carries its OWN
@@ -1121,6 +1140,7 @@ def maybe_push_rollback_snapshot(coord, iso: str) -> None:
         taken_at=now.isoformat(),
         bias=coord._bias_state,
         shademap=coord._shademap_state,
+        quantile=coord._quantile_state,
     )
     try:
         coord._store.push_snapshot(snapshot)

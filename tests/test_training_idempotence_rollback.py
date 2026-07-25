@@ -34,6 +34,7 @@ from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     IssuedSnapshot,
     LearnerConfig,
     LearnerSnapshot,
+    QuantileState,
     ShademapBin,
     ShademapState,
 )
@@ -117,6 +118,9 @@ def _distinct_snapshot(tag: float) -> LearnerSnapshot:
         shademap=ShademapState(
             channels={"M1": {"10:5:0": ShademapBin(tau=tag / 10.0, n=int(tag))}}
         ),
+        quantile=QuantileState(
+            bins={"clear|midday": [[f"2026-04-0{int(tag)}", 1.0 + tag / 10.0]]}
+        ),
     )
 
 
@@ -163,6 +167,8 @@ async def test_rollback_service_backend(monkeypatch):
     assert result["ring_size"] == 2
     assert c._bias_state.cells["clear|midday"].theta == pytest.approx(1.02)
     assert c._shademap_state.channels["M1"]["10:5:0"].tau == pytest.approx(0.2)
+    # The quantile ring is restored in step with the other two learners (A6).
+    assert c._quantile_state.bins["clear|midday"] == [["2026-04-02", 1.2]]
 
     # Going further back restores the older snapshot.
     result = await c.async_rollback_learners(2)

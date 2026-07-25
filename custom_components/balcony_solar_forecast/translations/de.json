@@ -131,6 +131,10 @@
     "slow_learner_auto_disabled": {
       "title": "Shademap-Lerner automatisch deaktiviert",
       "description": "Der Shademap-Lerner war sieben Tage in Folge schlechter als die reine Physik und wurde zum Schutz der Prognose automatisch deaktiviert. Zum Wiederaktivieren \"Shademap-Lerner (kanalweise Verschattungskarte)\" in den Integrationsoptionen einmal aus- und wieder einschalten."
+    },
+    "config_changed_bias_reseed": {
+      "title": "Day-ahead-Bias nach Konfigurationsänderung neu angelernt",
+      "description": "Eine prognoserelevante Einstellung wurde geändert (Azimut/Neigung/Spitzenleistung/Wirkungsgrad/Ross-Koeffizient/Horizont einer Ebene, die Albedo oder eine Wechselrichter-AC-Grenze), daher wurden die Day-ahead-Bias-Zellen zum Neulernen gegen die neue Geometrie wieder geöffnet. Für den schnellsten Neustart den Offline-Backfill-Bootstrap erneut ausführen oder den Dienst \"Day-ahead-Bias zurücksetzen\" aufrufen. Diese Meldung danach schließen."
     }
   },
   "services": {
@@ -252,7 +256,7 @@
     },
     "get_issued_forecast": {
       "name": "Ausgegebene Prognose abrufen",
-      "description": "Liefert die Day-Ahead-Prognose so, wie sie für ein vergangenes lokales Datum ausgegeben wurde, aus dem 90-Tage-Ausgabe-Ring (der eingefrorene Stand, ohne Rückschau). Wird von der gestrichelten Prognoselinie der Power-History-Karte für vergangene Tage genutzt.",
+      "description": "Liefert die Day-Ahead-Prognose so, wie sie für ein vergangenes lokales Datum ausgegeben wurde, aus dem 90-Tage-Ausgabe-Ring (der eingefrorene Stand, ohne Rückschau). Wird von der gestrichelten Prognoselinie der Power-History-Karte für vergangene Tage genutzt. Ein Treffer liefert die DC-Kurven plus eine AC-Kurve (hourly_wh_ac, mit dem eta zum Ausgabezeitpunkt), die Wolkenklasse je Stunde und den angewandten Korrekturfaktor.",
       "fields": {
         "entry_id": {
           "name": "Konfigurationseintrag",
@@ -279,7 +283,8 @@
           "ac_actual_entity": "Gesamt-AC-Zähler (hinter den Wechselrichtern)",
           "ac_actual_invert": "Vorzeichen des AC-Zählers invertieren",
           "site": "Standort-Konfiguration (Ebenen, Horizont, WR-Gruppen)",
-          "albedo": "Boden-Albedo (leer = 0,2)"
+          "albedo": "Boden-Albedo (leer = 0,2)",
+          "bifacial_beam_gain": "Beam-Gain (leer = 1,0)"
         },
         "data_description": {
           "name": "Eindeutiger Name dieser Anlage – nur eine Instanz je Name.",
@@ -287,7 +292,8 @@
           "recompute_interval_seconds": "Wie oft die Prognose neu gerechnet wird (Standard 900 = 15 min).",
           "ac_actual_entity": "Optional. Der Sensor, der die Gesamt-AC-Leistung hinter allen Wechselrichtern misst — das Kalibrierungsziel für den gelernten Wechselrichter-Wirkungsgrad (η) und den gleichwertigen AC-gegen-AC-Vergleich im Dashboard. Leer lassen, wenn kein Gesamt-AC-Zähler vorhanden ist.",
           "ac_actual_invert": "Aktivieren, wenn der AC-Zähler die eingespeiste Balkon-Solar-Leistung als negativen Wert meldet; der Messwert wird einmal negiert, damit die gemessene AC-Leistung positiv angezeigt wird.",
-          "albedo": "Reflexionsgrad des Bodens vor den Modulen für den Bodenreflex-Anteil. Dunkler Hof/Rasen ≈ 0,1, Lehrbuch-Standard 0,2, heller Beton ≈ 0,3. Wirkt am stärksten bei steiler Balkonmontage. Leer lassen für den Standard."
+          "albedo": "Reflexionsgrad des Bodens vor den Modulen für den Bodenreflex-Anteil. Dunkler Hof/Rasen ≈ 0,1, Lehrbuch-Standard 0,2, heller Beton ≈ 0,3. Wirkt am stärksten bei steiler Balkonmontage. Leer lassen für den Standard.",
+          "bifacial_beam_gain": "Faktor nur auf den direkten Anteil (Beam+Zirkumsolar), um den ehrlich unterschätzten Direktstrahl an klaren Morgen anzuheben (bifaziale Rückseite, steile Ost-Geometrie). Bereich 1,0–1,6; der Referenzstandort validierte ≈ 1,23. Leer lassen für 1,0 (keine Änderung)."
         }
       },
       "reconfigure": {
@@ -301,14 +307,16 @@
           "ac_actual_entity": "Gesamt-AC-Zähler (hinter den Wechselrichtern)",
           "ac_actual_invert": "Vorzeichen des AC-Zählers invertieren",
           "site": "Standort-Konfiguration (Ebenen, Horizont, WR-Gruppen)",
-          "albedo": "Boden-Albedo (leer = 0,2)"
+          "albedo": "Boden-Albedo (leer = 0,2)",
+          "bifacial_beam_gain": "Beam-Gain (leer = 1,0)"
         },
         "data_description": {
           "fetch_interval_seconds": "Wie oft Open-Meteo abgefragt wird (Standard 1800 = 30 min).",
           "recompute_interval_seconds": "Wie oft die Prognose neu gerechnet wird (Standard 900 = 15 min).",
           "ac_actual_entity": "Optional. Der Sensor, der die Gesamt-AC-Leistung hinter allen Wechselrichtern misst — das Kalibrierungsziel für den gelernten Wechselrichter-Wirkungsgrad (η) und den gleichwertigen AC-gegen-AC-Vergleich im Dashboard. Leer lassen, wenn kein Gesamt-AC-Zähler vorhanden ist.",
           "ac_actual_invert": "Aktivieren, wenn der AC-Zähler die eingespeiste Balkon-Solar-Leistung als negativen Wert meldet; der Messwert wird einmal negiert, damit die gemessene AC-Leistung positiv angezeigt wird.",
-          "albedo": "Reflexionsgrad des Bodens vor den Modulen für den Bodenreflex-Anteil. Dunkler Hof/Rasen ≈ 0,1, Lehrbuch-Standard 0,2, heller Beton ≈ 0,3. Wirkt am stärksten bei steiler Balkonmontage. Leer lassen für den Standard."
+          "albedo": "Reflexionsgrad des Bodens vor den Modulen für den Bodenreflex-Anteil. Dunkler Hof/Rasen ≈ 0,1, Lehrbuch-Standard 0,2, heller Beton ≈ 0,3. Wirkt am stärksten bei steiler Balkonmontage. Leer lassen für den Standard.",
+          "bifacial_beam_gain": "Faktor nur auf den direkten Anteil (Beam+Zirkumsolar), um den ehrlich unterschätzten Direktstrahl an klaren Morgen anzuheben (bifaziale Rückseite, steile Ost-Geometrie). Bereich 1,0–1,6; der Referenzstandort validierte ≈ 1,23. Leer lassen für 1,0 (keine Änderung)."
         }
       }
     },

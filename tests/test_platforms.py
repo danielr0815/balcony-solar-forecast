@@ -302,6 +302,38 @@ def test_energy_band_sensor_reads_ac_band(monkeypatch):
     assert s.native_value == pytest.approx(0.5)
 
 
+def test_energy_band_sensor_p10_reads_stripped_daily_key(monkeypatch):
+    # FOR-7: the daily P10 sensor reads the coordinator's scalar-stripped value
+    # (DATA_KEY_ENERGY_TODAY_AC_P10), NOT the sum of the scalar-inflated hourly
+    # band curve — so a spike cannot lift it above the end-of-day actual.
+    from custom_components.balcony_solar_forecast.const import (
+        DATA_KEY_ENERGY_TODAY_AC_P10,
+        DATA_KEY_QUANTILE_CURVES_AC,
+        FORECAST_RESP_KEY_P10,
+    )
+
+    fixed = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(sensor_mod.dt_util, "now", lambda: fixed)
+    monkeypatch.setattr(sensor_mod.dt_util, "as_local", lambda d: d)
+    start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
+    data = {
+        # The served hourly P10 band still carries the scalar (sums to 0.5 kWh),
+        # but the authoritative stripped daily value is 0.3 kWh.
+        DATA_KEY_QUANTILE_CURVES_AC: {
+            FORECAST_RESP_KEY_P10: {
+                start.isoformat(): 300.0,
+                (start + timedelta(hours=1)).isoformat(): 200.0,
+            }
+        },
+        DATA_KEY_ENERGY_TODAY_AC_P10: 0.3,
+    }
+    coord = _FakeCoordinator(data)
+    s = _bare(EnergyBandSensor, coord, _band=FORECAST_RESP_KEY_P10)
+    assert s.native_value == pytest.approx(0.3)
+    # band_source still rides along while the band exists.
+    assert s.extra_state_attributes == {"band_source": "learned"}
+
+
 def test_energy_band_sensor_none_without_ac_band():
     # No DATA_KEY_QUANTILE_CURVES_AC (quantiles off / cold start) => unknown, not
     # a fabricated spread.

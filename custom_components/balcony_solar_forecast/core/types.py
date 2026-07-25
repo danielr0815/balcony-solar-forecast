@@ -14,6 +14,7 @@ Conventions (all internal):
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 
@@ -43,6 +44,7 @@ from ..const import (
     CONF_ROSS_COEFF,
     CONF_SHADE_GROUP,
     CONF_SITE_ALBEDO,
+    CONF_SITE_BEAM_GAIN,
     CONF_TILT,
     CONF_WP,
     DAY_AHEAD_BIAS_MAX,
@@ -60,6 +62,8 @@ from ..const import (
     SHADEMAP_TAU_MIN,
     SITE_ALBEDO_MAX,
     SITE_ALBEDO_MIN,
+    SITE_BEAM_GAIN_MAX,
+    SITE_BEAM_GAIN_MIN,
 )
 
 __all__ = [
@@ -306,6 +310,15 @@ class SiteConfig:
     reflected-diffuse term; None == use ALBEDO_DEFAULT. Clamped to
     [SITE_ALBEDO_MIN, SITE_ALBEDO_MAX] on load; snow days still override with
     ALBEDO_SNOW (the engine's snow gate runs on top of this base value).
+
+    ``bifacial_beam_gain`` (optional, forensik T6) is a multiplicative factor on
+    the beam+circumsolar POA (the DIRECT share only); None == use
+    BEAM_GAIN_DEFAULT (1.0, identity => no behaviour change for existing users).
+    Clamped to [SITE_BEAM_GAIN_MIN, SITE_BEAM_GAIN_MAX] on load. It lifts the
+    honestly under-modeled direct beam on clear mornings into the RAW physics
+    (the reference site validated ~1.23), so the learned transmittance and
+    day-ahead-bias cells — both clamped and unable to express a >1 correction —
+    stop absorbing the deficit.
     """
 
     latitude: float
@@ -315,6 +328,7 @@ class SiteConfig:
     ac_actual_entity: str | None = None
     ac_actual_invert: bool = False
     albedo: float | None = None
+    bifacial_beam_gain: float | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> SiteConfig:
@@ -335,6 +349,21 @@ class SiteConfig:
             albedo = None
         if albedo is not None:
             albedo = max(SITE_ALBEDO_MIN, min(SITE_ALBEDO_MAX, albedo))
+        # Optional beam gain (forensik T6): same only-when-set + clamp convention
+        # as the albedo above; a hand-edited JSON can never push the direct share
+        # outside the physical band [1.0, 1.6].
+        raw_beam_gain = d.get(CONF_SITE_BEAM_GAIN)
+        beam_gain: float | None
+        try:
+            beam_gain = (
+                float(raw_beam_gain) if raw_beam_gain is not None else None
+            )
+        except (TypeError, ValueError):
+            beam_gain = None
+        if beam_gain is not None:
+            beam_gain = max(
+                SITE_BEAM_GAIN_MIN, min(SITE_BEAM_GAIN_MAX, beam_gain)
+            )
         return cls(
             latitude=float(d[CONF_LATITUDE]),
             longitude=float(d[CONF_LONGITUDE]),
@@ -347,6 +376,7 @@ class SiteConfig:
             ac_actual_entity=ac_actual_entity,
             ac_actual_invert=bool(d.get(CONF_AC_ACTUAL_INVERT, False)),
             albedo=albedo,
+            bifacial_beam_gain=beam_gain,
         )
 
     def to_dict(self) -> dict:
@@ -367,6 +397,9 @@ class SiteConfig:
         # Same only-when-set convention for the optional site albedo (v0.20).
         if self.albedo is not None:
             d[CONF_SITE_ALBEDO] = self.albedo
+        # Same only-when-set convention for the optional beam gain (forensik T6).
+        if self.bifacial_beam_gain is not None:
+            d[CONF_SITE_BEAM_GAIN] = self.bifacial_beam_gain
         return d
 
     def plane_by_name(self, name: str) -> PlaneConfig | None:
@@ -511,6 +544,15 @@ class ForecastResult:
     # unclamped one. Empty () on a v0.1 / older cached result => strip falls back
     # to divide-always (SPEC §8).
     corrected_unclamped_watts: tuple[float, ...] = ()
+    # Physical AC-clamp ceiling per slot, aligned to ``slot_starts``: the group
+    # DC limits + the ungrouped (ceiling-free) planes' corrected DC watts. The
+    # day-ahead headline strip (SPEC §8) caps a re-clamped slot's SCALAR-FREE
+    # value at this ceiling (``min(corrected_unclamped/factor, ceiling)``) instead
+    # of keeping the served, scalar-inflated ceiling — dividing the factor out on
+    # a clamped slot understated the headline, keeping the served ceiling ballooned
+    # it under a large intraday scalar (IRC-4/FOR-7). Empty () on a v0.1 / older
+    # cached result => the strip keeps the served value (legacy divide-always).
+    slot_ceilings: tuple[float, ...] = ()
     # Which learner layer(s) shaped ``total_watts`` this cycle
     # (const.CORRECTION_SOURCE_*). Empty string == not yet set by the engine.
     correction_source: str = ""
@@ -541,6 +583,15 @@ class ForecastResult:
     # slot (ceiling kept) from an unclamped one (factor divided out). Empty () on a
     # v0.1 / older cached result => strip falls back to divide-always (SPEC §8).
     ac_corrected_unclamped_watts: tuple[float, ...] = ()
+    # AC analogue of ``slot_ceilings``: the group AC limits + the ungrouped
+    # planes' served AC watts per slot. Feeds the AC day-ahead headline strip.
+    ac_slot_ceilings: tuple[float, ...] = ()
+    # Per-slot AC P10 band watts (``min(ac_watts * bf10, ac_ceiling)``), aligned
+    # to ``slot_starts`` — the per-slot source the DAILY P10 headline strips the
+    # intraday scalar out of (FOR-7): a spike must not lift the whole band, so the
+    # daily P10 aggregate divides the transient factor back out on each slot while
+    # the served band curve keeps it. Empty when no bands were issued this cycle.
+    ac_p10_watts: tuple[float, ...] = ()
     # Hourly Wh roll-ups of the AC P10 / P90 band curves (keyed by ISO-8601 UTC
     # hour, the SAME keys as ``ac_hourly_wh``). The AC analogue of
     # ``p10_hourly_wh`` / ``p90_hourly_wh``: per slot ac_band_watts =
@@ -1014,15 +1065,21 @@ class DriftState:
 class LearnerSnapshot:
     """One rollback snapshot of the persisted learner state (SPEC §5).
 
-    A date-stamped copy of BiasState + ShademapState taken by the nightly job
-    BEFORE it applies that night's training, so a drifting layer can be rolled
-    back to a prior good state. The coordinator keeps the last
-    DRIFT_ROLLBACK_SNAPSHOTS of these in a ring.
+    A date-stamped copy of BiasState + ShademapState + QuantileState taken by the
+    nightly job (and the bootstrap import) BEFORE it applies that night's
+    training, so a drifting/unwanted layer can be rolled back to a prior good
+    state. The coordinator keeps the last DRIFT_ROLLBACK_SNAPSHOTS in a ring.
+
+    The ``quantile`` field is ADDITIVE (SPEC §6): a legacy snapshot dict without
+    it loads with an empty QuantileState, so pre-existing rollback rings and
+    stored snapshots keep working, and ``rollback_learners`` restores the
+    quantile ring in step with the other two learners.
     """
 
     taken_at: str  # iso utc
     bias: BiasState
     shademap: ShademapState
+    quantile: QuantileState = field(default_factory=lambda: QuantileState())
 
     @classmethod
     def from_dict(cls, d: dict) -> LearnerSnapshot:
@@ -1032,14 +1089,23 @@ class LearnerSnapshot:
             taken_at=str(d.get("taken_at", "")),
             bias=BiasState.from_dict(d.get("bias", {})),
             shademap=ShademapState.from_dict(d.get("shademap", {})),
+            quantile=QuantileState.from_dict(d.get("quantile", {})),
         )
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "taken_at": self.taken_at,
             "bias": self.bias.to_dict(),
             "shademap": self.shademap.to_dict(),
         }
+        # Emit the quantile section ONLY when it carries data, so a legacy
+        # snapshot (or a snapshot taken while the ring was empty) round-trips
+        # BYTE-FAITHFUL through from_dict/to_dict — the v2->v3 store migration
+        # requires the learner_snapshots ring to be carried through unchanged
+        # (SPEC §14.4). A restored empty section is the pre-quantile behaviour.
+        if self.quantile.bins:
+            out["quantile"] = self.quantile.to_dict()
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -1134,6 +1200,11 @@ class IssuedSnapshot:
     # a slow-inactive day (slow-only == raw); the monitor then uses the legacy
     # shared signal.
     slow_only_hourly_wh: dict[str, float] = field(default_factory=dict)
+    # Site inverter DC->AC efficiency in effect AT ISSUE TIME (IRC-5/SCT-4): lets
+    # a reader convert the stored DC curves to AC without hindsight. ``None`` on
+    # legacy/v0.1 snapshots (written before v0.20.7); the reader then falls back
+    # to the CURRENT learned eta and flags the substitution.
+    eta: float | None = None
     version: int = 2
 
     @classmethod
@@ -1163,6 +1234,13 @@ class IssuedSnapshot:
                 if isinstance(k, str) and isinstance(v, str)
             }
 
+        eta_raw = d.get("eta")
+        eta = (
+            float(eta_raw)
+            if isinstance(eta_raw, (int, float)) and math.isfinite(float(eta_raw))
+            else None
+        )
+
         return cls(
             issued_at=str(d.get("issued_at", "")),
             status=str(d.get("status", "")),
@@ -1173,6 +1251,7 @@ class IssuedSnapshot:
             per_plane=per_plane,
             cloud_class_by_hour=cloud_class_by_hour,
             slow_only_hourly_wh=_fd("slow_only_hourly_wh"),
+            eta=eta,
             version=_safe_int(d.get("version", 2), 2),
         )
 
@@ -1195,6 +1274,10 @@ class IssuedSnapshot:
         # 90-day issued ring.
         if self.slow_only_hourly_wh:
             out["slow_only_hourly_wh"] = dict(self.slow_only_hourly_wh)
+        # Written only when known (a legacy/omitted eta round-trips as None, which
+        # the reader replaces with the current learned eta).
+        if self.eta is not None:
+            out["eta"] = self.eta
         return out
 
 

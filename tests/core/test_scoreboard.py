@@ -315,6 +315,41 @@ def test_stratified_breakdown_absent_class_not_present():
     assert CLOUD_CLASS_CLEAR not in strata
 
 
+def test_stratified_breakdown_low_n_suppresses_pct():
+    # C1/SPEC-5: a stratum below SCOREBOARD_STRATUM_MIN_N scored days must not emit
+    # the informational within-stratum percent (which was wildly noisy on n<3, e.g.
+    # -480 % on n=2); the row carries low_n=True and a null percent instead.
+    days = [
+        _day("2026-07-01", weather=CLOUD_CLASS_OVERCAST, measured=4.0, engine=6.0,
+             comparisons={"b": 4.1}),
+        _day("2026-07-02", weather=CLOUD_CLASS_OVERCAST, measured=4.0, engine=6.0,
+             comparisons={"b": 4.0}),
+    ]
+    strata = sb.stratified_breakdown(_state(days), window_days=14)
+    row = strata[CLOUD_CLASS_OVERCAST]
+    assert row["n"] == 2
+    assert row["low_n"] is True
+    assert row["engine_vs_best_baseline_pct"] is None
+
+
+def test_stratified_breakdown_at_min_n_emits_pct():
+    # At the SCOREBOARD_STRATUM_MIN_N floor (3 scored days) the percent is emitted
+    # and low_n is False.
+    days = [
+        _day("2026-07-01", weather=CLOUD_CLASS_CLEAR, measured=10.0, engine=9.0,
+             comparisons={"b": 12.0}),
+        _day("2026-07-02", weather=CLOUD_CLASS_CLEAR, measured=10.0, engine=11.0,
+             comparisons={"b": 13.0}),
+        _day("2026-07-03", weather=CLOUD_CLASS_CLEAR, measured=10.0, engine=9.5,
+             comparisons={"b": 12.5}),
+    ]
+    strata = sb.stratified_breakdown(_state(days), window_days=14)
+    row = strata[CLOUD_CLASS_CLEAR]
+    assert row["n"] == 3
+    assert row["low_n"] is False
+    assert row["engine_vs_best_baseline_pct"] is not None
+
+
 # ---------------------------------------------------------------------------
 # kill_gate_passed — pending / pass / fail
 # ---------------------------------------------------------------------------

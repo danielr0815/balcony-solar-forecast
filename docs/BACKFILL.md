@@ -1,8 +1,9 @@
 # Learner Bootstrap Backfill (SPEC §6)
 
-`scripts/backfill.py` warm-starts the two learning layers from ~2 years of
-history so the system does not meet its first live winter cold. It is a
-**one-shot, dev-machine** job (never runs on Home Assistant). It:
+`scripts/backfill.py` warm-starts the three learner states (day-ahead bias,
+shademap, quantile bands) from ~2 years of history so the system does not meet
+its first live winter cold. It is a **one-shot, dev-machine** job (never runs on
+Home Assistant). It:
 
 1. fetches Open-Meteo **Previous-Runs** day-1-lead forecasts-as-issued for the
    site (archived since 01/2024);
@@ -11,9 +12,11 @@ history so the system does not meet its first live winter cold. It is a
    engine — no numpy);
 3. pulls measured **hourly per-module** energy from your HA long-term
    statistics over the **WebSocket API**;
-4. computes a **day-ahead RLS bias** bootstrap and a **shademap** bin bootstrap
+4. computes a **day-ahead RLS bias** bootstrap, a **shademap** bin bootstrap
    (with the backfilled sample count `n` **capped** so live data overrides it
-   quickly); and
+   quickly), and a **quantile relative-error ring** bootstrap (per-hour
+   `measured / θ-corrected` folded through the SAME `train_quantiles` the live
+   nightly path uses); and
 5. writes a `bootstrap.json` that the
    `balcony_solar_forecast.import_bootstrap` service ingests
    (validate + clamp, rejects unknown schema).
@@ -114,6 +117,13 @@ bootstrap built for a different install is refused. Backfilled shademap bins
 carry a small `n` (capped at `BOOTSTRAP_MAX_BIN_N`), so the first weeks of live
 15-min data quickly outweigh them.
 
+The import is **additive** for the quantile ring: a bootstrap that carries a
+`quantile_state` section **replaces** the live ring (like the bias and shademap),
+while an older backfill file **without** that section leaves the live quantile
+ring untouched — an import never wipes learned bands. The rollback snapshot taken
+before the swap includes all three learner states, so `rollback_learners` undoes
+the import consistently.
+
 ---
 
 ## What it computes (and why it is coarse)
@@ -134,6 +144,17 @@ carry a small `n` (capped at `BOOTSTRAP_MAX_BIN_N`), so the first weeks of live
 - **Day-ahead RLS bias**: modeled vs. measured **site** energy is aggregated per
   `(cloud class × day part)` per day and fed through one scalar
   recursive-least-squares step per cell (forgetting factor, clamped bias band).
+
+- **Quantile bands**: after that RLS step, each daylight hour becomes one
+  `relerr = measured_site / (clamp(θ_cell) × gated_modeled_site)` sample (clamped
+  to `[QUANTILE_REL_ERR_MIN, MAX]`, only where the corrected forecast exceeds
+  `QUANTILE_MIN_FORECAST_WH`) in the SAME `(cloud class × day part)` bin. The ring
+  is date-windowed to `QUANTILE_RING_DAYS` relative to the **last** backfill day,
+  count-capped, and limited to `QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN` samples per
+  bin per day so the correlated hours of one coarse hourly day never over-weight a
+  band. A bin needs both enough samples and enough distinct days before it emits a
+  real (non-collapsed) band — the seeding is what gets the common bins past that
+  floor on day 0 instead of weeks later.
 
 - **Cloud class / day part** in the backfill key on the **UTC** hour (the dev
   script has no site calendar). At the operator site (UTC+1/+2) this is within

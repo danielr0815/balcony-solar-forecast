@@ -200,6 +200,12 @@ def test_cold_start_ensemble_win_and_15min_mapping():
         assert start not in band
     # Learned collapsed everywhere today, ensemble supplied the spread.
     assert c._band_source == BAND_SOURCE_ENSEMBLE
+    # Per-day provenance (SCT-4): 4 covered slots -> ensemble, 2 uncovered ->
+    # neutral (no band), all on _NOW's local day.
+    day = _NOW.date().isoformat()
+    assert c._band_source_by_day[day] == {
+        "bin": 0, "envelope": 0, "ensemble": 4, "neutral": 2,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +235,12 @@ def test_envelope_widens_only_where_wider(monkeypatch):
     assert (band[narrow].p10, band[narrow].p90) == (0.9, 1.1)  # never narrows
     assert (band[absent].p10, band[absent].p90) == (0.9, 1.1)  # learned unchanged
     assert c._band_source == BAND_SOURCE_ENVELOPE
+    # Per-day provenance (SCT-4): two ensemble-covered slots widened (envelope),
+    # the beyond-horizon slot stayed on the trained-bin spread (bin).
+    day = _NOW.date().isoformat()
+    assert c._band_source_by_day[day] == {
+        "bin": 1, "envelope": 2, "ensemble": 0, "neutral": 0,
+    }
 
 
 # ---------------------------------------------------------------------------

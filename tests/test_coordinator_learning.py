@@ -13,6 +13,7 @@ package), so HA must be installed; the whole module is skipped otherwise.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -32,12 +33,16 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_RAW_HOURLY_WH,
     DAY_AHEAD_BIAS_MIN,
+    DAY_AHEAD_BIAS_RESEED_N,
     DAY_PART_AFTERNOON,
     DAY_PART_MIDDAY,
     DAY_PART_MORNING,
     DRIFT_LOSS_STREAK_DAYS,
+    INTRADAY_MIN_TRAILING_MINUTES,
     INTRADAY_NEUTRAL,
+    INTRADAY_TRAILING_WINDOW_MINUTES,
     INVERTER_CAL_MIN_SAMPLES,
+    ISSUE_CONFIG_CHANGED_BIAS_RESEED,
     ISSUE_FAST_LEARNER_DISABLED,
     LABEL_FROZEN_STALE_SECONDS,
     LEARNER_LAYER_FAST,
@@ -45,19 +50,27 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     LEARNER_SNAPSHOT_RING,
     LEARNER_STATUS_ACTIVE,
     LEARNER_STATUS_FROZEN,
+    RLS_INIT_COVARIANCE,
     RLS_MIN_SAMPLES,
+    STATUS_FRESH,
+    STATUS_PHYSICS_FALLBACK,
 )
 from custom_components.balcony_solar_forecast.coordinator import (  # noqa: E402
     BalconySolarCoordinator,
     _is_frozen_channel,
+    _measured_power_rows,
     _usable_power,
 )
 from custom_components.balcony_solar_forecast.core import LearnerHooks  # noqa: E402
+from custom_components.balcony_solar_forecast.core.bias import (  # noqa: E402
+    compute_intraday_scalar,
+)
 from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     BiasCell,
     BiasState,
     DriftState,
     ForecastResult,
+    HorizonRow,
     InverterCalState,
     InverterGroup,
     IssuedSnapshot,
@@ -135,6 +148,13 @@ class _FakeStore:
 
     def set_inverter_cal_state(self, state) -> None:
         self.inverter_cal = state.to_dict()
+
+    # config fingerprint the day-ahead bias was learned against (A4)
+    def get_config_fingerprint(self):
+        return getattr(self, "config_fingerprint", None)
+
+    def set_config_fingerprint(self, fp) -> None:
+        self.config_fingerprint = fp
 
     # rollback ring (real ForecastStore API)
     def get_snapshots(self):
@@ -404,6 +424,186 @@ def test_day_ahead_training_moves_theta_up_not_to_min():
         c._train_day_ahead("2026-07-01", issued, actuals)
     theta = c._bias_state.cells[BiasState.cell_key("clear", DAY_PART_MIDDAY)].theta
     assert theta > DAY_AHEAD_BIAS_MIN + 0.2
+
+
+# ---------------------------------------------------------------------------
+# B2 (SCT-3): day-ahead trains on the SLOW-ONLY curve (fallback raw)
+# ---------------------------------------------------------------------------
+
+
+def test_day_ahead_trains_on_slow_only_not_raw():
+    """The modeled side of the RLS is snap.slow_only_hourly_wh, not raw: a first
+    RLS step from P0 lands theta ≈ measured/modeled, so measured==slow_only pins
+    theta to ~1.0 (using raw 1000 would land it near 0.8)."""
+    c = _make_coordinator()
+    h = "2026-07-01T11:00:00+00:00"
+    issued = IssuedSnapshot(
+        issued_at="x", status="fresh",
+        raw_hourly_wh={h: 1000.0},
+        slow_only_hourly_wh={h: 800.0},  # shademap trimmed the raw curve
+    ).to_dict()
+    c._train_day_ahead("2026-07-01", issued, {"M1": 800.0})
+    cell = next(iter(c._bias_state.cells.values()))
+    assert cell.theta == pytest.approx(1.0, abs=0.05)
+
+
+def test_day_ahead_falls_back_to_raw_when_slow_only_absent():
+    """A legacy / slow-inactive snapshot has no slow_only curve -> raw is used, so
+    the same measured 800 vs raw 1000 lands theta near 0.8."""
+    c = _make_coordinator()
+    h = "2026-07-01T11:00:00+00:00"
+    issued = IssuedSnapshot(
+        issued_at="x", status="fresh",
+        raw_hourly_wh={h: 1000.0},
+        slow_only_hourly_wh={},  # slow layer inactive / old snapshot
+    ).to_dict()
+    c._train_day_ahead("2026-07-01", issued, {"M1": 800.0})
+    cell = next(iter(c._bias_state.cells.values()))
+    assert cell.theta == pytest.approx(0.8, abs=0.05)
+
+
+# ---------------------------------------------------------------------------
+# A4 (FOR-4): config-fingerprint re-seed of the day-ahead bias cells
+# ---------------------------------------------------------------------------
+
+
+def _learned_bias_state() -> BiasState:
+    """A bias state that looks steady-state: high n, tiny (converged) covariance."""
+    return BiasState(
+        cells={
+            BiasState.cell_key("clear", DAY_PART_MIDDAY): BiasCell(
+                theta=0.7, covariance=2e-8, n=100
+            ),
+            BiasState.cell_key("clear", DAY_PART_MORNING): BiasCell(
+                theta=1.4, covariance=2e-8, n=90
+            ),
+        }
+    )
+
+
+def test_config_fingerprint_change_reseeds_cells(monkeypatch):
+    """A differing stored fingerprint caps every cell's n, re-opens covariance to
+    P0 and keeps theta; the new fingerprint is persisted and a repair issue fires."""
+    store = _FakeStore()
+    store.config_fingerprint = "stale000000000000"
+    c = _make_coordinator(store)
+    c._bias_state = _learned_bias_state()
+    raised: list[str] = []
+    monkeypatch.setattr(c, "_raise_repair_issue", lambda i: raised.append(i))
+
+    c._reconcile_config_fingerprint()
+
+    for cell in c._bias_state.cells.values():
+        assert cell.n <= DAY_AHEAD_BIAS_RESEED_N
+        assert cell.covariance == pytest.approx(RLS_INIT_COVARIANCE)
+    # theta (the learned estimate) is preserved as the re-adaptation start point.
+    mid = c._bias_state.cells[BiasState.cell_key("clear", DAY_PART_MIDDAY)]
+    assert mid.theta == pytest.approx(0.7)
+    # New fingerprint persisted; matches the live config.
+    assert store.config_fingerprint == c._config_fingerprint()
+    assert ISSUE_CONFIG_CHANGED_BIAS_RESEED in raised
+
+
+def test_config_fingerprint_first_start_records_without_reseed(monkeypatch):
+    """No stored fingerprint (fresh install / feature just landed): record the live
+    one, DO NOT touch the cells, DO NOT raise an issue."""
+    store = _FakeStore()  # config_fingerprint attribute absent -> getter None
+    c = _make_coordinator(store)
+    c._bias_state = _learned_bias_state()
+    raised: list[str] = []
+    monkeypatch.setattr(c, "_raise_repair_issue", lambda i: raised.append(i))
+
+    c._reconcile_config_fingerprint()
+
+    mid = c._bias_state.cells[BiasState.cell_key("clear", DAY_PART_MIDDAY)]
+    assert mid.n == 100  # untouched
+    assert mid.covariance == pytest.approx(2e-8)  # untouched
+    assert store.config_fingerprint == c._config_fingerprint()
+    assert raised == []
+
+
+def test_config_fingerprint_unchanged_is_noop(monkeypatch):
+    """A matching stored fingerprint leaves the cells and the store alone."""
+    store = _FakeStore()
+    c = _make_coordinator(store)
+    store.config_fingerprint = c._config_fingerprint()
+    c._bias_state = _learned_bias_state()
+    raised: list[str] = []
+    monkeypatch.setattr(c, "_raise_repair_issue", lambda i: raised.append(i))
+
+    c._reconcile_config_fingerprint()
+
+    mid = c._bias_state.cells[BiasState.cell_key("clear", DAY_PART_MIDDAY)]
+    assert mid.n == 100
+    assert mid.covariance == pytest.approx(2e-8)
+    assert raised == []
+
+
+def test_config_fingerprint_tracks_relevant_fields_only():
+    """The fingerprint moves for a forecast-relevant edit (azimuth, albedo, AC
+    limit) but is INVARIANT to benign edits (entity id, shade group)."""
+    from dataclasses import replace
+
+    c = _make_coordinator()
+    base = c._config_fingerprint()
+
+    # Azimuth change -> different geometry -> different fingerprint.
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], azimuth_deg=118.0), c._site.planes[1]),
+    )
+    assert c._config_fingerprint() != base
+
+    # Albedo change -> different diffuse term -> different fingerprint.
+    c._site = _site()
+    c._site = replace(c._site, albedo=0.3)
+    assert c._config_fingerprint() != base
+
+    # AC-limit change (a group) -> different clamp -> different fingerprint.
+    c._site = _site()
+    c._site = replace(
+        c._site,
+        groups=(InverterGroup(name="g1", plane_names=("M1", "M2"), ac_limit_w=800.0),),
+    )
+    assert c._config_fingerprint() != base
+
+    # tau-only horizon edit (the operator's commonest A1 action: raise a screen's
+    # transmittance instead of lowering elevation) reshapes the modeled beam and
+    # MUST move the fingerprint even though az/elevation are unchanged.
+    c._site = _site()
+    hz_row = HorizonRow(azimuth_deg=150.0, elevation_deg=20.0, tau=0.0)
+    c._site = replace(
+        c._site,
+        planes=(replace(c._site.planes[0], horizon=(hz_row,)), c._site.planes[1]),
+    )
+    tau0 = c._config_fingerprint()
+    assert tau0 != base
+    c._site = replace(
+        c._site,
+        planes=(
+            replace(c._site.planes[0], horizon=(replace(hz_row, tau=0.4),)),
+            c._site.planes[1],
+        ),
+    )
+    assert c._config_fingerprint() != tau0
+
+    # bifacial beam-gain change (the A1 1.0->1.25 rollout via the options flow)
+    # scales the direct-POA share site-wide -> different fingerprint.
+    c._site = _site()
+    c._site = replace(c._site, bifacial_beam_gain=1.25)
+    assert c._config_fingerprint() != base
+
+    # Benign edits (measured entity id, shade grouping) do NOT move it.
+    c._site = _site()
+    c._site = replace(
+        c._site,
+        planes=(
+            replace(c._site.planes[0], actual_entity="sensor.renamed",
+                    shade_group="balcony"),
+            replace(c._site.planes[1], shade_group="balcony"),
+        ),
+    )
+    assert c._config_fingerprint() == base
 
 
 async def test_async_reset_day_ahead_bias_clears_persists_and_refreshes():
@@ -762,7 +962,11 @@ def test_build_intraday_sample_returns_kc_space_ratio():
 
 
 def test_intraday_sample_uses_raw_curve():
-    """The sample's modeled_kc derives from the RAW curve, not the corrected."""
+    """The sample's modeled_kc derives from the RAW curve, not the served one.
+
+    With θ neutral (no ``_day_factor``) the modeled side is pure raw: it must
+    NEVER read the served ``watts`` (which already carries beam_tau + the scalar).
+    """
     c = _make_coordinator()
     # corrected 800 W, raw 400 W at noon; measured 400 W.
     result, start = _forecast_at_noon(800.0, raw_watts=400.0)
@@ -772,6 +976,40 @@ def test_intraday_sample_uses_raw_curve():
     assert sample is not None
     # ratio == measured/raw == 400/400 == 1.0 (NOT 400/800 == 0.5).
     assert sample.measured_kc / sample.modeled_kc == pytest.approx(1.0, rel=1e-6)
+
+
+def test_intraday_sample_theta_referenced_no_double_correction():
+    """A2: when the day-ahead θ fully explains the error (measured == raw × θ),
+    the intraday ratio stays ~1.0 — θ and the scalar must not double-correct.
+
+    Raw 400 W, θ 1.4 for the slot, measured 560 W == raw × θ. The modeled side is
+    raw × θ == 560, so the ratio (the scalar's numerator/denominator) is 1.0. With
+    the pre-A2 raw-only modeled side it would have been 560/400 == 1.4, stacking a
+    second 1.4 on top of the θ already in the served curve.
+    """
+    c = _make_coordinator()
+    result, start = _forecast_at_noon(400.0, raw_watts=400.0)
+    c._day_factor = {start: 1.4}
+    c.hass.states.set("sensor.m1", 560.0, last_updated=start)  # == 400 × 1.4
+    c.hass.states.set("sensor.m2", 0.0, last_updated=start)
+    sample = c._build_intraday_sample(result, start)
+    assert sample is not None
+    assert sample.measured_kc / sample.modeled_kc == pytest.approx(1.0, rel=1e-6)
+
+
+def test_intraday_sample_theta_referenced_keeps_real_weather_signal():
+    """A2: a REAL deviation on top of θ survives — measured == 1.4 × raw × θ makes
+    the ratio 1.4, so a genuine under-forecast (e.g. 21.07.) is still caught.
+    """
+    c = _make_coordinator()
+    result, start = _forecast_at_noon(400.0, raw_watts=400.0)
+    c._day_factor = {start: 1.4}
+    # measured = 1.4 × (raw 400 × θ 1.4) = 784 W.
+    c.hass.states.set("sensor.m1", 784.0, last_updated=start)
+    c.hass.states.set("sensor.m2", 0.0, last_updated=start)
+    sample = c._build_intraday_sample(result, start)
+    assert sample is not None
+    assert sample.measured_kc / sample.modeled_kc == pytest.approx(1.4, rel=1e-6)
 
 
 def test_intraday_sample_scales_modeled_to_usable_planes():
@@ -837,6 +1075,275 @@ def test_update_intraday_scalar_survives_notimplemented(monkeypatch):
     monkeypatch.setattr(coord_mod.bias_mod, "compute_intraday_scalar", _boom)
     c._update_intraday_scalar(start)
     assert c._intraday_scalar == INTRADAY_NEUTRAL
+
+
+# ---------------------------------------------------------------------------
+# A7/SCT-2: intraday sample-ring re-arm after a restart/reload
+# ---------------------------------------------------------------------------
+
+
+def _forecast_window(now: datetime, n_slots: int, raw_w_per_plane: float):
+    """A ForecastResult with ``n_slots`` back-to-back 15-min slots ending at
+    ``now`` (the last slot starts at ``now``), each plane holding a constant raw
+    watt curve so the modeled site total per slot is ``2 * raw_w_per_plane``.
+    """
+    slot = timedelta(minutes=15)
+    starts = tuple(now - slot * (n_slots - 1 - i) for i in range(n_slots))
+    m1 = tuple(raw_w_per_plane for _ in starts)
+    m2 = tuple(raw_w_per_plane for _ in starts)
+    total = tuple(a + b for a, b in zip(m1, m2, strict=True))
+    result = ForecastResult(
+        slot_starts=starts,
+        total_watts=total,
+        plane_results=(
+            PlaneResult(name="M1", watts=m1, raw_watts=m1),
+            PlaneResult(name="M2", watts=m2, raw_watts=m2),
+        ),
+        hourly_wh={},
+        raw_total_watts=total,
+        raw_hourly_wh={},
+    )
+    return result
+
+
+def _stat_rows_seconds_epoch(start: datetime, end: datetime, mean_w: float):
+    """Synthetic 5-min recorder stat rows with SECONDS-epoch ``start`` floats —
+    exactly what the in-process ``statistics_during_period`` API returns (the
+    historical epoch bug is seconds vs. milliseconds)."""
+    rows = []
+    step = timedelta(minutes=5)
+    t = start
+    while t < end:
+        rows.append({"start": t.timestamp(), "mean": mean_w})  # epoch SECONDS
+        t += step
+    return rows
+
+
+def test_measured_power_rows_parses_seconds_epoch():
+    """The re-arm stat parser must read epoch SECONDS (not treat them as ms)."""
+    t0 = datetime(2026, 7, 1, 9, 0, tzinfo=UTC)
+    rows = _stat_rows_seconds_epoch(t0, t0 + timedelta(minutes=15), 500.0)
+    parsed = _measured_power_rows(rows)
+    assert [w for _, w in parsed] == [500.0, 500.0, 500.0]
+    # Timestamps land in 2026, not 1970 (the seconds-as-ms collapse bug).
+    assert parsed[0][0] == t0
+    assert all(dt.year == 2026 for dt, _ in parsed)
+
+
+def test_measured_power_rows_skips_unusable():
+    t0 = datetime(2026, 7, 1, 9, 0, tzinfo=UTC)
+    rows = [
+        {"start": t0.timestamp(), "mean": None},          # no mean
+        {"start": None, "mean": 100.0},                    # unparseable start
+        {"start": t0.timestamp(), "mean": 250.0},          # good
+    ]
+    assert _measured_power_rows(rows) == [(t0, 250.0)]
+
+
+def test_rearm_samples_from_seconds_epoch_rows_fill_ring_nonneutral():
+    """Reconstruction from synthetic SECONDS-epoch stat rows fills the ring and
+    yields an immediate NON-neutral scalar (measured == 1.5 × modeled)."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    # 17 slots => 08:00..11:00; modeled site total per slot = 2 × 400 = 800 W.
+    result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._last_result = result
+    # Measured site total = 1200 W == 1.5 × 800 across the whole window.
+    stat_rows = _stat_rows_seconds_epoch(
+        now - timedelta(minutes=INTRADAY_TRAILING_WINDOW_MINUTES), now, 1200.0,
+    )
+    rows = _measured_power_rows(stat_rows)
+    samples = c._rearm_samples_from_rows(result, rows, now)
+    assert samples, "expected reconstructed samples"
+    # Coverage spans at least the minimum trailing window (else scalar is gated).
+    span = (max(s.at for s in samples) - min(s.at for s in samples))
+    assert span.total_seconds() / 60.0 >= INTRADAY_MIN_TRAILING_MINUTES
+    for s in samples:
+        c._intraday_samples.append(s)
+    scalar = compute_intraday_scalar(list(c._intraday_samples), now=now)
+    assert scalar != INTRADAY_NEUTRAL
+    assert scalar == pytest.approx(1.5, rel=1e-6)
+
+
+def test_rearm_skips_current_slot_no_double_sample():
+    """The slot CONTAINING ``now`` is not reconstructed, so a subsequent live
+    tick (which samples ``now``) never duplicates it — all sample times unique."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._last_result = result
+    rows = _measured_power_rows(
+        _stat_rows_seconds_epoch(
+            now - timedelta(minutes=INTRADAY_TRAILING_WINDOW_MINUTES), now, 1200.0,
+        )
+    )
+    samples = c._rearm_samples_from_rows(result, rows, now)
+    # No reconstructed sample carries the current slot's start.
+    assert now not in {s.at for s in samples}
+    for s in samples:
+        c._intraday_samples.append(s)
+    # A live tick then appends the current slot exactly once.
+    c.hass.states.set("sensor.m1", 600.0, last_updated=now)
+    c.hass.states.set("sensor.m2", 600.0, last_updated=now)
+    c._update_intraday_scalar(now)
+    ats = [s.at for s in c._intraday_samples]
+    assert len(ats) == len(set(ats)), "duplicate sample timestamps after re-arm"
+    assert ats.count(now) == 1
+
+
+def test_rearm_scales_modeled_to_metered_planes_only():
+    """On a PARTIALLY metered site the reconstructed modeled side must match the
+    metered subset the site-total sensor actually sums. M1 metered, M2 not; a
+    PERFECT forecast (measured == M1's modeled) must yield scalar 1.0, not 0.5
+    (the whole-site modeled would halve it, floored at INTRADAY_SCALAR_MIN and
+    served for hours after every reload)."""
+    c = _make_coordinator()
+    c._site = SiteConfig(
+        latitude=48.5,
+        longitude=12.2,
+        planes=(
+            PlaneConfig(name="M1", azimuth_deg=115.0, tilt_deg=70.0, wp=370.0,
+                        actual_entity="sensor.m1"),
+            PlaneConfig(name="M2", azimuth_deg=205.0, tilt_deg=70.0, wp=430.0,
+                        actual_entity=None),  # NOT metered
+        ),
+        groups=(),
+    )
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    # Each plane models 400 W; only M1 is metered, so a perfect forecast means
+    # the site-total sensor reads M1's 400 W (not both planes' 800 W).
+    result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._last_result = result
+    rows = _measured_power_rows(
+        _stat_rows_seconds_epoch(
+            now - timedelta(minutes=INTRADAY_TRAILING_WINDOW_MINUTES), now, 400.0,
+        )
+    )
+    samples = c._rearm_samples_from_rows(result, rows, now)
+    assert samples, "expected reconstructed samples"
+    for s in samples:
+        c._intraday_samples.append(s)
+    scalar = compute_intraday_scalar(list(c._intraday_samples), now=now)
+    assert scalar == pytest.approx(1.0, rel=1e-6)
+
+
+def test_async_rearm_fills_ring_from_stubs():
+    """End-to-end orchestration: fresh weather + resolvable sensor + stats ->
+    ring populated (recorder/registry IO stubbed)."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._last_result = result
+    c._measured_total_stat_id = lambda: "sensor.total"
+
+    async def _fake_read(entity_id, when):
+        assert entity_id == "sensor.total"
+        return _measured_power_rows(
+            _stat_rows_seconds_epoch(
+                when - timedelta(minutes=INTRADAY_TRAILING_WINDOW_MINUTES),
+                when, 1200.0,
+            )
+        )
+
+    c._async_read_measured_total_stats = _fake_read
+    asyncio.run(c._async_rearm_intraday_ring(now, STATUS_FRESH))
+    assert c._intraday_samples
+    scalar = compute_intraday_scalar(list(c._intraday_samples), now=now)
+    assert scalar == pytest.approx(1.5, rel=1e-6)
+
+
+def test_async_rearm_neutral_when_no_stats():
+    """Missing recorder data -> ring stays empty -> scalar stays neutral."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    c._last_result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._measured_total_stat_id = lambda: "sensor.total"
+
+    async def _empty(entity_id, when):
+        return []
+
+    c._async_read_measured_total_stats = _empty
+    asyncio.run(c._async_rearm_intraday_ring(now, STATUS_FRESH))
+    assert not c._intraday_samples
+    assert compute_intraday_scalar(list(c._intraday_samples), now=now) == (
+        INTRADAY_NEUTRAL
+    )
+
+
+def test_async_rearm_neutral_when_sensor_missing():
+    """No site-total sensor registered -> no reconstruction."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    c._last_result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._measured_total_stat_id = lambda: None
+    called = {"read": False}
+
+    async def _read(entity_id, when):
+        called["read"] = True
+        return []
+
+    c._async_read_measured_total_stats = _read
+    asyncio.run(c._async_rearm_intraday_ring(now, STATUS_FRESH))
+    assert not c._intraday_samples
+    assert called["read"] is False
+
+
+def test_async_rearm_skipped_when_weather_stale():
+    """A physics-fallback (stale) weather image blocks reconstruction."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    c._last_result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    called = {"stat_id": False}
+
+    def _stat_id():
+        called["stat_id"] = True
+        return "sensor.total"
+
+    c._measured_total_stat_id = _stat_id
+    asyncio.run(c._async_rearm_intraday_ring(now, STATUS_PHYSICS_FALLBACK))
+    assert not c._intraday_samples
+    assert called["stat_id"] is False
+
+
+def test_async_rearm_skipped_when_fast_disabled():
+    """Fast learner off (drift-disabled) -> no reconstruction."""
+    c = _make_coordinator()
+    c._drift_state = DriftState(fast_disabled=True)
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    c._last_result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._measured_total_stat_id = lambda: "sensor.total"
+    asyncio.run(c._async_rearm_intraday_ring(now, STATUS_FRESH))
+    assert not c._intraday_samples
+
+
+def test_async_rearm_skipped_when_ring_already_primed():
+    """A ring already carrying live samples is never re-filled (no double-fill)."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    c._last_result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    c._measured_total_stat_id = lambda: "sensor.total"
+    existing = _IntradaySampleForTest(now - timedelta(minutes=30))
+    c._intraday_samples.append(existing)
+    called = {"read": False}
+
+    async def _read(entity_id, when):
+        called["read"] = True
+        return []
+
+    c._async_read_measured_total_stats = _read
+    asyncio.run(c._async_rearm_intraday_ring(now, STATUS_FRESH))
+    assert list(c._intraday_samples) == [existing]
+    assert called["read"] is False
+
+
+class _IntradaySampleForTest:
+    """Minimal stand-in with the attributes the ring/scalar read."""
+
+    def __init__(self, at: datetime) -> None:
+        self.at = at
+        self.measured_kc = 1.0
+        self.modeled_kc = 1.0
+        self.modeled_wh = 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -936,6 +1443,47 @@ def test_hooks_shademap_silenced_by_drift_disable():
     assert hooks.beam_tau is None
 
 
+def test_build_learner_hooks_caches_day_factor(monkeypatch):
+    """A2: the per-slot θ factor is cached on ``_day_factor`` (keyed by slot.start)
+    so the intraday sampler can reference the θ-corrected modeled curve.
+    """
+    c = _make_coordinator()
+    c._bias_state = BiasState(cells={"clear|midday": BiasCell(theta=1.4, n=99)})
+    monkeypatch.setattr(
+        coord_mod.bias_mod, "classify_cloud", lambda **kw: CLOUD_CLASS_CLEAR
+    )
+    monkeypatch.setattr(
+        coord_mod.bias_mod, "day_ahead_factor_solar", lambda *a, **kw: 1.4
+    )
+    slot_start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+
+    class _Slot:
+        start = slot_start
+        ghi = 500.0
+        cloud_low = cloud_mid = cloud_high = 0.0
+        visibility_m = 20000.0
+
+    class _W:
+        slots = (_Slot(),)
+
+    c._build_learner_hooks(_W(), slot_start)
+    assert c._day_factor.get(slot_start) == pytest.approx(1.4)
+
+
+def test_build_learner_hooks_day_factor_empty_when_inactive():
+    """No bias cells -> day-ahead layer inactive -> cached θ is empty (sampler
+    then falls back to raw, matching the served curve)."""
+    c = _make_coordinator()
+    c._day_factor = {datetime(2026, 1, 1, tzinfo=UTC): 9.9}  # stale, must clear
+
+    class _W:
+        slots = ()
+
+    now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    c._build_learner_hooks(_W(), now)
+    assert c._day_factor == {}
+
+
 # ---------------------------------------------------------------------------
 # self.data additive keys + learner status
 # ---------------------------------------------------------------------------
@@ -963,12 +1511,18 @@ def test_build_data_carries_learner_keys():
 
 
 def _one_slot_result(
-    *, total_w: float, prereclamp_w: float | None, start: datetime
+    *,
+    total_w: float,
+    prereclamp_w: float | None,
+    start: datetime,
+    ceiling_w: float | None = None,
 ) -> ForecastResult:
     """A single-slot ForecastResult with an explicit pre-re-clamp total.
 
     ``prereclamp_w`` is ``corrected_unclamped_watts[0]``; pass None to leave the
-    field empty (the legacy / older-cached case).
+    field empty (the legacy / older-cached case). ``ceiling_w`` is
+    ``slot_ceilings[0]``; None leaves it empty (older result -> a clamped slot
+    keeps the served ceiling).
     """
     return ForecastResult(
         slot_starts=(start,),
@@ -976,6 +1530,7 @@ def _one_slot_result(
         plane_results=(PlaneResult(name="M1", watts=(total_w,)),),
         hourly_wh={start.isoformat(): total_w * 0.25},
         corrected_unclamped_watts=() if prereclamp_w is None else (prereclamp_w,),
+        slot_ceilings=() if ceiling_w is None else (ceiling_w,),
     )
 
 
@@ -1042,18 +1597,60 @@ def test_dayahead_today_no_groups_bit_identical_to_legacy():
     assert energy == pytest.approx(round(served / 1.3 * 0.25 / 1000.0, 3))
 
 
+def test_dayahead_today_clamped_high_scalar_uses_prereclamp_not_ceiling():
+    """IRC-4/FOR-7: a re-clamped slot under a LARGE scalar whose day-ahead value
+    lies BELOW the ceiling contributes ``prereclamp/factor``, not the served
+    ceiling — the pre-fix keep-ceiling path ballooned the headline by the whole
+    factor headroom (20.07. +3.27 kWh at scalar 2.355)."""
+    c = _make_coordinator()
+    c._intraday_scalar = 2.355  # factor at age 0 == 2.355 (within band)
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    # Day-ahead (scalar-free) power 500 W; the 2.355x scalar lifted it to 1177.5
+    # W, re-clamped to the 800 W ceiling. The true day-ahead value is 500 W.
+    result = _one_slot_result(
+        total_w=800.0, prereclamp_w=1177.5, start=start, ceiling_w=800.0,
+    )
+    energy = c._dayahead_today_kwh(result, now=start)
+    # Uses prereclamp/factor == 500 W -> 0.125 kWh (NOT the ballooned 0.2 kWh).
+    assert energy == pytest.approx(round(500.0 * 0.25 / 1000.0, 3))
+    assert energy != pytest.approx(0.2)
+
+
+def test_dayahead_today_clamped_dayahead_curve_still_delivers_ceiling():
+    """When the day-ahead curve ALONE would clamp (prereclamp/factor >= ceiling),
+    the re-clamped slot still contributes the ceiling — the scalar-free value is
+    capped there, so a genuinely clamped clear midday is unchanged."""
+    c = _make_coordinator()
+    c._intraday_scalar = 2.355
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    # Day-ahead value 800 W == the ceiling; scalar lifted it to 1884 W.
+    # prereclamp/factor == 800 == ceiling -> min() keeps the ceiling.
+    result = _one_slot_result(
+        total_w=800.0, prereclamp_w=1884.0, start=start, ceiling_w=800.0,
+    )
+    energy = c._dayahead_today_kwh(result, now=start)
+    assert energy == pytest.approx(round(800.0 * 0.25 / 1000.0, 3))  # 0.2
+
+
 # ---------------------------------------------------------------------------
 # AC-side headline: _dayahead_today_kwh_ac strips the factor identically
 # ---------------------------------------------------------------------------
 
 
 def _one_slot_ac_result(
-    *, ac_w: float, ac_prereclamp_w: float | None, start: datetime
+    *,
+    ac_w: float,
+    ac_prereclamp_w: float | None,
+    start: datetime,
+    ac_ceiling_w: float | None = None,
+    ac_p10_w: float | None = None,
 ) -> ForecastResult:
     """A single-slot ForecastResult carrying an explicit AC pre-clamp total.
 
     ``ac_prereclamp_w`` is ``ac_corrected_unclamped_watts[0]``; None leaves it
-    empty (the legacy / older-cached case). The DC fields are filler.
+    empty (the legacy / older-cached case). ``ac_ceiling_w`` is
+    ``ac_slot_ceilings[0]``; ``ac_p10_w`` is ``ac_p10_watts[0]`` (the served AC
+    P10 band watts) — None leaves each field empty. The DC fields are filler.
     """
     return ForecastResult(
         slot_starts=(start,),
@@ -1064,6 +1661,8 @@ def _one_slot_ac_result(
         ac_corrected_unclamped_watts=(
             () if ac_prereclamp_w is None else (ac_prereclamp_w,)
         ),
+        ac_slot_ceilings=() if ac_ceiling_w is None else (ac_ceiling_w,),
+        ac_p10_watts=() if ac_p10_w is None else (ac_p10_w,),
     )
 
 
@@ -1098,6 +1697,68 @@ def test_dayahead_today_ac_empty_prereclamp_falls_back_to_divide():
     result = _one_slot_ac_result(ac_w=800.0, ac_prereclamp_w=None, start=start)
     energy = c._dayahead_today_kwh_ac(result, now=start)
     assert energy == pytest.approx(round(800.0 / 1.3 * 0.25 / 1000.0, 3))
+
+
+def test_dayahead_today_ac_clamped_high_scalar_uses_prereclamp_not_ceiling():
+    """AC-side IRC-4/FOR-7: a clamped slot under a large scalar contributes the
+    scalar-free ``prereclamp/factor`` capped at the AC ceiling, not the ballooned
+    served ceiling."""
+    c = _make_coordinator()
+    c._intraday_scalar = 2.355
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    # Day-ahead AC 500 W, scalar -> 1177.5 W, AC-clamped to the 800 W limit.
+    result = _one_slot_ac_result(
+        ac_w=800.0, ac_prereclamp_w=1177.5, start=start, ac_ceiling_w=800.0,
+    )
+    energy = c._dayahead_today_kwh_ac(result, now=start)
+    assert energy == pytest.approx(round(500.0 * 0.25 / 1000.0, 3))  # 0.125
+    assert energy != pytest.approx(0.2)
+
+
+# ---------------------------------------------------------------------------
+# FOR-7 (B1): the DAILY AC P10 must not RISE under a high intraday scalar
+# ---------------------------------------------------------------------------
+
+
+def test_dayahead_ac_p10_strips_high_scalar():
+    """A high scalar lifts the whole served band; the daily P10 aggregate divides
+    the transient factor back out so it stays at its scalar-free value."""
+    c = _make_coordinator()
+    c._intraday_scalar = 2.0  # factor at age 0 == 2.0
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    # Central AC served 800 W (unclamped: prereclamp == served), P10 band 600 W
+    # (both carry the 2.0x scalar). Scalar-free central == 400 W, so the P10
+    # strip ratio is 0.5 -> daily P10 == 600 * 0.5 == 300 W.
+    result = _one_slot_ac_result(
+        ac_w=800.0, ac_prereclamp_w=800.0, start=start, ac_p10_w=600.0,
+    )
+    p10 = c._dayahead_today_kwh_ac_p10(result, now=start)
+    assert p10 == pytest.approx(round(300.0 * 0.25 / 1000.0, 3))  # 0.075
+    # NOT the scalar-inflated served band (600 W -> 0.15 kWh).
+    assert p10 != pytest.approx(round(600.0 * 0.25 / 1000.0, 3))
+
+
+def test_dayahead_ac_p10_keeps_down_correction():
+    """A down-correction (factor < 1) keeps the served, scaled-down P10 band —
+    min(1, scalar_free/served) == 1, so the conservative low band is preserved."""
+    c = _make_coordinator()
+    c._intraday_scalar = 0.8  # factor at age 0 == 0.8
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    result = _one_slot_ac_result(
+        ac_w=640.0, ac_prereclamp_w=640.0, start=start, ac_p10_w=480.0,
+    )
+    p10 = c._dayahead_today_kwh_ac_p10(result, now=start)
+    # ratio = (640/0.8)/640 == 1.25, min(1, 1.25) == 1 -> served band kept.
+    assert p10 == pytest.approx(round(480.0 * 0.25 / 1000.0, 3))  # 0.12
+
+
+def test_dayahead_ac_p10_none_without_band():
+    """No AC band issued (ac_p10_watts empty) -> daily P10 is None."""
+    c = _make_coordinator()
+    c._intraday_scalar = 2.0
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    result = _one_slot_ac_result(ac_w=800.0, ac_prereclamp_w=800.0, start=start)
+    assert c._dayahead_today_kwh_ac_p10(result, now=start) is None
 
 
 def test_build_data_carries_ac_keys():

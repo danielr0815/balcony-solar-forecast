@@ -37,6 +37,7 @@ from balcony_solar_forecast.const import (
     INTRADAY_SCALAR_MIN,
     INTRADAY_TAU_MINUTES,
     MIDDAY_SOLAR_HALFWIDTH_H,
+    RLS_INIT_COVARIANCE,
     RLS_MIN_SAMPLES,
 )
 from balcony_solar_forecast.core.bias import (
@@ -50,6 +51,7 @@ from balcony_solar_forecast.core.bias import (
     day_ahead_factor_solar,
     day_part_for_hour,
     day_part_for_solar,
+    reseed_day_ahead_bias,
     train_day_ahead_bias,
 )
 from balcony_solar_forecast.core.types import BiasCell, BiasState
@@ -515,6 +517,68 @@ def test_classify_fog_still_overrides_single_full_deck():
                           visibility_m=500, month=6) == CLOUD_CLASS_FOG
 
 
+# ---------------------------------------------------------------------------
+# classify_cloud — clear-sky-index (k_c) split (A5). haurwitz_ghi(50 deg) ~= 779
+# W/m^2, so kc = ghi/779; thresholds 0.65 (clear) / 0.30 (overcast).
+# ---------------------------------------------------------------------------
+
+
+def test_classify_kc_clear_overrides_high_cirrus_cover():
+    # High cirrus deck (60%) that the OLD layer-cover rule would call mixed, but a
+    # near-clear-sky GHI => kc ~= 0.90 => clear. Proves the class follows realised
+    # irradiance, not the raw cloud layers.
+    assert classify_cloud(cloud_low=0, cloud_mid=0, cloud_high=60,
+                          visibility_m=20000, month=6,
+                          ghi=700.0, elevation_deg=50.0) == CLOUD_CLASS_CLEAR
+
+
+def test_classify_kc_overcast_at_midday_despite_clear_layers():
+    # Cloud-cover fields say clear (0/0/0) but the midday GHI collapsed
+    # (kc ~= 0.19) => overcast. kc overrides the layer cover.
+    assert classify_cloud(cloud_low=0, cloud_mid=0, cloud_high=0,
+                          visibility_m=20000, month=6,
+                          ghi=150.0, elevation_deg=50.0) == CLOUD_CLASS_OVERCAST
+
+
+def test_classify_kc_mixed_between_thresholds():
+    # kc ~= 0.50 (between 0.30 and 0.65) => mixed regardless of the layer fields.
+    assert classify_cloud(cloud_low=0, cloud_mid=0, cloud_high=0,
+                          visibility_m=20000, month=6,
+                          ghi=390.0, elevation_deg=50.0) == CLOUD_CLASS_MIXED
+
+
+def test_classify_kc_twilight_falls_back_to_layer_cover():
+    # Below CLOUD_KC_MIN_ELEVATION_DEG the Haurwitz reference is unreliable, so a
+    # low-sun slot ignores kc and uses the layer cover. An overcast layer deck
+    # (100/0/0) classifies overcast even though its tiny dawn GHI would give a
+    # spuriously clear-ish kc against the near-zero reference.
+    assert classify_cloud(cloud_low=100, cloud_mid=0, cloud_high=0,
+                          visibility_m=20000, month=6,
+                          ghi=20.0, elevation_deg=3.0) == CLOUD_CLASS_OVERCAST
+
+
+def test_classify_kc_missing_ghi_falls_back_to_layer_cover():
+    # A usable elevation but no GHI (None) => layer-cover fallback (10/5/5 -> clear).
+    assert classify_cloud(cloud_low=10, cloud_mid=5, cloud_high=5,
+                          visibility_m=20000, month=6,
+                          ghi=None, elevation_deg=50.0) == CLOUD_CLASS_CLEAR
+
+
+def test_classify_kc_nonfinite_ghi_falls_back_to_layer_cover():
+    # Non-finite GHI degrades to the layer cover rather than the kc split.
+    assert classify_cloud(cloud_low=100, cloud_mid=0, cloud_high=0,
+                          visibility_m=20000, month=6,
+                          ghi=float("nan"), elevation_deg=50.0) == CLOUD_CLASS_OVERCAST
+
+
+def test_classify_kc_fog_still_takes_precedence():
+    # Fog is tested BEFORE the kc split: a clear-sky GHI with collapsed visibility
+    # still classifies fog.
+    assert classify_cloud(cloud_low=0, cloud_mid=0, cloud_high=0,
+                          visibility_m=500, month=6,
+                          ghi=700.0, elevation_deg=50.0) == CLOUD_CLASS_FOG
+
+
 # ===========================================================================
 # day_part_for_hour
 # ===========================================================================
@@ -719,6 +783,54 @@ def test_train_preserves_version():
                        measured_wh=1200.0, modeled_wh=1000.0)
     ])
     assert out.version == 1
+
+
+# --- reseed_day_ahead_bias (A4/FOR-4) --------------------------------------
+
+
+def test_reseed_caps_n_and_reopens_covariance_keeps_theta():
+    state = BiasState(
+        cells={
+            "clear|midday": BiasCell(theta=0.7, covariance=2e-8, n=100),
+            "clear|morning": BiasCell(theta=1.4, covariance=1e-7, n=15),
+        }
+    )
+    out = reseed_day_ahead_bias(state, n_cap=20)
+    mid = out.cells["clear|midday"]
+    morn = out.cells["clear|morning"]
+    # n capped only where it exceeds the cap; theta preserved; covariance re-opened.
+    assert mid.n == 20
+    assert morn.n == 15  # already below the cap -> unchanged
+    assert mid.theta == pytest.approx(0.7)
+    assert morn.theta == pytest.approx(1.4)
+    assert mid.covariance == pytest.approx(RLS_INIT_COVARIANCE)
+    assert morn.covariance == pytest.approx(RLS_INIT_COVARIANCE)
+
+
+def test_reseed_empty_state_is_noop():
+    assert reseed_day_ahead_bias(BiasState(), n_cap=20).cells == {}
+
+
+def test_reseed_does_not_mutate_input():
+    state = BiasState(cells={"clear|midday": BiasCell(theta=0.7, covariance=2e-8, n=100)})
+    reseed_day_ahead_bias(state, n_cap=20)
+    assert state.cells["clear|midday"].n == 100
+    assert state.cells["clear|midday"].covariance == pytest.approx(2e-8)
+
+
+def test_reseed_reopened_cell_readapts_faster_than_steady_state():
+    """The re-opened covariance is the whole point: one training step on a
+    re-seeded (P0) cell moves theta far more than on a converged (tiny-P) cell."""
+    sample = [DayAheadSample(cloud_class=CLOUD_CLASS_CLEAR, day_part=DAY_PART_MIDDAY,
+                             measured_wh=1000.0, modeled_wh=1000.0)]
+    converged = BiasState(cells={"clear|midday": BiasCell(theta=0.7, covariance=2e-8, n=100)})
+    reseeded = reseed_day_ahead_bias(converged, n_cap=20)
+
+    step_converged = train_day_ahead_bias(converged, sample).cells["clear|midday"].theta
+    step_reseeded = train_day_ahead_bias(reseeded, sample).cells["clear|midday"].theta
+    # Both start at theta 0.7 and see the same measured==modeled day (pulls toward
+    # 1.0); the re-opened cell moves much closer in a single step.
+    assert (step_reseeded - 0.7) > 10 * (step_converged - 0.7)
 
 
 # --- apply_day_ahead_bias --------------------------------------------------

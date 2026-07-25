@@ -721,8 +721,14 @@ class _IssuedStore:
 class _IssuedCoordinator:
     """Fake coordinator carrying just the ``_store`` the handler reads."""
 
-    def __init__(self, ring):
+    def __init__(self, ring, *, eta=0.9):
         self._store = _IssuedStore(ring)
+        self._eta = eta
+
+    def _effective_inverter_eta(self):
+        # Stand-in for the coordinator's CURRENT learned/default eta, used only as
+        # the fallback for a legacy snapshot that stored no eta of its own.
+        return self._eta
 
 
 def _issued_snapshot():
@@ -783,6 +789,18 @@ def test_get_issued_forecast_found_slices_to_local_day():
         for k, v in _filter_hourly_to_local_day(snap.raw_hourly_wh, iso).items()
     }
     assert result["raw_hourly_wh"] == expected_raw
+    # This legacy snapshot stored no eta, so the AC curve uses the coordinator's
+    # CURRENT eta and flags the substitution (IRC-5/SCT-4).
+    assert result["eta_source"] == "current"
+    assert result["eta"] == 0.9
+    assert result["hourly_wh_ac"] == {
+        k: _round3(v * 0.9) for k, v in expected.items()
+    }
+    # applied_factor = corrected / raw per hour (the served correction).
+    assert result["applied_factor_by_hour"] == {
+        "2026-06-21T09:00:00+00:00": round(222.2222 / 200.0, 4),
+        "2026-06-21T10:00:00+00:00": round(333.33339 / 300.0, 4),
+    }
 
 
 def test_get_issued_forecast_rounds_like_the_store():
@@ -850,6 +868,58 @@ def test_get_issued_forecast_corrected_falls_back_to_raw():
     # hourly_wh falls back to the raw curve (exactly the nightly scorer's rule).
     assert resp["result"]["hourly_wh"] == {"2026-06-21T10:00:00+00:00": 300.0}
     assert resp["result"]["oldest_available"] == iso
+
+
+def test_get_issued_forecast_uses_snapshot_eta_and_metadata():
+    """A snapshot carrying its own eta + cloud classes serves them AS ISSUED."""
+    from balcony_solar_forecast.core.types import IssuedSnapshot
+
+    iso = "2026-06-21"
+    snap = IssuedSnapshot(
+        issued_at="2026-06-21T01:30:00+00:00",
+        status="fresh",
+        corrected_hourly_wh={"2026-06-21T10:00:00+00:00": 300.0},
+        raw_hourly_wh={"2026-06-21T10:00:00+00:00": 250.0},
+        cloud_class_by_hour={"2026-06-21T10:00:00+00:00": "clear"},
+        eta=0.95,
+    )
+    # Coordinator's CURRENT eta differs (0.9); the snapshot's frozen eta must win.
+    coord = _IssuedCoordinator({iso: snap.to_dict()}, eta=0.9)
+    hass = _FakeHass({"e1": coord})
+    result = svc._handle_get_issued_forecast(hass, _Call({"date": iso}))["result"]
+    assert result["eta"] == 0.95
+    assert result["eta_source"] == "snapshot"
+    assert result["hourly_wh_ac"] == {"2026-06-21T10:00:00+00:00": round(300.0 * 0.95, 3)}
+    assert result["cloud_class_by_hour"] == {"2026-06-21T10:00:00+00:00": "clear"}
+    assert result["applied_factor_by_hour"] == {
+        "2026-06-21T10:00:00+00:00": round(300.0 / 250.0, 4)
+    }
+
+
+def test_get_issued_forecast_applied_factor_omits_zero_raw_hours():
+    """An hour whose raw physics is ~0 has an undefined ratio → omitted."""
+    from balcony_solar_forecast.core.types import IssuedSnapshot
+
+    iso = "2026-06-21"
+    snap = IssuedSnapshot(
+        issued_at="2026-06-21T01:30:00+00:00",
+        status="fresh",
+        corrected_hourly_wh={
+            "2026-06-21T05:00:00+00:00": 12.0,
+            "2026-06-21T10:00:00+00:00": 300.0,
+        },
+        raw_hourly_wh={
+            "2026-06-21T05:00:00+00:00": 0.0,
+            "2026-06-21T10:00:00+00:00": 250.0,
+        },
+        eta=0.95,
+    )
+    coord = _IssuedCoordinator({iso: snap.to_dict()})
+    hass = _FakeHass({"e1": coord})
+    result = svc._handle_get_issued_forecast(hass, _Call({"date": iso}))["result"]
+    assert result["applied_factor_by_hour"] == {
+        "2026-06-21T10:00:00+00:00": round(300.0 / 250.0, 4)
+    }
 
 
 def test_get_issued_forecast_unsupported_coordinator_raises():

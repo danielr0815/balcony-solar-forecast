@@ -800,6 +800,15 @@ def _handle_get_issued_forecast(
     entry), or ``None`` on an empty ring. The card turns a miss into an honest
     "archive since <date>" hint instead of a bare emptiness the operator would
     misread as "the forecast stopped updating".
+
+    A HIT also carries the AC-side + metadata block (IRC-5/SCT-4, SPEC §15.4):
+    ``hourly_wh``/``raw_hourly_wh`` are explicitly DC; ``hourly_wh_ac`` is the
+    served DC curve times ``eta`` (the DC->AC efficiency FROZEN into the snapshot
+    at issue time, ``eta_source == "snapshot"`` — or, for a legacy snapshot that
+    predates the field, the CURRENT learned eta with ``eta_source == "current"``);
+    ``cloud_class_by_hour`` is the day-ahead forecast weather class per hour; and
+    ``applied_factor_by_hour`` is the served/raw ratio (the shademap ∘ day-ahead
+    correction) per hour.
     """
     # Lazy imports: ``_glue_util`` pulls in ``.core.types`` (DriftState /
     # ForecastResult), which would create an import cycle if done at module load —
@@ -853,6 +862,24 @@ def _handle_get_issued_forecast(
     raw = _filter_hourly_to_local_day(
         snap.raw_hourly_wh or snap.corrected_hourly_wh, iso
     )
+    # DC->AC efficiency: the eta frozen INTO the snapshot at issue time (no
+    # hindsight). A legacy snapshot lacks it — fall back to the CURRENT learned
+    # eta and flag the substitution so a reader never mistakes it for the issued
+    # value (IRC-5/SCT-4).
+    if snap.eta is not None:
+        eta = snap.eta
+        eta_source = "snapshot"
+    else:
+        eta = coordinator._effective_inverter_eta()
+        eta_source = "current"
+    # Applied day-ahead factor per hour (corrected / raw), i.e. the shademap ∘
+    # day-ahead correction the served curve carried over the pure physics
+    # (SCT-4). Omitted for an hour whose raw is ~0 (undefined ratio).
+    applied_factor = {
+        k: round(corrected[k] / raw[k], 4)
+        for k in corrected
+        if k in raw and raw[k] > 0.0
+    }
     return {
         "result": {
             "date": iso,
@@ -861,6 +888,13 @@ def _handle_get_issued_forecast(
             "oldest_available": oldest,
             "hourly_wh": {k: _round3(v) for k, v in corrected.items()},
             "raw_hourly_wh": {k: _round3(v) for k, v in raw.items()},
+            # The served (corrected) DC curve converted to AC with the issue-time
+            # eta — the DC curves above are explicitly DC (SPEC §15.4).
+            "hourly_wh_ac": {k: _round3(v * eta) for k, v in corrected.items()},
+            "eta": round(eta, 4),
+            "eta_source": eta_source,
+            "cloud_class_by_hour": dict(snap.cloud_class_by_hour),
+            "applied_factor_by_hour": applied_factor,
         }
     }
 

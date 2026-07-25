@@ -91,6 +91,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import (
     BOOTSTRAP_KEY_BIAS,
+    BOOTSTRAP_KEY_QUANTILE,
     BOOTSTRAP_KEY_SCHEMA,
     BOOTSTRAP_KEY_SHADEMAP,
     BOOTSTRAP_KEY_SITE_SIGNATURE,
@@ -107,6 +108,7 @@ from .const import (
     STORE_KEY_ACTUALS_LOG,
     STORE_KEY_BIAS_STATE,
     STORE_KEY_COMPARISON_RING,
+    STORE_KEY_CONFIG_FINGERPRINT,
     STORE_KEY_DRIFT_STATE,
     STORE_KEY_HOURLY_ACTUALS,
     STORE_KEY_INVERTER_CAL_STATE,
@@ -127,6 +129,7 @@ from .core.types import (
     QuantileState,
     ScoreboardState,
     ShademapState,
+    _safe_int,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -174,6 +177,11 @@ def _empty_state() -> dict[str, Any]:
         # default-reads a store lacking this key to the neutral state, so every
         # existing v2/v3 store stays byte-faithful.
         STORE_KEY_INVERTER_CAL_STATE: InverterCalState().to_dict(),  # learned eta_inv
+        # Config fingerprint the day-ahead bias cells were learned against (A4).
+        # None on a fresh / pre-fingerprint store: the first reconcile just
+        # records the live fingerprint (no re-seed) so an existing install is not
+        # punished by the feature's introduction.
+        STORE_KEY_CONFIG_FINGERPRINT: None,
         # --- v3 scoreboard + quantile sections (neutral / empty) ---
         STORE_KEY_QUANTILE_STATE: QuantileState().to_dict(),  # {bin_key: [relerr,...]}
         STORE_KEY_SCOREBOARD_STATE: ScoreboardState().to_dict(),  # {iso_date: DayScore}
@@ -393,6 +401,11 @@ def _validate_learner_sections(
     state[STORE_KEY_INVERTER_CAL_STATE] = InverterCalState.from_dict(
         raw.get(STORE_KEY_INVERTER_CAL_STATE, {})
     ).to_dict()
+    # Config fingerprint (A4): a plain string or None, carried through faithfully
+    # (a v2 store or a pre-fingerprint v3 store has no entry -> stays None, which
+    # the coordinator treats as "first start, just record").
+    raw_fp = raw.get(STORE_KEY_CONFIG_FINGERPRINT)
+    state[STORE_KEY_CONFIG_FINGERPRINT] = raw_fp if isinstance(raw_fp, str) else None
 
 
 def _coerce_comparison_ring(raw: Any) -> dict[str, Any]:
@@ -682,6 +695,14 @@ class ForecastStore:
     def actuals_dates(self) -> list[str]:
         return sorted(self._data[STORE_KEY_ACTUALS_LOG])
 
+    def schema_version(self) -> int:
+        """The persisted on-disk schema version (for diagnostics, SPEC-2)."""
+        return _safe_int(self._data.get(_SCHEMA_KEY), _CURRENT_SCHEMA)
+
+    def hourly_actuals_dates(self) -> list[str]:
+        """Sorted local-date keys of the per-channel hourly-actuals ring."""
+        return sorted(self._data.get(STORE_KEY_HOURLY_ACTUALS, {}))
+
     # ------------------------------------------------------------------
     # Per-channel hourly actuals ring (short window; shademap trainer input)
     # ------------------------------------------------------------------
@@ -773,6 +794,22 @@ class ForecastStore:
         self._schedule_save()
 
     # ------------------------------------------------------------------
+    # Config fingerprint the day-ahead bias was learned against (A4)
+    # ------------------------------------------------------------------
+
+    def get_config_fingerprint(self) -> str | None:
+        """Return the stored config fingerprint, or None (fresh/pre-fingerprint)."""
+        fp = self._data.get(STORE_KEY_CONFIG_FINGERPRINT)
+        return fp if isinstance(fp, str) else None
+
+    def set_config_fingerprint(self, fingerprint: str | None) -> None:
+        """Persist the config fingerprint (schedules a bundled write)."""
+        self._data[STORE_KEY_CONFIG_FINGERPRINT] = (
+            fingerprint if isinstance(fingerprint, str) else None
+        )
+        self._schedule_save()
+
+    # ------------------------------------------------------------------
     # Learner state: rollback snapshot ring
     # ------------------------------------------------------------------
 
@@ -841,12 +878,17 @@ class ForecastStore:
     ) -> None:
         """Validate + clamp a backfill bootstrap and REPLACE the learner state.
 
-        Snapshots the prior (bias, shademap) into the rollback ring first, so an
-        unwanted import can be rolled back, then swaps in the clamped, n-capped
-        bootstrap. Raises ``ValueError`` on a schema mismatch / non-dict payload
-        / site-signature mismatch (the import service surfaces it to the
-        operator); all values inside a well-formed payload are clamped, never
-        rejected (SPEC §6).
+        Snapshots the prior (bias, shademap, quantile) into the rollback ring
+        first, so an unwanted import can be rolled back, then swaps in the
+        clamped, n-capped bootstrap. Raises ``ValueError`` on a schema mismatch /
+        non-dict payload / site-signature mismatch (the import service surfaces it
+        to the operator); all values inside a well-formed payload are clamped,
+        never rejected (SPEC §6).
+
+        The quantile ring is handled ADDITIVELY: a payload carrying
+        ``BOOTSTRAP_KEY_QUANTILE`` (a v0.20.7+ seeding backfill) REPLACES the ring
+        like the other two learners; a payload WITHOUT it (an older backfill file)
+        leaves the live quantile ring untouched — never wipe learned bands.
         """
         from homeassistant.util import dt as dt_util
 
@@ -856,16 +898,27 @@ class ForecastStore:
             payload,
             expected_signature=expected_signature,
         )
-        # Rollback point BEFORE the swap.
+        # Quantile ring: additive + backward-compatible (payload already
+        # validated as a dict by ingest_bootstrap above). Absent key -> keep the
+        # live ring; present key -> validate/clamp via the dataclass and replace.
+        if isinstance(payload, dict) and BOOTSTRAP_KEY_QUANTILE in payload:
+            quantile = QuantileState.from_dict(
+                payload.get(BOOTSTRAP_KEY_QUANTILE) or {}
+            )
+        else:
+            quantile = self.get_quantile_state()
+        # Rollback point BEFORE the swap (captures all three learner states).
         self.push_snapshot(
             LearnerSnapshot(
                 taken_at=dt_util.utcnow().isoformat(),
                 bias=self.get_bias_state(),
                 shademap=self.get_shademap_state(),
+                quantile=self.get_quantile_state(),
             )
         )
         self._data[STORE_KEY_BIAS_STATE] = bias.to_dict()
         self._data[STORE_KEY_SHADEMAP_STATE] = shademap.to_dict()
+        self._data[STORE_KEY_QUANTILE_STATE] = quantile.to_dict()
         self._schedule_save()
 
     # ------------------------------------------------------------------

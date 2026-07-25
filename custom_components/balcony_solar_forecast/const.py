@@ -16,7 +16,7 @@ from __future__ import annotations
 DOMAIN = "balcony_solar_forecast"
 
 INTEGRATION_NAME = "Balcony Solar Forecast"
-INTEGRATION_VERSION = "0.20.6"
+INTEGRATION_VERSION = "0.21.0"
 
 # --- Update behaviour (SPEC §4: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
@@ -78,6 +78,18 @@ CONF_AC_ACTUAL_INVERT = "ac_actual_invert"
 CONF_SITE_ALBEDO = "albedo"
 SITE_ALBEDO_MIN = 0.05
 SITE_ALBEDO_MAX = 0.9
+# Site-level bifacial beam gain (forensik T6 / A1). Optional multiplicative
+# factor on the beam+circumsolar POA (the DIRECT share), absent => 1.0 =
+# identity (no behaviour change for existing users). Lifts the honestly
+# under-modeled direct beam on clear mornings (bifacial rear-side gain + the
+# steep east-facing geometry) so the RAW physics stops leaking the deficit into
+# the learned transmittance / day-ahead-bias cells (which are clamped and cannot
+# express a >1 correction). For the reference site ~1.23 was validated
+# (backtest 2026-07-16). Values <1 are pointless (use ``efficiency`` instead),
+# so the band starts at 1.0.
+CONF_SITE_BEAM_GAIN = "bifacial_beam_gain"
+SITE_BEAM_GAIN_MIN = 1.0
+SITE_BEAM_GAIN_MAX = 1.6
 # plane fields
 CONF_PLANE_NAME = "name"
 CONF_AZIMUTH = "azimuth_deg"  # 0=N clockwise
@@ -103,6 +115,7 @@ CONF_GROUP_INVERTER_EFFICIENCY = "inverter_efficiency"  # optional: per-group DC
 
 # --- Physics constants (SPEC §4 physics musts) ---
 ALBEDO_DEFAULT = 0.2
+BEAM_GAIN_DEFAULT = 1.0  # identity beam+circumsolar gain when site leaves it unset
 ALBEDO_SNOW = 0.5  # applied when snow_depth > SNOW_DEPTH_THRESHOLD_M
 SNOW_DEPTH_THRESHOLD_M = 0.01
 RB_CAP = 10.0  # geometric beam-ratio cap (low-sun explosion guard)
@@ -415,6 +428,15 @@ DAY_AHEAD_BIAS_NEUTRAL = 1.0
 RLS_FORGETTING_FACTOR = 0.98    # lambda: <1 discounts old days
 RLS_INIT_COVARIANCE = 1000.0    # P0: large => fast initial adaptation
 RLS_MIN_SAMPLES = 3             # cells with fewer trained days stay neutral
+# When the forecast-relevant site config changes, the day-ahead bias cells were
+# learned against a now-stale geometry and re-adapt at only ~lambda's steady-
+# state gain (~0.001/day at n~100). On a fingerprint change every cell's RLS
+# covariance is re-opened to RLS_INIT_COVARIANCE (the actual learning-rate lever
+# — the gain depends on P, not n) and its effective sample count is capped to
+# this value so the estimator adapts quickly again without discarding the
+# current theta (A4/FOR-4). Strictly gentler than reset_day_ahead_bias, which
+# clears theta to neutral.
+DAY_AHEAD_BIAS_RESEED_N = 20
 
 # Cloud classes (SPEC §5/§6). "fog" = forecast visibility < FOG_VISIBILITY_M
 # OR (cloud_cover_low > FOG_CLOUD_LOW_PCT AND month in FOG_MONTHS).
@@ -428,14 +450,35 @@ CLOUD_CLASSES = (
     CLOUD_CLASS_OVERCAST,
     CLOUD_CLASS_FOG,
 )
-# Total-cloud-cover thresholds (%) separating clear / mixed / overcast when
-# the fog test does not fire. Mean of the three cloud layers.
+# Total-cloud-cover thresholds (%) separating clear / mixed / overcast — the
+# FALLBACK layer-cover split used only at low sun / when GHI is unavailable
+# (see the k_c thresholds below). Random-overlap total of the three layers.
 CLOUD_CLEAR_MAX_PCT = 25.0
 CLOUD_OVERCAST_MIN_PCT = 75.0
+# Clear-sky-index (k_c) classification (A5/SCT-1). When a slot carries a usable
+# GHI and the sun is high enough, the class is decided by
+# k_c = ghi / haurwitz_ghi(elevation) rather than the forecast cloud layers: the
+# layer cover counted mid/high decks at full random-overlap weight and routed
+# genuinely sunny afternoon hours into the overcast cell (11/20 h in the sunny
+# week), poisoning the day-ahead theta, the quantile bins and the scoreboard
+# strata alike. k_c reflects the irradiance that actually reaches the horizontal,
+# so all three consumers see a consistent class. Below CLOUD_KC_MIN_ELEVATION_DEG
+# the Haurwitz reference is too coarse and the classifier falls back to the layer
+# cover; the fog rule is unchanged and still tested FIRST.
+CLOUD_KC_CLEAR_MIN = 0.65        # k_c >= this => clear
+CLOUD_KC_OVERCAST_MAX = 0.30     # k_c <= this => overcast; between => mixed
+CLOUD_KC_MIN_ELEVATION_DEG = 5.0  # below this the k_c reference is unreliable
 # Fog-class parameters.
 FOG_VISIBILITY_M = 1000.0
 FOG_CLOUD_LOW_PCT = 85.0
 FOG_MONTHS = (10, 11, 12, 1, 2)   # Oct-Feb
+# Cloud-classification taxonomy version. Bumped whenever the MEANING of the
+# class labels changes (v1 layer-cover -> v2 k_c-based, A5). Folded into the
+# day-ahead config fingerprint (coordinator._config_fingerprint) so a change
+# re-seeds the RLS bias cells, whose learned theta was conditioned on the old
+# class boundaries; a re-bootstrap of the quantile bins / scoreboard strata is
+# likewise advised (their stored per-class content is now semantically stale).
+CLASSIFIER_VERSION = 2
 
 # Day parts (SPEC §5). Boundaries in local solar/clock hours (coordinator maps
 # a slot's local hour to a part). Midday brackets solar noon.
@@ -603,6 +646,7 @@ BOOTSTRAP_KEY_GENERATED_AT = "generated_at"     # iso utc
 BOOTSTRAP_KEY_SITE_SIGNATURE = "site_signature" # lat/lon+plane-name digest sanity check
 BOOTSTRAP_KEY_BIAS = "bias_state"               # day-ahead RLS cells
 BOOTSTRAP_KEY_SHADEMAP = "shademap_state"       # per-channel bins
+BOOTSTRAP_KEY_QUANTILE = "quantile_state"       # per-(class x part) relerr rings
 # Backfill n-credit cap: hourly-smeared backfilled bins are less trustworthy,
 # so their initial EMA sample count is capped so live 15-min data overrides
 # quickly (SPEC §6).
@@ -660,6 +704,10 @@ LEARNER_STATUS_VALUES = (
 # --- Repair issue ids (SPEC §5/§7) -----------------------------------------
 ISSUE_FAST_LEARNER_DISABLED = "fast_learner_auto_disabled"
 ISSUE_SLOW_LEARNER_DISABLED = "slow_learner_auto_disabled"
+# Raised when the forecast-relevant site config changed and the day-ahead bias
+# cells were re-seeded against the new geometry (A4/FOR-4): the operator may want
+# to re-run the offline backfill bootstrap or reset_day_ahead_bias.
+ISSUE_CONFIG_CHANGED_BIAS_RESEED = "config_changed_bias_reseed"
 
 
 # ===========================================================================
@@ -707,6 +755,12 @@ SCOREBOARD_MIN_PAIRED_DAYS = 1
 # (None) — a ring whose scoring stopped weeks ago must not keep publishing a
 # live-looking pass/fail. The coordinator passes the current local date in.
 SCOREBOARD_MAX_STALENESS_DAYS = 3
+# Minimum scored days in a weather stratum before its informational
+# within-stratum vs-best-baseline percent is emitted (C1/SPEC-5). With fewer
+# days a single mismatched pair produced absurd figures (a -480 % row on n=2);
+# below this the percent is published as None and the row carries low_n=True so
+# the dashboard/diagnostics can hide it rather than render a meaningless number.
+SCOREBOARD_STRATUM_MIN_N = 3
 
 # --- Comparison forecast sensors (GENERIC + CONFIGURABLE; ship EMPTY) -------
 # CONF_COMPARISON_SENSORS is an editable list of objects, each:
@@ -803,6 +857,13 @@ STORE_KEY_COMPARISON_RING = "comparison_ring"  # {iso_date: {comparison_name: da
 # top-level learner section that does NOT ride the bias/shademap rollback ring
 # (it is self-gating + never load-bearing, so a rollback need not touch it).
 STORE_KEY_INVERTER_CAL_STATE = "inverter_cal_state"  # InverterCalState (learned eta_inv)
+# Config fingerprint of the forecast-relevant site fields the day-ahead bias
+# cells were learned against (A4/FOR-4). Added ADDITIVELY within v3 (no version
+# bump): _empty_state injects None and a store lacking the key reads back None,
+# so an existing v3 store stays byte-faithful. When the stored fingerprint
+# differs from the live config the bias cells are re-seeded (see
+# DAY_AHEAD_BIAS_RESEED_N) so learning re-accelerates against the new geometry.
+STORE_KEY_CONFIG_FINGERPRINT = "config_fingerprint"  # str | None
 
 # --- New diagnostic sensors / binary sensors (SPEC §8/§10) -----------------
 # Entity object_ids are unprefixed: the device slug already carries
@@ -834,6 +895,11 @@ DATA_KEY_QUANTILE_CURVES = "quantile_curves"      # {"p10": {iso: Wh}, "p50": ..
 # AC-side band curves (Phase 2): {"p10": {iso_hour: Wh}, "p90": {iso_hour: Wh}}
 # HOURLY Wh (the AC bands are computed at hourly resolution; P50 == ac_watts).
 DATA_KEY_QUANTILE_CURVES_AC = "quantile_curves_ac"
+# Daily AC P10 headline (kWh | None) with the intraday scalar stripped
+# asymmetrically (FOR-7): the served band curve keeps the scalar, this day
+# aggregate does not rise under a spike. P90 stays the plain today-sum of the
+# served AC P90 band curve, so no separate key is carried for it.
+DATA_KEY_ENERGY_TODAY_AC_P10 = "energy_today_kwh_ac_p10"
 DATA_KEY_SCOREBOARD = "scoreboard"                # dict: engine_mae / per-comparison mae / vs_best_pct / gate / strata
 DATA_KEY_KILL_GATE_PASSED = "kill_gate_passed"    # bool | None (None == not enough window yet)
 
@@ -939,3 +1005,14 @@ DATA_KEY_BAND_SOURCE = "band_source"
 BAND_SOURCE_LEARNED = "learned"
 BAND_SOURCE_ENSEMBLE = "ensemble"
 BAND_SOURCE_ENVELOPE = "envelope"
+
+# Per-slot band provenance, aggregated per LOCAL day so the Recorder never sees a
+# 384-entry per-slot map (SCT-4). {iso_date: {"bin": n, "envelope": n,
+# "ensemble": n, "neutral": n}} — how many of that day's forecast slots got a
+# trained-bin spread, an ensemble-fused / envelope-widened band, a pure ensemble
+# spread, or fell through neutral (no band). Absent when quantiles are off.
+DATA_KEY_BAND_SOURCE_BY_DAY = "band_source_by_day"
+BAND_SLOT_BIN = "bin"
+BAND_SLOT_ENVELOPE = "envelope"
+BAND_SLOT_ENSEMBLE = "ensemble"
+BAND_SLOT_NEUTRAL = "neutral"

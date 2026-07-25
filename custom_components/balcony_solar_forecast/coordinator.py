@@ -48,6 +48,7 @@ from . import _actuals, _nightly, _scoreboard_glue
 from ._actuals import (
     _actuals_from_stats,  # noqa: F401  re-exported for tests
     _is_frozen_channel,  # noqa: F401  re-exported for tests
+    _stat_row_datetime,
 )
 
 # Pure helpers moved to _glue_util; imported for the coordinator's own use AND
@@ -72,9 +73,14 @@ from ._glue_util import (
 )
 from ._nightly import _NIGHTLY_HOUR, _NIGHTLY_MINUTE
 from .const import (
+    BAND_SLOT_BIN,
+    BAND_SLOT_ENSEMBLE,
+    BAND_SLOT_ENVELOPE,
+    BAND_SLOT_NEUTRAL,
     BAND_SOURCE_ENSEMBLE,
     BAND_SOURCE_ENVELOPE,
     BAND_SOURCE_LEARNED,
+    CLASSIFIER_VERSION,
     CONF_COMPARISON_SENSORS,
     CONF_ENSEMBLE_ENABLED,
     CONF_FETCH_INTERVAL,
@@ -89,10 +95,12 @@ from .const import (
     CORRECTION_SOURCE_NONE,
     CORRECTION_SOURCE_SHADEMAP,
     DATA_KEY_BAND_SOURCE,
+    DATA_KEY_BAND_SOURCE_BY_DAY,
     DATA_KEY_BIAS_CELLS,
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_CORRECTION_SOURCE,
     DATA_KEY_DRIFT_MAE,
+    DATA_KEY_ENERGY_TODAY_AC_P10,
     DATA_KEY_INTRADAY_SCALAR,
     DATA_KEY_KILL_GATE_PASSED,
     DATA_KEY_LEARNER_STATUS,
@@ -101,6 +109,7 @@ from .const import (
     DATA_KEY_RAW_HOURLY_WH,
     DATA_KEY_SCOREBOARD,
     DAY_AHEAD_BIAS_NEUTRAL,
+    DAY_AHEAD_BIAS_RESEED_N,
     DEFAULT_ENSEMBLE_ENABLED,
     DEFAULT_QUANTILES_ENABLED,
     DEFAULT_SCOREBOARD_ENABLED,
@@ -120,6 +129,7 @@ from .const import (
     INTRADAY_MIN_MODELED_WH,
     INTRADAY_NEUTRAL,
     INTRADAY_TRAILING_WINDOW_MINUTES,
+    ISSUE_CONFIG_CHANGED_BIAS_RESEED,
     ISSUE_FAST_LEARNER_DISABLED,
     ISSUE_SLOW_LEARNER_DISABLED,
     LEARNER_LAYER_DAY_AHEAD,
@@ -133,6 +143,7 @@ from .const import (
     MAX_PAYLOAD_AGE_HOURS,
     MAX_PHYSICS_FALLBACK_AGE_HOURS,
     RECOMPUTE_INTERVAL_SECONDS,
+    SENSOR_MEASURED_DC_TOTAL,
     STATUS_CACHED,
     STATUS_FRESH,
     STATUS_PHYSICS_FALLBACK,
@@ -202,6 +213,27 @@ class _IntradaySample:
     measured_kc: float
     modeled_kc: float
     modeled_wh: float
+
+
+def _measured_power_rows(rows: list[dict] | None) -> list[tuple[datetime, float]]:
+    """Reduce one entity's short-term stat rows to ``[(utc_time, mean_w)]`` (pure).
+
+    Used by the A7 intraday ring re-arm: ``start`` is disambiguated via
+    ``_stat_row_datetime`` (epoch SECONDS from the in-process
+    ``statistics_during_period`` API vs. MS from the WebSocket layer — the
+    historical epoch bug, mirrored from ``_actuals``). Rows without a usable
+    ``mean`` or an unparseable ``start`` are dropped. Never raises.
+    """
+    out: list[tuple[datetime, float]] = []
+    for row in rows or ():
+        mean = row.get("mean")
+        if mean is None:
+            continue
+        ts = _stat_row_datetime(row.get("start"))
+        if ts is None:
+            continue
+        out.append((ts, float(mean)))
+    return out
 
 
 class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
@@ -289,6 +321,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Which source shaped TODAY's band slots (const BAND_SOURCE_*), for the
         # P10/P90 sensors' ``band_source`` attribute. Recomputed per hooks build.
         self._band_source: str = BAND_SOURCE_LEARNED
+        # Per-LOCAL-day band-provenance counts (SCT-4), recomputed per hooks build.
+        self._band_source_by_day: dict[str, dict[str, int]] = {}
 
         # Cached weather image + provenance for the degradation ladder.
         # _last_fetched_at is the PAYLOAD's age anchor: it advances ONLY when the
@@ -322,6 +356,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Trailing ring of measured-vs-modeled samples (k_c space), one per
         # tick where a usable measurement + non-trivial modeled energy exist.
         self._intraday_samples: deque[_IntradaySample] = deque()
+        # One-shot guard for the A7 ring re-arm: after a restart/reload the ring
+        # is empty, so the scalar would stay neutral for the whole trailing
+        # window (>=2 h correction blackout, SCT-2). We reconstruct the ring once
+        # from recorder stats + the last forecast curve on the first tick that
+        # has a curve to reference; the flag stops any refill after that (the
+        # samples are re-derivable raw data, but re-armed exactly once).
+        self._intraday_rearmed: bool = False
         # Correction source shaping the served curve this cycle.
         self._correction_source: str = CORRECTION_SOURCE_NONE
 
@@ -347,6 +388,15 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         # Last computed ForecastResult (for the nightly per-plane snapshot).
         self._last_result: ForecastResult | None = None
+
+        # Per-slot day-ahead (RLS θ) factor of the LAST engine pass, keyed by the
+        # slot.start datetimes ``_last_result`` is aligned to. Cached so the
+        # intraday sampler can reference the θ-corrected modeled curve (the served
+        # curve minus the intraday scalar), not pure raw — otherwise θ and the
+        # intraday scalar would double-correct the same morning error (A2). Empty
+        # when the day-ahead layer is inactive => the sampler falls back to raw,
+        # matching the served curve (which then carries no θ either).
+        self._day_factor: dict[datetime, float] = {}
 
         # --- Shade-profile diagram selection (SPEC §15) ---------------------
         # Which module/plane + local date the shade-profile sensor renders. The
@@ -391,6 +441,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # real OFF->ON option transition inside rebuild_learner_config (a plain
         # restart with the option untouched keeps the flag, SPEC §5).
         self.rebuild_learner_config()
+        # A forecast-relevant config change (planes/albedo/AC limits) invalidates
+        # the geometry the day-ahead bias cells were learned against: re-open them
+        # for fast re-adaptation (A4/FOR-4). Runs on every setup AND options reload
+        # (both re-enter this method); a first start just records the fingerprint.
+        self._reconcile_config_fingerprint()
 
         last = self._store.get_last_payload()
         if not last:
@@ -513,12 +568,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )  # may raise ValueError
         self._bias_state = self._store.get_bias_state()
         self._shademap_state = self._store.get_shademap_state()
+        self._quantile_state = self._store.get_quantile_state()
         summary = {
             "bias_cells": len(self._bias_state.cells),
             "shademap_channels": len(self._shademap_state.channels),
             "shademap_bins": sum(
                 len(b) for b in self._shademap_state.channels.values()
             ),
+            "quantile_bins": len(self._quantile_state.bins),
         }
         await self.async_request_refresh()
         return summary
@@ -723,6 +780,109 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         raw = "|".join(parts).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()[:16]
 
+    def _config_fingerprint(self) -> str:
+        """Stable digest of the forecast-relevant site fields (A4/FOR-4).
+
+        Covers exactly the config the day-ahead bias cells are conditioned on:
+        each plane's azimuth / tilt / wp / efficiency / ross_coeff / horizon
+        profile (per row: elevation AND the transmittance fields tau / seasonal /
+        tau_leafed / tau_bare — the horizon rows ARE the tau-carrying "screens" of
+        SPEC §5, so a τ 0→0.4 edit reshapes the modeled beam and MUST re-seed),
+        the site albedo, the bifacial beam gain (T6 — the A1 1.0→1.25 rollout runs
+        through here and changes the direct-POA share site-wide), every inverter
+        group's AC limit, and the cloud-classification taxonomy version
+        (CLASSIFIER_VERSION, A5) — a change to any of these makes the learned theta
+        fit a now-stale geometry or class meaning, so a differing fingerprint
+        triggers a bias re-seed. Fields that do NOT change the modeled curve
+        (entity ids, shade grouping, meter sign) are excluded so a benign edit
+        never resets learning. Rounded so float re-serialisation can never
+        spuriously flip the hash.
+        """
+        import hashlib
+
+        def _hz_row(r) -> str:
+            tl = "-" if r.tau_leafed is None else f"{round(r.tau_leafed, 4)}"
+            tb = "-" if r.tau_bare is None else f"{round(r.tau_bare, 4)}"
+            return (
+                f"{round(r.azimuth_deg, 2)},{round(r.elevation_deg, 2)}"
+                f",t{round(r.tau, 4)},s{int(r.seasonal)},tl{tl},tb{tb}"
+            )
+
+        def _plane_sig(p) -> str:
+            hz = ";".join(_hz_row(r) for r in p.horizon)
+            ross = "-" if p.ross_coeff is None else f"{round(p.ross_coeff, 4)}"
+            return (
+                f"{p.name}:az{round(p.azimuth_deg, 2)}:tl{round(p.tilt_deg, 2)}"
+                f":wp{round(p.wp, 2)}:ef{round(p.efficiency, 4)}:ro{ross}:hz[{hz}]"
+            )
+
+        albedo = "-" if self._site.albedo is None else f"{round(self._site.albedo, 4)}"
+        beam_gain = (
+            "-"
+            if self._site.bifacial_beam_gain is None
+            else f"{round(self._site.bifacial_beam_gain, 4)}"
+        )
+        parts = [
+            *[_plane_sig(p) for p in self._site.planes],
+            f"albedo={albedo}",
+            f"beam_gain={beam_gain}",
+            *[f"grp:{g.name}:ac{round(g.ac_limit_w, 2)}" for g in self._site.groups],
+            # Cloud-classification taxonomy version (A5): a change to the class
+            # boundaries (layer-cover -> k_c) makes every learned theta cell fit a
+            # now-stale class meaning, so bump == fingerprint change == re-seed.
+            f"clsver={CLASSIFIER_VERSION}",
+        ]
+        raw = "|".join(parts).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()[:16]
+
+    def _reconcile_config_fingerprint(self) -> None:
+        """Re-seed the day-ahead bias when the forecast-relevant config changed.
+
+        Compares the live :meth:`_config_fingerprint` against the one stored when
+        the cells were last learned. A store without a fingerprint (fresh install
+        or the first run after this feature landed) just records the current one —
+        an existing install is NOT punished by the feature's introduction (the
+        cells were legitimately learned against the current config). A DIFFERING
+        fingerprint re-opens every cell for fast re-adaptation
+        (:func:`bias.reseed_day_ahead_bias`, cap DAY_AHEAD_BIAS_RESEED_N),
+        persists the new fingerprint, logs INFO and raises a repair issue so the
+        operator can re-run the offline bootstrap or reset. Best-effort: a store
+        lacking the fingerprint getter/setter (older schema in flight) is skipped.
+        """
+        getter = getattr(self._store, "get_config_fingerprint", None)
+        setter = getattr(self._store, "set_config_fingerprint", None)
+        if getter is None or setter is None:
+            return
+        try:
+            stored = getter()
+            current = self._config_fingerprint()
+        except Exception:  # pragma: no cover - defensive, never crash setup
+            _LOGGER.debug("Config fingerprint reconcile failed", exc_info=True)
+            return
+        if stored is None:
+            # First start / pre-fingerprint store: record, never re-seed.
+            setter(current)
+            return
+        if stored == current:
+            return
+        # Config changed: re-open the bias cells so learning re-accelerates.
+        cells_before = len(self._bias_state.cells)
+        self._bias_state = bias_mod.reseed_day_ahead_bias(
+            self._bias_state, n_cap=DAY_AHEAD_BIAS_RESEED_N
+        )
+        self._persist_bias_state()
+        setter(current)
+        _LOGGER.info(
+            "Forecast-relevant config changed (fingerprint %s -> %s); re-seeded "
+            "%d day-ahead bias cell(s) (n capped at %d, covariance re-opened) so "
+            "learning re-accelerates against the new geometry",
+            stored,
+            current,
+            cells_before,
+            DAY_AHEAD_BIAS_RESEED_N,
+        )
+        self._raise_repair_issue(ISSUE_CONFIG_CHANGED_BIAS_RESEED)
+
     @callback
     def async_start_nightly_job(self) -> None:
         """Schedule the idempotent 01:30-local snapshot / training job."""
@@ -793,6 +953,27 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         else:
             self._ensemble_factors = None
 
+        # A7/SCT-2: one-shot re-arm of the intraday sample ring after a
+        # restart/reload so the scalar does not spend the whole trailing window
+        # neutral. The modeled side is read off the PREVIOUS tick's forecast
+        # curve, so this fires on the first tick that has one (the second update),
+        # BEFORE the live sampler below adds the current slot. The one-shot is
+        # only SPENT once a real attempt is possible (fast learner on, weather
+        # FRESH/CACHED), so a restart landing in a stale-weather window defers the
+        # re-arm to the first fresh tick instead of wasting it. Best-effort: no
+        # recorder stats => degrade to the previous neutral behaviour.
+        fast_on = (self._learner_config.fast_enabled
+                   and not self._drift_state.fast_disabled)
+        if (not getattr(self, "_intraday_rearmed", False)
+                and self._last_result is not None
+                and fast_on
+                and status in (STATUS_FRESH, STATUS_CACHED)):
+            self._intraday_rearmed = True
+            try:
+                await self._async_rearm_intraday_ring(now, status)
+            except Exception:  # pragma: no cover - best-effort, never fatal
+                _LOGGER.debug("Intraday ring re-arm failed", exc_info=True)
+
         # FAST learner: refresh the intraday scalar from live actuals BEFORE the
         # engine pass; the engine applies it via hooks.slot_factor so the 15-min,
         # hourly and daily curves stay mutually consistent. Never fatal.
@@ -853,12 +1034,19 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         day_factor: dict[datetime, float] = {}
         if day_ahead_active:
             lon = self._site.longitude
+            lat = self._site.latitude
             for slot in weather.slots:
                 local = dt_util.as_local(slot.start)
+                # Clear-sky-index classification (A5): pass the slot GHI and the
+                # sun elevation (at slot start, same convention as the
+                # hours_from_solar_noon binning below) so classify_cloud keys the
+                # class on realised irradiance, not the raw cloud layers.
+                _az, elev = solpos.sun_position(slot.start, lat, lon)
                 cc = bias_mod.classify_cloud(
                     cloud_low=slot.cloud_low, cloud_mid=slot.cloud_mid,
                     cloud_high=slot.cloud_high,
                     visibility_m=slot.visibility_m, month=local.month,
+                    ghi=slot.ghi, elevation_deg=elev,
                 )
                 # Bin by APPARENT SOLAR time, not the wall clock (v0.19): the
                 # day-part boundary tracks solar noon instead of a fixed local
@@ -873,6 +1061,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 )
                 if f != DAY_AHEAD_BIAS_NEUTRAL:
                     day_factor[slot.start] = f
+
+        # Cache θ for the intraday sampler (A2): it references the θ-corrected
+        # modeled curve so θ and the intraday scalar don't double-correct. Keyed
+        # by the identical slot.start datetimes the resulting ForecastResult is
+        # aligned to. This pass builds the very result that becomes _last_result,
+        # so the cache and _last_result stay in lockstep across ticks.
+        self._day_factor = day_factor
 
         # Per-slot quantile bands (SPEC §6/§10): keyed by the identical
         # slot.start datetimes the engine iterates. Each slot's LEARNED band is
@@ -889,6 +1084,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # pre-v0.16 cached state — working: the ensemble attrs only exist after
         # __init__ / an ensemble update.
         self._band_source = BAND_SOURCE_LEARNED
+        # Per-LOCAL-day band provenance counts (SCT-4): compact summary of how each
+        # day's slots resolved (trained bin / envelope / ensemble / neutral), so a
+        # consumer can see WHICH days actually carry a trained band without a
+        # per-slot map hitting the Recorder.
+        band_source_by_day: dict[str, dict[str, int]] = {}
         band_by_slot: dict[datetime, QuantileBands] | None = None
         ens_factors = (
             getattr(self, "_ensemble_factors", None)
@@ -901,13 +1101,19 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             today = dt_util.as_local(now).date()
             ens_today = False           # ensemble covered >= 1 of today's slots
             learned_spread_today = False  # learned band had spread on a today slot
+            lon = self._site.longitude
+            lat = self._site.latitude
             for slot in weather.slots:
                 local = dt_util.as_local(slot.start)
                 if have_bins:
+                    # Same clear-sky-index classification as the day-ahead loop
+                    # (A5) so the quantile bins share the day-ahead cell taxonomy.
+                    _az, elev = solpos.sun_position(slot.start, lat, lon)
                     cc = bias_mod.classify_cloud(
                         cloud_low=slot.cloud_low, cloud_mid=slot.cloud_mid,
                         cloud_high=slot.cloud_high,
                         visibility_m=slot.visibility_m, month=local.month,
+                        ghi=slot.ghi, elevation_deg=elev,
                     )
                     # Solar-time day part (v0.19), consistent with the day-ahead
                     # bias binning above: the quantile bins share the day_part
@@ -931,8 +1137,29 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 b = ensembleband_mod.fuse_bands(learned, ens)
                 # Omit a neutral (identity) band so the engine's `if band:` path
                 # short-circuits an all-1.0 multiply.
-                if not (b.p10 == 1.0 and b.p50 == 1.0 and b.p90 == 1.0):
+                neutral_band = b.p10 == 1.0 and b.p50 == 1.0 and b.p90 == 1.0
+                if not neutral_band:
                     bands[slot.start] = b
+                # Per-slot provenance -> per-day counts (same taxonomy as the
+                # today-level ``_band_source``): neutral (no band), envelope
+                # (ensemble widened a learned spread), ensemble (spread came from
+                # the ensemble alone) or bin (trained-bin spread, no ensemble).
+                if neutral_band:
+                    cat = BAND_SLOT_NEUTRAL
+                elif ens is not None:
+                    cat = (
+                        BAND_SLOT_ENVELOPE
+                        if not learned.collapsed
+                        else BAND_SLOT_ENSEMBLE
+                    )
+                else:
+                    cat = BAND_SLOT_BIN
+                day_counts = band_source_by_day.setdefault(
+                    local.date().isoformat(),
+                    {BAND_SLOT_BIN: 0, BAND_SLOT_ENVELOPE: 0,
+                     BAND_SLOT_ENSEMBLE: 0, BAND_SLOT_NEUTRAL: 0},
+                )
+                day_counts[cat] += 1
                 # Band-source accounting over TODAY's slots only.
                 if local.date() == today:
                     if ens is not None:
@@ -950,6 +1177,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     if learned_spread_today
                     else BAND_SOURCE_ENSEMBLE
                 )
+        self._band_source_by_day = band_source_by_day
 
         slot_factor = None
         scalar = self._intraday_scalar
@@ -1331,27 +1559,41 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     def _modeled_power_for_planes(
         self, result: ForecastResult, now: datetime, plane_names: set[str]
     ) -> float:
-        """RAW modeled site power at ``now`` restricted to the given plane names.
+        """θ-referenced modeled site power at ``now`` restricted to the given
+        plane names.
 
-        Uses the RAW per-plane curve (labels must not depend on the applied
-        correction). Scaling the modeled side to exactly the planes that reported
-        a usable measurement makes the intraday ratio a pure weather error even
-        under a partial DTU dropout (SPEC §5). Falls back to the full-site RAW
-        power when the per-plane breakdown is unavailable (empty plane_results).
+        The RAW per-plane curve (``pr.raw_watts``) is scaled by the slot's
+        nightly-frozen day-ahead θ factor (``_day_factor``), so the modeled side
+        equals the SERVED curve minus the transient intraday scalar (A2, IRC-2).
+        Sampling against pure raw let θ (the day-ahead bias, 1.36–1.49 on this
+        site's mornings) and the intraday scalar correct the SAME error twice —
+        served/actual reached ×1.9 at 07–09Z. θ is site-level (one factor per
+        slot, applied to every plane equally) and frozen within a day, so it
+        cannot drift with the scalar it references — no circularity. The intraday
+        factor itself is deliberately NOT folded in here.
+
+        Scaling the modeled side to exactly the planes that reported a usable
+        measurement keeps the intraday ratio a pure weather error even under a
+        partial DTU dropout (SPEC §5). Falls back to the full-site RAW power
+        (still θ-scaled) when the per-plane breakdown is unavailable (empty
+        plane_results). When θ is inactive for the slot (day-ahead layer off /
+        starved cell) the factor is 1.0, so the served curve carries no θ and the
+        modeled side is pure raw — self-consistent.
         """
         idx = _slot_index_at(result.slot_starts, now)
         if idx is None:
             return 0.0
+        theta = getattr(self, "_day_factor", {}).get(result.slot_starts[idx], 1.0)
         planes = [pr for pr in result.plane_results if pr.name in plane_names]
         if not planes:
             # No per-plane breakdown to restrict to: use the raw site total.
-            return _raw_power_now(result, now)
+            return _raw_power_now(result, now) * theta
         total = 0.0
         for pr in planes:
             series = pr.raw_watts or pr.watts
             if idx < len(series):
                 total += series[idx]
-        return total
+        return total * theta
 
     def _clear_sky_ref_wh(self, now: datetime) -> float:
         """Haurwitz clear-sky GHI energy proxy (Wh/m^2) for the current slot.
@@ -1402,6 +1644,155 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._intraday_samples.popleft()
 
     # ------------------------------------------------------------------
+    # FAST learner: one-shot ring re-arm after a restart/reload (A7/SCT-2)
+    # ------------------------------------------------------------------
+
+    async def _async_rearm_intraday_ring(
+        self, now: datetime, status: str
+    ) -> None:
+        """Reconstruct the trailing intraday sample ring after a restart/reload.
+
+        The scalar itself is never persisted (SPEC §5), but the raw samples it is
+        derived from are re-derivable measurements: rebuild them from the
+        recorder's 5-min statistics of the site-total measured DC power sensor
+        (measured side) and the last forecast curve (θ-corrected modeled side —
+        the SAME basis the live sampler uses: bias-corrected, WITHOUT the intraday
+        scalar), so ``compute_intraday_scalar`` has >= INTRADAY_MIN_TRAILING_MINUTES
+        of history immediately instead of sitting neutral for hours (A7/SCT-2).
+
+        Guards (any miss => leave the ring empty, i.e. neutral, as before):
+          * fast learner enabled and not drift-disabled;
+          * the ring still empty (never double-fill a running ring);
+          * the served weather image FRESH/CACHED (a physics-fallback or
+            unavailable image would reconstruct against an untrustworthy curve);
+          * the site-total sensor + its recorder stats resolve.
+        The site-total sensor carries no per-plane breakdown, so the live path's
+        guard against TRANSIENT channel dropout cannot apply here; the modeled
+        side is instead restricted to the statically METERED planes (those with
+        an ``actual_entity`` — exactly what the site-total sensor sums), a
+        best-effort re-arm the organic live sampler then supersedes.
+        """
+        result = self._last_result
+        if result is None:
+            return
+        if not (self._learner_config.fast_enabled
+                and not self._drift_state.fast_disabled):
+            return
+        if self._intraday_samples:
+            return
+        if status not in (STATUS_FRESH, STATUS_CACHED):
+            return
+        entity_id = self._measured_total_stat_id()
+        if entity_id is None:
+            return
+        rows = await self._async_read_measured_total_stats(entity_id, now)
+        if not rows:
+            return
+        for sample in self._rearm_samples_from_rows(result, rows, now):
+            self._intraday_samples.append(sample)
+        self._trim_intraday_ring(now)
+
+    def _measured_total_stat_id(self) -> str | None:
+        """Entity/statistic id of the site-total measured DC power sensor.
+
+        Resolved from the entity registry by the sensor's unique_id
+        (``{entry_id}_measured_dc_power_total``); a MEASUREMENT sensor's statistic
+        id equals its entity id. None when the sensor is not registered (e.g. no
+        plane has an ``actual_entity`` configured, so the sensor is never built).
+        """
+        try:
+            from homeassistant.helpers import entity_registry as er
+
+            registry = er.async_get(self.hass)
+            return registry.async_get_entity_id(
+                "sensor", DOMAIN,
+                f"{self.entry.entry_id}_{SENSOR_MEASURED_DC_TOTAL}",
+            )
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    async def _async_read_measured_total_stats(
+        self, entity_id: str, now: datetime
+    ) -> list[tuple[datetime, float]]:
+        """5-min mean site-total DC power over the trailing window (executor).
+
+        Returns ``[(utc_time, mean_watts)]`` from the recorder short-term
+        statistics; ``start`` is disambiguated via ``_stat_row_datetime`` (the
+        in-process API hands out epoch SECONDS — the historical epoch bug, mirrors
+        _actuals). Any failure yields ``[]`` so the caller degrades to neutral.
+        """
+        start = now - timedelta(minutes=INTRADAY_TRAILING_WINDOW_MINUTES)
+        try:
+            from homeassistant.components.recorder import get_instance
+
+            def _read() -> list[tuple[datetime, float]]:
+                from homeassistant.components.recorder.statistics import (
+                    statistics_during_period,
+                )
+
+                stats = statistics_during_period(
+                    self.hass, start, now, {entity_id}, "5minute", None, {"mean"},
+                )
+                return _measured_power_rows(stats.get(entity_id))
+
+            return await get_instance(self.hass).async_add_executor_job(_read)
+        except Exception:  # pragma: no cover - recorder may be unavailable
+            _LOGGER.debug("Intraday re-arm stats read failed", exc_info=True)
+            return []
+
+    def _rearm_samples_from_rows(
+        self,
+        result: ForecastResult,
+        rows: list[tuple[datetime, float]],
+        now: datetime,
+    ) -> list[_IntradaySample]:
+        """Group 5-min site-total rows into engine 15-min slots and build one
+        ``_IntradaySample`` per PAST slot (k_c space), mirroring the live sampler.
+
+        The 5-min means of each slot are averaged into that slot's mean power; the
+        modeled side is the θ-scaled power of the METERED planes (those with an
+        ``actual_entity`` — the subset the site-total sensor sums; an unmetered
+        plane would otherwise inflate the modeled side and halve the scalar),
+        both normalised by the Haurwitz clear-sky reference so geometry/season
+        cancel. The slot
+        CONTAINING ``now`` is skipped so the reconstruction never collides with
+        the live sample the caller adds for the current tick (no double-samples).
+        Slots below INTRADAY_MIN_MODELED_WH or with no clear-sky reference (sun
+        down) are dropped, exactly as :meth:`_build_intraday_sample` gates them.
+        """
+        metered_planes = {p.name for p in self._site.planes if p.actual_entity}
+        now_idx = _slot_index_at(result.slot_starts, now)
+        by_slot: dict[int, list[float]] = {}
+        for ts, mean_w in rows:
+            idx = _slot_index_at(result.slot_starts, ts)
+            if idx is None or idx == now_idx:
+                continue
+            by_slot.setdefault(idx, []).append(mean_w)
+
+        samples: list[_IntradaySample] = []
+        for idx in sorted(by_slot):
+            slot_start = dt_util.as_utc(result.slot_starts[idx])
+            means = by_slot[idx]
+            measured_w = sum(means) / len(means)
+
+            modeled_w = self._modeled_power_for_planes(
+                result, slot_start, metered_planes)
+            modeled_wh = modeled_w * 0.25
+            if modeled_wh < INTRADAY_MIN_MODELED_WH:
+                continue
+            cs_ref_wh = self._clear_sky_ref_wh(slot_start)
+            if cs_ref_wh <= 0.0:
+                continue
+            measured_wh = measured_w * 0.25
+            samples.append(_IntradaySample(
+                at=slot_start,
+                measured_kc=measured_wh / cs_ref_wh,
+                modeled_kc=modeled_wh / cs_ref_wh,
+                modeled_wh=modeled_wh,
+            ))
+        return samples
+
+    # ------------------------------------------------------------------
     # Output assembly (the contract every platform reads)
     # ------------------------------------------------------------------
 
@@ -1436,19 +1827,23 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         never applied and understates the headline (up to the full factor). We
         detect such a slot from ``result.corrected_unclamped_watts`` (the
         pre-re-clamp corrected total): ``prereclamp - watts > 1e-6`` means the
-        re-clamp bit. On a clamped slot we keep ``watts`` UNCHANGED (the ceiling
-        — the true day-ahead value lies between ceiling/factor and the ceiling,
-        and equals the ceiling whenever the day-ahead curve alone would also
-        clamp, the typical clear-midday case); on an unclamped slot we divide the
-        factor out exactly as before. A site with NO inverter groups never clamps
-        (prereclamp == watts every slot) so its headline is bit-identical to the
-        pre-MED-1 divide-always path. When ``corrected_unclamped_watts`` is empty
-        (a v0.1 / older cached result) we cannot tell clamped from unclamped, so
-        we fall back to divide-always (SPEC §8).
+        re-clamp bit. On a clamped slot the SCALAR-FREE served value is
+        ``prereclamp[i] / factor`` (``corrected_unclamped == first-clamped *
+        factor``, engine.py:723-726 — the factor divides out EXACTLY), capped at
+        the physical ``slot_ceilings[i]`` so a day-ahead curve that clamps on its
+        own still contributes the ceiling (the typical clear-midday case). Keeping
+        the served ceiling instead (the pre-IRC-4 code) ballooned the headline by
+        the full factor headroom under a large intraday scalar (20.07.: +3.27 kWh
+        at scalar 2.355). On an unclamped slot we divide the factor out as before.
+        A site with NO inverter groups never clamps (prereclamp == watts every
+        slot) so its headline is bit-identical to the divide-always path. When
+        ``corrected_unclamped_watts`` or ``slot_ceilings`` is empty (a v0.1 /
+        older cached result) a clamped slot keeps the served ceiling unchanged
+        (SPEC §8).
         """
         return self._dayahead_today_kwh_over(
             now, result.slot_starts, result.total_watts,
-            result.corrected_unclamped_watts,
+            result.corrected_unclamped_watts, result.slot_ceilings,
         )
 
     def _dayahead_today_kwh_ac(
@@ -1457,15 +1852,60 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """AC-side analogue of :meth:`_dayahead_today_kwh` over the served AC curve.
 
         Identical day-ahead headline logic — strip the transient intraday factor,
-        but keep a CLAMPED slot's served ceiling (the factor never reached it) —
-        applied to ``ac_watts`` with the AC re-clamp detected from
-        ``ac_corrected_unclamped_watts``. See :meth:`_dayahead_today_kwh` for the
-        full MED-1 rationale; the only change is DC->AC on both series.
+        and on a CLAMPED slot cap the scalar-free value at the physical AC ceiling
+        (``ac_slot_ceilings``) — applied to ``ac_watts`` with the AC re-clamp
+        detected from ``ac_corrected_unclamped_watts``. See
+        :meth:`_dayahead_today_kwh` for the full rationale; the only change is
+        DC->AC on all three series.
         """
         return self._dayahead_today_kwh_over(
             now, result.slot_starts, result.ac_watts,
-            result.ac_corrected_unclamped_watts,
+            result.ac_corrected_unclamped_watts, result.ac_slot_ceilings,
         )
+
+    def _dayahead_slot_strips(
+        self,
+        now: datetime,
+        slot_starts,
+        watts_series,
+        prereclamp,
+        ceilings,
+    ):
+        """Yield ``(index, served_watts, scalar_free_watts)`` per local-today slot.
+
+        ``scalar_free_watts`` is the day-ahead-stable served value with the
+        transient intraday factor removed: divided out on an UNclamped slot; on a
+        re-clamped slot (``prereclamp[i] - served > 1e-6``) the pre-factor served
+        value ``prereclamp[i] / factor`` capped at the physical ``ceilings[i]``
+        (``corrected_unclamped == first-clamped * factor``, so ``prereclamp/factor``
+        is EXACTLY scalar-free; the cap keeps a day-ahead curve that clamps on its
+        own at the ceiling). When ``prereclamp`` or ``ceilings`` is unavailable
+        (older cached result) a clamped slot keeps the served ceiling unchanged
+        (legacy divide-else path). The per-slot factor is reconstructed by
+        :meth:`_intraday_factor_for_slot` so every strip shares ONE copy of the
+        factor math.
+        """
+        have_prereclamp = len(prereclamp) == len(watts_series)
+        have_ceilings = len(ceilings) == len(watts_series)
+        local_today = dt_util.as_local(now).date()
+        for i, (start, watts) in enumerate(
+            zip(slot_starts, watts_series, strict=False)
+        ):
+            start_utc = dt_util.as_utc(start)
+            if dt_util.as_local(start_utc).date() != local_today:
+                continue
+            factor = self._intraday_factor_for_slot(start_utc, now)
+            if have_prereclamp and prereclamp[i] - watts > 1e-6:
+                # Re-clamp bit: recover the scalar-free served value from the
+                # pre-re-clamp total and cap it at the physical ceiling. Without a
+                # ceiling series (older result) keep the served ceiling unchanged.
+                if have_ceilings:
+                    scalar_free = min(prereclamp[i] / factor, ceilings[i])
+                else:
+                    scalar_free = watts
+            else:
+                scalar_free = watts / factor
+            yield i, watts, scalar_free
 
     def _dayahead_today_kwh_over(
         self,
@@ -1473,35 +1913,52 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         slot_starts,
         watts_series,
         prereclamp,
+        ceilings,
     ) -> float | None:
         """Shared scalar-stripping headline roll-up for one served curve.
 
-        Sums today's local-day slots of ``watts_series``, dividing the transient
-        intraday factor back out on an UNclamped slot and keeping the served
-        ceiling on a clamped one (``prereclamp[i] - watts > 1e-6``). The per-slot
-        intraday factor is reconstructed by :meth:`_intraday_factor_for_slot` so
-        the DC and AC strips share ONE copy of the factor math. Returns None when
-        no slot falls on the local today.
+        Sums today's local-day slots of the scalar-free per-slot values from
+        :meth:`_dayahead_slot_strips`. Returns None when no slot falls on the
+        local today.
         """
-        have_prereclamp = len(prereclamp) == len(watts_series)
-        local_today = dt_util.as_local(now).date()
         total_wh = 0.0
         seen = False
-        for i, (start, watts) in enumerate(
-            zip(slot_starts, watts_series, strict=False)
+        for _i, _served, scalar_free in self._dayahead_slot_strips(
+            now, slot_starts, watts_series, prereclamp, ceilings
         ):
-            start_utc = dt_util.as_utc(start)
-            if dt_util.as_local(start_utc).date() != local_today:
+            seen = True
+            total_wh += scalar_free * 0.25
+        return round(total_wh / 1000.0, 3) if seen else None
+
+    def _dayahead_today_kwh_ac_p10(
+        self, result: ForecastResult, now: datetime
+    ) -> float | None:
+        """Today's AC P10 headline with the intraday scalar stripped ASYMMETRICALLY.
+
+        Under a large intraday scalar the served band scales up as one, so a spike
+        lifted the DAILY P10 above the end-of-day actual (FOR-7: p10 > Ist on 3/6
+        days). The P90 daily sensor keeps the scalar (an up-correction may widen
+        the optimistic tail); the P10 must not RISE from a high scalar. Per
+        local-today slot the served P10 band watts (``result.ac_p10_watts``) are
+        scaled by ``min(1, scalar_free/served)`` of the CENTRAL AC strip: a factor
+        > 1 divides out (band drops toward its day-ahead value), a factor <= 1
+        keeps the served (down-corrected) band. Returns None when no AC band was
+        issued this cycle (``ac_p10_watts`` empty) or no slot is today.
+        """
+        p10w = result.ac_p10_watts
+        if not p10w:
+            return None
+        total_wh = 0.0
+        seen = False
+        for i, served, scalar_free in self._dayahead_slot_strips(
+            now, result.slot_starts, result.ac_watts,
+            result.ac_corrected_unclamped_watts, result.ac_slot_ceilings,
+        ):
+            if i >= len(p10w):
                 continue
             seen = True
-            factor = self._intraday_factor_for_slot(start_utc, now)
-            # A clamped slot's served ``watts`` is the AC ceiling the factor never
-            # reached, so dividing it out understates the day-ahead value — keep
-            # the ceiling. Otherwise recover the pre-factor value by dividing.
-            if have_prereclamp and prereclamp[i] - watts > 1e-6:
-                total_wh += watts * 0.25
-            else:
-                total_wh += (watts / factor) * 0.25
+            ratio = scalar_free / served if served > 1e-9 else 1.0
+            total_wh += p10w[i] * min(1.0, ratio) * 0.25
         return round(total_wh / 1000.0, 3) if seen else None
 
     def _intraday_factor_for_slot(
@@ -1610,6 +2067,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         data[DATA_KEY_BAND_SOURCE] = getattr(
             self, "_band_source", BAND_SOURCE_LEARNED
         )
+        # Per-local-day band-provenance counts (SCT-4). Compact by construction
+        # (<= horizon days x 4 ints); only emitted when non-empty so a
+        # quantiles-off cycle stays byte-identical to the pre-fix payload.
+        band_by_day = getattr(self, "_band_source_by_day", None)
+        if band_by_day:
+            data[DATA_KEY_BAND_SOURCE_BY_DAY] = {
+                d: dict(counts) for d, counts in band_by_day.items()
+            }
         data[DATA_KEY_LEARNER_STATUS] = self._learner_status()
         data[DATA_KEY_BIAS_CELLS] = self._bias_cells_summary()
         data[DATA_KEY_DRIFT_MAE] = self._latest_drift_mae()
@@ -1651,6 +2116,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         quantile_curves_ac = self._quantile_curves_ac(result)
         if quantile_curves_ac:
             data[DATA_KEY_QUANTILE_CURVES_AC] = quantile_curves_ac
+        # Daily AC P10 headline with the intraday scalar stripped asymmetrically
+        # (FOR-7): the served band curve above keeps the scalar, but the P10 day
+        # aggregate must not balloon under a spike. None when no AC band issued.
+        data[DATA_KEY_ENERGY_TODAY_AC_P10] = self._dayahead_today_kwh_ac_p10(
+            result, now
+        )
         return data
 
     def _quantile_curves(self, result: ForecastResult) -> dict[str, dict[str, float]]:
@@ -1780,22 +2251,33 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
           ``n``       – trained days,
           ``applied`` – the factor actually served for that cell right now
                         (== ``theta`` once ``n >= RLS_MIN_SAMPLES``, else 1.0
-                        while the cell is still cold-starting and stays neutral).
+                        while the cell is still cold-starting and stays neutral),
+          ``clamped`` – True when the clamped theta sits AT the day-ahead band
+                        edge (``<= DAY_AHEAD_BIAS_MIN`` or ``>= DAY_AHEAD_BIAS_MAX``):
+                        the RLS wants to correct further than the band allows, an
+                        important diagnostic signal (e.g. clear|morning stuck at
+                        the 1.5 ceiling since bootstrap — SCT-4).
         Ratios are dimensionless (theta scales energy AND average power
         identically), so a dashboard can render them directly or multiply a
         per-part average-power baseline by ``applied`` to show the correction in
         W. ``day_part`` is the SOLAR-time part (v0.19), not a clock hour.
         """
+        from .const import DAY_AHEAD_BIAS_MAX, DAY_AHEAD_BIAS_MIN
+
         state = self._bias_state
         out: dict[str, dict[str, Any]] = {}
         for key, cell in sorted(state.cells.items()):
             cc, _, part = key.partition("|")
+            theta = cell.clamped_theta()
             out[key] = {
                 "cloud_class": cc,
                 "day_part": part,
-                "theta": round(cell.clamped_theta(), 4),
+                "theta": round(theta, 4),
                 "n": int(cell.n),
                 "applied": round(state.get_bias(cc, part), 4),
+                "clamped": (
+                    theta <= DAY_AHEAD_BIAS_MIN or theta >= DAY_AHEAD_BIAS_MAX
+                ),
             }
         return out
 
@@ -1923,6 +2405,22 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             out["raw"] = dict(raw)
         return out
 
+    def _effective_inverter_eta(self) -> float:
+        """The site DC->AC efficiency scalar to convert a DC curve to AC now.
+
+        The TRUSTED learned eta when the calibration has folded enough eligible
+        hours, else the datasheet DEFAULT_INVERTER_EFFICIENCY (a single site
+        scalar for the operator's identical inverters; per-group config overrides
+        are not reflected — observability only, IRC-5). Stored into each fresh
+        issued snapshot so the issued AC curve can be reconstructed without
+        hindsight, and reused as the fallback for legacy snapshots that lack it.
+        """
+        from .const import DEFAULT_INVERTER_EFFICIENCY
+
+        cal = getattr(self, "_inverter_cal_state", None) or InverterCalState()
+        eta = inverter_cal_mod.effective_eta(cal)
+        return float(eta) if eta is not None else DEFAULT_INVERTER_EFFICIENCY
+
     def _train_quantiles_day(self, day: date) -> None:
         """Sample one closed ``day`` into the quantile relative-error ring."""
         return _nightly.train_quantiles_day(self, day)
@@ -1935,20 +2433,96 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Per-bin quantile sample counts for diagnostics (SPEC §6/§10).
 
         Reports the enable flag plus, per (class x part) bin, the sample count
-        and whether the bin is trained (n >= QUANTILE_MIN_SAMPLES, i.e. emits a
-        real spread rather than a collapsed-to-P50 band). Bins only — never the
-        raw relative-error values or the operator's location.
+        ``n``, the ``days`` of evidence (distinct dated days + a lower bound on
+        the un-dated legacy samples' span) and whether the bin is ``trained``.
+        ``trained`` mirrors the SERVING gate exactly (QRC-4): a bin emits a real
+        spread only with BOTH ``n >= QUANTILE_MIN_SAMPLES`` AND
+        ``days >= QUANTILE_MIN_DAYS`` — the same ``ring_evidence`` the band reader
+        uses, so a "trained" bin here is a bin that actually produces a band. Bins
+        only — never the raw relative-error values or the operator's location.
         """
-        from .const import QUANTILE_MIN_SAMPLES
+        from .const import QUANTILE_MIN_DAYS, QUANTILE_MIN_SAMPLES
 
         bins: dict[str, dict[str, Any]] = {}
         for key, ring in self._quantile_state.bins.items():
-            n = len(ring)
-            bins[key] = {"n": n, "trained": n >= QUANTILE_MIN_SAMPLES}
+            n, days = quantiles_mod.ring_evidence(ring)
+            bins[key] = {
+                "n": n,
+                "days": days,
+                "trained": (
+                    n >= QUANTILE_MIN_SAMPLES and days >= QUANTILE_MIN_DAYS
+                ),
+            }
         return {
             "available": True,
             "enabled": self._quantiles_enabled,
             "bins": bins,
+        }
+
+    def store_stats(self) -> dict[str, Any]:
+        """Persistence fill-levels for diagnostics (SPEC-2).
+
+        Reports the issued-ring day count, the daily- and hourly-actuals day
+        counts, the rollback snapshot-ring fill (+ its capacity) and the on-disk
+        schema version. Read defensively via the store's public accessors so a
+        legacy store missing one degrades that field to ``None`` rather than the
+        whole block to ``available: False`` (the pre-fix status lie).
+        """
+        from .const import LEARNER_SNAPSHOT_RING
+
+        store = self._store
+
+        def _count(name: str) -> int | None:
+            getter = getattr(store, name, None)
+            if not callable(getter):
+                return None
+            try:
+                return len(getter())
+            except Exception:  # noqa: BLE001 -- diagnostics must not raise
+                return None
+
+        schema_getter = getattr(store, "schema_version", None)
+        schema = None
+        if callable(schema_getter):
+            try:
+                schema = int(schema_getter())
+            except Exception:  # noqa: BLE001 -- diagnostics must not raise
+                schema = None
+        return {
+            "available": True,
+            "issued_days": _count("issued_dates"),
+            "actuals_days": _count("actuals_dates"),
+            "hourly_actuals_days": _count("hourly_actuals_dates"),
+            "snapshot_ring": _count("get_snapshots"),
+            "snapshot_ring_capacity": LEARNER_SNAPSHOT_RING,
+            "schema_version": schema,
+        }
+
+    def learner_state_summary(self) -> dict[str, Any]:
+        """Persisted learner-state fill-levels for diagnostics (SPEC-2).
+
+        Coordinate-free by construction: the day-ahead bias CELL count, the
+        quantile BIN count, and the shademap CHANNEL count with each channel's
+        learned-bin count. Read off the coordinator's live in-memory states so it
+        never raises (a bare/__new__-built coordinator degrades to zeros).
+        """
+        bias = getattr(self, "_bias_state", None)
+        quant = getattr(self, "_quantile_state", None)
+        shade = getattr(self, "_shademap_state", None)
+        bias_cells = len(getattr(bias, "cells", {}) or {})
+        quantile_bins = len(getattr(quant, "bins", {}) or {})
+        channels = getattr(shade, "channels", {}) or {}
+        shademap_bins = {
+            chan: len(bins or {})
+            for chan, bins in channels.items()
+            if isinstance(chan, str)
+        }
+        return {
+            "available": True,
+            "bias_cells": bias_cells,
+            "quantile_bins": quantile_bins,
+            "shademap_channels": len(shademap_bins),
+            "shademap_bins": shademap_bins,
         }
 
     # ------------------------------------------------------------------
@@ -2037,10 +2611,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     async def async_rollback_learners(
         self, snapshots_back: int = 1
     ) -> dict[str, Any]:
-        """Restore BOTH learner states from the rollback ring (service backend).
+        """Restore the learner states from the rollback ring (service backend).
 
-        ``snapshots_back`` = 1 restores the newest snapshot, 2 the one before,
-        capped at the ring length. Enable flags and drift state are untouched:
+        Restores bias + shademap + quantile together (a legacy snapshot without a
+        quantile section restores an empty ring). ``snapshots_back`` = 1 restores
+        the newest snapshot, 2 the one before, capped at the ring length. Enable
+        flags and drift state are untouched:
         re-enabling after an auto-disable stays an explicit operator action in
         the options flow (SPEC §5).
         """
@@ -2051,8 +2627,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         snap = snaps[len(snaps) - back]
         self._bias_state = snap.bias
         self._shademap_state = snap.shademap
+        self._quantile_state = snap.quantile
         self._persist_bias_state()
         self._persist_shademap_state()
+        self._persist_quantile_state()
         _LOGGER.info(
             "Learner states rolled back %d snapshot(s) to %s", back, snap.taken_at
         )
