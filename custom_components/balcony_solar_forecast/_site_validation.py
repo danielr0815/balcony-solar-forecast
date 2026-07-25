@@ -127,8 +127,54 @@ def _validate_horizon(horizon) -> tuple:
                 raise SiteValidationError("bad_tau")
         if row.seasonal and (row.tau_leafed is None or row.tau_bare is None):
             raise SiteValidationError("seasonal_missing_tau")
+        _validate_tau_points(row)
 
     return tuple(sorted(horizon, key=lambda r: r.azimuth_deg))
+
+
+def _validate_tau_points(row) -> None:
+    """Range-check an inline elevation profile ``tau_points`` (ADR §2.5, v0.22).
+
+    Rules (additive; a row without ``tau_points`` is untouched, backward
+    compatible):
+      1. 1..12 ``(el, tau)`` pairs when present (``bad_tau_points``).
+      2. ``el`` strictly ascending; ``0 <= el <= elevation_deg`` of the row —
+         a knot above the edge is meaningless (above the edge tau is 1 by
+         definition) and rejected as ``tau_points_above_edge``.
+      3. ``0 <= tau <= 1`` per knot (``bad_tau``, the existing key).
+      4. ``tau_points_bare`` only with a ``seasonal`` row that also has
+         ``tau_points``, and then with the SAME length and identical el raster
+         (``seasonal_points_mismatch``); its taus obey rule 3 too.
+      NO monotonicity is enforced — real canopies have gaps (the measured
+      7-8 deg dip below 6-7 deg is legitimate).
+    """
+    pts = row.tau_points
+    if pts is None:
+        # A bare profile without a leafed one is a mismatch (nothing to blend).
+        if row.tau_points_bare is not None:
+            raise SiteValidationError("seasonal_points_mismatch")
+        return
+    if not 1 <= len(pts) <= 12:
+        raise SiteValidationError("bad_tau_points")
+    prev_el: float | None = None
+    for el, tau in pts:
+        if not 0.0 <= el <= row.elevation_deg:
+            raise SiteValidationError("tau_points_above_edge")
+        if prev_el is not None and not el > prev_el:
+            raise SiteValidationError("bad_tau_points")
+        prev_el = el
+        if not 0.0 <= tau <= 1.0:
+            raise SiteValidationError("bad_tau")
+
+    bare = row.tau_points_bare
+    if bare is not None:
+        if not row.seasonal or len(bare) != len(pts):
+            raise SiteValidationError("seasonal_points_mismatch")
+        for (el, _t), (bel, btau) in zip(pts, bare, strict=False):
+            if abs(el - bel) > 1e-9:
+                raise SiteValidationError("seasonal_points_mismatch")
+            if not 0.0 <= btau <= 1.0:
+                raise SiteValidationError("bad_tau")
 
 
 def _validate_shade_groups(site: SiteConfig) -> None:

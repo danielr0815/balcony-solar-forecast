@@ -118,7 +118,7 @@ def make_fake_horizon(wall_planes: set[str], wall_az: float, wall_from_el=90.0):
             return wall_from_el
         return 0.0
 
-    def fake_transmittance_at(plane, sun_az, doy):
+    def fake_transmittance_at(plane, sun_az, doy, sun_el=None):
         if plane.name in wall_planes and sun_az >= wall_az:
             return 0.0
         return 1.0

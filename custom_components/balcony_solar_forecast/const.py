@@ -107,6 +107,8 @@ CONF_HZ_TAU = "tau"  # transmittance 0..1 (static, or leafed default)
 CONF_HZ_SEASONAL = "seasonal"  # bool: this row's tau ramps with foliage
 CONF_HZ_TAU_LEAFED = "tau_leafed"  # summer transmittance when seasonal
 CONF_HZ_TAU_BARE = "tau_bare"  # winter transmittance when seasonal
+CONF_HZ_TAU_POINTS = "tau_points"  # optional [[el, tau], ...] tau(sun-el) profile below the edge (0.22)
+CONF_HZ_TAU_POINTS_BARE = "tau_points_bare"  # optional bare (winter) tau(el) profile, same el raster
 # inverter-group fields
 CONF_GROUP_NAME = "name"
 CONF_GROUP_PLANES = "plane_names"  # plane names feeding this AC clamp

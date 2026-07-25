@@ -37,6 +37,8 @@ from ..const import (
     CONF_HZ_TAU,
     CONF_HZ_TAU_BARE,
     CONF_HZ_TAU_LEAFED,
+    CONF_HZ_TAU_POINTS,
+    CONF_HZ_TAU_POINTS_BARE,
     CONF_LATITUDE,
     CONF_LONGITUDE,
     CONF_PLANE_NAME,
@@ -108,6 +110,16 @@ class HorizonRow:
     When ``seasonal`` is True the effective tau ramps between ``tau_bare``
     (winter/leafless) and ``tau_leafed`` (summer) via a cosine foliage ramp
     (SPEC §13); ``tau`` then holds the leafed value as a static fallback.
+
+    ``tau_points`` (optional, v0.22) is an inline elevation profile
+    ``((el, tau), ...)`` that makes the transmittance a piecewise-linear
+    function of the SUN elevation *below* the ``elevation_deg`` edge (above the
+    edge tau is 1 / the learned blend, unchanged). It is the leafed profile;
+    ``tau_points_bare`` (same el raster) optionally supplies the bare-winter
+    profile for a ``seasonal`` row (foliage blend per knot). A row without
+    ``tau_points`` keeps the scalar ``tau`` semantics exactly (backward
+    compatible). Both are tuples of tuples so the frozen row stays hashable and
+    the ``horizon.py`` ``lru_cache`` memos keep working.
     """
 
     azimuth_deg: float
@@ -116,6 +128,22 @@ class HorizonRow:
     seasonal: bool = False
     tau_leafed: float | None = None
     tau_bare: float | None = None
+    tau_points: tuple[tuple[float, float], ...] | None = None
+    tau_points_bare: tuple[tuple[float, float], ...] | None = None
+
+    @staticmethod
+    def _points_from(raw: object) -> tuple[tuple[float, float], ...] | None:
+        """Parse a raw ``[[el, tau], ...]`` list into a tuple of float pairs.
+
+        Returns None when the field is absent (``raw is None``) so an old config
+        round-trips without the key. A present list is coerced pair-by-pair;
+        malformed entries raise (caught at the validation boundary as
+        ``site_malformed``), an empty list becomes an empty tuple (rejected by
+        the range validator, which requires 1..12 pairs).
+        """
+        if raw is None:
+            return None
+        return tuple((float(p[0]), float(p[1])) for p in raw)
 
     @classmethod
     def from_dict(cls, d: dict) -> HorizonRow:
@@ -132,6 +160,8 @@ class HorizonRow:
                 None if d.get(CONF_HZ_TAU_BARE) is None
                 else float(d[CONF_HZ_TAU_BARE])
             ),
+            tau_points=cls._points_from(d.get(CONF_HZ_TAU_POINTS)),
+            tau_points_bare=cls._points_from(d.get(CONF_HZ_TAU_POINTS_BARE)),
         )
 
     def to_dict(self) -> dict:
@@ -146,6 +176,13 @@ class HorizonRow:
                 d[CONF_HZ_TAU_LEAFED] = self.tau_leafed
             if self.tau_bare is not None:
                 d[CONF_HZ_TAU_BARE] = self.tau_bare
+        # Only-when-set serialisation (mirrors seasonal / shade_group / ross):
+        # a row without an elevation profile round-trips to the exact pre-0.22
+        # dict — no new key — so old configs stay byte-identical.
+        if self.tau_points:
+            d[CONF_HZ_TAU_POINTS] = [[el, t] for el, t in self.tau_points]
+        if self.tau_points_bare:
+            d[CONF_HZ_TAU_POINTS_BARE] = [[el, t] for el, t in self.tau_points_bare]
         return d
 
 

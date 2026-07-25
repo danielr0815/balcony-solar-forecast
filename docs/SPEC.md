@@ -182,7 +182,17 @@ Pipeline (reine Funktionen über 15-min-Slots × N Ebenen, <50 ms/Lauf):
    Profil; Nahfeld je Ebene differenziert (Gebäudekante hart bei
    az ≈ 212° für S-Ebenen, Baumsektor az ~135–175° auf P3/P6 mit
    **saisonaler Transmittanz** ≈ 0,8 kahl / ≈ 0,45 belaubt, Kosinus-Rampe
-   April/November — **alle Startwerte messdatenbasiert, §13**). Unter Horizontlinie:
+   April/November — **alle Startwerte messdatenbasiert, §13**).
+   **Elevationsprofil τ(Sonnen-el) (v0.22, optional):** eine Horizontzeile kann
+   zusätzlich `tau_points: [[el, τ], …]` tragen — τ als stückweise lineare
+   Funktion der **Sonnen-Elevation** UNTERHALB der `elevation_deg`-Kante (über
+   der Kante gilt τ=1 wie bisher). Pro az-Nachbarzeile wird zuerst τ(el)
+   ausgewertet, dann in az interpoliert („resolve vor interpolate"); `sun_el`
+   wird von der Engine durchgereicht (fehlt es, gilt der oberste Knoten).
+   Saisonal blendet `tau_points_bare` (gleiches el-Raster) pro Knoten gegen das
+   belaubte Profil. Zeilen ohne `tau_points` sind byte-identisch zum Verhalten
+   vor v0.22. Das ersetzt die az-Rampe (Sonnenpfad-Projektion) durch die echte
+   physikalische Größe und beseitigt deren Saisondrift. Unter Horizontlinie:
    Beam+zirkumsolar × Transmittanz; Iso-Diffus × ebenen-eigenem SVF (behebt
    E4). **Halbtransparenter Horizont fürs Diffus (v0.5.x, audit #11):** der
    Himmel UNTER der Horizontlinie geht mit der (saisonal per `doy` aufgelösten)
@@ -737,6 +747,23 @@ Zeilen, 2024-07 … 2026-07) → **P90 je (Monat × Stunde)** ≈ Klartag-Profil
    Eine belaubte Baumreihe (τ 0,45) verdunkelt das Diffus im Sommer stärker als
    kahl (τ 0,8), also ist der Sommer-SVF der S-Module kleiner als im Winter;
    die harte Hauswand (τ0) dunkelt Beam UND Diffus weiterhin voll ab.
+   **Elevationsabhängige Baumkronen-Transmittanz (v0.22, `tau_points`):** die
+   Ost-Baumkronen (az ~52–89) sind halbtransparent mit elevationsabhängiger
+   τ_eff (gepoolte 4-Tage-Messung Juli 2026: el 5–6 ≈ 0,25 · 6–7 ≈ 0,45 ·
+   8–9 ≈ 0,85 · ≥9 ≈ 1). Statt diese Rampe als τ(az) entlang des Sonnenpfads
+   eines Ankertags zu kodieren (Saisondrift ~0,3°/Tag, Phantom-Beam im
+   Spätsommer), trägt die Zeile ein Inline-Profil `tau_points: [[el, τ], …]`
+   unterhalb der Kronen-Oberkante (`elevation_deg`). τ hängt damit an der
+   Sonnen-Elevation, nicht am Datum — driftfrei und je Baumsektor
+   wiederverwendbar. Das Profil wirkt auch im SVF: der blockierte Keil `[0, h]`
+   wird an den Profilknoten segmentiert und pro Segment mit seiner
+   Mittelpunkts-τ gewichtet (Band-Integral, geschlossene Form, O(360)
+   memoisiert). Der oberste Knoten wird per Konvention auf τ=1 an der Kante
+   gelegt, damit am Gate-Übergang keine Sprungstelle entsteht. Validierung:
+   1–12 Paare, el streng aufsteigend und in `[0, elevation_deg]`, τ∈[0,1], kein
+   Monotoniezwang; `tau_points_bare` (gleiches el-Raster) optional für den
+   saisonalen Winter (`bad_tau_points` / `tau_points_above_edge` /
+   `seasonal_points_mismatch`).
 5. **Verschattungsgruppen:** Weil Hang, Baumsektor und Hauswandkante
    Standort-Geometrie sind (Befunde 1–3, nicht modulspezifisch), können
    gleich verschattete Ebenen desselben Balkons über eine gemeinsame
