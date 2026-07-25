@@ -16,7 +16,7 @@ from __future__ import annotations
 DOMAIN = "balcony_solar_forecast"
 
 INTEGRATION_NAME = "Balcony Solar Forecast"
-INTEGRATION_VERSION = "0.23.0"
+INTEGRATION_VERSION = "0.23.1"
 
 # --- Update behaviour (SPEC §4: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
@@ -346,6 +346,39 @@ def _plane(name, az, tilt, wp, horizon, actual_entity):
     }
 
 
+# ===========================================================================
+# DEFAULT_SITE — REFERENCE EXAMPLE, *NOT* A MAINTAINED IMAGE OF THE OPERATOR'S
+# PLANT (labelled honestly in 0.23.1).
+# ---------------------------------------------------------------------------
+# What it IS: the shipped starting point of a fresh install and the anchor of
+# the geometry/engine tests — a complete, valid example of the site-object
+# STRUCTURE and FORMAT (planes, tilts, horizon rows with tau/seasonal rows,
+# inverter groups). Change it only with the tests in mind; several test
+# expectations are pinned to these numbers.
+#
+# What it is NOT: the operator's live configuration. Known, deliberate
+# deviations as of 0.23.1 (documented in docs/project-knowledge/05-…):
+#   * The seasonal screen az 135-175 sits on M4/M8 here (_south_horizon), but
+#     the shademap evaluation DISPROVED that placement: the real near-field
+#     screen shades M2/M3. Live no longer carries this screen at all; it uses
+#     per-module tree windows instead.
+#   * The hard wall edge is az 212 here (_wall_row(212.0)); live moved it to
+#     az 195 on 2026-07-16.
+#   * No `albedo` and no `bifacial_beam_gain` key => ALBEDO_DEFAULT 0.2 and
+#     BEAM_GAIN_DEFAULT 1.0 apply; live runs 0.15 and 1.25.
+#   * No `tau_points` / `tau_points_bare` / `diffuse_tau` rows at all, i.e.
+#     none of the 0.22 horizon refinements are exercised by the default.
+#
+# Consequences: never bootstrap a real install against this object. The
+# in-process action `balcony_solar_forecast.run_bootstrap` (SPEC §15.6) always
+# uses the LIVE config; `scripts/backfill.py` requires `--site` and gates this
+# object behind the explicit `--use-default-site` opt-in (SPEC §6).
+#
+# The substantive rework — a neutral, entity-free minimal default plus a real
+# onboarding flow, so a foreign install does not inherit this plant's geometry
+# and its eight hardcoded Hoymiles entity ids — is the subject of
+# docs/adr/ADR-0023-onboarding-standortkonfiguration.md and NOT this comment.
+# ===========================================================================
 DEFAULT_SITE = {
     CONF_LATITUDE: 48.547853,
     CONF_LONGITUDE: 12.187272,
@@ -723,6 +756,77 @@ ISSUE_SLOW_LEARNER_DISABLED = "slow_learner_auto_disabled"
 # cells were re-seeded against the new geometry (A4/FOR-4): the operator may want
 # to re-run the offline backfill bootstrap or reset_day_ahead_bias.
 ISSUE_CONFIG_CHANGED_BIAS_RESEED = "config_changed_bias_reseed"
+# --- Learning-visibility gates (0.23.1) ------------------------------------
+# Both make "the system is not learning" VISIBLE instead of log-only. The
+# failure they were written for: DEFAULT_SITE ships EIGHT of the reference
+# plant's Hoymiles entity ids, and _actuals discards the WHOLE day for BOTH
+# learners as soon as ONE configured channel is unusable. A foreign install
+# that adopts the shipped default therefore throws away every night forever
+# while status + entities look perfectly normal (cold_start, learner "active") —
+# the status-lie class the July forensics named as the core problem.
+#
+# 1) Raised at setup / after a config change when a configured plane
+#    `actual_entity` does not exist in this HA instance at all. Catches the
+#    copied reference site in seconds instead of after days of silence.
+ISSUE_ACTUAL_ENTITY_MISSING = "actual_entity_missing"
+# 2) Raised when the nightly training discarded the WHOLE day
+#    LEARNING_STALLED_STREAK_DAYS times in a row for a STRUCTURAL reason.
+#    ONE ISSUE ID PER REASON, deliberately: the three gates have three
+#    different remedies (fix the entity id / restart the stuck DTU / close the
+#    recorder gap), and a remedy passed as a translation PLACEHOLDER would ship
+#    English prose into the German repair card. Per-reason ids keep every word
+#    of the advice inside the translation file where it can be translated.
+ISSUE_LEARNING_STALLED_DEAD_CHANNEL = "learning_stalled_dead_channel"
+ISSUE_LEARNING_STALLED_FROZEN_CHANNEL = "learning_stalled_frozen_channel"
+ISSUE_LEARNING_STALLED_LOW_COVERAGE = "learning_stalled_low_coverage"
+
+# --- Nightly whole-day discard reasons (SPEC §5 label gates) ---------------
+# Which gate in `_actuals._actuals_from_stats` discarded the day. Persisted in
+# the store's learning-health section and surfaced in diagnostics + the
+# `learning_stalled` repair issue, because the remedies differ: a dead channel
+# is a wrong/removed entity id, a frozen channel is a stuck DTU/inverter sensor,
+# and low coverage is a recorder/LTS gap or a module dying mid-day.
+DROPOUT_REASON_DEAD_CHANNEL = "dead_channel"
+DROPOUT_REASON_FROZEN_CHANNEL = "frozen_channel"
+DROPOUT_REASON_LOW_COVERAGE = "low_coverage"
+DROPOUT_REASONS = (
+    DROPOUT_REASON_DEAD_CHANNEL,
+    DROPOUT_REASON_FROZEN_CHANNEL,
+    DROPOUT_REASON_LOW_COVERAGE,
+)
+# Which repair issue a persistent streak of each reason raises. Exhaustive over
+# DROPOUT_REASONS by construction (asserted in tests): a new gate that forgets
+# its issue id would otherwise stall learning invisibly again.
+ISSUE_LEARNING_STALLED_BY_REASON = {
+    DROPOUT_REASON_DEAD_CHANNEL: ISSUE_LEARNING_STALLED_DEAD_CHANNEL,
+    DROPOUT_REASON_FROZEN_CHANNEL: ISSUE_LEARNING_STALLED_FROZEN_CHANNEL,
+    DROPOUT_REASON_LOW_COVERAGE: ISSUE_LEARNING_STALLED_LOW_COVERAGE,
+}
+# Consecutive STRUCTURALLY discarded days before the repair issue fires. Only
+# days the integration actually issued a forecast for count (a fresh install's
+# catch-up sweep reaches back into pre-install history and must stay silent),
+# so this is a real "we ran, we measured, we still learned nothing" streak.
+# Five: long enough that a single recorder purge / mid-day outage self-heals,
+# short enough to beat the 14-day scoreboard window to the punch.
+LEARNING_STALLED_STREAK_DAYS = 5
+
+# The ``{slot}`` names each repair card's translation carries — the declared
+# contract between the code that builds the placeholder dict and the two shipped
+# translation files. Guarded from BOTH sides (tests): the translations must not
+# open a slot nobody fills, and the code must not fill a slot nobody opened.
+# An unfilled slot renders verbatim in the repair dialog ("{count} of
+# {configured} configured measurement channels ..."), i.e. the same "shows a raw
+# slug" failure as a missing translation key, one level deeper — and naming the
+# concrete plane, entity id and day count is the entire value of these cards.
+ISSUE_TRANSLATION_PLACEHOLDERS: dict[str, frozenset[str]] = {
+    ISSUE_FAST_LEARNER_DISABLED: frozenset(),
+    ISSUE_SLOW_LEARNER_DISABLED: frozenset(),
+    ISSUE_CONFIG_CHANGED_BIAS_RESEED: frozenset(),
+    ISSUE_ACTUAL_ENTITY_MISSING: frozenset({"count", "configured", "channels"}),
+    ISSUE_LEARNING_STALLED_DEAD_CHANNEL: frozenset({"days", "channels", "last_day"}),
+    ISSUE_LEARNING_STALLED_FROZEN_CHANNEL: frozenset({"days", "channels", "last_day"}),
+    ISSUE_LEARNING_STALLED_LOW_COVERAGE: frozenset({"days", "channels", "last_day"}),
+}
 
 
 # ===========================================================================
@@ -879,6 +983,16 @@ STORE_KEY_INVERTER_CAL_STATE = "inverter_cal_state"  # InverterCalState (learned
 # differs from the live config the bias cells are re-seeded (see
 # DAY_AHEAD_BIAS_RESEED_N) so learning re-accelerates against the new geometry.
 STORE_KEY_CONFIG_FINGERPRINT = "config_fingerprint"  # str | None
+# Learning-health bookkeeping (0.23.1): the nightly whole-day-discard streak and
+# its cause, so "nothing was learned for N days" survives a restart and can be
+# read remotely from the diagnostics dump instead of only from the log. Added
+# ADDITIVELY within v3 (NO version bump), exactly like STORE_KEY_INVERTER_CAL_STATE
+# and STORE_KEY_CONFIG_FINGERPRINT: _empty_state injects the neutral dict and a
+# store lacking the key reads back neutral, so every existing v3 store stays
+# byte-faithful. Shape: {discard_streak: int, last_discard_reason: str | None,
+# last_discard_modules: list[str], last_discard_day: iso | None,
+# last_accepted_day: iso | None}.
+STORE_KEY_LEARNING_HEALTH = "learning_health"
 
 # --- New diagnostic sensors / binary sensors (SPEC §8/§10) -----------------
 # Entity object_ids are unprefixed: the device slug already carries

@@ -60,6 +60,8 @@ v0.4 additions):
       "comparison_ring":     {iso_date: {comparison_name: daily_kwh}},
       # --- AC-side Phase 3 (added ADDITIVELY within v3; no version bump) ---
       "inverter_cal_state":  InverterCalState.to_dict(),            # learned eta_inv (neutral when absent)
+      # --- learning health (0.23.1, ADDITIVE within v3; no version bump) ---
+      "learning_health":     {"discard_streak": int, ...},          # nightly whole-day-discard streak
     }
 
 **Load is validate-and-clamp** (SPEC §5 "Store validate-and-clamp beim
@@ -97,6 +99,7 @@ from .const import (
     BOOTSTRAP_KEY_SITE_SIGNATURE,
     BOOTSTRAP_MAX_BIN_N,
     BOOTSTRAP_SCHEMA_VERSION,
+    DROPOUT_REASONS,
     HOURLY_ACTUALS_RING_DAYS,
     LEARNER_SNAPSHOT_RING,
     PAYLOAD_MIN_SAVE_INTERVAL_SECONDS,
@@ -115,6 +118,7 @@ from .const import (
     STORE_KEY_ISSUED_LOG,
     STORE_KEY_LAST_PAYLOAD,
     STORE_KEY_LEARNER_SNAPSHOTS,
+    STORE_KEY_LEARNING_HEALTH,
     STORE_KEY_QUANTILE_STATE,
     STORE_KEY_SCOREBOARD_STATE,
     STORE_KEY_SHADEMAP_STATE,
@@ -153,6 +157,47 @@ _LEGACY_SCHEMA = STORAGE_DATA_VERSION  # == 1
 # ===========================================================================
 
 
+def _empty_learning_health() -> dict[str, Any]:
+    """Neutral learning-health section (0.23.1): nothing discarded or accepted.
+
+    Deliberately NOT a ``core/types`` dataclass: it is bookkeeping about the
+    nightly IO, not a learner state, it never rides the rollback ring and it
+    never feeds the physics — a plain validated dict keeps the additive
+    v3 extension to one coercer and one getter/setter pair.
+    """
+    return {
+        "discard_streak": 0,
+        "last_discard_reason": None,
+        "last_discard_modules": [],
+        "last_discard_day": None,
+        "last_accepted_day": None,
+    }
+
+
+def _coerce_learning_health(raw: Any) -> dict[str, Any]:
+    """Validate-and-clamp the learning-health section (never raises).
+
+    A store written before 0.23.1 has no such key, so ``raw`` is ``None`` and
+    the neutral section is injected — every other section stays byte-faithful
+    (the same additive contract as ``inverter_cal_state`` /
+    ``config_fingerprint``). A corrupt section degrades to neutral rather than
+    crashing setup (SPEC §5).
+    """
+    out = _empty_learning_health()
+    if not isinstance(raw, dict):
+        return out
+    out["discard_streak"] = max(0, _safe_int(raw.get("discard_streak"), 0))
+    reason = raw.get("last_discard_reason")
+    out["last_discard_reason"] = reason if reason in DROPOUT_REASONS else None
+    modules = raw.get("last_discard_modules")
+    if isinstance(modules, list):
+        out["last_discard_modules"] = [m for m in modules if isinstance(m, str)]
+    for key in ("last_discard_day", "last_accepted_day"):
+        value = raw.get(key)
+        out[key] = value if isinstance(value, str) else None
+    return out
+
+
 def _empty_state() -> dict[str, Any]:
     """A well-formed, empty inner state at the CURRENT (v3) schema.
 
@@ -182,6 +227,9 @@ def _empty_state() -> dict[str, Any]:
         # records the live fingerprint (no re-seed) so an existing install is not
         # punished by the feature's introduction.
         STORE_KEY_CONFIG_FINGERPRINT: None,
+        # Nightly whole-day-discard streak + its cause (0.23.1). Neutral on a
+        # fresh / pre-feature store: nothing discarded, nothing accepted yet.
+        STORE_KEY_LEARNING_HEALTH: _empty_learning_health(),
         # --- v3 scoreboard + quantile sections (neutral / empty) ---
         STORE_KEY_QUANTILE_STATE: QuantileState().to_dict(),  # {bin_key: [relerr,...]}
         STORE_KEY_SCOREBOARD_STATE: ScoreboardState().to_dict(),  # {iso_date: DayScore}
@@ -406,6 +454,11 @@ def _validate_learner_sections(
     # the coordinator treats as "first start, just record").
     raw_fp = raw.get(STORE_KEY_CONFIG_FINGERPRINT)
     state[STORE_KEY_CONFIG_FINGERPRINT] = raw_fp if isinstance(raw_fp, str) else None
+    # Learning health (0.23.1): same additive contract — a store predating the
+    # key reads back the neutral section, a populated one round-trips unchanged.
+    state[STORE_KEY_LEARNING_HEALTH] = _coerce_learning_health(
+        raw.get(STORE_KEY_LEARNING_HEALTH)
+    )
 
 
 def _coerce_comparison_ring(raw: Any) -> dict[str, Any]:
@@ -807,6 +860,23 @@ class ForecastStore:
         self._data[STORE_KEY_CONFIG_FINGERPRINT] = (
             fingerprint if isinstance(fingerprint, str) else None
         )
+        self._schedule_save()
+
+    # ------------------------------------------------------------------
+    # Learning health: the nightly whole-day-discard streak (0.23.1)
+    # ------------------------------------------------------------------
+
+    def get_learning_health(self) -> dict[str, Any]:
+        """Return a COPY of the learning-health section (validated/neutral).
+
+        A copy so a caller cannot mutate persisted state without going through
+        :meth:`set_learning_health` (which is what schedules the write).
+        """
+        return _coerce_learning_health(self._data.get(STORE_KEY_LEARNING_HEALTH))
+
+    def set_learning_health(self, health: dict[str, Any]) -> None:
+        """Persist the learning-health section (schedules a bundled write)."""
+        self._data[STORE_KEY_LEARNING_HEALTH] = _coerce_learning_health(health)
         self._schedule_save()
 
     # ------------------------------------------------------------------

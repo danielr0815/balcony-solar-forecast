@@ -135,6 +135,22 @@
     "config_changed_bias_reseed": {
       "title": "Day-ahead bias re-seeded after config change",
       "description": "A forecast-relevant setting changed (a plane's azimuth/tilt/peak power/efficiency/Ross coefficient/horizon, the site albedo, or an inverter AC limit), so the day-ahead bias cells were re-opened to re-learn against the new geometry. For the fastest reset, re-run the offline backfill bootstrap or call the \"Reset day-ahead bias\" service. Dismiss this issue once done."
+    },
+    "actual_entity_missing": {
+      "title": "Measurement channels do not exist — nothing can be learned",
+      "description": "{count} of {configured} configured measurement channels point at entities that do not exist in this Home Assistant: {channels}.\n\nNightly training discards the whole day as soon as one channel is unusable, so the forecast will never learn from your plant until this is fixed.\n\nOpen the integration, choose \"Reconfigure\" and enter your own inverter sensors for these planes (or remove the plane). The shipped default site is a reference example and carries another installation's sensor ids."
+    },
+    "learning_stalled_dead_channel": {
+      "title": "Nothing learned for {days} days — a channel reports nothing",
+      "description": "Nightly training has discarded the whole day {days} times in a row, most recently {last_day}, because {channels} produced no usable statistics at all.\n\nCheck that the entity id is still correct, that the sensor is not permanently unavailable, and that it is not excluded from the recorder (a sensor without long-term statistics can never be training data).\n\nUntil a day is accepted again, neither the day-ahead bias nor the shade map improves. This issue clears itself as soon as one day passes the label gates."
+    },
+    "learning_stalled_frozen_channel": {
+      "title": "Nothing learned for {days} days — a channel is frozen",
+      "description": "Nightly training has discarded the whole day {days} times in a row, most recently {last_day}, because {channels} held one identical non-zero value hour after hour.\n\nThe inverter/DTU sensor is stuck: restart it or increase its polling timeout. The day is discarded on purpose — a frozen reading would teach the learners a value the plant never produced.\n\nThis issue clears itself as soon as one day passes the label gates."
+    },
+    "learning_stalled_low_coverage": {
+      "title": "Nothing learned for {days} days — measurements are incomplete",
+      "description": "Nightly training has discarded the whole day {days} times in a row, most recently {last_day}, because {channels} covered too little of the day's daylight hours.\n\nLook for a recorder / long-term-statistics gap, an aggressive database purge, or a module that drops out mid-day. A partial day is discarded on purpose: measured against the full site forecast it looks like a production deficit and would bias both learners downward.\n\nThis issue clears itself as soon as one day passes the label gates."
     }
   },
   "services": {

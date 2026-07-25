@@ -42,12 +42,17 @@ type BalconySolarConfigEntry = ConfigEntry[BalconySolarCoordinator]
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register the integration services (quality-scale ``action-setup``).
 
-    All six services (get_forecast / import_bootstrap / dump_shademap /
-    rollback_learners / install_dashboard / suggest_shade_groups) are registered
-    here — once, independent of any config entry — and stay registered, so an
-    automation firing while no entry is loaded gets a clear
+    All 10 services (get_forecast / import_bootstrap / run_bootstrap /
+    rollback_learners / reset_day_ahead_bias / dump_shademap / install_dashboard
+    / suggest_shade_groups / get_shade_profile / get_issued_forecast) are
+    registered here — once, independent of any config entry — and stay
+    registered, so an automation firing while no entry is loaded gets a clear
     ServiceValidationError instead of "Service not found". The handlers resolve
     their coordinators dynamically from ``hass.data``.
+
+    The count and the list are machine-guarded against drift by
+    ``tests/test_spec_integrity.py`` (this docstring said "six" for four
+    releases while services.yaml grew to ten).
 
     Also serves + auto-registers the two bundled Lovelace cards (the
     shade-profile diagram, SPEC §15, and the power-history card) so they appear
@@ -86,6 +91,15 @@ async def async_setup_entry(
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     coordinator.async_start_nightly_job()
+
+    # Learning visibility (0.23.1, SPEC §5): verify every configured
+    # ``actual_entity`` actually exists in this HA. The nightly gates discard
+    # the WHOLE day as soon as one channel is unusable, so an install that
+    # adopted the shipped reference site (which carries the reference plant's
+    # eight Hoymiles entity ids) would never learn anything while looking
+    # healthy. Deferred to EVENT_HOMEASSISTANT_STARTED during a cold boot so
+    # the inverter integration has had its turn.
+    coordinator.async_schedule_channel_health_check()
 
     # Catch up any nightly job missed while HA was down (idempotent/date-keyed).
     # Background task tied to the entry: tracked and auto-cancelled on unload.

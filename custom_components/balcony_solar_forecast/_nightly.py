@@ -132,6 +132,14 @@ async def async_nightly_job(coord, now: datetime | None = None) -> None:
                     coord._store.record_actuals(iso, daily)
                 if hourly:
                     coord._store.record_hourly_actuals(iso, hourly)
+                # Learning visibility (0.23.1): fold the outcome into the
+                # persisted discard streak so "we ran all week and learned
+                # NOTHING" becomes a repair issue naming the responsible gate,
+                # instead of a warning line per night. Only reached when a read
+                # actually happened — an already-recorded day was counted when
+                # it was first read, and a recorder IO failure (read is None) is
+                # not a label-gate verdict.
+                coord._record_actuals_outcome(day, accepted=bool(daily))
         try:
             await coord._train_and_guard(day)
         except Exception:  # pragma: no cover - never crash the scheduler

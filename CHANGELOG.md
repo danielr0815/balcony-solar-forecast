@@ -5,6 +5,136 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.1] - 2026-07-25
+
+A trap in the offline backfill CLI: `--site` was optional, and omitting it
+silently reconstructed the whole bootstrap against `const.DEFAULT_SITE` — the
+shipped **reference** site, not yours. That flag is now required, and the
+reference site is labelled honestly for what it is. The `run_bootstrap` action
+was never affected (it always uses the live config).
+
+The same reference site turned out to hide a second, quieter failure: it wires
+**eight** of the reference plant's inverter entity ids, and the nightly label
+gates discard the *whole* day for *both* learners as soon as one configured
+channel is unusable. An install that adopted that default therefore threw away
+every single night — forever — while the status entities kept reporting
+`cold_start` and the learners kept reporting "active". That is now visible.
+
+### Fixed
+
+- **"This install is not learning" is now a repair issue, not a log line.** Two
+  independent detectors (SPEC §5.1). At setup and after every config change,
+  every configured plane `actual_entity` is checked for existence in this Home
+  Assistant; a missing one raises `actual_entity_missing`, which **names the
+  plane and the entity id** and points at Reconfigure. And when the nightly
+  training discards the whole day `LEARNING_STALLED_STREAK_DAYS` times in a row,
+  one of three reason-specific issues fires —
+  `learning_stalled_dead_channel` / `_frozen_channel` / `_low_coverage` —
+  because the three gates need three different remedies (fix the entity id,
+  restart the stuck DTU, close the recorder gap). Both clear themselves: the
+  first when every channel resolves again, the second on the first accepted day.
+- **`scripts/backfill.py` no longer falls back to the reference site silently.**
+  Without `--site` the run now aborts **before the first network call** (exit
+  code 2) with a message naming the three real options: the in-process
+  `balcony_solar_forecast.run_bootstrap` action (no token, always the live
+  config — the recommended path), how to export your live site object to
+  `site.json`, and the new opt-in flag. Reconstructing against foreign geometry
+  is not detectable after the fact: `site_signature` only guards the *import*,
+  and only on lat/lon + plane names, so a wrong-site bootstrap trains every
+  learner on a stranger's plant while looking healthy.
+
+### Changed
+
+- **No false alarm during a new install's run-in phase.** A brand-new plant
+  legitimately has no complete long-term-statistics days yet, and the nightly
+  catch-up window reaches back before the installation existed. A discarded day
+  therefore only counts toward the streak when the integration actually *issued*
+  a forecast for that day — proof that we were running and the channels should
+  have logged. The streak is also idempotent per day, since a discarded day is
+  never recorded and is re-read every night. Both sides are covered by tests:
+  the fresh install stays silent, the permanently dead channel does not.
+- **The discard streak survives restarts** in a new `learning_health` store
+  section (streak, last cause, channels responsible, last accepted day) — added
+  **additively inside schema v3, no version bump**, following the same pattern
+  as `inverter_cal_state` and `config_fingerprint`: a store written before
+  0.23.1 reads back neutral and every other section stays byte-faithful.
+- **One repair card per root cause.** A copied reference site would otherwise
+  collect two cards for one fix: `actual_entity_missing` at setup, and a week
+  later `learning_stalled_dead_channel` on top of it. While the missing-channel
+  card stands, the streak keeps counting and stays visible in the diagnostics
+  dump but raises no card of its own; the suppression lifts as soon as the
+  channels resolve, so a stall with a genuinely different cause still surfaces.
+- **The diagnostics dump answers "why is nothing being learned?"** through the
+  accessors it already used, not a third code path:
+  `store.learning_health` (cause, modules, streak, threshold, last accepted day)
+  and `learners.state.actual_channels` (configured / missing channels, AC-meter
+  status). Zero learned cells reads very differently once you can see that the
+  input channels do not exist.
+- **The optional AC meter stays diagnostics-only, deliberately.**
+  `ac_actual_entity` is self-gating and never blocks learning, so a missing one
+  is reported in the dump and logged once rather than raising a second repair
+  card that would dilute the one that actually requires action.
+- **New `--use-default-site` opt-in** makes the old behaviour explicit for demo,
+  test and CI runs, and logs a loud WARNING that the reference site is not the
+  operator's plant. `--site` wins if both are given.
+- **`const.DEFAULT_SITE` is labelled honestly.** A comment block at the
+  definition states that it is a structure/format example and *not* a maintained
+  image of the operator's plant, and names the known deviations: the seasonal
+  screen az 135–175 sits on M4/M8 there although the shademap evaluation showed
+  it actually shades M2/M3; the wall edge is az 212 instead of the live az 195;
+  and there are no `albedo` / `bifacial_beam_gain` / `tau_points` /
+  `diffuse_tau` keys (so albedo 0.2 and beam gain 1.0 apply). **No geometry was
+  changed** — the numbers stay the test anchor; the substantive rework of the
+  shipped default belongs to the onboarding ADR
+  (`docs/adr/ADR-0023-onboarding-standortkonfiguration.md`).
+
+### Docs
+
+- **New SPEC §5.1** documents the label gates' *visibility*: both detectors, the
+  two repair-issue families, the run-in-phase rule as a binding requirement, the
+  diagnostics fields, and why the channel check does **not** hang off the config
+  fingerprint (that reconcile runs before the first refresh — at a cold boot,
+  usually before the inverter integration has registered its entities — and
+  `actual_entity` is deliberately not a fingerprint field). §8, §14.4 and the §0
+  signpost carry the matching entries.
+- **Three corrections found in the 0.23.1 SPEC review.** §5 described the
+  nightly catch-up as "`NIGHTLY_CATCHUP_MAX_DAYS` back from yesterday"; it is
+  really a window *ending yesterday* that starts the day after the newest
+  recorded actuals day, capped at that constant — which is also why a fresh
+  install's sweep necessarily reaches into pre-install history. §8 named the
+  diagnostics key `snapshot_ring`/`_capacity`; it is `snapshot_ring_capacity`.
+  And `async_setup`'s docstring promised "All six services" while
+  `services.yaml` had grown to ten.
+- **`tests/test_spec_integrity.py` gained three guards** so those three cannot
+  recur: every `ISSUE_*` id in `const.py` must be named in the SPEC, must carry
+  an `issues` translation in **both** shipped languages (title *and*
+  description — an untranslated repair card renders as a raw slug), and
+  `async_setup`'s docstring must name every service in `services.yaml` and state
+  their count.
+- **SPEC §6** now fixes the site semantics of a bootstrap run (action = standard
+  path, `--site` mandatory, `--use-default-site` opt-in); §15.6 cross-references
+  it. `docs/BACKFILL.md` follows with a rewritten "Your site (`--site`,
+  required)" section, an updated flag table and a troubleshooting row.
+- **SPEC currency pass (0.23.x).** SPEC §0 gained an as-built signpost that
+  routes each topic to its authoritative section, and the corrections around
+  action resolution, bias fallback and map provenance landed. New
+  `tests/test_spec_integrity.py` guards the contract mechanically: every
+  `SPEC §x.y` citation in the tree must resolve to a real heading (section
+  numbers stay immutable), every action and every public site-config field must
+  be named in the SPEC, and every top-level section must be reachable from the
+  §0 signpost. `CLAUDE.md`, `CONTRIBUTING.md`, the PR template and the CI
+  workflow carry the matching reminder.
+- **ADR-0023 (onboarding / site configuration) is now in the repository**
+  (`docs/adr/ADR-0023-onboarding-standortkonfiguration.md`, status *Proposed*):
+  the analysis and staged plan behind the honest `DEFAULT_SITE` label — why the
+  shipped reference site blocks a general release (foreign geometry *and* eight
+  hardcoded entity ids that starve every learner), and the MVP/v1/expansion cut.
+  `const.py`, SPEC §6 and this file point at it, so the guard below applies.
+- **`tests/test_spec_integrity.py` gained a fifth guard:** every repo-relative
+  `docs/…` path named in a tracked markdown file, in `custom_components/` or in
+  `tests/` must resolve to a **tracked** file — a document that exists only on
+  the author's disk is a dangling link in every fresh clone.
+
 ## [0.23.0] - 2026-07-25
 
 The 320-day re-bootstrap is now a Home Assistant action —

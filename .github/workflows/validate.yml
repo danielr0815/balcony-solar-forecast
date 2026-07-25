@@ -31,6 +31,41 @@ jobs:
       - name: Hassfest validation
         uses: "home-assistant/actions/hassfest@master"
 
+  # Advisory ONLY — never a gate. docs/SPEC.md is the project's contract
+  # (SPEC §0: every behavioural change updates it in the SAME PR), but "was the
+  # SPEC edit actually needed?" is a judgement call no workflow can make. So
+  # this job prints a GitHub warning annotation and stops there: no failing
+  # status, no required check. The hard, machine-checkable half of the contract
+  # (citations resolve, services/config fields documented, signpost complete)
+  # lives in tests/test_spec_integrity.py and runs inside the normal `tests`
+  # job — that one DOES fail the build.
+  spec-reminder:
+    if: github.event_name == 'pull_request'
+    runs-on: "ubuntu-latest"
+    name: SPEC reminder (advisory)
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: "actions/checkout@v4"
+        with:
+          fetch-depth: 0
+
+      - name: Warn when the integration changed without a SPEC update
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" || true)"
+          code="$(printf '%s\n' "$changed" | grep -c '^custom_components/' || true)"
+          spec="$(printf '%s\n' "$changed" | grep -c '^docs/SPEC\.md$' || true)"
+          if [ "$code" -gt 0 ] && [ "$spec" -eq 0 ]; then
+            echo "::warning title=SPEC not updated::This PR changes custom_components/ ($code file(s)) but not docs/SPEC.md. Pull the SPEC along in the same PR (SPEC §0 change rule), or say in the PR description why no contract change is needed (pure refactor, test-only, tooling)."
+          else
+            echo "SPEC reminder: nothing to flag (code files changed: $code, SPEC changed: $spec)."
+          fi
+
   lint:
     runs-on: "ubuntu-latest"
     name: Lint (ruff)
@@ -104,8 +139,11 @@ jobs:
       # prints a visible per-file terminal summary (skip-covered trims the
       # fully-covered files) but there is deliberately NO `--cov-fail-under`,
       # so coverage never fails the build — it informs, it does not block.
+      # No `-q` here: `pyproject.toml` already sets `addopts = "-q"`, and a
+      # second one escalates to `-qq`, which drops the `N passed, M skipped`
+      # line from the log — the one line a CI run exists to show.
       - name: Run test suite
         run: >-
-          python -m pytest tests -q -p no:homeassistant
+          python -m pytest tests -p no:homeassistant
           --cov=custom_components/balcony_solar_forecast
           --cov-report=term-missing:skip-covered

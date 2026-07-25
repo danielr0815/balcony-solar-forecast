@@ -35,15 +35,44 @@ is written against, and comments throughout the code cite it (`SPEC §4`,
 `§9/§10`, …).
 
 - Any feature or behavioural change **must update the SPEC in the same PR**.
-  New behaviour is appended as a versioned addendum section — follow the
-  existing **§14 (v0.4)** / **§15 (v0.5)** pattern: a new numbered section that
-  documents the entities, defaults, gating and tunables the release introduces.
+- **File it by topic, not by release.** New behaviour becomes a subsection at
+  the end of the section that owns the topic (see the signpost table in **§0**),
+  or a new top-level section with a thematic title. The historical
+  **§14 (v0.4)** / **§15 (v0.5)** addendum sections are exactly the pattern §0
+  replaced — do not grow new ones.
+- **Section numbers are immutable.** Never renumber, delete or re-use an
+  existing number; the code cites them. Retitling and rewriting the content is
+  fine.
 - When you change behaviour that an existing section describes, update that
-  section (or add the addendum) so the SPEC and the code never disagree.
+  section so the SPEC and the code never disagree.
 - Keep the **`SPEC §…` citations in code comments accurate**. If you move logic
-  a comment points at a section, or you renumber/retitle a section, fix the
-  citations. The comments are load-bearing — they record the incident, finding
-  or review that motivated the logic.
+  a comment points at a section, fix the citation. The comments are
+  load-bearing — they record the incident, finding or review that motivated the
+  logic.
+
+### Keeping the SPEC current — the mechanics
+
+Discipline alone let the SPEC drift once already, so three mechanisms back it
+up now:
+
+- **[`tests/test_spec_integrity.py`](tests/test_spec_integrity.py)** (runs in
+  the normal suite, **fails the build**): every `SPEC §…` citation under
+  `custom_components/` and `tests/` must resolve to a real heading; every
+  service in `services.yaml` and every public `site` config field in `const.py`
+  must be named in the SPEC; every top-level section must be covered by the §0
+  signpost. When it fails, the message names the exact citation site or field.
+- **The `spec-reminder` CI job** (advisory, `continue-on-error`, never a gate):
+  on a PR that touches `custom_components/` without touching `docs/SPEC.md`, it
+  prints a warning annotation. Pull the SPEC along, or say in the PR why the
+  contract did not change.
+- **[`.github/pull_request_template.md`](.github/pull_request_template.md)** and
+  **[`CLAUDE.md`](CLAUDE.md)** carry the same checklist for humans and for
+  AI-assisted sessions.
+
+New operator-visible config fields have a home: the **§4.1** schema table
+(field name, meaning, range/default, and whether it enters the config
+fingerprint). Add the row in the same PR — guard (c) above checks the field
+name is there at all.
 
 ## 3. Dev environment
 
@@ -104,8 +133,11 @@ tests) and importing the plugin pulls the POSIX-only `fcntl` (unimportable on
 Windows). So the plugin only ever breaks a suite that never uses it. Disabling
 it runs the **full** meaningful suite identically on Linux, macOS, WSL and
 Windows (`pytest-asyncio`, installed via PHACC, still drives the async tests).
-This is exactly what `make test` and the CI `tests` job do — CI runs
-`python -m pytest tests -q -p no:homeassistant`.
+This is what `make test` and the CI `tests` job do — CI runs the same
+`python -m pytest tests -p no:homeassistant`, plus `--cov` flags for a
+report-only coverage summary. Do **not** add a `-q`: `pyproject.toml` already
+sets `addopts = "-q"`, and a second one escalates to `-qq`, which drops the
+`N passed, M skipped` line.
 
 ## 5. Versioning & releases
 
