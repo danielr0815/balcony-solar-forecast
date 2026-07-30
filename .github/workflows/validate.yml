@@ -13,10 +13,21 @@ jobs:
     name: HACS Validation
     steps:
       - name: Checkout
-        uses: "actions/checkout@v4"
+        uses: "actions/checkout@v7"
+
+      # HACS validation can only run against PUBLIC repos: the action
+      # downloads hacs.json/manifest.json from raw.githubusercontent.com
+      # without auth, which 404s while the repo is private. Skip then; the
+      # job revives automatically once the repo is public again.
+      - name: Check repo visibility
+        id: visibility
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "private=$(gh repo view --json isPrivate --jq .isPrivate)" >> "$GITHUB_OUTPUT"
 
       - name: HACS validation
-        uses: "hacs/action@main"
+        if: steps.visibility.outputs.private != 'true'
+        uses: "hacs/action@22.5.0"
         with:
           category: "integration"
           ignore: "brands"
@@ -26,18 +37,22 @@ jobs:
     name: Hassfest Validation
     steps:
       - name: Checkout
-        uses: "actions/checkout@v4"
+        uses: "actions/checkout@v7"
 
+      # hassfest has no usable release tags (only an ancient 1.0.0), so this
+      # pins a master SHA instead of floating on @master. Bump manually:
+      # https://github.com/home-assistant/actions/commits/master
       - name: Hassfest validation
-        uses: "home-assistant/actions/hassfest@master"
+        uses: "home-assistant/actions/hassfest@e3fb68ebda13d88a0d695082f471ba2c83d025fb"
 
   # Advisory ONLY — never a gate. docs/SPEC.md is the project's contract
   # (SPEC §1.3: every behavioural change updates it in the SAME PR), but "was the
   # SPEC edit actually needed?" is a judgement call no workflow can make. So
   # this job prints a GitHub warning annotation and stops there: no failing
   # status, no required check. The hard, machine-checkable half of the contract
-  # (citations resolve, services/config fields documented, signpost complete)
-  # lives in tests/test_spec_integrity.py and runs inside the normal `tests`
+  # (citations resolve, services/config fields documented, signpost complete,
+  # version stamp matches INTEGRATION_VERSION) lives in
+  # tests/test_spec_integrity.py and runs inside the normal `tests`
   # job — that one DOES fail the build.
   spec-reminder:
     if: github.event_name == 'pull_request'
@@ -48,7 +63,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: "actions/checkout@v4"
+        uses: "actions/checkout@v7"
         with:
           fetch-depth: 0
 
@@ -68,28 +83,35 @@ jobs:
 
   lint:
     runs-on: "ubuntu-latest"
-    name: Lint (ruff)
+    name: Lint (ruff + mypy)
     steps:
       - name: Checkout
-        uses: "actions/checkout@v4"
+        uses: "actions/checkout@v7"
 
-      - name: Set up Python
-        uses: "actions/setup-python@v5"
+      - name: Set up uv
+        uses: "astral-sh/setup-uv@v9.0.0"
         with:
-          python-version: "3.13"
+          enable-cache: true
 
-      - name: Install ruff
-        run: pip install ruff
+      # uv reads .python-version (3.14) and installs the interpreter itself;
+      # uv.lock is the single source of truth for every tool version.
+      - name: Install dev dependencies
+        run: uv sync --group dev
 
-      # Lint only (no `ruff format --check`): the code is intentionally
-      # hand-formatted (aligned call args, deliberate line breaks), so the
-      # project lints but does not enforce the ruff formatter.
+      # Lint only (deliberately NO `ruff format --check`): the code is
+      # intentionally hand-formatted (aligned call args, deliberate line
+      # breaks, E501 off), so the project lints but never formats.
       - name: Ruff check
-        run: ruff check .
+        run: uv run ruff check .
+
+      # Baseline only: errors are reported for the pure physics/learning
+      # core ([tool.mypy] in pyproject.toml explains the scope).
+      - name: Type check (mypy)
+        run: uv run mypy
 
       - name: Version consistency (manifest == pyproject == const)
         run: |
-          python - <<'PY'
+          uv run python - <<'PY'
           import json, re, pathlib
           mf = json.loads(pathlib.Path(
               "custom_components/balcony_solar_forecast/manifest.json"
@@ -115,17 +137,15 @@ jobs:
     name: Tests (pytest)
     steps:
       - name: Checkout
-        uses: "actions/checkout@v4"
+        uses: "actions/checkout@v7"
 
-      - name: Set up Python
-        uses: "actions/setup-python@v5"
+      - name: Set up uv
+        uses: "astral-sh/setup-uv@v9.0.0"
         with:
-          python-version: "3.13"
+          enable-cache: true
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install homeassistant pytest pytest-homeassistant-custom-component pytest-cov
+      - name: Install dev dependencies
+        run: uv sync --group dev
 
       # Disable the pytest-homeassistant-custom-component plugin (`-p
       # no:homeassistant`). The suite is unit-style: every HA-layer test runs
@@ -135,15 +155,45 @@ jobs:
       # Python 3.12+ for the sync tests -- so the plugin only breaks a suite that
       # never uses its fixtures. Disabling it runs the full meaningful suite
       # (pytest-asyncio, installed via PHACC, still drives the async tests).
+      # Coverage source comes from [tool.coverage.run] in pyproject.toml.
       # Coverage is REPORT-ONLY, never a gate: `--cov-report=term-missing`
       # prints a visible per-file terminal summary (skip-covered trims the
       # fully-covered files) but there is deliberately NO `--cov-fail-under`,
       # so coverage never fails the build — it informs, it does not block.
+      # The XML report is kept as a build artifact (no external service).
       # No `-q` here: `pyproject.toml` already sets `addopts = "-q"`, and a
       # second one escalates to `-qq`, which drops the `N passed, M skipped`
       # line from the log — the one line a CI run exists to show.
       - name: Run test suite
         run: >-
-          python -m pytest tests -p no:homeassistant
-          --cov=custom_components/balcony_solar_forecast
-          --cov-report=term-missing:skip-covered
+          uv run pytest tests -p no:homeassistant
+          --cov --cov-report=term-missing:skip-covered
+          --cov-report=xml
+
+      - name: Upload coverage report
+        uses: "actions/upload-artifact@v7"
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  devcontainer:
+    runs-on: "ubuntu-latest"
+    name: Devcontainer (build + full suite)
+    steps:
+      - name: Checkout
+        uses: "actions/checkout@v7"
+
+      # Builds .devcontainer/devcontainer.json (incl. postCreateCommand =
+      # uv sync) and runs the full check battery INSIDE the container, so a
+      # broken devcontainer fails immediately. The lint/tests jobs give
+      # faster feedback via setup-uv; this job proves the container itself.
+      # No cacheFrom: the devcontainer is image-based (no Dockerfile), the
+      # only layers are the pulled base image plus the node feature.
+      - name: Build and test in devcontainer
+        uses: "devcontainers/ci@v0.3.1900000450"
+        with:
+          runCmd: >-
+            uv run pytest tests -p no:homeassistant
+            && uv run ruff check .
+            && uv run mypy
