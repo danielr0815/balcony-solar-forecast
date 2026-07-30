@@ -177,7 +177,9 @@ ARBEITSREGELN (hart)
    Der Release-Guard vergleicht zusätzlich den Git-Tag; HACS liefert den Zipball
    des Tags aus, ein Bump nach dem Tag wirkt also nicht.
 6. TESTS LAUFEN MIT -p no:homeassistant:
-   .\.venv\Scripts\python.exe -m pytest tests -p no:homeassistant
+   uv run pytest tests -p no:homeassistant
+   (Setup: `uv sync --group dev`; vor dem Dev-Setup-2026 vom 2026-07-30 —
+   siehe Update-Kasten in 07 — hieß das `.\.venv\Scripts\python.exe -m pytest …`.)
    Das pytest-Plugin von pytest-homeassistant-custom-component zieht POSIX-only
    fcntl (auf Windows nicht importierbar) und autouse-Fixtures, die unter
    Python >= 3.12 werfen; kein Test benutzt es. pyproject.toml enthält bereits
@@ -256,8 +258,9 @@ TYPISCHE FALLSTRICKE
 - Beim Erzeugen von Config-YAML/JSON Floats NIE runden (Pythons float-repr ist
   round-trip-exakt) — sonst verschiebst du still Geometrie und kippst den
   Fingerprint.
-- Windows/PowerShell: kein && / ||-Verketten (A; if ($?) { B }), immer
-  .\.venv\Scripts\python.exe verwenden.
+- Windows/PowerShell: kein && / ||-Verketten (A; if ($?) { B }), Kommandos
+  immer als `uv run …` aufrufen (uv gehört seit 2026-07-30 zum Setup, siehe
+  Update-Kasten in 07).
 - Nach einer prognoserelevanten Config-Änderung sind 3-7 Tage Einschwingen
   normal (die Bias-Zellen lernen gegen die verschobene RAW-Kurve zurück). Das
   ist keine Regression und kein Grund zurückzurollen. Reihenfolge immer:

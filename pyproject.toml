@@ -1,17 +1,19 @@
 # This is a Home Assistant CUSTOM COMPONENT, not a PyPI package — it is loaded
 # by Home Assistant from custom_components/, not `pip install`ed. There is
 # deliberately no [build-system]; this file carries project metadata, the dev
-# dependency group, and the tool configuration (ruff, pytest).
+# dependency group, and the tool configuration (ruff, pytest, coverage, mypy, uv).
 #
 # Runtime version source of truth: custom_components/balcony_solar_forecast/
-# manifest.json. The value below is metadata only.
+# manifest.json. The value below is metadata only — CI enforces that
+# manifest.json == pyproject.toml == const.py INTEGRATION_VERSION (3-way).
 
 [project]
 name = "balcony-solar-forecast"
 version = "0.23.2"
 description = "Self-learning multi-plane PV forecast for Home Assistant: raw-irradiance transposition, per-channel shade learning, quantile bands and a skill scoreboard."
 readme = "README.md"
-requires-python = ">=3.13"
+# Floor matches homeassistant's own requirement (HA >= 2026.3 needs 3.14.2+).
+requires-python = ">=3.14.2"
 license = "MIT"
 authors = [{ name = "Daniel R." }]
 keywords = ["home-assistant", "hacs", "solar", "pv", "forecast", "energy"]
@@ -20,28 +22,45 @@ keywords = ["home-assistant", "hacs", "solar", "pv", "forecast", "energy"]
 Homepage = "https://github.com/danielr0815/balcony-solar-forecast"
 Documentation = "https://github.com/danielr0815/balcony-solar-forecast/blob/main/docs/SPEC.md"
 Issues = "https://github.com/danielr0815/balcony-solar-forecast/issues"
+Changelog = "https://github.com/danielr0815/balcony-solar-forecast/blob/main/CHANGELOG.md"
 
-# Dev tooling (PEP 735 dependency group), identical to the battery-manager-ha
-# setup. Install with `pip install --group dev` (pip >= 25.1), or run
-# `make install` / scripts/setup-env.{sh,ps1} which create the venv for you.
-# `homeassistant` is unpinned; `pytest-homeassistant-custom-component` pins the
-# matching HA version. There are no RUNTIME dependencies (manifest requirements
-# is []); these packages only run the tests + linter.
+# Dev tooling (PEP 735 dependency group). Install with `uv sync` (creates
+# .venv from uv.lock — the single source of truth, also used by CI), or with
+# `pip install --group dev` (pip >= 25.1). See CONTRIBUTING.md.
+#
+# Version policy: `>=` states the minimum requirement; the EXACT versions
+# live in uv.lock (reproducibility guarantee — updates flow via Dependabot
+# or `uv lock --upgrade`, reviewed in a PR).
+# EXCEPTION: pytest-homeassistant-custom-component stays fully pinned —
+# phacc itself pins homeassistant (and pytest/pytest-cov) exactly, so it
+# carries the effective HA coupling; the next release (0.13.349) would
+# already pull the 2026.8.0b0 beta. phacc therefore leads the HA version.
 [dependency-groups]
 dev = [
-    "homeassistant",
-    "pytest",
-    "pytest-homeassistant-custom-component",
-    "ruff",
+    "homeassistant>=2026.7.4",
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+    "pytest-homeassistant-custom-component==0.13.348",
+    "ruff>=0.16.0",
+    "mypy>=2.3.0",
 ]
+
+[tool.uv]
+# Not a PyPI package (no [build-system] above): uv only manages the dev
+# environment, it must not try to build/install the project itself.
+package = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q"
+# Make `custom_components` importable regardless of how pytest is invoked
+# (console script, `python -m pytest`, IDE) — previously this worked only
+# because `python -m pytest` puts the CWD on sys.path.
+pythonpath = ["."]
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py314"
 line-length = 88
 extend-exclude = [".venv"]
 
@@ -62,3 +81,51 @@ ignore = ["E501"]
 # redefinition of the imported name (F811). This is the standard pytest pattern,
 # not a real redefinition, so F811 is suppressed for the test tree.
 "tests/**" = ["F811"]
+
+[tool.coverage.run]
+# Measure only the integration itself; tests/, scripts/ and the bundled JS
+# cards are not meaningful coverage targets.
+source = ["custom_components/balcony_solar_forecast"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+# Type checking is a BASELINE, not a gate: errors are only reported for the
+# pure physics/learning core (no Home Assistant imports). `follow_imports =
+# "silent"` still analyses the HA layer for types (core imports from const.py)
+# but suppresses its errors; widen the scope before tightening any rule.
+# Run: `mypy` (via `uv run mypy`).
+[tool.mypy]
+python_version = "3.14"
+files = ["custom_components/balcony_solar_forecast/core"]
+mypy_path = "custom_components/balcony_solar_forecast"
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+
+# HONEST BASELINE (2026-07-30, mypy 2.3.0): the eight modules below carry
+# together 45 known type errors (dominated by [unreachable] from runtime
+# validation mypy cannot narrow, plus arg-type/assignment in the dataclass
+# builders). They are EXCLUDED from reporting instead of being churned with
+# `type: ignore` comments — remove a module from this list as it is brought
+# clean. The remaining nine core modules (engine, clearsky, horizon,
+# transpose, solpos, electrical, inverter_cal, shademap, __init__) are checked
+# with all warn flags above and must STAY clean — that is the gate.
+[[tool.mypy.overrides]]
+module = [
+    "balcony_solar_forecast.core.types",
+    "balcony_solar_forecast.core.bias",
+    "balcony_solar_forecast.core.quantiles",
+    "balcony_solar_forecast.core.scoreboard",
+    "balcony_solar_forecast.core.shadeprofile",
+    "balcony_solar_forecast.core.ensembleband",
+    "balcony_solar_forecast.core.bootstrap_build",
+    "balcony_solar_forecast.core.openmeteo_backfill",
+]
+ignore_errors = true

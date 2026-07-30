@@ -44,10 +44,11 @@ numpy/pandas/pvlib.
    nicht. Version nur im Release-PR anfassen.
 5. **Tests und Lint:**
    ```
-   .venv\Scripts\python.exe -m pytest tests -p no:homeassistant     # Windows
-   make test                                                        # POSIX
-   .venv\Scripts\python.exe -m ruff check .
+   uv run pytest tests -p no:homeassistant     # überall (Windows/POSIX), via make: `make test`
+   uv run ruff check .                         # via make: `make lint`
    ```
+   Setup: `uv sync --group dev` (bzw. `make install`; uv installiert Python
+   3.14 selbst, exakte Tool-Versionen stehen im `uv.lock`).
    `-p no:homeassistant` ist Pflicht: das PHACC-Plugin zieht POSIX-only `fcntl`
    und autouse-Fixtures, die unter Python ≥ 3.12 werfen — kein Test benutzt es.
    `pyproject.toml` setzt bereits `addopts = "-q"`; **kein zweites `-q`** auf der

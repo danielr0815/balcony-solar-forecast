@@ -1,24 +1,25 @@
 <#
     Bootstrap the balcony-solar-forecast dev environment on Windows (PowerShell).
 
-    Thin wrapper around scripts/setup_env.py — identical to `make install`.
-    Creates .\.venv and installs the dev tooling (Home Assistant, pytest,
-    pytest-homeassistant-custom-component, ruff) from pyproject.toml.
+    Installs uv if it is missing, then `uv sync --group dev` (creates .\.venv
+    from uv.lock with the dev tooling: Home Assistant, pytest, pytest-cov,
+    pytest-homeassistant-custom-component, ruff, mypy). Thin wrapper around
+    scripts/setup_env.py — with uv already installed, plain
+    `uv sync --group dev` (or `make install`) does the same thing.
 
-    Usage:  .\scripts\setup-env.ps1 [install|test|test-core|lint|format|clean]
+    Usage:  .\scripts\setup-env.ps1
 
-    Note: the full test suite runs on Linux / WSL / CI; on Windows use
-    `test-core` (the Home Assistant test helpers cannot load here — HA's runner
-    imports the POSIX-only 'fcntl').
+    Note: the full test suite runs everywhere (`make test` ==
+    `uv run pytest tests -p no:homeassistant`); `-p no:homeassistant` is what
+    keeps the HA test helpers off Windows — the PHACC plugin imports the
+    POSIX-only 'fcntl'.
 #>
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 
-$cmd = if ($args.Count -ge 1) { $args[0] } else { "install" }
-
 if (Get-Command py -ErrorAction SilentlyContinue) {
-    & py -3.13 scripts/setup_env.py $cmd
+    & py -3.14 scripts/setup_env.py
 } else {
-    & python scripts/setup_env.py $cmd
+    & python scripts/setup_env.py
 }
 exit $LASTEXITCODE

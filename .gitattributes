@@ -1,0 +1,17 @@
+# Windows/WSL-friendly: force LF in the working tree on checkout, let git
+# normalize on commit. The Windows workflow is documented in CONTRIBUTING.md.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending-normalized — the brand icons under
+# custom_components/balcony_solar_forecast/brand/ ship to HACS as-is.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary

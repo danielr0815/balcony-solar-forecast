@@ -1,0 +1,14 @@
+{
+  // Kein Formatter, kein format-on-save: der Code ist absichtlich
+  // handformatiert (E501 aus, siehe CONTRIBUTING.md §1) — `ruff format`
+  // würde die Hand-Ausrichtung zerstören.
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "[python]": {
+    "editor.formatOnSave": false
+  },
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  // `-p no:homeassistant` ist Pflicht (PHACC-Plugin bricht die Suite,
+  // siehe CONTRIBUTING.md §4); `-q` steht bereits in pyproject addopts.
+  "python.testing.pytestArgs": ["tests", "-p", "no:homeassistant"]
+}

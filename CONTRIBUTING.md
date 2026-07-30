@@ -82,14 +82,18 @@ name is there at all.
 
 ## 3. Dev environment
 
-The dev tooling lives in a local `./.venv`. Create it with:
+The dev tooling lives in a local `./.venv`, created by **uv** from the
+committed `uv.lock` (the single source of truth for every tool version — CI
+uses the same lockfile):
 
 ```bash
-make install
+uv sync --group dev      # or: make install
 ```
 
-On a machine **without** `make`, run the cross-platform bootstrap directly —
-both wrappers call the same pure-stdlib script:
+uv installs Python 3.14 itself if needed (pinned in `.python-version`;
+`requires-python >= 3.14.2` matches HA's own floor). On a machine **without
+uv**, the cross-platform bootstrap installs it first, then delegates to the
+same `uv sync`:
 
 ```bash
 # Linux / macOS / WSL
@@ -99,15 +103,20 @@ both wrappers call the same pure-stdlib script:
 .\scripts\setup-env.ps1
 ```
 
-`make install` and both wrappers delegate to
-[`scripts/setup_env.py`](scripts/setup_env.py), which creates `./.venv` and
-installs the **`[dependency-groups] dev`** group from `pyproject.toml` —
-`homeassistant`, `pytest`, `pytest-homeassistant-custom-component`, `ruff`.
-Home Assistant is unpinned; `pytest-homeassistant-custom-component` pins the
-matching HA version transitively. These packages only run the tests and the
-linter — the integration has **no runtime dependencies**. The bootstrap
-interpreter creates the venv (`py -3.13` on Windows / via `make`, `python3` on
-POSIX; `requires-python >= 3.13`).
+Both wrappers call [`scripts/setup_env.py`](scripts/setup_env.py) (pure
+stdlib). Alternatively there is a **devcontainer** (`.devcontainer/`) whose
+`postCreateCommand` runs the same `uv sync --group dev`; it also carries a
+Node feature so the JS card harness (`tests/harness/`) runs instead of
+skipping.
+
+The dev group in `pyproject.toml` is `homeassistant`, `pytest`, `pytest-cov`,
+`pytest-homeassistant-custom-component`, `ruff`, `mypy`. These packages only
+run the tests and the linter/typer — the integration has **no runtime
+dependencies**. The `>=` entries are minimums; the exact versions live in
+`uv.lock` (updates via Dependabot or `uv lock --upgrade`, reviewed in a PR).
+Sole full pin: `pytest-homeassistant-custom-component` — it pins HA (and
+pytest/pytest-cov) exactly itself, so it leads the HA coupling (rationale in
+the pyproject comment).
 
 ## 4. Test architecture — and why the HA plugin is disabled
 
@@ -123,10 +132,10 @@ The code is split into two layers:
 The whole suite is **unit-style** and runs with the PHACC plugin disabled:
 
 ```bash
-make test        # == python -m pytest tests -p no:homeassistant   (full suite)
-make test-core   # == python -m pytest tests/core -p no:homeassistant
-make lint        # == ruff check .
-make format      # == ruff check --fix .   (lint autofix — NOT ruff format)
+make test        # == uv run pytest tests -p no:homeassistant   (full suite)
+make test-core   # == uv run pytest tests/core -p no:homeassistant
+make lint        # == uv run ruff check .
+make format      # == uv run ruff check --fix .   (lint autofix — NOT ruff format)
 make clean       # remove ./.venv
 ```
 
@@ -140,7 +149,7 @@ Windows). So the plugin only ever breaks a suite that never uses it. Disabling
 it runs the **full** meaningful suite identically on Linux, macOS, WSL and
 Windows (`pytest-asyncio`, installed via PHACC, still drives the async tests).
 This is what `make test` and the CI `tests` job do — CI runs the same
-`python -m pytest tests -p no:homeassistant`, plus `--cov` flags for a
+`uv run pytest tests -p no:homeassistant`, plus `--cov` flags for a
 report-only coverage summary. Do **not** add a `-q`: `pyproject.toml` already
 sets `addopts = "-q"`, and a second one escalates to `-qq`, which drops the
 `N passed, M skipped` line.

@@ -13,6 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dev environment rebuilt on uv (dev-setup-2026), no runtime behaviour
+  changes.** The dev toolchain now comes from a committed `uv.lock` (single
+  source of truth, also used by CI) via `uv sync --group dev`; the Makefile is
+  a thin wrapper around uv, and `scripts/setup-env.{sh,ps1}` /
+  `scripts/setup_env.py` only install uv when it is missing. Python moves to
+  **3.14** (`.python-version`, `requires-python >= 3.14.2`) with the dev floor
+  `homeassistant>=2026.7.4`; `pytest-homeassistant-custom-component` stays the
+  only fully pinned package because it carries the HA coupling. Added: a
+  mypy baseline over `core/` (eight legacy modules with known errors are
+  named and excluded in `[tool.mypy]`, the rest must stay clean), report-only
+  coverage config, a devcontainer (Python 3.14 image + Node feature for the
+  JS card harness), a pre-commit config with `ruff-check --fix` only
+  (`ruff format` remains forbidden), `.editorconfig`, and `.gitattributes`
+  (LF enforcement, brand PNGs binary). CI moves to uv (`setup-uv` with cache),
+  `actions/checkout@v7`, pinned HACS/hassfest actions with a private-repo
+  visibility guard, and a new devcontainer CI job that runs the full suite
+  inside the container. Test invocation is unchanged everywhere:
+  `pytest tests -p no:homeassistant`.
+
 ## [0.23.2] - 2026-07-25
 
 A documentation release: no runtime behaviour changes. `docs/SPEC.md` stopped
