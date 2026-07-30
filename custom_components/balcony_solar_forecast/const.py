@@ -91,10 +91,13 @@ SITE_ALBEDO_MAX = 0.9
 # the learned transmittance / day-ahead-bias cells (which are clamped and cannot
 # express a >1 correction). For the reference site ~1.23 was validated
 # (backtest 2026-07-16). Values <1 are pointless (use ``efficiency`` instead),
-# so the band starts at 1.0.
+# so the band starts at 1.0. Cap 1.3 (tightened from 1.6): real bifacial gain
+# is typically 5-25 % and the reference validated 1.23-1.25 — beyond ~1.3 the
+# field stops being a physics correction and re-admits the over-lift it was
+# meant to replace (SPEC §4.5).
 CONF_SITE_BEAM_GAIN = "bifacial_beam_gain"
 SITE_BEAM_GAIN_MIN = 1.0
-SITE_BEAM_GAIN_MAX = 1.6
+SITE_BEAM_GAIN_MAX = 1.3
 # plane fields
 CONF_PLANE_NAME = "name"
 CONF_AZIMUTH = "azimuth_deg"  # 0=N clockwise
@@ -121,6 +124,17 @@ CONF_GROUP_NAME = "name"
 CONF_GROUP_PLANES = "plane_names"  # plane names feeding this AC clamp
 CONF_GROUP_AC_LIMIT = "ac_limit_w"  # AC clamp, VA/W
 CONF_GROUP_INVERTER_EFFICIENCY = "inverter_efficiency"  # optional: per-group DC->AC efficiency
+
+# --- Site cardinality limits (SPEC §7.2-§7.4) --------------------------------
+# Hard caps enforced by _site_validation.validate_site. The site object arrives
+# via the config flow's object selector (free JSON): without caps a pasted or
+# crafted object would allocate unbounded planes (per-plane engine passes),
+# shademap channels (one bin grid per distinct shade group) and horizon rows
+# (per-slot interpolation) on every recompute tick. 8 planes covers the shipped
+# 8-module reference site exactly; 64 horizon rows is ~6x its densest table.
+SITE_MAX_PLANES = 8
+SITE_MAX_SHADE_GROUPS = 8
+SITE_MAX_HORIZON_POINTS = 64
 
 # --- Physics constants (SPEC §4 physics musts) ---
 ALBEDO_DEFAULT = 0.2
@@ -393,8 +407,13 @@ def _plane(name, az, tilt, wp, horizon, actual_entity):
 # docs/adr/ADR-0023-onboarding-standortkonfiguration.md and NOT this comment.
 # ===========================================================================
 DEFAULT_SITE = {
-    CONF_LATITUDE: 48.547853,
-    CONF_LONGITUDE: 12.187272,
+    # Generic mid-Germany default location (review 0.23.x): the shipped default
+    # must not silently impersonate the operator's Landshut plant on a foreign
+    # install — 51.1 N / 10.4 E sits near Germany's geographic centre, so a
+    # copied default produces plausible-but-generic sun geometry everywhere in
+    # the country until the operator sets the real coordinates (SPEC §7.8).
+    CONF_LATITUDE: 51.1,
+    CONF_LONGITUDE: 10.4,
     CONF_PLANES: [
         # --- lower balcony (70 deg tilt) ---
         _plane("M1", 25.0, 70.0, 370, _default_horizon(),
@@ -628,6 +647,16 @@ LABEL_FROZEN_MIN_REPEATS = 4
 # fraction of the day's DAYLIGHT hours (sun elevation > 0); below it the whole
 # day is discarded (empty), so a later catch-up can fill it once LTS is complete.
 DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE = 0.75
+# Nightly + bootstrap plausibility gate (SPEC §10): a sustained HOURLY mean
+# above this fraction of the channel's configured Wp is physically impossible
+# — even cloud-edge enhancement peaks are sub-hourly, so a full-hour reading of
+# e.g. 5 kW on a 400 Wp module proves a mis-scaled SENSOR (the classic
+# kW-instead-of-W entity), not production. Such a day is discarded for
+# learning AND scoring (shademap tau would saturate, the RLS theta would
+# learn a 1000x deficit); 1.25x headroom keeps legitimate over-Wp peaks
+# trainable. Applied in `_actuals._actuals_from_stats` (live) and in
+# `core.bootstrap_build._process_day_impl` (backfill parity).
+CHANNEL_PLAUSIBILITY_MAX_WP_FRAC = 1.25
 
 # Drift monitor: rolling daylight MAE corrected vs pure physics.
 DRIFT_WINDOW_DAYS = 7
@@ -699,6 +728,13 @@ SERVICE_RUN_BOOTSTRAP = "run_bootstrap"  # in-process re-bootstrap (no token, li
 # Days without measured actuals in the range are skipped, so an over-wide cap is
 # self-correcting; ~400 d covers a full year plus margin (SPEC §12.2).
 BOOTSTRAP_DEFAULT_MAX_DAYS = 400
+# Hard SPAN limit for an explicit [start_date, end_date] range (SPEC §12.2):
+# unlike the default cap above, an explicit multi-year span does NOT
+# self-correct cheaply — it keeps the service fetching chunked weather and
+# reconstructing for hours inside one service call (a developer-tools action
+# has no timeout). 1826 = 5 calendar years incl. one leap day, matching the
+# Previous-Runs archive depth (since 01/2024) with generous margin.
+BOOTSTRAP_MAX_RANGE_DAYS = 1826
 # Chunk width (days) for the in-process Open-Meteo weather fetch: the range is
 # split into consecutive windows so one huge multi-year request cannot trip a
 # provider limit, mirroring the CLI's WebSocket LTS chunking (SPEC §12.2).
@@ -814,6 +850,16 @@ ISSUE_ETA_OUT_OF_BAND = "eta_out_of_band"
 DROPOUT_REASON_DEAD_CHANNEL = "dead_channel"
 DROPOUT_REASON_FROZEN_CHANNEL = "frozen_channel"
 DROPOUT_REASON_LOW_COVERAGE = "low_coverage"
+# Deliberately NOT in DROPOUT_REASONS below: the plausibility gate (SPEC §10,
+# CHANNEL_PLAUSIBILITY_MAX_WP_FRAC) discards the day and records this reason in
+# the persisted learning_health (visible in the diagnostic dump), but raises NO
+# learning_stalled_* repair issue — a mis-scaled channel is a unit/config error
+# the nightly WARNING names directly with its remedy, per the 0.23.x review
+# decision (log + diagnostics only, no fourth card).
+DROPOUT_REASON_IMPLAUSIBLE_CHANNEL = "implausible_channel"
+# The reasons that raise a learning_stalled_* repair issue on a persistent
+# streak (ISSUE_LEARNING_STALLED_BY_REASON is exhaustive over exactly this
+# tuple). DROPOUT_REASON_IMPLAUSIBLE_CHANNEL stays out deliberately (see above).
 DROPOUT_REASONS = (
     DROPOUT_REASON_DEAD_CHANNEL,
     DROPOUT_REASON_FROZEN_CHANNEL,
@@ -889,10 +935,13 @@ DEFAULT_SCOREBOARD_GATE_MARGIN = 0.10
 SCOREBOARD_MIN_WINDOW_DAYS = 1
 # Minimum number of PAIRED days (days on which BOTH the engine and the
 # candidate comparison were scored) before that comparison is eligible to set
-# the best-baseline bar for the gate. A comparison scored on a single lucky day
-# must not decide the whole verdict; the gate is a matched-pair comparison over
-# the days both sides cover (fixes non-paired evaluation, SPEC §15.2).
-SCOREBOARD_MIN_PAIRED_DAYS = 1
+# the best-baseline bar for the gate. A comparison scored on one or two lucky
+# days must not decide the whole verdict; the gate is a matched-pair
+# comparison over the days both sides cover (fixes non-paired evaluation,
+# SPEC §15.2). Raised 1 -> 3: with a single paired day a 10 % margin is pure
+# weather luck (one clear-day bust of the baseline flips the verdict), three
+# is the smallest sample that separates a pattern from a coin flip.
+SCOREBOARD_MIN_PAIRED_DAYS = 3
 # Staleness bound (local days): the newest scored day must be within this many
 # days of "today" for the gate to assert at all, else the verdict is suspended
 # (None) — a ring whose scoring stopped weeks ago must not keep publishing a

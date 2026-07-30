@@ -650,6 +650,46 @@ def test_process_day_channel_dropout_skips_module(site: SiteConfig):
     assert isinstance(used, bool)
 
 
+def test_process_day_kw_scaled_sensor_discards_day(site: SiteConfig):
+    """SPEC §10 plausibility gate: a kW-instead-of-W channel discards the WHOLE
+    day for every learner. A sustained hourly reading above
+    CHANNEL_PLAUSIBILITY_MAX_WP_FRAC x the module's Wp is physically impossible
+    (cloud-edge enhancement peaks are sub-hourly), so the mis-scaled channel
+    must never become shademap/bias ground truth — before the gate it seeded
+    saturated tau into the M2 bins and a ~1000x deficit into the RLS cells."""
+    acc = bf.BootstrapAccumulator()
+    weather = _clear_summer_noon_hours()
+    svf = _svf(site)
+    hourly_actuals = _tracked_actuals(site, weather, svf, factor=1.0)
+    # One channel reports kW instead of W (1000x).
+    hourly_actuals["M2"] = {
+        h: wh * 1000.0 for h, wh in hourly_actuals["M2"].items()
+    }
+    used = bf.process_day_hourly(
+        acc, site, weather, hourly_actuals, svf_by_plane=svf
+    )
+    assert used is False
+    assert acc.shade_samples == 0
+    assert not acc.shade
+    assert acc.bias_samples == 0
+
+
+def test_process_day_reading_at_plausibility_bound_still_trains(site: SiteConfig):
+    """The gate fires ABOVE 1.25 x Wp, not at it: a sustained reading exactly at
+    the cloud-edge headroom is still legitimate training data."""
+    acc = bf.BootstrapAccumulator()
+    weather = _clear_summer_noon_hours()
+    svf = _svf(site)
+    hourly_actuals = _tracked_actuals(site, weather, svf, factor=1.0)
+    m2 = site.plane_by_name("M2")
+    first = next(iter(hourly_actuals["M2"]))
+    hourly_actuals["M2"][first] = 1.25 * m2.wp  # exactly AT the bound
+    used = bf.process_day_hourly(
+        acc, site, weather, hourly_actuals, svf_by_plane=svf
+    )
+    assert used is True
+
+
 # ---------------------------------------------------------------------------
 # Partial metering (SPEC §9.1/§9.5/§11.1 Teilmengen-Regel)
 # ---------------------------------------------------------------------------
@@ -658,8 +698,8 @@ def test_process_day_channel_dropout_skips_module(site: SiteConfig):
 def _partial_metered_site() -> SiteConfig:
     """Two identical front planes; only M1 carries a meter (actual_entity)."""
     return SiteConfig.from_dict({
-        const.CONF_LATITUDE: 48.547853,
-        const.CONF_LONGITUDE: 12.187272,
+        const.CONF_LATITUDE: 51.1,
+        const.CONF_LONGITUDE: 10.4,
         const.CONF_PLANES: [
             {
                 const.CONF_PLANE_NAME: "M1",
@@ -683,8 +723,8 @@ def _partial_metered_site() -> SiteConfig:
 def _unmetered_site() -> SiteConfig:
     """The same two planes, NEITHER metered."""
     raw = {
-        const.CONF_LATITUDE: 48.547853,
-        const.CONF_LONGITUDE: 12.187272,
+        const.CONF_LATITUDE: 51.1,
+        const.CONF_LONGITUDE: 10.4,
         const.CONF_PLANES: [
             {
                 const.CONF_PLANE_NAME: "M1",

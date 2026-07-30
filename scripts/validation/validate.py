@@ -11,6 +11,10 @@ Aufrufe:
   Live gegen Home Assistant (zieht Daten und analysiert sie):
       python validate.py --ha-url http://10.102.10.11:8123 --token <TOKEN>
 
+  Das Token kann auch aus der Umgebung kommen (bevorzugt — ein --token-CLI-Arg
+  steht in der Prozessliste; ueber http:// reist es im Klartext):
+      HA_LONG_LIVED_TOKEN=<TOKEN> python validate.py --ha-url http://...
+
 Nur Python-stdlib (>= 3.11); numpy wird nicht benoetigt.
 """
 
@@ -34,8 +38,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         description="Post-Deployment-Validierung balcony_solar_forecast",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--ha-url", help="HA-Basis-URL, IP verwenden! z.B. http://10.102.10.11:8123")
-    p.add_argument("--token", help="Long-Lived Access Token")
+    p.add_argument("--ha-url", help="HA-Basis-URL, IP verwenden! z.B. http://10.102.10.11:8123 (besser https:// — über http reist das Token im Klartext)")
+    p.add_argument(
+        "--token",
+        help="Long-Lived Access Token (default: env HA_LONG_LIVED_TOKEN — bevorzugt, ein CLI-Arg steht in der Prozessliste)",
+    )
     p.add_argument(
         "--offline",
         action="store_true",
@@ -58,6 +65,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--fetch-only", action="store_true", help="Nur Daten ziehen, keine Analyse"
     )
     a = p.parse_args(argv)
+    if not a.token:
+        # Env fallback resolved AFTER parsing: with ArgumentDefaultsHelpFormatter
+        # an argparse default=<env value> would print the token into --help.
+        a.token = os.environ.get("HA_LONG_LIVED_TOKEN")
     if a.offline and not a.data_dir:
         p.error("--offline braucht --data-dir")
     if not a.offline and not (a.ha_url and a.token):

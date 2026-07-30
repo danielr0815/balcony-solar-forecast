@@ -43,7 +43,9 @@ Alle Kommandos aus dem Ordner `validation/` heraus.
 ### Live-Validierung (Standardfall, ~1 Woche nach Deployment)
 
 ```powershell
-python validate.py --ha-url http://10.102.10.11:8123 --token "<TOKEN>" --json report.json
+python validate.py --ha-url http://10.102.10.11:8123 --json report.json
+# Token aus der Umgebung (HA_LONG_LIVED_TOKEN) — bevorzugt: ein --token-CLI-Arg
+# steht in der Prozessliste, über http:// reist er im Klartext. --token bleibt Override.
 ```
 
 Das Skript zieht alle Daten (REST + WebSocket) in einen Ordner

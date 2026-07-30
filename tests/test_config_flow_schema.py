@@ -28,8 +28,8 @@ from homeassistant.helpers import config_validation as cv  # noqa: E402
 def _build_schema(include_name: bool = True):
     return _user_schema(
         name="Test",
-        latitude=48.5479,
-        longitude=12.1873,
+        latitude=51.1,
+        longitude=10.4,
         fetch_interval=1800,
         recompute_interval=900,
         site=copy.deepcopy(DEFAULT_SITE),
@@ -56,3 +56,14 @@ def test_user_schema_serializes_like_the_flow_endpoint(include_name: bool) -> No
     # the shipped default site must ride along as the field default
     site_field = next(f for f in fields if f.get("name") == "site")
     assert site_field.get("default"), "DEFAULT_SITE must prefill the object selector"
+
+
+def test_user_schema_beam_gain_selector_band() -> None:
+    """The bifacial-gain band tightened 1.6 -> 1.3 (SPEC §4.5): the form
+    selector must follow SITE_BEAM_GAIN_MIN/MAX, not a stale literal."""
+    schema = _build_schema()
+    fields = voluptuous_serialize.convert(schema, custom_serializer=cv.custom_serializer)
+    field = next(f for f in fields if f.get("name") == "bifacial_beam_gain")
+    number = field["selector"]["number"]
+    assert number["min"] == pytest.approx(1.0)
+    assert number["max"] == pytest.approx(1.3)

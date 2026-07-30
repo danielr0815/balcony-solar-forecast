@@ -689,6 +689,71 @@ def test_shade_group_absent_is_backward_compatible() -> None:
 
 
 # --------------------------------------------------------------------------
+# Cardinality limits (SPEC §7.2-§7.4): a pasted/crafted site object must not
+# allocate unbounded planes, shademap channels or horizon rows.
+# --------------------------------------------------------------------------
+
+
+def test_too_many_planes_rejected() -> None:
+    site = _site()
+    # 9 planes > SITE_MAX_PLANES (8), no shade groups -> the plane cap fires.
+    site[CONF_PLANES] = site[CONF_PLANES] + [
+        {**copy.deepcopy(site[CONF_PLANES][0]), CONF_PLANE_NAME: "M9"}
+    ]
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "too_many_planes"
+
+
+def test_max_planes_exactly_at_limit_ok() -> None:
+    # The shipped reference site already sits exactly at the cap (8 planes).
+    assert len(validate_site(_site()).planes) == 8
+
+
+def test_too_many_shade_groups_rejected() -> None:
+    # 9 distinct shade groups > SITE_MAX_SHADE_GROUPS (8). With the plane cap
+    # at 8 this shape necessarily also has too many planes; the pooled-channel
+    # limit is checked FIRST (each group is a whole shademap channel of bins).
+    site = _site()
+    site[CONF_PLANES] = site[CONF_PLANES] + [
+        {**copy.deepcopy(site[CONF_PLANES][0]), CONF_PLANE_NAME: "M9"}
+    ]
+    for idx, plane in enumerate(site[CONF_PLANES]):
+        plane[CONF_SHADE_GROUP] = f"G{idx}"
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "too_many_shade_groups"
+
+
+def test_shade_groups_at_limit_ok() -> None:
+    site = _site()
+    for idx, plane in enumerate(site[CONF_PLANES]):
+        plane[CONF_SHADE_GROUP] = f"G{idx}"  # 8 distinct groups == the cap
+    assert validate_site(site) is not None
+
+
+def test_too_many_horizon_points_rejected() -> None:
+    site = _site()
+    row = site[CONF_PLANES][0][CONF_HORIZON][0]
+    # 65 rows > SITE_MAX_HORIZON_POINTS (64), all individually valid.
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        {**row, CONF_HZ_AZIMUTH: float(i)} for i in range(65)
+    ]
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+    assert exc.value.code == "too_many_horizon_points"
+
+
+def test_horizon_points_at_limit_ok() -> None:
+    site = _site()
+    row = site[CONF_PLANES][0][CONF_HORIZON][0]
+    site[CONF_PLANES][0][CONF_HORIZON] = [
+        {**row, CONF_HZ_AZIMUTH: float(i)} for i in range(64)
+    ]
+    assert validate_site(site) is not None
+
+
+# --------------------------------------------------------------------------
 # Translation coverage: every raisable code must exist in both locales.
 # --------------------------------------------------------------------------
 
@@ -718,6 +783,9 @@ _ALL_ERROR_CODES = {
     "bad_ac_limit",
     "shade_group_empty",
     "shade_group_collision",
+    "too_many_planes",
+    "too_many_shade_groups",
+    "too_many_horizon_points",
 }
 
 

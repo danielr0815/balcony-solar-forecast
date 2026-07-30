@@ -477,6 +477,25 @@ def _process_day_impl(
         # No measured side exists at all: the day carries no learnable signal.
         return False
 
+    # Plausibility gate (SPEC §10, mirrors the live label gate in
+    # _actuals._actuals_from_stats): a sustained hourly reading above
+    # CHANNEL_PLAUSIBILITY_MAX_WP_FRAC x the module's Wp is physically
+    # impossible, so the channel is mis-scaled (kW instead of W). Discard the
+    # WHOLE day — the shademap would seed saturated tau and the RLS theta a
+    # ~1000x deficit. Checked BEFORE the reconstruction loop: a poisoned day
+    # is not worth a single modeled hour.
+    offender = _implausible_actuals_module(planes, actuals_hourly)
+    if offender is not None:
+        _LOGGER.warning(
+            "Backfill %s: channel %s reads above %.2f x its configured Wp in "
+            "an hour — the sensor is likely mis-scaled (kW instead of W?); "
+            "discarding the whole day for all learners (SPEC §10)",
+            day_weather[0].start.date().isoformat(),
+            offender,
+            const.CHANNEL_PLAUSIBILITY_MAX_WP_FRAC,
+        )
+        return False
+
     # --- 1) Reconstruct every plane's modeled split for every hour. ---
     # recon[plane][iso_hour] = PlaneHourReconstruction
     recon: dict[str, dict[str, PlaneHourReconstruction]] = {
@@ -749,6 +768,34 @@ def _is_frozen_hourly(values: list[float]) -> bool:
         else:
             run = 1
     return False
+
+
+def _implausible_actuals_module(
+    planes: tuple[PlaneConfig, ...],
+    actuals_hourly: dict[str, dict[str, float]] | None,
+) -> str | None:
+    """First module with a physically impossible hourly reading, else None.
+
+    SPEC §10 (mirrors the live gate in ``_actuals._actuals_from_stats``): an
+    hourly mean (W over its hour == Wh) above
+    ``CHANNEL_PLAUSIBILITY_MAX_WP_FRAC`` x the module's configured Wp cannot
+    occur sustained over a full hour — even cloud-edge enhancement peaks are
+    sub-hourly — so the channel is mis-scaled (the classic kW-instead-of-W
+    sensor). The DAILY-totals path carries no hourly values and is not gated
+    here (a daily sum has no 1-h sustain semantics). Unknown/zero-Wp modules
+    are skipped (no scale to judge against).
+    """
+    if not actuals_hourly:
+        return None
+    wp_by_name = {p.name: p.wp for p in planes}
+    for module, hours in actuals_hourly.items():
+        wp = wp_by_name.get(module)
+        if wp is None or wp <= 0.0:
+            continue
+        limit = const.CHANNEL_PLAUSIBILITY_MAX_WP_FRAC * wp
+        if any(wh > limit for wh in hours.values()):
+            return module
+    return None
 
 
 def _resolve_hourly_measured(

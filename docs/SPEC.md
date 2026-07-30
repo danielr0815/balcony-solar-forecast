@@ -254,6 +254,16 @@ lassen. Iso-Diffus und Bodenreflex bleiben unberührt. Default
 `BEAM_GAIN_DEFAULT` = 1,0 ist die **Identität**: eine Konfiguration ohne das
 Feld verhält sich unverändert.
 
+Das Band ist `[SITE_BEAM_GAIN_MIN, SITE_BEAM_GAIN_MAX]` = **[1,0; 1,3]**
+(Lade-Clamp in `SiteConfig.from_dict`, Formular-Grenze im Config-Flow). Die
+Obergrenze ist physikalisch begründet, nicht willkürlich: realer
+Bifazialgewinn liegt typischerweise bei 5–25 %, und der Referenzstandort
+validierte 1,23–1,25 (Backtest 2026-07). Jenseits von ~1,3 wäre der Faktor
+keine Physik-Korrektur mehr, sondern brächte genau die Überhöhung zurück, die
+er ersetzen soll — mit denselben Folgefehlern (Morgen-Übertreibung,
+saturierte Shademap-Bins). Ein gespeicherter Alt-Wert > 1,3 lädt daher
+geklemmt auf 1,3 (früheres Maximum 1,6).
+
 ### §4.6 Bodenreflex und Albedo
 
 Bodenreflex `albedo · GHI · (1 − cos β) / 2` — bei 70–80° Neigung immerhin
@@ -438,8 +448,8 @@ den Options — ein strukturelles Feld dort verschattet `entry.data` dauerhaft.
 
 | Feld | Bedeutung | Bereich / Default | Fingerprint |
 |---|---|---|---|
-| `latitude`, `longitude` | Standort für Fetch + Sonnenstand | Pflicht | nein (aber Site-Signatur des Bootstrap-Imports, §12.5) |
-| `planes` | Liste der Modulebenen (≥ 1) | `no_planes` | — |
+| `latitude`, `longitude` | Standort für Fetch + Sonnenstand | Pflicht | **ja** (die gesamte Sonnengeometrie hängt daran; zusätzlich Site-Signatur des Bootstrap-Imports, §12.5) |
+| `planes` | Liste der Modulebenen (≥ 1, ≤ `SITE_MAX_PLANES` = 8) | `no_planes`, `too_many_planes` | — |
 | `groups` | Liste der Wechselrichter-Gruppen | darf leer sein | — |
 | `ac_actual_entity` | Entity-ID des **Gesamt**-AC-Zählers hinter allen Wechselrichtern (η-Kalibrierung, §9.6) | optional; leer ⇒ nicht konfiguriert | nein |
 | `ac_actual_invert` | negiert diesen Zähler einmalig an der Lesegrenze | optional, Default `false` | nein |
@@ -457,12 +467,16 @@ den Options — ein strukturelles Feld dort verschattet `entry.data` dauerhaft.
 | `efficiency` | DC-seitiger Systemwirkungsgrad (§6.2) | 0…1, Default `DEFAULT_EFFICIENCY`, `bad_efficiency` | **ja** |
 | `horizon` | Horizontzeilen dieser Ebene (§5, §7.4) | stabil nach Azimut sortiert | **ja** (zeilenweise) |
 | `actual_entity` | Entity-ID der gemessenen **DC**-Leistung dieses Kanals | optional | nein |
-| `shade_group` | poolt den langsamen Lerner: gleiche Gruppe ⇒ **ein** Verschattungs-Pool (§9.2) | optional; leer ⇒ `shade_group_empty`; Namenskollision ⇒ `shade_group_collision` | nein |
+| `shade_group` | poolt den langsamen Lerner: gleiche Gruppe ⇒ **ein** Verschattungs-Pool (§9.2) | optional; leer ⇒ `shade_group_empty`; Namenskollision ⇒ `shade_group_collision`; > `SITE_MAX_SHADE_GROUPS` (8) verschiedene Gruppen ⇒ `too_many_shade_groups` | nein |
 | `ross_coeff` | montageabhängiger Ross-Koeffizient (§6.1) | optional, `[0,005; 0,12]`, `bad_ross_coeff`; ungesetzt ⇒ `ROSS_COEFF` | **ja** |
 
 ### §7.4 Horizontzeile (`planes[].horizon[]`)
 
-Semantik und Begründung in §5.1, Wirkung in §5.4.
+Semantik und Begründung in §5.1, Wirkung in §5.4. Pro Ebene höchstens
+`SITE_MAX_HORIZON_POINTS` (64) Zeilen (`too_many_horizon_points`) — die
+Mengenlimits (8 Ebenen / 8 Verschattungsgruppen / 64 Zeilen) begrenzen, was
+ein über den Objekt-Selektor als freies JSON eingefügtes Site-Objekt pro
+Recompute-Tick allozieren kann.
 
 | Feld | Bereich / Regel |
 |---|---|
@@ -502,6 +516,11 @@ Die Bias-Zellen (§9.5) werden gegen eine bestimmte **prognoserelevante
 Konfiguration** gelernt. Neben dem Bias-State wird deshalb ein
 `config_fingerprint` persistiert (§16.1): ein SHA-256-Kurzhash über
 
+- den **Standort** (`latitude`, `longitude`, auf 4 Nachkommastellen gerundet) —
+  die gesamte Sonnengeometrie, gegen die jede θ-Zelle gelernt wurde, hängt an
+  den Koordinaten; ein Standortwechsel per Reconfigure muss neu ansäen (ohne
+  sie im Hash blieb ein Umzug unsichtbar und die Zellen lernten gegen die
+  alte Geometrie weiter),
 - je Ebene Azimut, Neigung, Wp, Wirkungsgrad, Ross-Koeffizient und den
   **Horizont** — je Zeile Azimut, Elevation und **alle** Transmittanzfelder
   (`tau`, `seasonal`, `tau_leafed`, `tau_bare`, `tau_points`,
@@ -537,7 +556,12 @@ mehrebenigen Balkonanlage: acht Modulebenen, vier Wechselrichter-Gruppen mit je
 800 VA `ac_limit_w`, Fernfeld-Horizontzeilen (az 60–100 el 13°, az 100–150
 el 16°, jeweils τ 0), saisonale Baumzeilen (τ 0,45 belaubt / 0,8 kahl) und eine
 harte Wandzeile (az > 212, el 90, τ 0). Sein Inhalt ist hier beschrieben, weil
-Tests ihn prüfen und der Config-Flow ihn als Ausgangspunkt anbietet.
+Tests ihn prüfen und der Config-Flow ihn als Ausgangspunkt anbietet. Der
+Standort ist ein **generischer Mitteldeutschland-Default** (51,1 N / 10,4 O,
+nahe dem geographischen Zentrum) — bewusst **kein** realer Betreiberstandort,
+damit eine kopierte Default-Config auf einer fremden Installation nicht
+still die Geometrie der Referenzanlage (Landshut) vortäuscht; Betreiber
+setzen ihre echten Koordinaten im Config-Flow.
 
 **Er ist kein gepflegtes Abbild einer realen Anlage.** Bekannte Abweichungen
 (normativer Bestandteil dieses Abschnitts, nicht Historie):
@@ -851,10 +875,12 @@ Rollback-Ring (selbst-gatend).
 
 - **Label-Gates im Trainer:** eingefrorene Sensoren (derselbe Wert über
   `LABEL_FROZEN_MIN_REPEATS` aufeinanderfolgende Stunden bei altem
-  `last_updated`), verletzte Energie-Monotonie und **Messkanal-Dropout** (ein
+  `last_updated`), verletzte Energie-Monotonie, **Messkanal-Dropout** (ein
   konfigurierter Kanal ohne verwertbare Zeilen oder mit reißender
-  Tagesabdeckung) verwerfen den **ganzen Tag** für **beide** geometrischen
-  Lerner. Eine teilgemessene Anlage darf nie gegen das Vollmodell trainieren.
+  Tagesabdeckung) und die **Plausibilitätsgrenze** aus §10 (Stundenwert >
+  `CHANNEL_PLAUSIBILITY_MAX_WP_FRAC` × Kanal-Wp) verwerfen den **ganzen Tag**
+  für **beide** geometrischen Lerner. Eine teilgemessene oder falsch skaliert
+  messende Anlage darf nie gegen das Vollmodell trainieren.
   Die Sichtbarkeit dieser Verwürfe regelt §10.
 - **Drift-Monitor:** rollierende 7-Tage-Tageslicht-MAE korrigiert vs. reine
   Physik. Verliert eine Schicht `DRIFT_LOSS_STREAK_DAYS` Tage in Folge, wird sie
@@ -988,6 +1014,24 @@ Verwurfssträhne: nur Tage, für die eine Prognose ausgeliefert wurde
 (`eta_oob_streak`, `eta_oob_last_day`, `eta_oob_last_median`, §16.1); ein Tag
 ohne auswertbares Verhältnis zählt weder hoch noch zurück. Reine Sichtbarkeit:
 Kalibrierung, Physik und Lernentscheidungen ändern sich dadurch nicht.
+
+**Kanal-Plausibilitätsgrenze (falsch skalierte Messung).** Ein über eine
+**volle Stunde** anhaltender Messwert oberhalb von
+`CHANNEL_PLAUSIBILITY_MAX_WP_FRAC` (1,25) × der konfigurierten Wp des Kanals
+ist physikalisch unmöglich — selbst Cloud-Edge-Überhöhungen sind
+Sub-Stunden-Phänomene — und beweist eine falsch skalierte **Messung** (der
+Klassiker: kW statt W), keine Rekordproduktion. `_actuals._actuals_from_stats`
+verwirft einen solchen Tag **ganz** für Lernen **und** Scoring (Grund
+`implausible_channel`, neben den Label-Gates aus §9.8); der Bootstrap-Kern
+(`core.bootstrap_build._process_day_impl`, nur der Stunden-Pfad) wendet
+dieselbe Grenze an, damit ein fehlskalierter Kanal weder live noch im
+Backfill Shademap-τ sättigt oder dem RLS-θ ein ~1000×-Defizit einlernt.
+Die 1,25-Reserve hält legitime Über-Wp-Spitzen trainierbar; die Grenze greift
+oberhalb, nicht bei 1,25 × Wp. Sichtbarkeit bewusst **ohne** vierte
+Repair-Karte: die nächtliche WARNING nennt Ebene, Entity-ID und Gegenmittel
+(Einheit/Skalierung der Entität prüfen), der Verwurfgrund landet persistiert
+in `learning_health` und damit im Diagnose-Dump — eine fehlskalierte Entität
+ist ein Konfigurationsfehler mit eindeutigem Handgriff, kein Strähnenmuster.
 
 **Sichtbarkeit im Diagnose-Dump (§14.6).** Beide Gates schreiben in die bereits
 vorhandenen Accessoren, nicht in einen dritten Sonderweg:
@@ -1171,7 +1215,16 @@ als Traceback.
 
 **Default-Zeitraum:** `end` = gestern (lokal), `start` = heute −
 `BOOTSTRAP_DEFAULT_MAX_DAYS`. Der Deckel ist großzügig, weil Tage ohne Actuals
-übersprungen werden — ein zu weiter Start korrigiert sich selbst.
+übersprungen werden — ein zu weiter Start korrigiert sich selbst. Zwei
+Leitplanken für **explizite** Angaben: ein zukünftiges `end_date` wird auf
+gestern geklemmt (es kann noch keine Actuals tragen — ein Fehler würde einen
+Tippfehler bestrafen), und eine Spannweite über `BOOTSTRAP_MAX_RANGE_DAYS`
+(1826 Tage = 5 Kalenderjahre inkl. Schalttag) wird mit
+`ServiceValidationError` **abgelehnt**: anders als die gedeckelte Default-Range
+korrigiert sich eine explizite Mehrjahres-Range nicht billig selbst — ein
+einzelner Service-Call würde stundenlang Wetter-Chunks holen und
+rekonstruieren (die Aktion in den Entwicklerwerkzeugen kennt kein Timeout).
+Stattdessen aufeinanderfolgende Bootstraps fahren.
 
 ### §12.3 Offline-/CI-Weg: `scripts/backfill.py`
 
@@ -1434,9 +1487,19 @@ Eine Beispielkonfiguration steht in `docs/DASHBOARD.md`.
 Fenster gewerteter Tage mindestens `DEFAULT_SCOREBOARD_GATE_MARGIN` (Default
 **0,10** = 10 %) besser auf Tages-kWh ist als die beste Baseline, mindestens
 `SCOREBOARD_MIN_WINDOW_DAYS` Tage gewertet und mindestens
-`SCOREBOARD_MIN_PAIRED_DAYS` gepaarte Tage vorliegen, und der Ring nicht
+`SCOREBOARD_MIN_PAIRED_DAYS` (**3**) gepaarte Tage vorliegen, und der Ring nicht
 **stale** ist (der neueste gewertete Tag liegt innerhalb
 `SCOREBOARD_MAX_STALENESS_DAYS`).
+
+Die Bezugsgröße der 10 % ist der **relative MAE-Rückgang gegen die beste
+Baseline**, gepaart über genau die Tage, an denen **beide** Seiten gewertet
+wurden: `(Baseline-MAE − Engine-MAE) / Baseline-MAE ≥ 0,10`. „Beste Baseline"
+heißt dabei aus Sicht des Motors die **schwerste**: das Gate wertet den
+Vergleich, bei dem der Engine-Vorsprung am **kleinsten** ist — der Motor muss
+jede eligible Baseline schlagen. Eine Baseline mit weniger als 3 gepaarten
+Tagen ist **nicht eligible**: ein einzelner Glückstag (etwa ein
+Clear-day-Bust der Baseline) kippte sonst das Urteil; das Gate liefert dann
+`None` (keine Aussage), nicht etwa ein vorzeitiges *on*.
 
 Ein **unvolles Fenster liefert `None`** — das ist **korrekt, kein Fehlschlag**:
 ein Teilfenster darf das Gate nie behaupten.
@@ -1829,8 +1892,10 @@ pvlib und pandas sind **niemals** Laufzeitabhängigkeiten (§2).
 
 **Sonnenstands-Anker:** gegen PVGIS verifizierte Referenzwerte mit dem
 Genauigkeitsziel < 0,3° aus §4.1, plus das Tiefstands-/Nachtverhalten. Die
-verbindlichen Anker gelten für die Breite des Auslieferungs-Defaults (§7.8,
-≈ 48,55° N) und sind die Mittags-Elevationen der beiden Sonnenwenden:
+verbindlichen Anker sind **standortgebunden** und gelten für den
+Betreiber-Referenzstandort Landshut (≈ 48,55° N) — **nicht** für den
+generischen Mitteldeutschland-Standort des Auslieferungs-Defaults (§7.8) —:
+die Mittags-Elevationen der beiden Sonnenwenden
 **Sommersonnenwende 64,9° ± 0,4** und **Wintersonnenwende 18,0° ± 0,4**; dazu
 die Konventionsanker Mittagsazimut ≈ 180° und Juni-Sonnenaufgangsazimut im
 NO-Quadranten (0 = Nord, §20.1). Die Toleranz ist absichtlich weiter als das

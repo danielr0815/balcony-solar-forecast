@@ -50,13 +50,13 @@ def _ensemble_payload(time, base, **members) -> dict:
 
 
 def test_build_ensemble_params_shape():
-    p = build_ensemble_params(48.547853, 12.187272)
+    p = build_ensemble_params(51.1, 10.4)
     assert p["hourly"] == "shortwave_radiation"
     assert p["models"] == ENSEMBLE_MODEL
     assert p["forecast_days"] == "3"
     assert p["timezone"] == "UTC"
-    assert p["latitude"] == "48.547853"
-    assert p["longitude"] == "12.187272"
+    assert p["latitude"] == "51.100000"
+    assert p["longitude"] == "10.400000"
     # No transposition params on the boundary (raw GHI members only).
     joined = " ".join(f"{k}={v}" for k, v in p.items())
     assert "azimuth" not in joined

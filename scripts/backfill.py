@@ -42,12 +42,16 @@ unit tests exercise the math with fixture weather and NO network.
 
 Usage (see docs/BACKFILL.md for the full operator runbook):
 
-    python scripts/backfill.py \\
+    HA_LONG_LIVED_TOKEN=... python scripts/backfill.py \\
         --ha-url http://homeassistant.local:8123 \\
-        --token "$HA_LONG_LIVED_TOKEN" \\
         --start 2024-07-01 --end 2026-07-01 \\
         --site site.json \\
         --out bootstrap.json
+
+The token defaults to the ``HA_LONG_LIVED_TOKEN`` env var; ``--token`` remains
+as an explicit override. Prefer the env var — a ``--token`` CLI arg is visible
+in the process list, and prefer an ``https://`` HA URL (over plain ``http://``
+the Bearer token travels in cleartext).
 
 Add ``--dry-run`` to fetch + reconstruct + summarise WITHOUT writing the file.
 
@@ -65,6 +69,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 import types
 from datetime import UTC, date, datetime, timedelta
@@ -536,9 +541,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("--ha-url", required=True,
-                   help="HA base URL, e.g. http://homeassistant.local:8123")
-    p.add_argument("--token", required=True,
-                   help="HA long-lived access token (WebSocket auth)")
+                   help="HA base URL, e.g. http://homeassistant.local:8123 "
+                        "(prefer https:// — the token travels as a Bearer "
+                        "header, readable on the wire over plain http)")
+    p.add_argument("--token", default=os.environ.get("HA_LONG_LIVED_TOKEN"),
+                   help="HA long-lived access token (WebSocket auth). Default: "
+                        "the HA_LONG_LIVED_TOKEN env var — prefer it, a CLI "
+                        "--token is visible in the process list")
     p.add_argument("--start", required=True,
                    help="Range start, ISO date YYYY-MM-DD (LTS since 2024-07)")
     p.add_argument("--end", required=True, help="Range end, ISO date YYYY-MM-DD")
@@ -565,7 +574,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_arg_parser().parse_args(argv)
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    if not args.token:
+        parser.error(
+            "--token is required (or set HA_LONG_LIVED_TOKEN in the "
+            "environment — preferred, it keeps the token out of the process "
+            "list)"
+        )
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",

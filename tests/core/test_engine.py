@@ -836,8 +836,9 @@ class TestBifacialBeamGain:
         d_none = base.to_dict()
         assert CONF_SITE_BEAM_GAIN not in d_none
         assert SiteConfig.from_dict(d_none).bifacial_beam_gain is None
-        # Hand-edited out-of-band values clamp into the physical band [1.0, 1.6];
-        # values < 1 (use efficiency instead) clamp up to the identity floor.
+        # Hand-edited out-of-band values clamp into the physical band
+        # [SITE_BEAM_GAIN_MIN, SITE_BEAM_GAIN_MAX]; values < 1 (use efficiency
+        # instead) clamp up to the identity floor.
         d_low = dict(d_none, **{CONF_SITE_BEAM_GAIN: 0.5})
         assert SiteConfig.from_dict(d_low).bifacial_beam_gain == pytest.approx(
             SITE_BEAM_GAIN_MIN
@@ -849,6 +850,17 @@ class TestBifacialBeamGain:
         # Garbage degrades to None (default applies), never raises.
         d_junk = dict(d_none, **{CONF_SITE_BEAM_GAIN: "lots"})
         assert SiteConfig.from_dict(d_junk).bifacial_beam_gain is None
+
+    def test_siteconfig_beam_gain_clamps_legacy_16_to_13(self):
+        # The physical band tightened 1.6 -> 1.3 (SPEC §4.5): bifacial gain is
+        # typically 5-25 % and the reference site validated 1.23-1.25, so a
+        # stored/hand-edited 1.6 would re-admit the over-lift the field was
+        # meant to replace — it now loads clamped to the 1.3 cap.
+        from balcony_solar_forecast.const import CONF_SITE_BEAM_GAIN
+
+        base = _two_plane_site()
+        d = dict(base.to_dict(), **{CONF_SITE_BEAM_GAIN: 1.6})
+        assert SiteConfig.from_dict(d).bifacial_beam_gain == pytest.approx(1.3)
 
 
 class TestTauPointsThroughEngine:

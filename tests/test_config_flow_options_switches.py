@@ -65,8 +65,8 @@ def _user_structural_schema():
     """The user/reconfigure schema — structural fields only, no switches."""
     return _user_schema(
         name="Test",
-        latitude=48.5479,
-        longitude=12.1873,
+        latitude=51.1,
+        longitude=10.4,
         fetch_interval=1800,
         recompute_interval=900,
         site=copy.deepcopy(DEFAULT_SITE),

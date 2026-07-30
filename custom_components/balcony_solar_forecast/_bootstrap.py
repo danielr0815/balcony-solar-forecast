@@ -47,6 +47,7 @@ from .const import (
     BOOTSTRAP_KEY_BIAS,
     BOOTSTRAP_KEY_QUANTILE,
     BOOTSTRAP_KEY_SHADEMAP,
+    BOOTSTRAP_MAX_RANGE_DAYS,
     BOOTSTRAP_WEATHER_CHUNK_DAYS,
 )
 from .core import horizon
@@ -202,13 +203,19 @@ def _resolve_range(
 
     Default end is yesterday (local); default start is today - N days (a cap —
     days without actuals are skipped, so an over-wide start self-corrects).
-    Raises ServiceValidationError on unparseable dates or an inverted range.
+    An explicit FUTURE end_date is clamped to yesterday (it can carry no
+    actuals — erroring would punish a fat-finger, SPEC §12.2); an explicit
+    span wider than BOOTSTRAP_MAX_RANGE_DAYS is REJECTED, because unlike the
+    capped default it would not self-correct cheaply (one service call would
+    fetch + reconstruct for hours). Raises ServiceValidationError on
+    unparseable dates or an inverted range.
     """
     today = dt_util.now().date()
+    yesterday = today - timedelta(days=1)
     if raw_end is None:
-        end = today - timedelta(days=1)
+        end = yesterday
     else:
-        end = _parse_date(raw_end, "end_date")
+        end = min(_parse_date(raw_end, "end_date"), yesterday)
     if raw_start is None:
         start = today - timedelta(days=BOOTSTRAP_DEFAULT_MAX_DAYS)
     else:
@@ -217,6 +224,13 @@ def _resolve_range(
         raise ServiceValidationError(
             f"end_date ({end.isoformat()}) is before start_date "
             f"({start.isoformat()})."
+        )
+    if (end - start).days + 1 > BOOTSTRAP_MAX_RANGE_DAYS:
+        raise ServiceValidationError(
+            f"Date range {start.isoformat()}..{end.isoformat()} spans "
+            f"{(end - start).days + 1} days; the maximum is "
+            f"BOOTSTRAP_MAX_RANGE_DAYS ({BOOTSTRAP_MAX_RANGE_DAYS}). Narrow "
+            "the range or run consecutive bootstraps."
         )
     return start, end
 

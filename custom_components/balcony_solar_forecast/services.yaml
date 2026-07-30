@@ -79,7 +79,9 @@ run_bootstrap:
       name: Start date
       description: >-
         First day to reconstruct, ISO YYYY-MM-DD. Omit to default to ~400 days
-        ago (days without measured history are skipped automatically).
+        ago (days without measured history are skipped automatically). The
+        start_date..end_date span is capped at 5 years (1826 days); wider
+        ranges are rejected — run consecutive bootstraps instead.
       example: "2024-07-01"
       required: false
       selector:
@@ -88,6 +90,8 @@ run_bootstrap:
       name: End date
       description: >-
         Last day to reconstruct, ISO YYYY-MM-DD. Omit to default to yesterday.
+        A future date is clamped to yesterday (it carries no measured history
+        yet).
       example: "2026-07-01"
       required: false
       selector:

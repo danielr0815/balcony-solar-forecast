@@ -17,7 +17,14 @@ import math
 from dataclasses import replace
 from typing import Any
 
-from .const import CONF_PLANES, CONF_SHADE_GROUP, HZ_DIFFUSE_TAU_MAX
+from .const import (
+    CONF_PLANES,
+    CONF_SHADE_GROUP,
+    HZ_DIFFUSE_TAU_MAX,
+    SITE_MAX_HORIZON_POINTS,
+    SITE_MAX_PLANES,
+    SITE_MAX_SHADE_GROUPS,
+)
 from .core.types import PlaneConfig, SiteConfig
 
 # Upper sanity bound for an inverter-group AC limit (W). Local guard only;
@@ -55,6 +62,18 @@ def validate_site(raw: Any) -> SiteConfig:
 
     if not site.planes:
         raise SiteValidationError("no_planes")
+
+    # Cardinality caps (SPEC §7.2-§7.4): the site object arrives as free JSON
+    # via the object selector, so bound what a pasted/crafted object can
+    # allocate. The shade-group pool is checked FIRST: each distinct group is
+    # a whole pooled shademap channel (the costlier object), and with the
+    # plane cap at SITE_MAX_PLANES an over-limit group count can only occur
+    # together with too many planes — report the more specific limit.
+    n_groups = len({p.shade_group for p in site.planes if p.shade_group})
+    if n_groups > SITE_MAX_SHADE_GROUPS:
+        raise SiteValidationError("too_many_shade_groups")
+    if len(site.planes) > SITE_MAX_PLANES:
+        raise SiteValidationError("too_many_planes")
 
     # Raw plane dicts (parallel to ``site.planes``; from_dict + the horizon-only
     # sort preserve plane order) so an EXPLICIT empty/whitespace shade_group can
@@ -115,6 +134,10 @@ def _validate_horizon(horizon) -> tuple:
     the shipped 100.0 / 100.01 far-field breakpoints), so canonicalising is
     lossless for the interpolator.
     """
+    # Row-count cap first (SPEC §7.4): the per-slot interpolation cost scales
+    # with the table length, and the object selector accepts free JSON.
+    if len(horizon) > SITE_MAX_HORIZON_POINTS:
+        raise SiteValidationError("too_many_horizon_points")
     for row in horizon:
         if not 0.0 <= row.azimuth_deg <= 360.0:
             raise SiteValidationError("bad_horizon_azimuth")

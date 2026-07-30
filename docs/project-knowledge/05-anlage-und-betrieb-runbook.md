@@ -15,7 +15,11 @@ Ein **Balkonkraftwerk** an einer Wohnung: 8 Module in zwei Reihen übereinander
 (unterer/oberer Balkon) am Geländer montiert, also **sehr steil** (`tilt_deg`
 70°/80° gegen die Horizontale, 90° = senkrecht). Drei Fassadenrichtungen,
 jeweils 90° zueinander. **Standort** 48,547853° N / 12,187272° O (Raum
-Landshut), so auch in `const.DEFAULT_SITE`. Eine **Zeitzone** kennt die
+Landshut). `const.DEFAULT_SITE` trug diese Koordinaten bis einschließlich
+v0.23.3; danach trägt es bewusst einen **generischen
+Mitteldeutschland-Standort** (51,1° N / 10,4° O, SPEC §7.8), damit eine
+kopierte Default-Config nicht still die reale Anlage vortäuscht. Eine
+**Zeitzone** kennt die
 Integration nicht als eigenes Feld — sie nutzt durchgängig
 `hass.config.time_zone` (beim Betreiber `Europe/Berlin`, UTC+1/+2). Der
 **Azimut** ist intern überall **0° = Nord im Uhrzeigersinn** (180° = Süd) — und

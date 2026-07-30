@@ -411,7 +411,7 @@ class SiteConfig:
             albedo = max(SITE_ALBEDO_MIN, min(SITE_ALBEDO_MAX, albedo))
         # Optional beam gain (forensik T6): same only-when-set + clamp convention
         # as the albedo above; a hand-edited JSON can never push the direct share
-        # outside the physical band [1.0, 1.6].
+        # outside the physical band [SITE_BEAM_GAIN_MIN, SITE_BEAM_GAIN_MAX].
         raw_beam_gain = d.get(CONF_SITE_BEAM_GAIN)
         beam_gain: float | None
         try:

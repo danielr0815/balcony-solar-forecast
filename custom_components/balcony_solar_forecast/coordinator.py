@@ -802,6 +802,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Stable digest of the forecast-relevant site fields (A4/FOR-4).
 
         Covers exactly the config the day-ahead bias cells are conditioned on:
+        the site LOCATION (lat/lon — they set the entire sun geometry every
+        theta cell was learned against, so a location reconfigure must re-seed;
+        rounded to 4 decimals like the bootstrap site-signature, so float
+        re-serialisation can never spuriously flip the hash),
         each plane's azimuth / tilt / wp / efficiency / ross_coeff / horizon
         profile (per row: elevation AND the transmittance fields tau / seasonal /
         tau_leafed / tau_bare AND the v0.22 inline elevation profiles
@@ -868,6 +872,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             else f"{round(self._site.bifacial_beam_gain, 4)}"
         )
         parts = [
+            f"loc={round(self._site.latitude, 4)},{round(self._site.longitude, 4)}",
             *[_plane_sig(p) for p in self._site.planes],
             f"albedo={albedo}",
             f"beam_gain={beam_gain}",

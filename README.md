@@ -41,7 +41,8 @@ Hinzufügen der Integration werden abgefragt:
 - das **Site-Objekt**: die Modul-**Ebenen** (Azimut, Neigung, Wp), die
   **Horizont**-Profile je Ebene und die **Wechselrichter-Gruppen** mit ihren
   Mess-Entitäten. Das mitgelieferte Referenz-Setup ist als **editierbarer
-  Default** vorbelegt — Vorlage und Testfall, kein Zwang.
+  Default** vorbelegt (Standort: generisches Mitteldeutschland, 51,1° N /
+  10,4° O) — Vorlage und Testfall, kein Zwang.
 - optional ein **Gesamt-AC-Zähler** (hinter allen Wechselrichtern) plus ein
   Vorzeichen-Invert-Flag: das Kalibrierungsziel für den gelernten
   Wechselrichter-Wirkungsgrad η und der gleichwertige AC-gegen-AC-Vergleich im

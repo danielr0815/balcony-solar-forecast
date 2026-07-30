@@ -22,9 +22,11 @@ from datetime import UTC, date, datetime, timedelta, tzinfo
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CHANNEL_PLAUSIBILITY_MAX_WP_FRAC,
     DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE,
     DROPOUT_REASON_DEAD_CHANNEL,
     DROPOUT_REASON_FROZEN_CHANNEL,
+    DROPOUT_REASON_IMPLAUSIBLE_CHANNEL,
     DROPOUT_REASON_LOW_COVERAGE,
     LABEL_FROZEN_MIN_REPEATS,
 )
@@ -94,6 +96,10 @@ async def async_read_actuals(
             {"mean", "state"},
         )
         expected = _daylight_hours_in_local_day(coord._site, start, end)
+        # Wp per module for the SPEC §10 plausibility gate (kW-instead-of-W).
+        wp_by_module = {
+            p.name: p.wp for p in coord._site.planes if p.actual_entity
+        }
         dropout: dict[str, object] = {}
         daily, hourly = _actuals_from_stats(
             stats,
@@ -101,6 +107,7 @@ async def async_read_actuals(
             expected_daylight_hours=expected,
             day=day,
             dropout_out=dropout,
+            wp_by_module=wp_by_module,
         )
         return daily, hourly, (dropout or None)
 
@@ -224,6 +231,7 @@ def _actuals_from_stats(
     expected_daylight_hours: int,
     day: date,
     dropout_out: dict[str, object] | None = None,
+    wp_by_module: dict[str, float] | None = None,
 ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
     """Pure post-processing of LTS rows into per-module (daily, hourly) actuals.
 
@@ -235,6 +243,10 @@ def _actuals_from_stats(
 
       * frozen channel — byte-identical non-zero hourly means held for
         LABEL_FROZEN_MIN_REPEATS+ consecutive hours (:func:`_is_frozen_channel`);
+      * IMPLAUSIBLE channel (only with ``wp_by_module``) — a sustained hourly
+        mean above CHANNEL_PLAUSIBILITY_MAX_WP_FRAC x the module's configured
+        Wp is physically impossible (cloud-edge peaks are sub-hourly), so the
+        sensor is mis-scaled (kW instead of W); SPEC §10;
       * MISSING channel — a configured module with no LTS rows at all, or rows
         without a single usable mean (a DTU port that went unavailable);
       * per-module day-completeness — EVERY configured module must cover at
@@ -297,6 +309,22 @@ def _actuals_from_stats(
                 module, entity_id, day,
             )
             return _dropout(DROPOUT_REASON_FROZEN_CHANNEL, module)
+        if wp_by_module is not None:
+            wp = wp_by_module.get(module)
+            if wp is not None and wp > 0.0:
+                worst = max(means)
+                if worst > CHANNEL_PLAUSIBILITY_MAX_WP_FRAC * wp:
+                    _LOGGER.warning(
+                        "Channel %s (%s) measured a sustained %.0f W in an "
+                        "hour on %s — above %.2f x its configured %.0f Wp, "
+                        "which is physically impossible; the sensor is likely "
+                        "mis-scaled (kW instead of W?). Discarding the whole "
+                        "day for learning and scoring (SPEC §10); fix the "
+                        "entity's unit/scaling and the day trains again.",
+                        module, entity_id, worst, day,
+                        CHANNEL_PLAUSIBILITY_MAX_WP_FRAC, wp,
+                    )
+                    return _dropout(DROPOUT_REASON_IMPLAUSIBLE_CHANNEL, module)
         per_hour: dict[str, float] = {}
         wh = 0.0
         for hkey, m in zip(hkeys, means, strict=False):

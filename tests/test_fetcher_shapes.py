@@ -74,7 +74,7 @@ def good_payload() -> dict:
 
 
 def test_build_params_no_azimuth_conversion_and_fixed_model():
-    p = build_params(48.547853, 12.187272, 3)
+    p = build_params(51.1, 10.4, 3)
     # We fetch raw radiation components and transpose locally — no GTI/tilt
     # param, hence NO azimuth conversion in the fetch URL.
     joined = " ".join(f"{k}={v}" for k, v in p.items())
@@ -83,8 +83,8 @@ def test_build_params_no_azimuth_conversion_and_fixed_model():
     assert p["timezone"] == "UTC"
     assert p["models"] == "icon_seamless"
     assert p["forecast_days"] == "3"
-    assert p["latitude"] == "48.547853"
-    assert p["longitude"] == "12.187272"
+    assert p["latitude"] == "51.100000"
+    assert p["longitude"] == "10.400000"
 
 
 def test_build_params_lists_every_requested_variable():

@@ -48,6 +48,41 @@ def _args(*extra: str):
     return bf.build_arg_parser().parse_args([*_BASE_ARGV, *extra])
 
 
+def _argv_without_token(*extra: str) -> list[str]:
+    """_BASE_ARGV minus the explicit --token pair (for the env-default tests)."""
+    argv = list(_BASE_ARGV)
+    idx = argv.index("--token")
+    del argv[idx : idx + 2]
+    return [*argv, *extra]
+
+
+def test_token_defaults_from_env(monkeypatch):
+    """Token hygiene: the long-lived token comes from HA_LONG_LIVED_TOKEN when
+    --token is absent — it then never appears in the process list."""
+    monkeypatch.setenv("HA_LONG_LIVED_TOKEN", "env-token")
+    args = bf.build_arg_parser().parse_args(
+        _argv_without_token("--site", "x.json")
+    )
+    assert args.token == "env-token"
+
+
+def test_token_cli_overrides_env(monkeypatch):
+    """An explicit --token still wins over the env var."""
+    monkeypatch.setenv("HA_LONG_LIVED_TOKEN", "env-token")
+    args = _args("--site", "x.json")  # _BASE_ARGV carries --token dummy-token
+    assert args.token == "dummy-token"
+
+
+def test_main_errors_without_token_or_env(monkeypatch, capsys):
+    """Neither --token nor the env var: exit 2 with a message naming BOTH
+    (a bare 'required: --token' would not teach the safer path)."""
+    monkeypatch.delenv("HA_LONG_LIVED_TOKEN", raising=False)
+    with pytest.raises(SystemExit) as excinfo:
+        bf.main(_argv_without_token("--site", "x.json"))
+    assert excinfo.value.code == 2
+    assert "HA_LONG_LIVED_TOKEN" in capsys.readouterr().err
+
+
 def test_missing_site_raises_with_an_actionable_message():
     """Without --site (and without the opt-in) the run refuses to start."""
     with pytest.raises(bf.SiteArgumentError) as excinfo:

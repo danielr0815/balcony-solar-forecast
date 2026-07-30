@@ -43,7 +43,10 @@ _spec.loader.exec_module(_solpos)
 sun_position = _solpos.sun_position
 _refraction_correction = _solpos._refraction_correction
 
-# Operator reference site (SPEC §7.8 / const.DEFAULT_SITE).
+# PVGIS anchor site (SPEC §21): the operator reference plant, Landshut.
+# Deliberately NOT read from const.DEFAULT_SITE — that shipped default is a
+# GENERIC mid-Germany location since the 0.23.x review (SPEC §7.8), while the
+# PVGIS-verified anchors below are location-specific to Landshut.
 LAT = 48.547853
 LON = 12.187272
 

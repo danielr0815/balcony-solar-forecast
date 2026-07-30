@@ -617,6 +617,58 @@ def test_config_fingerprint_unchanged_is_noop(monkeypatch):
     assert raised == []
 
 
+def test_config_fingerprint_tracks_location():
+    """SPEC §7.2/§7.7: lat/lon ARE forecast-relevant (they set the whole sun
+    geometry the bias cells are conditioned on), so a location reconfigure must
+    flip the fingerprint; a same-coordinates rebuild must not."""
+    from dataclasses import replace
+
+    c = _make_coordinator()
+    base = c._config_fingerprint()
+
+    c._site = replace(c._site, latitude=52.52)  # moved north
+    assert c._config_fingerprint() != base
+
+    c._site = _site()
+    c._site = replace(c._site, longitude=13.4)  # moved east
+    assert c._config_fingerprint() != base
+
+    # Same coordinates, fresh object -> identical fingerprint, no reseed.
+    c._site = _site()
+    assert c._config_fingerprint() == base
+
+
+def test_config_fingerprint_location_change_reseeds(monkeypatch):
+    """End to end (SPEC §7.7): a fingerprint stored at the OLD location differs
+    after a location reconfigure, so the reconcile re-seeds the bias cells,
+    persists the new fingerprint and raises the repair issue; storing again at
+    the SAME location is a no-op."""
+    from dataclasses import replace
+
+    store = _FakeStore()
+    c = _make_coordinator(store)
+    store.config_fingerprint = c._config_fingerprint()  # learned at old location
+    c._bias_state = _learned_bias_state()
+    raised: list[str] = []
+    monkeypatch.setattr(c, "_raise_repair_issue", lambda i: raised.append(i))
+
+    c._site = replace(c._site, latitude=52.52, longitude=13.4)  # reconfigure
+    c._reconcile_config_fingerprint()
+
+    mid = c._bias_state.cells[BiasState.cell_key("clear", DAY_PART_MIDDAY)]
+    assert mid.n <= DAY_AHEAD_BIAS_RESEED_N
+    assert store.config_fingerprint == c._config_fingerprint()
+    assert ISSUE_CONFIG_CHANGED_BIAS_RESEED in raised
+
+    # Reconcile again at the SAME location: nothing more happens.
+    raised.clear()
+    c._bias_state = _learned_bias_state()
+    c._reconcile_config_fingerprint()
+    mid = c._bias_state.cells[BiasState.cell_key("clear", DAY_PART_MIDDAY)]
+    assert mid.n == 100
+    assert raised == []
+
+
 def test_config_fingerprint_tracks_relevant_fields_only():
     """The fingerprint moves for a forecast-relevant edit (azimuth, albedo, AC
     limit) but is INVARIANT to benign edits (entity id, shade group)."""
@@ -810,7 +862,7 @@ def _legacy_v021_site() -> SiteConfig:
 
 
 def test_config_fingerprint_legacy_config_is_byte_stable():
-    """GOLDEN: a config WITHOUT any v0.22 field hashes to the exact v0.21.0 value.
+    """GOLDEN: a config WITHOUT any v0.22 field hashes to the exact pinned value.
 
     The v0.22 fields (tau_points / tau_points_bare / diffuse_tau) are appended to
     the fingerprint's row segment ONLY when set (mirroring the nur-wenn-gesetzt
@@ -818,13 +870,19 @@ def test_config_fingerprint_legacy_config_is_byte_stable():
     pre-0.22 string. This pins that: if the base format ever silently shifts, an
     upgrade would spontaneously re-seed every follower's day-ahead bias against an
     UNCHANGED raw curve (ADR §1: 'kein Spontan-Reseed beim Upgrade'). The golden
-    was computed from the v0.21.0 ``_config_fingerprint`` algorithm; it must only
+    was computed from the ``_config_fingerprint`` algorithm; it must only
     change on a DELIBERATE fingerprint-format bump (CLASSIFIER_VERSION or a
     documented schema change), never as a side effect of adding an optional field.
+
+    Bumped 48f218a3ca86ee54 -> 4639a8c404bf8df6 exactly once, deliberately: the
+    0.23.x review put lat/lon INTO the fingerprint (SPEC §7.7 — a location
+    reconfigure must re-seed). That format bump re-seeds every existing install
+    exactly once on upgrade — accepted and documented, the reseed keeps theta
+    and only re-opens covariance (bias.reseed_day_ahead_bias).
     """
     c = _make_coordinator()
     c._site = _legacy_v021_site()
-    assert c._config_fingerprint() == "48f218a3ca86ee54"
+    assert c._config_fingerprint() == "4639a8c404bf8df6"
 
 
 def test_config_fingerprint_legacy_bytes_ignore_v022_none_fields():
@@ -2250,6 +2308,76 @@ def test_actuals_from_stats_partial_module_discards_day():
         day=datetime(2026, 6, 20).date(),
     )
     assert daily == {} and hourly == {}
+
+
+def test_actuals_from_stats_kw_scaled_channel_discards_day():
+    """SPEC §10 plausibility gate: a sustained hourly mean above
+    CHANNEL_PLAUSIBILITY_MAX_WP_FRAC x the module's configured Wp is physically
+    impossible — the channel is mis-scaled (the classic kW-instead-of-W
+    sensor) and the whole day is discarded for learning AND scoring, with the
+    reason recorded for diagnostics (mirrors the bootstrap-side gate)."""
+    from custom_components.balcony_solar_forecast.coordinator import (
+        _actuals_from_stats,
+    )
+
+    good = [(h, 100.0 + h) for h in range(6, 18)]
+    poisoned = [(h, 100.0 + h) for h in range(6, 18)]
+    poisoned[5] = (11, 5000.0)  # 5 kW sustained on a 400 Wp module
+    stats = {"sensor.m1": _lts_rows(good), "sensor.m2": _lts_rows(poisoned)}
+    dropout: dict = {}
+    daily, hourly = _actuals_from_stats(
+        stats,
+        {"M1": "sensor.m1", "M2": "sensor.m2"},
+        expected_daylight_hours=12,
+        day=datetime(2026, 6, 20).date(),
+        dropout_out=dropout,
+        wp_by_module={"M1": 400.0, "M2": 400.0},
+    )
+    assert daily == {} and hourly == {}
+    assert dropout["reason"] == "implausible_channel"
+    assert dropout["modules"] == ["M2"]
+
+
+def test_actuals_from_stats_reading_at_plausibility_bound_accepted():
+    """The gate fires ABOVE 1.25 x Wp, not at it (cloud-edge headroom)."""
+    from custom_components.balcony_solar_forecast.coordinator import (
+        _actuals_from_stats,
+    )
+
+    good = [(h, 100.0 + h) for h in range(6, 18)]
+    at_bound = [(h, 100.0 + h) for h in range(6, 18)]
+    at_bound[5] = (11, 500.0)  # exactly 1.25 x 400 Wp
+    stats = {"sensor.m1": _lts_rows(good), "sensor.m2": _lts_rows(at_bound)}
+    daily, hourly = _actuals_from_stats(
+        stats,
+        {"M1": "sensor.m1", "M2": "sensor.m2"},
+        expected_daylight_hours=12,
+        day=datetime(2026, 6, 20).date(),
+        wp_by_module={"M1": 400.0, "M2": 400.0},
+    )
+    assert set(daily) == {"M1", "M2"}
+    assert len(hourly["M2"]) == 12
+
+
+def test_actuals_from_stats_plausibility_gate_inert_without_wp():
+    """Legacy callers without ``wp_by_module`` keep the pre-gate behaviour —
+    the gate is opt-in via the site-aware caller (``async_read_actuals``)."""
+    from custom_components.balcony_solar_forecast.coordinator import (
+        _actuals_from_stats,
+    )
+
+    good = [(h, 100.0 + h) for h in range(6, 18)]
+    poisoned = [(h, 100.0 + h) for h in range(6, 18)]
+    poisoned[5] = (11, 5000.0)  # implausible, but no Wp context given
+    stats = {"sensor.m1": _lts_rows(good), "sensor.m2": _lts_rows(poisoned)}
+    daily, hourly = _actuals_from_stats(
+        stats,
+        {"M1": "sensor.m1", "M2": "sensor.m2"},
+        expected_daylight_hours=12,
+        day=datetime(2026, 6, 20).date(),
+    )
+    assert set(daily) == {"M1", "M2"}
+    assert len(hourly["M2"]) == 12
 
 
 def test_actuals_from_stats_unknown_daylight_skips_coverage_gate():

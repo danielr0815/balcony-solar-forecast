@@ -335,7 +335,7 @@
           "ac_actual_entity": "Optional. Der Sensor, der die Gesamt-AC-Leistung hinter allen Wechselrichtern misst — das Kalibrierungsziel für den gelernten Wechselrichter-Wirkungsgrad (η) und den gleichwertigen AC-gegen-AC-Vergleich im Dashboard. Leer lassen, wenn kein Gesamt-AC-Zähler vorhanden ist.",
           "ac_actual_invert": "Aktivieren, wenn der AC-Zähler die eingespeiste Balkon-Solar-Leistung als negativen Wert meldet; der Messwert wird einmal negiert, damit die gemessene AC-Leistung positiv angezeigt wird.",
           "albedo": "Reflexionsgrad des Bodens vor den Modulen für den Bodenreflex-Anteil. Dunkler Hof/Rasen ≈ 0,1, Lehrbuch-Standard 0,2, heller Beton ≈ 0,3. Wirkt am stärksten bei steiler Balkonmontage. Leer lassen für den Standard.",
-          "bifacial_beam_gain": "Faktor nur auf den direkten Anteil (Beam+Zirkumsolar), um den ehrlich unterschätzten Direktstrahl an klaren Morgen anzuheben (bifaziale Rückseite, steile Ost-Geometrie). Bereich 1,0–1,6; der Referenzstandort validierte ≈ 1,23. Leer lassen für 1,0 (keine Änderung)."
+          "bifacial_beam_gain": "Faktor nur auf den direkten Anteil (Beam+Zirkumsolar), um den ehrlich unterschätzten Direktstrahl an klaren Morgen anzuheben (bifaziale Rückseite, steile Ost-Geometrie). Bereich 1,0–1,3; der Referenzstandort validierte ≈ 1,23. Leer lassen für 1,0 (keine Änderung)."
         }
       },
       "reconfigure": {
@@ -358,7 +358,7 @@
           "ac_actual_entity": "Optional. Der Sensor, der die Gesamt-AC-Leistung hinter allen Wechselrichtern misst — das Kalibrierungsziel für den gelernten Wechselrichter-Wirkungsgrad (η) und den gleichwertigen AC-gegen-AC-Vergleich im Dashboard. Leer lassen, wenn kein Gesamt-AC-Zähler vorhanden ist.",
           "ac_actual_invert": "Aktivieren, wenn der AC-Zähler die eingespeiste Balkon-Solar-Leistung als negativen Wert meldet; der Messwert wird einmal negiert, damit die gemessene AC-Leistung positiv angezeigt wird.",
           "albedo": "Reflexionsgrad des Bodens vor den Modulen für den Bodenreflex-Anteil. Dunkler Hof/Rasen ≈ 0,1, Lehrbuch-Standard 0,2, heller Beton ≈ 0,3. Wirkt am stärksten bei steiler Balkonmontage. Leer lassen für den Standard.",
-          "bifacial_beam_gain": "Faktor nur auf den direkten Anteil (Beam+Zirkumsolar), um den ehrlich unterschätzten Direktstrahl an klaren Morgen anzuheben (bifaziale Rückseite, steile Ost-Geometrie). Bereich 1,0–1,6; der Referenzstandort validierte ≈ 1,23. Leer lassen für 1,0 (keine Änderung)."
+          "bifacial_beam_gain": "Faktor nur auf den direkten Anteil (Beam+Zirkumsolar), um den ehrlich unterschätzten Direktstrahl an klaren Morgen anzuheben (bifaziale Rückseite, steile Ost-Geometrie). Bereich 1,0–1,3; der Referenzstandort validierte ≈ 1,23. Leer lassen für 1,0 (keine Änderung)."
         }
       }
     },
@@ -388,7 +388,10 @@
       "group_unknown_plane": "Eine Gruppe verweist auf eine unbekannte Ebene.",
       "bad_ac_limit": "Das AC-Limit muss größer als 0 sein.",
       "shade_group_empty": "Eine Verschattungsgruppe muss ein nicht-leerer Name sein.",
-      "shade_group_collision": "Eine Verschattungsgruppe darf nicht dem Namen einer Ebene entsprechen, die nicht selbst zu dieser Gruppe gehört."
+      "shade_group_collision": "Eine Verschattungsgruppe darf nicht dem Namen einer Ebene entsprechen, die nicht selbst zu dieser Gruppe gehört.",
+      "too_many_planes": "Es können höchstens 8 Ebenen konfiguriert werden.",
+      "too_many_shade_groups": "Es können höchstens 8 verschiedene Verschattungsgruppen konfiguriert werden.",
+      "too_many_horizon_points": "Die Horizonttabelle einer Ebene kann höchstens 64 Zeilen enthalten."
     },
     "abort": {
       "already_configured": "Eine Anlage mit diesem Namen ist bereits eingerichtet."
@@ -442,7 +445,10 @@
       "group_unknown_plane": "Eine Gruppe verweist auf eine unbekannte Ebene.",
       "bad_ac_limit": "Das AC-Limit muss größer als 0 sein.",
       "shade_group_empty": "Eine Verschattungsgruppe muss ein nicht-leerer Name sein.",
-      "shade_group_collision": "Eine Verschattungsgruppe darf nicht dem Namen einer Ebene entsprechen, die nicht selbst zu dieser Gruppe gehört."
+      "shade_group_collision": "Eine Verschattungsgruppe darf nicht dem Namen einer Ebene entsprechen, die nicht selbst zu dieser Gruppe gehört.",
+      "too_many_planes": "Es können höchstens 8 Ebenen konfiguriert werden.",
+      "too_many_shade_groups": "Es können höchstens 8 verschiedene Verschattungsgruppen konfiguriert werden.",
+      "too_many_horizon_points": "Die Horizonttabelle einer Ebene kann höchstens 64 Zeilen enthalten."
     }
   }
 }

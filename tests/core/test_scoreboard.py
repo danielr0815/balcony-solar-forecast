@@ -443,6 +443,29 @@ def test_kill_gate_respects_min_window_days():
     )
 
 
+def test_kill_gate_undetermined_with_only_two_paired_days():
+    # SPEC §15.4: a comparison paired over fewer than
+    # SCOREBOARD_MIN_PAIRED_DAYS (3) days is NOT eligible to set the
+    # best-baseline bar — a lucky pair must not pass the gate; the verdict is
+    # UNDETERMINED even though the engine's window is full and winning.
+    days = [
+        _day("2026-07-01", measured=10.0, engine=9.0, comparisons={"b": 14.0}),
+        _day("2026-07-02", measured=10.0, engine=9.0, comparisons={"b": 14.0}),
+        _day("2026-07-03", measured=10.0, engine=9.0),  # engine-only day
+    ]
+    assert sb.kill_gate_passed(_state(days), window_days=3, gate_margin=0.10) is None
+
+
+def test_kill_gate_three_paired_days_eligible():
+    # Exactly at the SCOREBOARD_MIN_PAIRED_DAYS floor (3) the comparison sets
+    # the bar; engine MAE 1 vs baseline MAE 4 -> 75 % >= 10 % -> pass.
+    days = [
+        _day(f"2026-07-0{i}", measured=10.0, engine=9.0, comparisons={"b": 14.0})
+        for i in range(1, 4)
+    ]
+    assert sb.kill_gate_passed(_state(days), window_days=3, gate_margin=0.10) is True
+
+
 # ---------------------------------------------------------------------------
 # scoreboard_summary — pure assembly
 # ---------------------------------------------------------------------------

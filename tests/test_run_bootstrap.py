@@ -272,6 +272,30 @@ def test_range_explicit_dates_parsed():
     assert end.isoformat() == "2025-06-30"
 
 
+def test_range_span_over_limit_rejected():
+    # Security bound (SPEC §12.2): a multi-year span would keep the service
+    # fetching + reconstructing for hours — reject instead of self-correcting.
+    with pytest.raises(ServiceValidationError, match="BOOTSTRAP_MAX_RANGE_DAYS"):
+        bs._resolve_range("2020-01-01", "2025-12-31")  # 6 calendar years
+
+
+def test_range_span_exactly_at_limit_ok():
+    # 5 calendar years incl. the 2024 leap day == BOOTSTRAP_MAX_RANGE_DAYS (1826).
+    start, end = bs._resolve_range("2021-01-01", "2025-12-31")
+    assert (end - start).days + 1 == 1826
+
+
+def test_range_future_end_date_clamped_to_yesterday():
+    # A fat-fingered future end_date carries no actuals; clamp like the default
+    # instead of erroring (SPEC §12.2). A future START still fails inverted.
+    today = dt_util.now().date()
+    future = (today + timedelta(days=30)).isoformat()
+    _start, end = bs._resolve_range(None, future)
+    assert end == today - timedelta(days=1)
+    with pytest.raises(ServiceValidationError, match="before start_date"):
+        bs._resolve_range(future, None)
+
+
 def test_date_windows_chunks_inclusive():
     from datetime import date
 

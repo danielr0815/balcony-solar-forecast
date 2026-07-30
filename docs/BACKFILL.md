@@ -124,9 +124,8 @@ the rollback snapshot lets you undo it.
 Full 2-year backfill (LTS exists since 2024-07):
 
 ```sh
-py -3.14 scripts/backfill.py \
+HA_LONG_LIVED_TOKEN=PASTE_LONG_LIVED_TOKEN py -3.14 scripts/backfill.py \
     --ha-url http://homeassistant.local:8123 \
-    --token "PASTE_LONG_LIVED_TOKEN" \
     --start 2024-07-01 \
     --end   2026-07-01 \
     --site  site.json \
@@ -136,9 +135,8 @@ py -3.14 scripts/backfill.py \
 Dry run first (fetch + reconstruct + summarise, **no file written**):
 
 ```sh
-py -3.14 scripts/backfill.py \
+HA_LONG_LIVED_TOKEN=PASTE_LONG_LIVED_TOKEN py -3.14 scripts/backfill.py \
     --ha-url http://homeassistant.local:8123 \
-    --token "PASTE_LONG_LIVED_TOKEN" \
     --start 2024-07-01 --end 2026-07-01 \
     --site site.json \
     --dry-run --verbose
@@ -155,7 +153,7 @@ several thousand quasi-clear shademap samples and all twelve (4 cloud classes ×
 | Flag | Required | Meaning |
 |---|---|---|
 | `--ha-url` | yes | HA base URL for the WebSocket LTS pull. |
-| `--token` | yes | HA long-lived access token. |
+| `--token` | no | HA long-lived access token; defaults to the `HA_LONG_LIVED_TOKEN` env var. |
 | `--start` | yes | Range start `YYYY-MM-DD` (UTC calendar). |
 | `--end` | yes | Range end `YYYY-MM-DD` (inclusive). |
 | `--out` | no | Output path (default `bootstrap.json`). |
@@ -168,8 +166,13 @@ several thousand quasi-clear shademap samples and all twelve (4 cloud classes ×
 optional and the run silently reconstructed against the shipped reference site;
 that trap is closed (see below).
 
-Keep the token out of your shell history: on POSIX shells put it in an env var
-and reference it (`--token "$HA_TOKEN"`); PowerShell: `--token $env:HA_TOKEN`.
+Token hygiene: the token defaults to the `HA_LONG_LIVED_TOKEN` env var —
+**prefer it over `--token`**, because a CLI argument is visible to every user on
+the machine in the process list (`ps`), and the env var also keeps the token out
+of your shell history (prefix the command with a space on POSIX shells with
+`HISTCONTROL=ignorespace`, or export it once per session; PowerShell:
+`$env:HA_LONG_LIVED_TOKEN = "..."`). Prefer an `https://` HA URL: over plain
+`http://` the Bearer token travels in cleartext on the wire.
 
 ---
 
@@ -227,8 +230,9 @@ follow it:
    ```sh
    # export the EDITED site object to site.json first (config-flow shape), then:
    py -3.14 scripts/backfill.py --ha-url http://homeassistant.local:8123 \
-       --token "$HA_TOKEN" --start 2024-07-01 --end 2026-07-01 \
+       --start 2024-07-01 --end 2026-07-01 \
        --site site.json --out bootstrap.json
+   # (token from HA_LONG_LIVED_TOKEN in the environment)
    ```
 
    Import as above. Expect a short transition where the served 04–06Z curve
