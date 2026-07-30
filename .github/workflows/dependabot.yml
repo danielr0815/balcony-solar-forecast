@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # Keep the GitHub Actions used by the CI/release workflows current and
+  # pinned.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+      - ci
+
+  # Keep the pinned dev dependencies (pyproject.toml [dependency-groups]) and
+  # uv.lock current. Note: homeassistant / pytest / pytest-cov /
+  # pytest-homeassistant-custom-component are coupled — phacc pins the other
+  # three exactly, so bump them together (see the comment in pyproject.toml).
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
