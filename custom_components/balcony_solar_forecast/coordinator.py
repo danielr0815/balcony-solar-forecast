@@ -123,6 +123,7 @@ from .const import (
     ENSEMBLE_FETCH_INTERVAL_S,
     ENSEMBLE_MIN_DET_GHI,
     ENSEMBLE_MIN_MEMBERS,
+    FAILED_FETCH_MIN_INTERVAL_SECONDS,
     FETCH_INTERVAL_SECONDS,
     FORECAST_DAYS,
     FORECAST_RESP_KEY_P10,
@@ -1094,7 +1095,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             _LOGGER.warning("Intraday-scalar tick failed; serving previous", exc_info=True)
 
         try:
-            result = self._compute(weather, now)
+            result = await self._compute(weather, now)
         except Exception as err:  # pragma: no cover - engine owns correctness
             _LOGGER.exception("Forecast engine failed")
             raise UpdateFailed(f"Forecast engine error: {err}") from err
@@ -1105,11 +1106,26 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._correction_source = result.correction_source
         return self._build_data(result, dict(result.hourly_wh), now, status, age)
 
-    def _compute(self, weather, now: datetime) -> ForecastResult:
-        """Run the engine with the learner hooks bound over the persisted state."""
+    async def _compute(self, weather, now: datetime) -> ForecastResult:
+        """Run the engine with the learner hooks bound over the persisted state.
+
+        The hook BINDING stays on the event loop (``_build_learner_hooks``
+        reads/writes coordinator state); only the pure engine pass runs in the
+        executor. That is race-free by construction: every hook closes over
+        freshly built per-pass dicts (``day_factor``, ``band_by_slot``), floats
+        captured by value, or the copy-on-write learner states —
+        ``shademap.update_bin`` returns a NEW ``ShademapState`` and every writer
+        rebinds ``self._shademap_state`` with one atomic attribute set, so the
+        ``beam_tau`` closure's bind-time reference is an immutable snapshot no
+        event-loop callback can mutate in place.
+        """
         tz = dt_util.get_time_zone(self.hass.config.time_zone)
         hooks = self._build_learner_hooks(weather, now)
-        return compute_forecast(self._site, weather, now, tz=tz, hooks=hooks)
+
+        def _run() -> ForecastResult:
+            return compute_forecast(self._site, weather, now, tz=tz, hooks=hooks)
+
+        return await self.hass.async_add_executor_job(_run)
 
     def _build_learner_hooks(self, weather, now: datetime) -> LearnerHooks:
         """Bind shademap.effective_tau into beam_tau and compose the intraday
@@ -1351,7 +1367,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         return beam_tau
 
-    def _slow_only_hourly(self, iso: str) -> dict[str, float]:
+    async def _slow_only_hourly(self, iso: str) -> dict[str, float]:
         """Slow-only (shademap ∘ physics, NO day-ahead factor) hourly Wh for the
         local day ``iso`` — the drift monitor's per-layer attribution reference
         (audit #13b).
@@ -1361,7 +1377,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         treat slow-only == raw and blame only the fast layer, so the raw curve is
         NOT duplicated into the store. Also {} when no weather is cached or the
         engine pass raises — the nightly snapshot must never fail on this. Runs
-        ONCE per nightly snapshot, so the extra engine pass is cheap.
+        ONCE per nightly snapshot, so the extra engine pass is cheap. The engine
+        pass itself runs in the executor (same snapshot-safety argument as
+        :meth:`_compute`: the shademap state is copy-on-write, so the bind-time
+        ``beam_tau`` closure reads an immutable reference).
         """
         if not self._slow_active():
             return {}
@@ -1376,9 +1395,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 correction_source=CORRECTION_SOURCE_SHADEMAP,
                 band_by_slot=None,
             )
-            result = compute_forecast(
-                self._site, weather, dt_util.utcnow(), tz=tz, hooks=hooks
-            )
+            now = dt_util.utcnow()
+
+            def _run() -> ForecastResult:
+                return compute_forecast(self._site, weather, now, tz=tz, hooks=hooks)
+
+            result = await self.hass.async_add_executor_job(_run)
             return _filter_hourly_to_local_day(result.hourly_wh, iso)
         except Exception:  # pragma: no cover - never fail the nightly snapshot
             _LOGGER.debug(
@@ -1390,9 +1412,17 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Scheduling keys on the last ATTEMPT, not the payload age: the
         # keep-richer branch retains the old payload but must still count as a
         # completed round-trip, else a degraded provider would be hammered every
-        # recompute tick.
-        if self._last_attempt_at is None or not self._last_fetch_ok:
+        # recompute tick. The same hammering guard applies to FAILURES (SPEC §3
+        # „Retry"): a down provider is retried on a backoff — min(configured
+        # fetch interval, FAILED_FETCH_MIN_INTERVAL_SECONDS), so a faster
+        # configured cadence is never stretched — not on every recompute tick.
+        if self._last_attempt_at is None:
             return True
+        if not self._last_fetch_ok:
+            return now - self._last_attempt_at >= min(
+                self._fetch_interval,
+                timedelta(seconds=FAILED_FETCH_MIN_INTERVAL_SECONDS),
+            )
         return now - self._last_attempt_at >= self._fetch_interval
 
     async def _async_try_fetch(self, now: datetime) -> None:
@@ -1405,6 +1435,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
         except FetchError as err:
             self._last_fetch_ok = False
+            # The attempt anchor advances on failure too — it IS an attempt.
+            # Without the stamp the _due_for_fetch backoff never engages and a
+            # down provider would be hammered every recompute tick; the PAYLOAD
+            # age anchor (_last_fetched_at) stays untouched so the served
+            # weather keeps aging honestly through the ladder (SPEC §13).
+            self._last_attempt_at = now
             self._last_error = str(err)
             _LOGGER.warning("Open-Meteo fetch failed: %s", err)
             return

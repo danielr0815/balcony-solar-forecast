@@ -212,11 +212,13 @@ without the bundled frontend resources.
   rides as the `inverter_efficiency_learned` attribute of `power_production_now`,
   surfaced here as an attribute row (learned η, folded-sample count, applied
   value). Gated on the two DC diagnostic sensors existing.
-- **Production per module (measured DC · forecast AC)** (bundled card — no HACS
+- **Production per module (measured DC · forecast DC)** (bundled card — no HACS
   install) — an energy-dashboard-style chart: one **stacked hourly production bar
   per module** (M1…M8, coloured segments — measured **DC**) with a **dashed
-  forecast line** (the **AC** forecast); the title and the line's provenance
-  caption spell the two units out so the mixed-unit overlay is never misread.
+  forecast line** (also **DC**: today's live `wh_period` model curve, past days
+  the frozen issued `hourly_wh` curve, §18.4); the title and the line's
+  provenance caption („Prognose (live)" vs. „Prognose (Stand 01:30)") spell the
+  shared DC basis and the line's origin out so the overlay is never misread.
   Hovering (or touching) shows a crosshair with every module's Wh **and the
   total** for that hour (§4c). It replaces the old messy 8-line measured-power
   history-graph. On a partial install where the measured-total sensor is absent it

@@ -75,11 +75,54 @@ const A_DATE = "date";
 const A_AXIS_AZ_MIN = "axis_azimuth_min";
 const A_AXIS_AZ_MAX = "axis_azimuth_max";
 
-// Entity auto-discovery patterns (entity_id shapes; the device slug already
-// carries "balcony_solar_forecast", so a loose contains-match is safe).
+// Entity auto-discovery, i18n-proof: the Python side sets every entity's
+// unique_id to "{entry_id}_{key}" (sensor.py BalconyForecastEntity), and the
+// key is LANGUAGE-STABLE — while the entity_id's object slug is generated from
+// the TRANSLATED entity name, so a German install gets e.g.
+// "sensor...._verschattungsprofil", which the English regex below can never
+// match. Discovery therefore matches the entity registry's unique_id SUFFIX
+// (platform-gated); the entity_id regex stays only as a fallback for a hass
+// without registry access (and for the sync picker preview, which cannot await
+// the websocket call).
+const KEY_SENSOR = "shade_profile";
+const KEY_SELECT = "shade_profile_module";
+const KEY_DATE = "shade_profile_date";
 const RE_SENSOR = /^sensor\..*shade_profile$/;
 const RE_SELECT = /^select\..*shade_profile_module$/;
 const RE_DATE = /^date\..*shade_profile_date$/;
+
+// One entity-registry fetch per hass connection, shared by all card instances
+// (a WeakMap so a torn-down connection can be garbage-collected).
+const _registryCache = new WeakMap(); // hass -> Promise<list|null>
+
+/** Fetch the entity registry once; null when unreadable (regex fallback). */
+function entityRegistry(hass) {
+  if (!hass || typeof hass.callWS !== "function") return Promise.resolve(null);
+  let p = _registryCache.get(hass);
+  if (!p) {
+    p = hass
+      .callWS({ type: "config/entity_registry/list" })
+      .then((list) => (isArray(list) ? list : null))
+      .catch(() => null);
+    _registryCache.set(hass, p);
+  }
+  return p;
+}
+
+/** entity_id of OUR entity whose unique_id ends with `_{key}`, or undefined. */
+function byUniqueId(list, key) {
+  if (!list) return undefined;
+  const suffix = `_${key}`;
+  for (const e of list) {
+    // Platform-gated: a foreign integration's look-alike unique_id suffix must
+    // never be claimed as ours.
+    if (!e || e.platform !== "balcony_solar_forecast") continue;
+    if (typeof e.unique_id === "string" && e.unique_id.endsWith(suffix)) {
+      return e.entity_id;
+    }
+  }
+  return undefined;
+}
 
 // Tiny i18n dict keyed off the two-letter `hass.language`; English fallback.
 const I18N = {
@@ -210,6 +253,10 @@ class BalconyShadeProfileCard extends HTMLElement {
     this._lastCtx = null;
     this._nowTimer = null;
     this._hovering = false;
+    // Entity-registry discovery state (i18n-proof unique_id match): the fetched
+    // registry list plus the one-shot guard for its fetch.
+    this._registryList = null;
+    this._registryRequested = false;
   }
 
   // Refresh the live "now" marker roughly once a minute while the card is on
@@ -246,7 +293,9 @@ class BalconyShadeProfileCard extends HTMLElement {
     return 6;
   }
 
-  /** Picker preview: return discovered ids so the preview renders live data. */
+  /** Picker preview: return discovered ids so the preview renders live data.
+   * Static and sync, so it can only use the entity_id regex fallback — the
+   * registry (unique_id) discovery runs once the card itself is mounted. */
   static getStubConfig(hass) {
     const find = (re) => {
       if (!hass || !hass.states) return undefined;
@@ -263,6 +312,8 @@ class BalconyShadeProfileCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (!this._config) return;
+    // Kick the one-shot registry discovery (unique_id match; regex until then).
+    this._ensureRegistry(hass);
     const ids = this._resolveIds(hass);
     const s = hass.states[ids.sensor];
     const sel = hass.states[ids.module_select];
@@ -294,16 +345,46 @@ class BalconyShadeProfileCard extends HTMLElement {
 
   _resolveIds(hass) {
     const c = this._config;
-    const find = (re) => {
+    // Registry unique_id match FIRST (language-stable), entity_id regex only
+    // as the fallback while the registry fetch is still in flight (or
+    // unavailable). An explicitly configured id always wins.
+    const find = (key, re) => {
+      const hit = byUniqueId(this._registryList, key);
+      if (hit) return hit;
       if (!hass || !hass.states) return undefined;
       for (const id of Object.keys(hass.states)) if (re.test(id)) return id;
       return undefined;
     };
     return {
-      sensor: c.sensor || find(RE_SENSOR),
-      module_select: c.module_select || find(RE_SELECT),
-      date_entity: c.date_entity || find(RE_DATE),
+      sensor: c.sensor || find(KEY_SENSOR, RE_SENSOR),
+      module_select: c.module_select || find(KEY_SELECT, RE_SELECT),
+      date_entity: c.date_entity || find(KEY_DATE, RE_DATE),
     };
+  }
+
+  /**
+   * Kick the ONE entity-registry fetch discovery needs (the i18n-proof
+   * unique_id match). Sync hass pushes run on the regex fallback until the
+   * promise lands; when the registry then changes a resolved id, the whole
+   * setter path is re-run so the render picks up the corrected entities.
+   */
+  _ensureRegistry(hass) {
+    if (this._registryRequested) return;
+    this._registryRequested = true;
+    const before = this._resolveIds(hass);
+    entityRegistry(hass).then((list) => {
+      if (!list || this._hass !== hass || !this.isConnected) return;
+      this._registryList = list;
+      const after = this._resolveIds(hass);
+      if (
+        before.sensor === after.sensor &&
+        before.module_select === after.module_select &&
+        before.date_entity === after.date_entity
+      ) {
+        return;
+      }
+      this.hass = hass; // guarded: _registryRequested is already spent
+    });
   }
 
   // --- rendering ----------------------------------------------------------

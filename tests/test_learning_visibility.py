@@ -46,7 +46,9 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     DROPOUT_REASON_FROZEN_CHANNEL,
     DROPOUT_REASON_LOW_COVERAGE,
     DROPOUT_REASONS,
+    INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS,
     ISSUE_ACTUAL_ENTITY_MISSING,
+    ISSUE_ETA_OUT_OF_BAND,
     ISSUE_LEARNING_STALLED_BY_REASON,
     ISSUE_LEARNING_STALLED_DEAD_CHANNEL,
     ISSUE_LEARNING_STALLED_FROZEN_CHANNEL,
@@ -1399,3 +1401,113 @@ def test_stalled_card_reaches_the_registry_fully_rendered(monkeypatch, lang):
     assert str(LEARNING_STALLED_STREAK_DAYS) in text
     assert "M2 (sensor.m2)" in text
     assert "{" not in text
+
+
+# ---------------------------------------------------------------------------
+# (10) η out-of-band watchdog (SPEC §10): a persistently implausible measured
+#      AC/DC ratio is a METERING defect (mis-scaled DC ports, an AC meter that
+#      also sees house load), not an inverter property. The nightly calibration
+#      refuses the folds silently; this detector makes the pattern visible
+#      after INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS consecutive days and clears
+#      it on the first day back in band.
+# ---------------------------------------------------------------------------
+
+
+def _eta_day(coord, day: date, median: float, *, ours: bool = True) -> None:
+    """One nightly calibration verdict: the day's MEDIAN raw AC/DC ratio."""
+    if ours:
+        coord._store.issued[day.isoformat()] = {"status": "ok"}
+    _channel_health.record_eta_calibration_outcome(coord, day, median_ratio=median)
+
+
+def test_eta_oob_streak_raises_at_threshold_with_actionable_placeholders():
+    from datetime import timedelta
+
+    coord = _Coord()
+    for offset in range(INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS - 1):
+        _eta_day(coord, _DAY + timedelta(days=offset), 0.77)
+    assert coord.raised == []  # below the threshold: silent
+    assert coord._store.get_learning_health()["eta_oob_streak"] == (
+        INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS - 1
+    )
+
+    last = _DAY + timedelta(days=INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS - 1)
+    _eta_day(coord, last, 0.77)
+    assert _issue_ids(coord) == [ISSUE_ETA_OUT_OF_BAND]
+    placeholders = coord.raised[0][1]
+    assert set(placeholders) == set(
+        ISSUE_TRANSLATION_PLACEHOLDERS[ISSUE_ETA_OUT_OF_BAND]
+    )
+    assert placeholders["days"] == str(INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS)
+    assert placeholders["last_day"] == last.isoformat()
+    assert placeholders["median"].startswith("0.77")
+    assert "0.90" in placeholders["band"] and "0.99" in placeholders["band"]
+
+    # Idempotent: the catch-up sweep re-processes the same day — counted once.
+    _eta_day(coord, last, 0.77)
+    assert len(coord.raised) == 1
+    assert coord._store.get_learning_health()["eta_oob_streak"] == (
+        INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS
+    )
+
+
+def test_eta_oob_in_band_day_resets_and_deletes():
+    from datetime import timedelta
+
+    coord = _Coord()
+    for offset in range(INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS):
+        # > INVERTER_CAL_MAX: the AC meter also sees house load.
+        _eta_day(coord, _DAY + timedelta(days=offset), 1.35)
+    assert _issue_ids(coord) == [ISSUE_ETA_OUT_OF_BAND]
+
+    good = _DAY + timedelta(days=INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS)
+    _eta_day(coord, good, 0.96)
+    assert coord.deleted == [ISSUE_ETA_OUT_OF_BAND]
+    health = coord._store.get_learning_health()
+    assert health["eta_oob_streak"] == 0
+    assert health["eta_oob_last_day"] is None
+
+
+def test_eta_oob_predating_days_never_count():
+    """Fresh-install guard, same contract as the discard streak: a day we never
+    issued a forecast for is pre-install history — its (legacy) metering says
+    nothing about TODAY's wiring."""
+    from datetime import timedelta
+
+    coord = _Coord()
+    for offset in range(INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS * 2):
+        _eta_day(coord, _DAY + timedelta(days=offset), 0.77, ours=False)
+    assert coord.raised == []
+    assert coord._store.get_learning_health()["eta_oob_streak"] == 0
+
+
+def test_eta_oob_streak_survives_on_the_real_store():
+    """The eta keys ride the SAME persisted learning_health section (the shipped
+    coercer must not strip them) and come back through the diagnostics summary."""
+    store = _real_store()
+    coord = _Coord(store=store)
+    store.record_issued(_DAY.isoformat(), {"status": "ok"})
+
+    _channel_health.record_eta_calibration_outcome(coord, _DAY, median_ratio=0.77)
+
+    health = store.get_learning_health()
+    assert health["eta_oob_streak"] == 1
+    assert health["eta_oob_last_day"] == _DAY.isoformat()
+    assert health["eta_oob_last_median"] == pytest.approx(0.77)
+    assert coord.learning_health_summary()["eta_oob_streak"] == 1
+
+
+@pytest.mark.parametrize("lang", ("en", "de"))
+def test_eta_oob_card_reaches_the_registry_fully_rendered(lang):
+    """The shipped translation formats with exactly the raised placeholders —
+    no leftover slot, and the concrete median/band/day survive."""
+    from datetime import timedelta
+
+    coord = _Coord()
+    for offset in range(INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS):
+        _eta_day(coord, _DAY + timedelta(days=offset), 0.77)
+    ((issue_id, placeholders),) = coord.raised
+    assert issue_id == ISSUE_ETA_OUT_OF_BAND
+    text = _render(ISSUE_ETA_OUT_OF_BAND, placeholders, lang)
+    assert "{" not in text
+    assert "0.77" in text

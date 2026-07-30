@@ -420,11 +420,12 @@ def _add_measured_power(
         card: dict[str, Any] = {
             "type": _POWER_HISTORY_CARD,
             "total_sensor": total,
-            # Title spells out the two units on the card: the stacked bars are
-            # the measured per-module DC production, the dashed line is the AC
-            # forecast (power_production_now/energy_production_today are AC since
-            # Phase 2), so the mixed-unit overlay is never misread.
-            "title": "Production per module (measured DC · forecast AC)",
+            # Title spells out the SHARED DC basis: the stacked bars are the
+            # measured per-module DC production AND the dashed line is the DC
+            # forecast (wh_period is the DC model curve; the issued ring's
+            # hourly_wh is explicitly DC — SPEC §18.4). Claiming "AC" for the
+            # line here made the overlay read as a mixed-unit comparison.
+            "title": "Production per module (measured DC · forecast DC)",
         }
         forecast = entity_map.get(SENSOR_ENERGY_TODAY)
         if forecast is not None:

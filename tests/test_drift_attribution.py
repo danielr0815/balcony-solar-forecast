@@ -181,14 +181,14 @@ def test_auto_disable_after_streak_only_guilty_layer(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_slow_only_hourly_empty_when_slow_inactive():
+async def test_slow_only_hourly_empty_when_slow_inactive():
     """No learned shademap channels -> slow layer inactive -> {} (callers treat
     it as slow-only == raw; the raw curve is never duplicated into the store)."""
     c = _make_coordinator()  # default: empty ShademapState -> slow inactive
-    assert c._slow_only_hourly("2026-05-01") == {}
+    assert await c._slow_only_hourly("2026-05-01") == {}
 
 
-def test_slow_only_hourly_empty_when_no_weather():
+async def test_slow_only_hourly_empty_when_no_weather():
     """Slow layer active but no cached weather -> {} (the snapshot never fails
     on the extra engine pass)."""
     c = _make_coordinator()
@@ -197,7 +197,7 @@ def test_slow_only_hourly_empty_when_no_weather():
         channels={"M1": {"10:15:1": ShademapBin(tau=0.3, n=20)}}
     )
     # _FakeStore.get_last_payload() -> None -> _cached_weather() is None.
-    assert c._slow_only_hourly("2026-05-01") == {}
+    assert await c._slow_only_hourly("2026-05-01") == {}
 
 
 async def test_snapshot_issued_stores_slow_only_curve(monkeypatch):
@@ -211,7 +211,11 @@ async def test_snapshot_issued_stores_slow_only_curve(monkeypatch):
         DATA_KEY_CORRECTED_HOURLY_WH: {h: 1000.0},
         "status": "fresh",
     }
-    monkeypatch.setattr(c, "_slow_only_hourly", lambda iso: {h: 900.0})
+
+    async def _fake_slow_only(iso):
+        return {h: 900.0}
+
+    monkeypatch.setattr(c, "_slow_only_hourly", _fake_slow_only)
     await c._snapshot_issued(date(2026, 7, 1))
     stored = IssuedSnapshot.from_dict(c._store.get_issued("2026-07-01"))
     assert stored.slow_only_hourly_wh == {h: 900.0}

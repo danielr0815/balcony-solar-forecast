@@ -110,6 +110,11 @@ class _FakeHass:
         self.states = _FakeStates()
         self.config = _FakeConfig()
 
+    async def async_add_executor_job(self, func, *args):
+        """Run inline: the engine pass is pure CPU with no loop interaction,
+        and the executor indirection must not change test-visible results."""
+        return func(*args)
+
 
 class _FakeStore:
     """In-memory stand-in for the (owner: store) v2 getters/setters."""
@@ -135,6 +140,13 @@ class _FakeStore:
 
     def set_shademap_state(self, state) -> None:
         self.shademap = state.to_dict()
+
+    # learning-health bookkeeping (SPEC §10): plain validated dict, no dataclass
+    def get_learning_health(self) -> dict:
+        return dict(getattr(self, "learning_health", {}))
+
+    def set_learning_health(self, health: dict) -> None:
+        self.learning_health = dict(health)
 
     def get_drift_state(self) -> DriftState:
         return DriftState.from_dict(self.drift)
@@ -1581,7 +1593,7 @@ class _IntradaySampleForTest:
 # ---------------------------------------------------------------------------
 
 
-def test_compute_passes_learner_hooks(monkeypatch):
+async def test_compute_passes_learner_hooks(monkeypatch):
     c = _make_coordinator()
     captured = {}
 
@@ -1596,7 +1608,7 @@ def test_compute_passes_learner_hooks(monkeypatch):
         slots = ()
 
     now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
-    c._compute(_W(), now)
+    await c._compute(_W(), now)
     assert isinstance(captured["hooks"], LearnerHooks)
 
 
@@ -2904,6 +2916,54 @@ async def test_nightly_inverter_cal_read_exception_is_contained():
     # Must NOT raise; calibration left untouched.
     await c._train_inverter_cal(day)
     assert c._inverter_cal_state is before
+
+
+async def test_nightly_eta_out_of_band_streak_raises_then_clears_issue():
+    """η plausibility watchdog (SPEC §10): the nightly MEDIAN raw AC/DC ratio
+    sitting outside [INVERTER_CAL_MIN, INVERTER_CAL_MAX] for three nights in a
+    row raises the persistent ``eta_out_of_band`` repair issue — the
+    mis-scaled-metering smoking gun the silent EMA-drop never shows — and the
+    first in-band night clears it. Pure visibility: the calibration itself is
+    untouched either way (out-of-band folds keep being refused)."""
+    c = _make_coordinator()
+    c._site = _ac_meter_site()
+    raised: list[tuple[str, dict | None]] = []
+    deleted: list[str] = []
+    c._raise_repair_issue = lambda iid, ph=None: raised.append((iid, ph))
+    c._delete_repair_issue = deleted.append
+
+    async def _run_night(iso: str, ac10: float, ac11: float) -> None:
+        c._store.hourly_actuals[iso] = {
+            "M1": {
+                f"{iso}T10:00:00+00:00": 500.0,
+                f"{iso}T11:00:00+00:00": 520.0,
+            }
+        }
+        c._store.issued[iso] = {"status": "ok"}  # a day we RAN (streak guard)
+        ac = {f"{iso}T10:00:00+00:00": ac10, f"{iso}T11:00:00+00:00": ac11}
+
+        async def _read(_day, _ac=ac):
+            return _ac
+
+        c._async_read_ac_actuals = _read
+        await c._train_inverter_cal(datetime.fromisoformat(iso).date())
+
+    # ratio 0.77 — DC ports reading ~25 % high — outside [0.90, 0.99].
+    await _run_night("2026-07-05", 385.0, 400.4)
+    await _run_night("2026-07-06", 385.0, 400.4)
+    assert raised == []  # below the streak threshold: silent
+    await _run_night("2026-07-07", 385.0, 400.4)
+    assert [i for i, _ in raised] == ["eta_out_of_band"]
+    assert raised[0][1]["days"] == "3"
+    assert raised[0][1]["last_day"] == "2026-07-07"
+
+    # Idempotent: re-training the same night (catch-up re-sweep) counts once.
+    await _run_night("2026-07-07", 385.0, 400.4)
+    assert len(raised) == 1
+
+    # The first in-band night (ratio 0.96) resets the streak and clears the card.
+    await _run_night("2026-07-08", 480.0, 499.2)
+    assert deleted == ["eta_out_of_band"]
 
 
 # --- AC-meter reader: sign inversion ---------------------------------------

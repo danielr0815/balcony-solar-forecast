@@ -177,7 +177,11 @@ zugunsten des reicheren alten verworfen wird.
 **Retry.** Begrenzte Versuche (`MAX_TRIES`) mit **Backoff und Jitter**. Ein
 Serverhinweis `Retry-After` über `_RETRY_AFTER_MAX_INLINE_SECONDS` wird **nicht**
 inline abgewartet: der Coordinator serviert weiter aus dem Last-Good-Cache und
-versucht es in seiner eigenen Kadenz erneut, statt den Tick zu blockieren.
+versucht es in seiner eigenen Kadenz erneut, statt den Tick zu blockieren. Nach
+einem **Fehlversuch** plant der Coordinator den nächsten Versuch frühestens nach
+`min(fetch_interval_seconds, FAILED_FETCH_MIN_INTERVAL_SECONDS)` (15 min) ein —
+nie in jedem Recompute-Tick —; der Versuchsanker zählt auch den Fehlversuch,
+während der Altersanker des servierten Payloads unberührt weiteraltert (§13).
 
 **Budget.** Das Open-Meteo-Free-Tier erlaubt 10 000 Calls/Tag; ein Call je
 30 min sind ~48/Tag und lassen Raum für Ensemble (§11.3) und Bootstrap (§12).
@@ -968,10 +972,28 @@ Repair-Karte neben der blockierenden verwässerte genau das Signal, das Handlung
 erfordert; ein fehlender AC-Zähler erscheint daher im Diagnose-Dump
 (`actual_channels.ac_missing`) und einmal im Log.
 
+**η-Plausibilitätswächter (`eta_out_of_band`).** Kein Repair-Issue ist der
+**fehlende** AC-Zähler — sehr wohl aber der **dauerhaft unplausibel messende**:
+liegt der nächtliche **Median der rohen AC/DC-Verhältnisse** eines Tages (vor
+dem Plausibilitätsband ausgewertet, §9.6) außerhalb von [`INVERTER_CAL_MIN`,
+`INVERTER_CAL_MAX`] (0,90–0,99), verwirft die Kalibrierung diese Stunden zwar
+korrekt, aber das Muster beweist eine falsch skalierte **Messung** (zu hoch
+lesende DC-Kanäle, ein AC-Zähler mit Hauslast) — keinen Wechselrichter-Fehler.
+Zählt das `INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS` Tage in Folge, wird das
+persistente Repair-Issue `eta_out_of_band` gesetzt (Platzhalter: Strähne,
+Median, Band, letzter Tag); der erste Tag mit Median im Band setzt die Strähne
+auf 0 und löscht das Issue wieder. Gezählt wird mit demselben Vertrag wie die
+Verwurfssträhne: nur Tage, für die eine Prognose ausgeliefert wurde
+(Anlaufschutz), tagesidempotent, persistiert in `learning_health`
+(`eta_oob_streak`, `eta_oob_last_day`, `eta_oob_last_median`, §16.1); ein Tag
+ohne auswertbares Verhältnis zählt weder hoch noch zurück. Reine Sichtbarkeit:
+Kalibrierung, Physik und Lernentscheidungen ändern sich dadurch nicht.
+
 **Sichtbarkeit im Diagnose-Dump (§14.6).** Beide Gates schreiben in die bereits
 vorhandenen Accessoren, nicht in einen dritten Sonderweg:
 `store_stats()['learning_health']` (letzte Verwurfsursache, betroffene Ebenen,
-Strähnenlänge, Schwelle, letzter angenommener Ist-Tag) und
+Strähnenlänge, Schwelle, letzter angenommener Ist-Tag, dazu die
+η-Wächter-Strähne `eta_oob_*`) und
 `learner_state_summary()['actual_channels']` (Anzahl konfigurierter Kanäle,
 fehlende Kanäle, AC-Zähler-Status). Fern-Diagnose ist damit ohne Log-Zugriff
 möglich.
@@ -1458,7 +1480,9 @@ einen Store **ohne** den Schlüssel auf denselben neutralen Wert, und jede ander
 Sektion bleibt byte-treu. Ein bestehender v3-Store lädt damit unverändert.
 
 `learning_health` hält `{discard_streak, last_discard_reason,
-last_discard_modules, last_discard_day, last_accepted_day}`.
+last_discard_modules, last_discard_day, last_accepted_day}` sowie die
+η-Wächter-Strähne `{eta_oob_streak, eta_oob_last_day, eta_oob_last_median}`
+(§10).
 
 Unbekannte oder zukünftige Schemaversionen werden mit einer Warnung verworfen
 statt geraten.

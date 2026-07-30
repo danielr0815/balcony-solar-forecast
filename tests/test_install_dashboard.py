@@ -116,8 +116,10 @@ def test_build_full_inventory_matches_shipped_yaml():
     )
     assert power_hist["total_sensor"] == "sensor.real_measured_dc_power_total"
     assert power_hist["forecast_sensor"] == "sensor.real_energy_production_today"
-    # Title spells out the mixed units: measured DC bars vs AC forecast line.
-    assert power_hist["title"] == "Production per module (measured DC · forecast AC)"
+    # Title spells out the SHARED DC basis: measured DC bars AND a DC forecast
+    # line (wh_period is the DC model curve; the issued ring's hourly_wh is
+    # explicitly DC — SPEC §18.4). An "AC" claim here misread the overlay.
+    assert power_hist["title"] == "Production per module (measured DC · forecast DC)"
     # No leftover per-module measured history-graph (its data is in the card).
     assert not any(
         c.get("title", "").startswith("Measured DC power") for c in cards

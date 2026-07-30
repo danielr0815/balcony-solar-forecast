@@ -21,6 +21,10 @@
 //   3. DAY nav where the service call THROWS → state "error" (+ message).
 //   4. WEEK bars: today's column is the summed HOURLY energy, not the running
 //      daily-mean × 24 h (which overstates a still-running day).
+//   5. i18n-proof discovery: German (translated) object slugs defeat the
+//      entity_id regex fallback; the entity-registry unique_id SUFFIX match
+//      must still resolve both entities (and never claim a foreign platform's
+//      look-alike unique_id).
 //
 // Run:  node tests/harness/power_card_harness.mjs
 // CI:   tests/test_frontend_harness.py wraps this via subprocess (skips when
@@ -353,6 +357,82 @@ const STATES = {
   }
   console.log(
     "OK scenario 4: week today = summed hourly energy; complete days = mean × 24",
+  );
+}
+
+// ============================================================================
+// Scenario 5 — i18n-proof discovery: German object slugs defeat the entity_id
+// regex; the entity-registry unique_id suffix match must still resolve both
+// entities, platform-gated so a foreign look-alike unique_id is never claimed.
+// ============================================================================
+{
+  const germanStates = {
+    // HA generates the entity_id object slug from the TRANSLATED entity name,
+    // so a German install never matches the English discovery regex.
+    "sensor.balkon_gemessene_dc_leistung_gesamt": {
+      attributes: { sources: ["sensor.m1"], source_names: ["M1"] },
+    },
+    "sensor.balkon_energieproduktion_heute": {
+      attributes: {
+        wh_period: { [`${isoAt(0)}T10:00:00+00:00`]: 2000 },
+      },
+    },
+  };
+  const hass = {
+    language: "de",
+    states: germanStates,
+    callWS: async (msg) => {
+      if (msg.type === "config/entity_registry/list") {
+        return [
+          // A FOREIGN platform entry whose unique_id happens to end with one of
+          // the keys must never be claimed by the card.
+          {
+            entity_id: "sensor.foreign_measured_dc_power_total",
+            unique_id: "zzz_measured_dc_power_total",
+            platform: "other_integration",
+          },
+          {
+            entity_id: "sensor.balkon_gemessene_dc_leistung_gesamt",
+            unique_id: "entry42_measured_dc_power_total",
+            platform: "balcony_solar_forecast",
+          },
+          {
+            entity_id: "sensor.balkon_energieproduktion_heute",
+            unique_id: "entry42_energy_production_today",
+            platform: "balcony_solar_forecast",
+          },
+        ];
+      }
+      if (msg.type === "recorder/statistics_during_period") {
+        return { "sensor.m1": [{ start: Date.now(), mean: 100 }] };
+      }
+      throw new Error(`unexpected WS ${msg.type}`);
+    },
+  };
+  const card = makeCard(hass);
+  card._config = {}; // no manual ids: pure discovery
+
+  // Sync path: the regex fallback must find NOTHING under German slugs.
+  const before = card._resolveIds(hass);
+  assert(
+    before.total_sensor === undefined,
+    `regex unexpectedly matched a German slug: ${before.total_sensor}`,
+  );
+
+  // The async registry pass resolves via the language-stable unique_id suffix.
+  card._ensureRegistry(hass);
+  await settle();
+  const after = card._resolveIds(hass);
+  assert(
+    after.total_sensor === "sensor.balkon_gemessene_dc_leistung_gesamt",
+    `registry unique_id match failed for total: ${after.total_sensor}`,
+  );
+  assert(
+    after.forecast_sensor === "sensor.balkon_energieproduktion_heute",
+    `registry unique_id match failed for forecast: ${after.forecast_sensor}`,
+  );
+  console.log(
+    "OK scenario 5: unique_id registry discovery beats German object slugs",
   );
 }
 

@@ -35,6 +35,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed  # noqa: E402
 from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     CORRECTION_SOURCE_BOTH,
     CORRECTION_SOURCE_INTRADAY,
+    FAILED_FETCH_MIN_INTERVAL_SECONDS,
     MAX_PAYLOAD_AGE_HOURS,
     MAX_PHYSICS_FALLBACK_AGE_HOURS,
     STATUS_CACHED,
@@ -201,7 +202,11 @@ def test_due_for_fetch_attempt_anchor():
     assert c._due_for_fetch(NOW) is True  # interval elapsed
     c._last_attempt_at = NOW - timedelta(minutes=5)
     c._last_fetch_ok = False
-    assert c._due_for_fetch(NOW) is True  # failure -> retry next tick
+    # A failure backs off (FAILED_FETCH_MIN_INTERVAL_SECONDS) instead of
+    # retrying on the very next recompute tick.
+    assert c._due_for_fetch(NOW) is False
+    c._last_attempt_at = NOW - timedelta(seconds=FAILED_FETCH_MIN_INTERVAL_SECONDS)
+    assert c._due_for_fetch(NOW) is True  # backoff elapsed -> retry
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +226,10 @@ async def test_try_fetch_failure_keeps_cache_and_records_error():
 
     assert c._last_fetch_ok is False
     assert "boom" in c._last_error
+    # The ATTEMPT anchor advances on failure too — it IS an attempt; without
+    # the stamp the _due_for_fetch backoff never engages and a down provider
+    # would be hammered every recompute tick.
+    assert c._last_attempt_at == NOW
     # The payload anchor and the stored payload are untouched.
     assert c._last_fetched_at == NOW - timedelta(hours=3)
     assert store.last_payload["payload"] is old
@@ -238,6 +247,34 @@ async def test_try_fetch_success_persists_and_advances_both_anchors():
     assert c._last_fetched_at == NOW
     assert c._last_attempt_at == NOW
     assert store.last_payload["payload"] is fresh
+
+
+async def test_failed_fetch_backs_off_provider():
+    """Sustained outage: at most ONE provider attempt per backoff window
+    (FAILED_FETCH_MIN_INTERVAL_SECONDS), never one per recompute tick — and a
+    configured fetch interval SHORTER than the backoff is not stretched."""
+    store = _PayloadStore()
+    store.set_last_payload(_om_payload(), "2026-07-05T09:00:00+00:00")
+    c = _coord(store)
+    c._fetcher = _FakeFetcher([FetchError("down", retryable=True)] * 3)
+
+    backoff = timedelta(seconds=FAILED_FETCH_MIN_INTERVAL_SECONDS)
+    await c._async_try_fetch(NOW)  # attempt 1 fails
+    assert c._fetcher.calls == 1
+    # Every recompute tick inside the window: NOT due (no new attempt).
+    for minutes in (1, 5, 14):
+        assert c._due_for_fetch(NOW + timedelta(minutes=minutes)) is False
+    # Backoff elapsed: exactly one retry, which fails again and re-arms.
+    t1 = NOW + backoff
+    assert c._due_for_fetch(t1) is True
+    await c._async_try_fetch(t1)  # attempt 2 fails
+    assert c._fetcher.calls == 2
+    assert c._due_for_fetch(t1 + timedelta(minutes=1)) is False
+
+    # A fetch interval SHORTER than the backoff wins the min(): the operator's
+    # faster cadence is not stretched by the failure backoff.
+    c._fetch_interval = timedelta(minutes=10)
+    assert c._due_for_fetch(t1 + timedelta(minutes=10)) is True
 
 
 async def test_try_fetch_coverage_refusal_keeps_payload_age():

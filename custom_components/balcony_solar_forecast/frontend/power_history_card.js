@@ -68,10 +68,52 @@ const A_SOURCE_NAMES = "source_names";
 // const.ATTR_WH_PERIOD).
 const A_WH_PERIOD = "wh_period";
 
-// Entity auto-discovery patterns (the device slug already carries
-// "balcony_solar_forecast", so a loose suffix match is safe).
+// Entity auto-discovery, i18n-proof: the Python side sets every entity's
+// unique_id to "{entry_id}_{key}" (sensor.py BalconyForecastEntity), and the
+// key is LANGUAGE-STABLE — while the entity_id's object slug is generated from
+// the TRANSLATED entity name, so a German install gets e.g.
+// "sensor...._gemessene_dc_leistung_gesamt", which the English regex below can
+// never match. Discovery therefore matches the entity registry's unique_id
+// SUFFIX (platform-gated); the entity_id regex stays only as a fallback for a
+// hass without registry access (and for the sync picker preview, which cannot
+// await the websocket call).
+const KEY_TOTAL = "measured_dc_power_total";
+const KEY_FORECAST = "energy_production_today";
 const RE_TOTAL = /^sensor\..*measured_dc_power_total$/;
 const RE_FORECAST = /^sensor\..*energy_production_today$/;
+
+// One entity-registry fetch per hass connection, shared by all card instances
+// (a WeakMap so a torn-down connection can be garbage-collected).
+const _registryCache = new WeakMap(); // hass -> Promise<list|null>
+
+/** Fetch the entity registry once; null when unreadable (regex fallback). */
+function entityRegistry(hass) {
+  if (!hass || typeof hass.callWS !== "function") return Promise.resolve(null);
+  let p = _registryCache.get(hass);
+  if (!p) {
+    p = hass
+      .callWS({ type: "config/entity_registry/list" })
+      .then((list) => (isArray(list) ? list : null))
+      .catch(() => null);
+    _registryCache.set(hass, p);
+  }
+  return p;
+}
+
+/** entity_id of OUR entity whose unique_id ends with `_{key}`, or undefined. */
+function byUniqueId(list, key) {
+  if (!list) return undefined;
+  const suffix = `_${key}`;
+  for (const e of list) {
+    // Platform-gated: a foreign integration's look-alike unique_id suffix must
+    // never be claimed as ours.
+    if (!e || e.platform !== "balcony_solar_forecast") continue;
+    if (typeof e.unique_id === "string" && e.unique_id.endsWith(suffix)) {
+      return e.entity_id;
+    }
+  }
+  return undefined;
+}
 
 // Measured-statistics refetch cadence (ms) — the recorder writes hourly LTS on
 // its own schedule, so 5 min is ample and cheap.
@@ -87,11 +129,12 @@ const I18N = {
       "No measured-power sensor found — is the Balcony Solar Forecast integration set up?",
     noStats: "No hourly statistics yet",
     noStatsRange: "No statistics for this range",
-    // Provenance caption above the plot when a forecast line IS drawn. The
-    // dashed line is the AC forecast (power_production_now/energy_production_today
-    // are AC since Phase 2) while the stacked bars are measured DC per module.
-    forecastLive: "Forecast AC (live)",
-    forecastIssued: "Forecast AC (as issued 01:30)",
+    // Provenance caption above the plot when a forecast line IS drawn. Bars
+    // (measured per module) AND the dashed line (today: the live wh_period
+    // model curve; past days: the issued ring's hourly_wh) are all DC — the
+    // caption names the line's ORIGIN (SPEC §18.4), never a unit basis.
+    forecastLive: "Forecast (live)",
+    forecastIssued: "Forecast (as issued 01:30)",
     // Under-plot notes when NO past-day line is drawn ({d} = the date).
     forecastError: "Forecast lookup failed",
     forecastMissing:
@@ -114,12 +157,13 @@ const I18N = {
       "Kein Messleistungs-Sensor gefunden — ist die Integration „Balcony Solar Forecast“ eingerichtet?",
     noStats: "Noch keine Stundenstatistik",
     noStatsRange: "Keine Statistikdaten für diesen Zeitraum",
-    // Provenance caption above the plot when a forecast line IS drawn. Die
-    // gestrichelte Linie ist die AC-Prognose (power_production_now/
-    // energy_production_today sind seit Phase 2 AC), die Balken die gemessene
-    // DC-Produktion je Modul.
-    forecastLive: "Prognose AC (live)",
-    forecastIssued: "Prognose AC (Stand 01:30)",
+    // Provenance caption above the plot when a forecast line IS drawn. Balken
+    // (gemessen je Modul) UND gestrichelte Linie (heute: die live wh_period-
+    // Modellkurve; Vergangenheit: hourly_wh aus dem Issued-Ring) sind alles
+    // DC — die Beschriftung nennt die HERKUNFT der Linie (SPEC §18.4), keine
+    // Einheiten-Basis.
+    forecastLive: "Prognose (live)",
+    forecastIssued: "Prognose (Stand 01:30)",
     // Under-plot notes when NO past-day line is drawn ({d} = the date).
     forecastError: "Prognose-Abruf fehlgeschlagen",
     forecastMissing:
@@ -322,6 +366,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
     // TypeError and killed every statistics load in v0.15.0/v0.16.0.
     this._liveDayKey = undefined;
     this._fetchSeq = 0; // generation token — a stale async fetch is ignored
+    // Entity-registry discovery state (i18n-proof unique_id match): the fetched
+    // registry list plus the one-shot guard for its fetch.
+    this._registryList = null;
+    this._registryRequested = false;
   }
 
   // --- Lovelace card API --------------------------------------------------
@@ -338,7 +386,9 @@ class BalconyPowerHistoryCard extends HTMLElement {
     return 6;
   }
 
-  /** Picker preview: return discovered ids so the preview renders live data. */
+  /** Picker preview: return discovered ids so the preview renders live data.
+   * Static and sync, so it can only use the entity_id regex fallback — the
+   * registry (unique_id) discovery runs once the card itself is mounted. */
   static getStubConfig(hass) {
     const find = (re) => {
       if (!hass || !hass.states) return undefined;
@@ -375,6 +425,8 @@ class BalconyPowerHistoryCard extends HTMLElement {
     if (!this._config) return;
     // Kick the first (or, while live, a new-day) statistics fetch as hass arrives.
     this._ensureFetch();
+    // Kick the one-shot registry discovery (unique_id match; regex until then).
+    this._ensureRegistry(hass);
 
     const ids = this._resolveIds(hass);
     const total = hass.states[ids.total_sensor];
@@ -454,15 +506,46 @@ class BalconyPowerHistoryCard extends HTMLElement {
 
   _resolveIds(hass) {
     const c = this._config;
-    const find = (re) => {
+    // Registry unique_id match FIRST (language-stable), entity_id regex only
+    // as the fallback while the registry fetch is still in flight (or
+    // unavailable). An explicitly configured id always wins.
+    const find = (key, re) => {
+      const hit = byUniqueId(this._registryList, key);
+      if (hit) return hit;
       if (!hass || !hass.states) return undefined;
       for (const id of Object.keys(hass.states)) if (re.test(id)) return id;
       return undefined;
     };
     return {
-      total_sensor: c.total_sensor || find(RE_TOTAL),
-      forecast_sensor: c.forecast_sensor || find(RE_FORECAST),
+      total_sensor: c.total_sensor || find(KEY_TOTAL, RE_TOTAL),
+      forecast_sensor: c.forecast_sensor || find(KEY_FORECAST, RE_FORECAST),
     };
+  }
+
+  /**
+   * Kick the ONE entity-registry fetch discovery needs (the i18n-proof
+   * unique_id match). Sync hass pushes run on the regex fallback until the
+   * promise lands; when the registry then changes a resolved id, the whole
+   * setter path is re-run so module list, statistics fetch and render all pick
+   * up the corrected ids (the fetch's day-key guard is reset for that).
+   */
+  _ensureRegistry(hass) {
+    if (this._registryRequested) return;
+    this._registryRequested = true;
+    const before = this._resolveIds(hass);
+    entityRegistry(hass).then((list) => {
+      if (!list || this._hass !== hass || !this.isConnected) return;
+      this._registryList = list;
+      const after = this._resolveIds(hass);
+      if (
+        before.total_sensor === after.total_sensor &&
+        before.forecast_sensor === after.forecast_sensor
+      ) {
+        return;
+      }
+      this._liveDayKey = undefined; // re-arm the first-fetch kick
+      this.hass = hass; // guarded: _registryRequested is already spent
+    });
   }
 
   /** Module list [{id, name, color}] from the total sensor's attributes. */

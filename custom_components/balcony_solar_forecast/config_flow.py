@@ -17,10 +17,11 @@ Structural setup — location, the fetch/recompute cadences and the full ``site`
 object — lives in ``entry.data`` and is edited AFTER setup through the
 reconfigure flow (``async_step_reconfigure``, the HA quality-scale pattern),
 which writes it straight back into ``entry.data`` via
-``async_update_reload_and_abort``. Editing structural data into
-``entry.options`` (the legacy options behaviour) permanently shadowed
-``entry.data`` through the ``{**entry.data, **entry.options}`` merge every
-reader uses.
+``hass.config_entries.async_update_entry`` (the entry's update listener then
+fires the single reload — the flow never schedules one itself). Editing
+structural data into ``entry.options`` (the legacy options behaviour)
+permanently shadowed ``entry.data`` through the
+``{**entry.data, **entry.options}`` merge every reader uses.
 
 The options flow is therefore slimmed to RUNTIME TUNABLES only: the three
 learner kill switches (fast learner / shademap learning / day-ahead bias —
@@ -108,7 +109,7 @@ _MAX_RECOMPUTE_SECONDS = 3600  # 1 h
 # e.g. by the legacy options flow that used to edit the site there — would
 # silently shadow the just-reconfigured data through the ``{**data, **options}``
 # merge every reader uses, so the reconfigure step strips them out of options in
-# the SAME atomic ``async_update_reload_and_abort`` call.
+# the SAME atomic ``async_update_entry`` call.
 _STRUCTURAL_OPTION_KEYS = frozenset(
     {
         CONF_LATITUDE,
@@ -480,11 +481,17 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
                     for k, v in entry.options.items()
                     if k not in _STRUCTURAL_OPTION_KEYS
                 }
-                return self.async_update_reload_and_abort(
+                # Update + abort only — NEVER async_update_reload_and_abort:
+                # the entry has an update listener (__init__._async_reload_entry)
+                # that fires the reload off this very update, so the helper's
+                # own async_schedule_reload would reload TWICE — and HA reports
+                # exactly that pattern as deprecated (breaks in 2026.12).
+                self.hass.config_entries.async_update_entry(
                     entry,
                     data_updates=_structural_data(site, user_input),
                     options=stripped_options,
                 )
+                return self.async_abort(reason="reconfigure_successful")
 
         merged = {**entry.data, **entry.options}
         defaults = _current_values(user_input, existing=merged)

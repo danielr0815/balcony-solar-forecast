@@ -22,6 +22,11 @@ INTEGRATION_VERSION = "0.23.3"
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
 RECOMPUTE_INTERVAL_SECONDS = 900  # engine re-run cadence (15-min slots)
 SLOT_MINUTES = 15  # forecast resolution
+# Failure backoff (SPEC §3 „Retry"): after a FAILED fetch the provider is
+# retried at most this often — min(configured fetch interval, 15 min) — never
+# on every recompute tick; a down Open-Meteo would otherwise see a request per
+# tick for the whole outage.
+FAILED_FETCH_MIN_INTERVAL_SECONDS = 900
 # today / tomorrow / day-after (d2) — plus ONE buffer day: the fetch runs
 # with timezone=UTC, so forecast_days counts UTC days from the current UTC
 # date. In the local evening (UTC+2) the LOCAL day-after-tomorrow lies
@@ -166,6 +171,14 @@ INVERTER_CAL_MIN_LOAD_W = 100.0  # below this summed DC the inverter self-
 #                                  ratio — skip the sample
 INVERTER_CAL_MIN_SAMPLES = 20  # distinct eligible hours before the learned eta is
 #                                trusted (else the config/default eta is used)
+# η plausibility watchdog (SPEC §10): the nightly calibration's MEDIAN raw
+# AC/DC ratio sitting outside [INVERTER_CAL_MIN, INVERTER_CAL_MAX] this many
+# days in a row is a METERING defect (DC ports mis-scaled, an AC meter that
+# also sees house load), not an inverter property — the EMA refuses the folds
+# silently, so this streak raises ISSUE_ETA_OUT_OF_BAND; a day back in band
+# resets it and clears the card. Same "only days we issued a forecast for"
+# counting contract as LEARNING_STALLED_STREAK_DAYS.
+INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS = 3
 # Clip-headroom gate for a calibration hour (AC-side Phase 3): the datasheet-
 # derived AC (DEFAULT_INVERTER_EFFICIENCY * summed DC) must sit below this
 # fraction of the summed group AC ceiling for the hour to count as UNCLIPPED — a
@@ -784,6 +797,13 @@ ISSUE_ACTUAL_ENTITY_MISSING = "actual_entity_missing"
 ISSUE_LEARNING_STALLED_DEAD_CHANNEL = "learning_stalled_dead_channel"
 ISSUE_LEARNING_STALLED_FROZEN_CHANNEL = "learning_stalled_frozen_channel"
 ISSUE_LEARNING_STALLED_LOW_COVERAGE = "learning_stalled_low_coverage"
+# 3) Raised when the nightly η calibration's MEDIAN raw AC/DC ratio stays
+#    outside [INVERTER_CAL_MIN, INVERTER_CAL_MAX] for
+#    INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS days in a row: the folds are refused
+#    either way (never load-bearing), but the pattern proves the METERING is
+#    mis-scaled — a MISSING AC meter is deliberately not an issue (SPEC §10),
+#    an implausibly measuring one is.
+ISSUE_ETA_OUT_OF_BAND = "eta_out_of_band"
 
 # --- Nightly whole-day discard reasons (SPEC §9.8 label gates) ---------------
 # Which gate in `_actuals._actuals_from_stats` discarded the day. Persisted in
@@ -831,6 +851,7 @@ ISSUE_TRANSLATION_PLACEHOLDERS: dict[str, frozenset[str]] = {
     ISSUE_LEARNING_STALLED_DEAD_CHANNEL: frozenset({"days", "channels", "last_day"}),
     ISSUE_LEARNING_STALLED_FROZEN_CHANNEL: frozenset({"days", "channels", "last_day"}),
     ISSUE_LEARNING_STALLED_LOW_COVERAGE: frozenset({"days", "channels", "last_day"}),
+    ISSUE_ETA_OUT_OF_BAND: frozenset({"days", "median", "band", "last_day"}),
 }
 
 

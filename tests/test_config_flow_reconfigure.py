@@ -3,14 +3,19 @@
 Reconfigure is the HA quality-scale entry point for editing STRUCTURAL setup
 (location, fetch/recompute cadences, the full site object) back into
 ``entry.data`` — never ``entry.options``, where it would permanently shadow
-``entry.data`` through the ``{**data, **options}`` merge. Two invariants are
+``entry.data`` through the ``{**data, **options}`` merge. Three invariants are
 load-bearing and untested elsewhere:
 
   * the lat/lon-into-site merge (the coordinator reads ONLY the site-embedded
-    coordinates — see config_flow.py), shared verbatim with the user step; and
+    coordinates — see config_flow.py), shared verbatim with the user step;
   * the atomic strip of stale structural keys from ``entry.options`` in the SAME
-    ``async_update_reload_and_abort`` call, so a legacy entry cannot keep
-    shadowing the just-reconfigured data.
+    ``async_update_entry`` call, so a legacy entry cannot keep shadowing the
+    just-reconfigured data; and
+  * the SINGLE reload: the step must NOT use ``async_update_reload_and_abort``
+    (it schedules its own reload ON TOP of the one the entry's update listener
+    fires — and HA reports exactly that as deprecated, breaking in 2026.12).
+    The flow only updates + aborts; ``__init__._async_reload_entry`` (wired via
+    ``entry.add_update_listener``) owns the one and only reload.
 
 Uses the same ``Flow.__new__`` + monkeypatched-fake pattern as
 tests/test_config_flow_user.py (no HA flow manager needed).
@@ -54,6 +59,24 @@ class _FakeEntry:
         self.options = options or {}
 
 
+class _FakeConfigEntries:
+    """Captures the flow's ``async_update_entry`` call (HA's is sync)."""
+
+    def __init__(self, captured: dict):
+        self._captured = captured
+
+    def async_update_entry(self, entry, **kwargs):
+        self._captured.setdefault("update_calls", []).append(
+            {"entry": entry, "kwargs": kwargs}
+        )
+        return True
+
+
+class _FakeHass:
+    def __init__(self, captured: dict):
+        self.config_entries = _FakeConfigEntries(captured)
+
+
 def _entry(options=None) -> _FakeEntry:
     return _FakeEntry(
         data={
@@ -73,24 +96,33 @@ def _entry(options=None) -> _FakeEntry:
 def _flow(monkeypatch, entry):
     """A reconfigure flow with the HA plumbing faked out.
 
-    ``captured['kwargs']`` holds the ``async_update_reload_and_abort`` kwargs,
-    ``captured['entry']`` the entry passed to it, ``captured['form']`` the
-    ``async_show_form`` kwargs.
+    ``captured['update_calls']`` holds every ``async_update_entry`` call,
+    ``captured['abort_reason']`` the ``async_abort`` reason, ``captured['form']``
+    the ``async_show_form`` kwargs. ``async_update_reload_and_abort`` is armed
+    to RAISE: calling it is the double-reload bug this module guards against.
     """
     flow = BalconySolarForecastConfigFlow.__new__(BalconySolarForecastConfigFlow)
     captured: dict = {}
+    flow.hass = _FakeHass(captured)
 
     monkeypatch.setattr(flow, "_get_reconfigure_entry", lambda: entry)
 
-    def _update_reload_and_abort(entry_arg, **kwargs):
-        captured["entry"] = entry_arg
-        captured["kwargs"] = kwargs
-        return {"type": "abort", "reason": "reconfigure_successful"}
+    def _abort(*, reason):
+        captured["abort_reason"] = reason
+        return {"type": "abort", "reason": reason}
+
+    def _update_reload_and_abort(entry_arg, **kwargs):  # pragma: no cover
+        raise AssertionError(
+            "async_update_reload_and_abort must not be used: it schedules a "
+            "reload ON TOP of the update listener's (double reload; deprecated, "
+            "breaks in HA 2026.12)"
+        )
 
     def _show_form(*, step_id, data_schema, errors=None):
         captured["form"] = {"step_id": step_id, "errors": dict(errors or {})}
         return {"type": "form", "step_id": step_id, "errors": errors}
 
+    monkeypatch.setattr(flow, "async_abort", _abort)
     monkeypatch.setattr(
         flow, "async_update_reload_and_abort", _update_reload_and_abort
     )
@@ -130,8 +162,10 @@ async def test_reconfigure_merges_coordinates_and_strips_stale_options(monkeypat
     result = await flow.async_step_reconfigure(_submit())
 
     assert result["type"] == "abort"
-    assert captured["entry"] is entry
-    kwargs = captured["kwargs"]
+    assert len(captured["update_calls"]) == 1
+    call = captured["update_calls"][0]
+    assert call["entry"] is entry
+    kwargs = call["kwargs"]
 
     updates = kwargs["data_updates"]
     # Top-level coordinates carry the SUBMITTED values...
@@ -172,7 +206,7 @@ async def test_reconfigure_ac_meter_merges_into_site_and_round_trips(monkeypatch
         )
     )
 
-    site_dict = captured["kwargs"]["data_updates"][CONF_SITE]
+    site_dict = captured["update_calls"][0]["kwargs"]["data_updates"][CONF_SITE]
     assert site_dict[CONF_AC_ACTUAL_ENTITY] == "sensor.house_ac_meter"
     assert site_dict[CONF_AC_ACTUAL_INVERT] is True
     # The persisted site dict reloads into a SiteConfig carrying both.
@@ -198,7 +232,7 @@ async def test_reconfigure_empty_ac_meter_stays_none(monkeypatch):
         _submit(**{CONF_SITE: stale_site, CONF_AC_ACTUAL_ENTITY: "  "})
     )
 
-    site_dict = captured["kwargs"]["data_updates"][CONF_SITE]
+    site_dict = captured["update_calls"][0]["kwargs"]["data_updates"][CONF_SITE]
     assert CONF_AC_ACTUAL_ENTITY not in site_dict
     assert CONF_AC_ACTUAL_INVERT not in site_dict
     site = SiteConfig.from_dict(site_dict)
@@ -212,7 +246,26 @@ async def test_reconfigure_with_empty_options_still_strips_cleanly(monkeypatch):
 
     await flow.async_step_reconfigure(_submit())
 
-    assert captured["kwargs"]["options"] == {}
+    assert captured["update_calls"][0]["kwargs"]["options"] == {}
+
+
+async def test_reconfigure_aborts_without_scheduling_a_reload(monkeypatch):
+    """Exactly ONE reload per reconfigure — fired by the entry's update
+    listener (__init__._async_reload_entry), never by the flow itself.
+
+    The fake ``async_update_reload_and_abort`` RAISES on any call (the
+    deprecated helper schedules a second reload and breaks in HA 2026.12), so
+    reaching the abort proves the flow stayed off that path. The single
+    ``async_update_entry`` call is what triggers the listener.
+    """
+    entry = _entry()
+    flow, captured = _flow(monkeypatch, entry)
+
+    result = await flow.async_step_reconfigure(_submit())
+
+    assert result == {"type": "abort", "reason": "reconfigure_successful"}
+    assert captured["abort_reason"] == "reconfigure_successful"
+    assert len(captured["update_calls"]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +284,7 @@ async def test_reconfigure_invalid_site_maps_error_and_rerenders(monkeypatch):
     assert result["type"] == "form"
     assert captured["form"]["step_id"] == "reconfigure"
     assert captured["form"]["errors"] == {CONF_SITE: "no_planes"}
-    assert "kwargs" not in captured  # no update happened
+    assert "update_calls" not in captured  # no update happened
 
 
 async def test_reconfigure_first_render_shows_form(monkeypatch):
@@ -243,4 +296,4 @@ async def test_reconfigure_first_render_shows_form(monkeypatch):
     assert result["type"] == "form"
     assert captured["form"]["step_id"] == "reconfigure"
     assert captured["form"]["errors"] == {}
-    assert "kwargs" not in captured
+    assert "update_calls" not in captured

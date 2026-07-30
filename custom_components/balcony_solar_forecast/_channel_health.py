@@ -36,6 +36,16 @@ repair card next to the blocking one would dilute exactly the signal that needs
 action, so a missing AC meter is reported in the diagnostics dump and logged
 once — visible to whoever is debugging, silent to whoever is not.
 
+The exception that proves the rule: a meter that IS there and measures
+**persistently implausible** (:func:`record_eta_calibration_outcome`). When the
+nightly η calibration's MEDIAN raw AC/DC ratio stays outside
+[``INVERTER_CAL_MIN``, ``INVERTER_CAL_MAX``] for
+``INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS`` days in a row, the metering itself is
+mis-scaled (DC ports reading high, an AC meter that also sees house load) —
+that is a configuration defect the operator can fix, not optional equipment,
+so it earns the persistent ``eta_out_of_band`` card (raised/cleared, never
+load-bearing).
+
 **One card per root cause.** The same argument applies BETWEEN the two
 detectors: a copied reference site raises (1) at once and would, a working week
 later, raise (2) on top of it — two cards, one root, one fix. So while (1)
@@ -51,7 +61,11 @@ import logging
 from datetime import date
 
 from .const import (
+    INVERTER_CAL_MAX,
+    INVERTER_CAL_MIN,
+    INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS,
     ISSUE_ACTUAL_ENTITY_MISSING,
+    ISSUE_ETA_OUT_OF_BAND,
     ISSUE_LEARNING_STALLED_BY_REASON,
     LEARNING_STALLED_STREAK_DAYS,
 )
@@ -305,6 +319,92 @@ def _day_was_ours(coord, iso: str) -> bool:
     # exists, and a silent ``False`` here would mean NO day ever counts — the
     # detector would be permanently, invisibly off. The caller's handler logs.
     return coord._store.get_issued(iso) is not None
+
+
+def record_eta_calibration_outcome(
+    coord, day: date, *, median_ratio: float
+) -> None:
+    """η plausibility watchdog (SPEC §10): fold one nightly calibration verdict
+    into the persisted out-of-band streak.
+
+    ``median_ratio`` is the day's MEDIAN raw measured-AC/modeled-DC ratio over
+    the eligible hours (computed in ``_nightly.train_inverter_cal`` BEFORE the
+    plausibility band drops anything). Inside
+    [``INVERTER_CAL_MIN``, ``INVERTER_CAL_MAX``] the metering is consistent and
+    any standing issue clears; outside it the calibration refuses the folds
+    silently and the streak advances — at
+    ``INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS`` the persistent repair issue names
+    the mis-scaled metering the bare ``n == 0`` calibration never could. Days
+    without an evaluable ratio never reach here (no count, no clear). Never
+    raises (SPEC §10).
+    """
+    try:
+        _record_eta_calibration_outcome(coord, day, median_ratio=median_ratio)
+    except Exception:
+        _LOGGER.warning(
+            "η out-of-band bookkeeping failed for %s; the streak did not "
+            "advance and the eta_out_of_band card cannot fire",
+            day, exc_info=True,
+        )
+
+
+def _record_eta_calibration_outcome(
+    coord, day: date, *, median_ratio: float
+) -> None:
+    store = coord._store
+    health = dict(store.get_learning_health())
+    iso = day.isoformat()
+
+    in_band = INVERTER_CAL_MIN <= median_ratio <= INVERTER_CAL_MAX
+    if in_band:
+        if health.get("eta_oob_streak"):
+            _LOGGER.info(
+                "η raw ratio back in band on %s after %s out-of-band day(s)",
+                iso, health.get("eta_oob_streak"),
+            )
+        health.update(eta_oob_streak=0, eta_oob_last_day=None,
+                      eta_oob_last_median=None)
+        store.set_learning_health(health)
+        coord._delete_repair_issue(ISSUE_ETA_OUT_OF_BAND)
+        return
+
+    if not _day_was_ours(coord, iso):
+        # Fresh-install guard (same contract as the discard streak): a day we
+        # never issued a forecast for is pre-install history; its legacy
+        # metering says nothing about today's wiring.
+        _LOGGER.debug(
+            "Out-of-band η ratio on %s predates our first issued forecast; "
+            "not counted toward the eta streak", iso,
+        )
+        return
+
+    if isinstance(health.get("eta_oob_last_day"), str) and (
+        iso <= health["eta_oob_last_day"]
+    ):
+        return  # already counted (idempotent re-sweep of the same day)
+
+    streak = int(health.get("eta_oob_streak") or 0) + 1
+    health.update(eta_oob_streak=streak, eta_oob_last_day=iso,
+                  eta_oob_last_median=float(median_ratio))
+    store.set_learning_health(health)
+
+    if streak < INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS:
+        return
+    _LOGGER.warning(
+        "Nightly η calibration saw an out-of-band raw AC/DC ratio %d days in a "
+        "row (last: %s, median %.3f, band %.2f–%.2f): the metering is "
+        "mis-scaled, not the inverter (SPEC §10)",
+        streak, iso, median_ratio, INVERTER_CAL_MIN, INVERTER_CAL_MAX,
+    )
+    coord._raise_repair_issue(
+        ISSUE_ETA_OUT_OF_BAND,
+        {
+            "days": str(streak),
+            "median": f"{median_ratio:.3f}",
+            "band": f"{INVERTER_CAL_MIN:.2f}–{INVERTER_CAL_MAX:.2f}",
+            "last_day": iso,
+        },
+    )
 
 
 def learning_health_summary(coord) -> dict[str, object]:

@@ -151,6 +151,10 @@
     "learning_stalled_low_coverage": {
       "title": "Seit {days} Tagen wird nichts gelernt — die Messung ist unvollständig",
       "description": "Das nächtliche Training hat {days} Mal in Folge den ganzen Tag verworfen, zuletzt {last_day}, weil {channels} zu wenige der Tageslichtstunden abgedeckt hat.\n\nSuchen Sie nach einer Lücke in Recorder/Langzeitstatistik, einem zu aggressiven Datenbank-Purge oder einem Modul, das mitten am Tag ausfällt. Ein Teiltag wird absichtlich verworfen: gegen die Prognose der Gesamtanlage gerechnet sieht er wie ein Ertragsdefizit aus und würde beide Lerner nach unten verzerren.\n\nDie Meldung verschwindet von selbst, sobald ein Tag die Label-Gates besteht."
+    },
+    "eta_out_of_band": {
+      "title": "Messung falsch skaliert — gemessenes AC/DC-Verhältnis unplausibel",
+      "description": "Seit {days} Tagen in Folge, zuletzt am {last_day}, lag der Median des gemessenen AC/DC-Verhältnisses der Anlage außerhalb des plausiblen Wechselrichter-Bands ({band}); der letzte Median war {median}. Die Wirkungsgrad-Kalibrierung verwirft solche Werte korrekt — die AC-Prognose bleibt auf dem konfigurierten Wirkungsgrad —, aber ein solches Verhältnis bedeutet eine falsch skalierte MESSUNG, nicht den Wechselrichter: typischerweise zu hoch messende DC-Sensoren (falsche Einheit oder Port-Zuordnung) oder ein AC-Zähler, der auch Hausverbrauch mitmisst.\n\nPrüfen Sie die actual_entity-Sensoren der Ebenen und den ac_actual_entity-Zähler. Die Meldung verschwindet von selbst, sobald der Median eine Nacht wieder im Band liegt."
     }
   },
   "services": {

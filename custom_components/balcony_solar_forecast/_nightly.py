@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta
 
 from homeassistant.util import dt as dt_util
 
+from . import _channel_health
 from ._glue_util import (
     _daily_kwh_from_hourly,
     _filter_hourly_to_local_day,
@@ -222,7 +223,7 @@ async def snapshot_issued(coord, today: date) -> None:
         # Slow-only (shademap ∘ physics, no day-ahead) curve for the drift
         # monitor's per-layer attribution (audit #13b); {} when the slow layer
         # is inactive (slow-only == raw, so nothing extra is stored).
-        slow_only_hourly_wh=coord._slow_only_hourly(iso),
+        slow_only_hourly_wh=await coord._slow_only_hourly(iso),
         # Site DC->AC efficiency in effect right now, so the issued AC curve can be
         # reconstructed later without hindsight (IRC-5/SCT-4).
         eta=coord._effective_inverter_eta(),
@@ -573,6 +574,13 @@ async def train_inverter_cal(coord, day: date) -> None:
         "n": len(ratios),
         "in_band_n": in_band,
     }
+    # η plausibility watchdog (SPEC §10): fold the day's median into the
+    # persisted out-of-band streak — raises ISSUE_ETA_OUT_OF_BAND after
+    # INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS consecutive out-of-band days, clears
+    # it on the first day back in band. Pure visibility, never load-bearing.
+    _channel_health.record_eta_calibration_outcome(
+        coord, day, median_ratio=raw_median
+    )
     new_state = inverter_cal_mod.update(coord._inverter_cal_state, ratios)
     if new_state is coord._inverter_cal_state:
         return  # every ratio was out of band -> nothing folded, state unchanged

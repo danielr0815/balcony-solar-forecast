@@ -151,6 +151,10 @@
     "learning_stalled_low_coverage": {
       "title": "Nothing learned for {days} days — measurements are incomplete",
       "description": "Nightly training has discarded the whole day {days} times in a row, most recently {last_day}, because {channels} covered too little of the day's daylight hours.\n\nLook for a recorder / long-term-statistics gap, an aggressive database purge, or a module that drops out mid-day. A partial day is discarded on purpose: measured against the full site forecast it looks like a production deficit and would bias both learners downward.\n\nThis issue clears itself as soon as one day passes the label gates."
+    },
+    "eta_out_of_band": {
+      "title": "Metering mis-scaled — measured AC/DC ratio implausible",
+      "description": "For {days} days in a row, most recently {last_day}, the median measured AC/DC ratio of the site sat outside the plausible inverter band ({band}); the last median was {median}. The efficiency calibration correctly refuses such values, so the AC forecast stays on the configured efficiency — but a ratio like this means the MEASUREMENT is mis-scaled, not the inverter: typically DC sensors reading too high (wrong unit or port assignment) or an AC meter that also measures house consumption.\n\nCheck the planes' actual_entity sensors and the ac_actual_entity meter. This issue clears itself on the first night the median is back inside the band."
     }
   },
   "services": {

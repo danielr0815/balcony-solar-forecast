@@ -14,6 +14,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
@@ -85,7 +86,9 @@ async def async_setup_entry(
     # ConfigEntryNotReady (retry later) when there is truly nothing to serve.
     await coordinator.async_config_entry_first_refresh()
 
-    entry.runtime_data = coordinator
+    # Single bookkeeping lane: hass.data. (entry.runtime_data used to mirror
+    # this; every reader — services, platforms, unload — resolves through
+    # hass.data, so the second lane was pure drift risk.)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -132,7 +135,7 @@ async def async_unload_entry(
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        coordinator: BalconySolarCoordinator = entry.runtime_data
+        coordinator: BalconySolarCoordinator = hass.data[DOMAIN][entry.entry_id]
         coordinator.async_shutdown_extra()
         # Flush pending delayed save: a reload does not fire the HA-stop
         # event, so the last-good cache could otherwise be lost.
@@ -148,9 +151,18 @@ async def async_unload_entry(
 async def async_remove_entry(
     hass: HomeAssistant, entry: BalconySolarConfigEntry
 ) -> None:
-    """Delete this entry's persisted store."""
+    """Delete this entry's persisted store and its repair issues."""
     store = ForecastStore(hass, entry.entry_id)
     await store.async_remove()
+    # Orphan sweep: every repair issue this entry raised is entry-scoped with
+    # the ``_{entry_id}`` suffix (coordinator._issue_id_for), and HA's issue
+    # registry keeps issues after the entry is removed — a re-installed entry
+    # would otherwise inherit stale, unactionable warnings. Foreign domains and
+    # OTHER entries of our own domain are untouched.
+    suffix = f"_{entry.entry_id}"
+    for domain, issue_id in list(ir.async_get(hass).issues):
+        if domain == DOMAIN and issue_id.endswith(suffix):
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
 
 
 async def _async_reload_entry(

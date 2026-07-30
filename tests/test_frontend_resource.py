@@ -325,6 +325,12 @@ def test_js_card_file_sanity():
     assert "return_response" in text, "card JS does not request a service response"
     assert "call_service" in text, "card JS does not use the WS call_service command"
 
+    # i18n-proof entity discovery: the entity registry's unique_id suffix match
+    # (language-stable) with the entity_id regex only as fallback — a German
+    # install's translated object slugs must not hide the card's entities.
+    assert "config/entity_registry/list" in text
+    assert "unique_id" in text
+
     # No external-URL ES imports (self-contained module).
     assert re.search(r'from\s+["\']https?:', text) is None
 
@@ -379,6 +385,25 @@ def test_power_history_js_card_sanity():
         "oldest_available",
     ):
         assert marker in text, f"power-history card JS missing marker {marker!r}"
+
+    # SPEC §18.4 caption contract: the provenance caption names the line's
+    # ORIGIN ("live" vs the frozen ~01:30 issue) in both locales — never an
+    # "AC" basis, because bars AND dashed line are both DC (wh_period is the
+    # DC model curve; the issued ring's hourly_wh is explicitly DC).
+    for label in (
+        'forecastLive: "Forecast (live)"',
+        'forecastIssued: "Forecast (as issued 01:30)"',
+        'forecastLive: "Prognose (live)"',
+        'forecastIssued: "Prognose (Stand 01:30)"',
+    ):
+        assert label in text, f"power-history card JS missing label {label!r}"
+    assert "Forecast AC" not in text, "caption claims an AC basis the DC line does not have"
+    assert "Prognose AC" not in text, "caption claims an AC basis the DC line does not have"
+
+    # i18n-proof entity discovery (entity-registry unique_id suffix, regex only
+    # as fallback) — same contract as the shade-profile card.
+    assert "config/entity_registry/list" in text
+    assert "unique_id" in text
 
     # Self-contained module: no external-URL ES imports, and it must NOT pull in
     # the sibling shade-profile card (each card stays independent).

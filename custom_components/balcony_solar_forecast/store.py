@@ -85,6 +85,7 @@ as module-level functions so it is testable without a running ``hass``.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any
 
@@ -171,6 +172,13 @@ def _empty_learning_health() -> dict[str, Any]:
         "last_discard_modules": [],
         "last_discard_day": None,
         "last_accepted_day": None,
+        # η plausibility watchdog (SPEC §10): consecutive days whose nightly
+        # MEDIAN raw AC/DC ratio sat outside the plausible inverter band, plus
+        # the last evidence. Same persisted-streak contract as the discard
+        # streak; added additively (old stores default to neutral).
+        "eta_oob_streak": 0,
+        "eta_oob_last_day": None,
+        "eta_oob_last_median": None,
     }
 
 
@@ -195,6 +203,15 @@ def _coerce_learning_health(raw: Any) -> dict[str, Any]:
     for key in ("last_discard_day", "last_accepted_day"):
         value = raw.get(key)
         out[key] = value if isinstance(value, str) else None
+    out["eta_oob_streak"] = max(0, _safe_int(raw.get("eta_oob_streak"), 0))
+    last_day = raw.get("eta_oob_last_day")
+    out["eta_oob_last_day"] = last_day if isinstance(last_day, str) else None
+    median = raw.get("eta_oob_last_median")
+    out["eta_oob_last_median"] = (
+        float(median)
+        if isinstance(median, (int, float)) and math.isfinite(median)
+        else None
+    )
     return out
 
 
