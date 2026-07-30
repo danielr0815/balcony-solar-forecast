@@ -10,16 +10,29 @@ jobs:
     name: Validate for release
     steps:
       - name: Checkout
-        uses: "actions/checkout@v4"
+        uses: "actions/checkout@v7"
+
+      # HACS validation can only run against public repos: the action fetches
+      # hacs.json/manifest.json from raw.githubusercontent.com without auth,
+      # which 404s while the repo is private. Skip in that case; the check
+      # comes back automatically once the repo is public (same logic as
+      # validate.yml).
+      - name: Check repo visibility
+        id: visibility
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "private=$(gh repo view --json isPrivate --jq .isPrivate)" >> "$GITHUB_OUTPUT"
 
       - name: HACS validation
-        uses: "hacs/action@main"
+        if: steps.visibility.outputs.private != 'true'
+        uses: "hacs/action@22.5.0"
         with:
           category: "integration"
           ignore: "brands"
 
+      # Pinned SHA (no usable tags upstream) — see validate.yml.
       - name: Hassfest validation
-        uses: "home-assistant/actions/hassfest@master"
+        uses: "home-assistant/actions/hassfest@e3fb68ebda13d88a0d695082f471ba2c83d025fb"
 
       # HACS installs the TAG's zipball (zip_release: false), so the version
       # strings must already be correct IN the tagged commit — bump manifest /
