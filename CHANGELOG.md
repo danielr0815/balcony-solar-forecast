@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.3] - 2026-07-30
+
+A tooling release: no runtime behaviour changes.
+
 ### Changed
 
 - **Dev environment rebuilt on uv (dev-setup-2026), no runtime behaviour
