@@ -24,8 +24,9 @@ Konstantenname* (keine Zeilennummern — die veralten sofort). Zusätzlich verbi
 > weil es die HA-Kopplung führt (Begründung im `pyproject.toml`-Kommentar).
 > Alle Kommandos heißen jetzt `uv run …` (`uv run pytest tests
 > -p no:homeassistant`, `uv run ruff check .`, `uv run mypy`) — die
-> Kommando-Blöcke in §3 unten zeigen noch den Pip-Vorgänger und sind durch
-> diesen Kasten ersetzt. Neu dazu: **mypy-Baseline** auf `core/` (acht ältere
+> Kommando-Blöcke in §3 und die CI-Tabelle in §6 unten zeigen noch den
+> Pip-Vorgänger und sind durch diesen Kasten ersetzt (in 00 bereits
+> aktualisiert). Neu dazu: **mypy-Baseline** auf `core/` (acht ältere
 > Module mit bekannten Fehlern sind im `[tool.mypy]`-Kommentar namentlich
 > ausgenommen, die übrigen müssen sauber bleiben), **Coverage**-Config in
 > `pyproject.toml` (report-only, kein Gate), **Devcontainer**
