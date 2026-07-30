@@ -376,6 +376,32 @@ def test_score_day_skips_when_actuals_missing(monkeypatch):
     assert store.get_scoreboard_state().days == {}
 
 
+def test_score_day_garbage_numbers_leave_day_unscored(monkeypatch):
+    """A non-finite measured (or engine) number must NOT enter the ring:
+    score_day returns None and the glue writes nothing — the old 0.0 clamp
+    fabricated |engine - 0| as the engine's worst day into the kill-gate
+    window (SPEC §15.2)."""
+    store = _FakeStore()
+    iso = "2026-07-08"
+    day = date(2026, 7, 8)
+    store.issued[iso] = _issued_for_day(
+        iso, corrected_hourly={"2026-07-08T11:00:00+00:00": 5000.0}
+    )
+    store.actuals[iso] = {"M1": float("nan"), "M2": 5000.0}
+    _patch_recorder(monkeypatch, {})
+
+    c = _make_coordinator(store, ())
+    asyncio.run(c._score_scoreboard_day(day))
+    assert store.get_scoreboard_state().days == {}
+    # A NaN in the ISSUED curve is equally unscorable.
+    store.issued[iso] = _issued_for_day(
+        iso, corrected_hourly={"2026-07-08T11:00:00+00:00": float("nan")}
+    )
+    store.actuals[iso] = {"M1": 5000.0}
+    asyncio.run(c._score_scoreboard_day(day))
+    assert store.get_scoreboard_state().days == {}
+
+
 def test_score_day_disabled_is_noop(monkeypatch):
     store = _FakeStore()
     iso = "2026-07-07"

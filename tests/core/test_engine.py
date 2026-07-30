@@ -217,6 +217,24 @@ class TestPipeline:
         res = engine.compute_forecast(site, weather, now=_TEST_DATE)
         assert res.total_watts[_NOON_INDEX] > 0.0
 
+    def test_slot_without_temperature_is_unusable_not_zero_celsius(self):
+        """A temperature gap must zero the slot (unusable weather image,
+        ``_slot_is_usable``), never fabricate 0 °C — the Ross derate at a fake
+        freezing cell over-predicts a summer afternoon. Real physics, no
+        stand-ins: a solstice-noon slot at the reference site must produce,
+        its temperature-less twin must not."""
+        site = _two_plane_site()
+        noon = _TEST_DATE + timedelta(minutes=15 * _NOON_INDEX)
+        weather = WeatherSeries(slots=(
+            WeatherSlot(start=noon, ghi=900.0, dni=800.0, dhi=120.0,
+                        temp_c=None),
+            WeatherSlot(start=noon + timedelta(minutes=15),
+                        ghi=900.0, dni=800.0, dhi=120.0, temp_c=25.0),
+        ))
+        res = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        assert res.total_watts[0] == 0.0
+        assert res.total_watts[1] > 0.0
+
     def test_twilight_diffuse_not_clipped(self, monkeypatch):
         """Regression (engine §E4): when the sun is below the horizon but the
         sky still carries diffuse (civil twilight / winter fog), the engine must

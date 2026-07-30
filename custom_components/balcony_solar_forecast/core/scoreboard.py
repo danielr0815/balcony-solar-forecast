@@ -32,7 +32,7 @@ Frozen public contract (implementers depend on these EXACT signatures):
     score_day(
         *, iso_date, weather_class, measured_kwh, engine_kwh,
         comparison_kwh, engine_hourly_mae=None,
-    ) -> DayScore
+    ) -> DayScore | None
     hourly_mae(issued_corrected_hourly, measured_hourly) -> float | None
 
     # --- rolling-window aggregation over a DayScore ring ---
@@ -150,7 +150,7 @@ def score_day(
     engine_kwh: float,
     comparison_kwh: dict[str, float],
     engine_hourly_mae: float | None = None,
-) -> DayScore:
+) -> DayScore | None:
     """Build one :class:`DayScore` from yesterday's leak-free raw numbers.
 
     Computes ``engine_daily_abs_err = |engine_kwh - measured_kwh|`` and, for each
@@ -161,17 +161,18 @@ def score_day(
     the pre-computed hourly MAE for the day (see :func:`hourly_mae`) or None. The
     returned DayScore round-trips through the store's scoreboard ring.
 
-    Pure and total: negative / non-finite inputs are clamped to a sane
-    non-negative error by the DayScore dataclass on the persistence round-trip;
-    this function performs the leak-free arithmetic only.
+    Pure and total. A non-finite or NEGATIVE ``measured_kwh`` / ``engine_kwh``
+    leaves the day UNSCORED (returns ``None``, mirroring
+    :func:`_finite_or_none`): the earlier 0.0 clamp fabricated a day that never
+    happened — a NaN measured sum scored as ``|engine - 0|``, the engine's
+    worst possible day, straight into the kill-gate window (SPEC §15.2).
     """
-    # measured / engine are dropped (day unscored) if non-finite, never zeroed.
+    # measured / engine are dropped (day unscored) if non-finite or negative,
+    # never zeroed.
     measured = _finite_or_none(measured_kwh)
     engine = _finite_or_none(engine_kwh)
-    if measured is None:
-        measured = 0.0
-    if engine is None:
-        engine = 0.0
+    if measured is None or engine is None:
+        return None
     engine_err = abs(engine - measured)
 
     cmp_kwh: dict[str, float] = {}

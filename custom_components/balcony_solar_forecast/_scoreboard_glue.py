@@ -149,6 +149,15 @@ async def score_scoreboard_day(coord, day: date) -> None:
         comparison_kwh=comparison_kwh,
         engine_hourly_mae=engine_hourly_mae,
     )
+    if day_score is None:
+        # Non-finite / negative measured or engine number: the day stays
+        # UNSCORED — no ring entry, no persist (a fabricated 0.0-kWh day
+        # would poison the kill-gate window, SPEC §15.2).
+        _LOGGER.warning(
+            "Scoreboard: %s unscorable (measured=%r, engine=%r); day skipped",
+            iso, measured_kwh, engine_kwh,
+        )
+        return
     # eMMC-wear guard (minor): a deterministic re-score with an identical
     # DayScore (restart-heavy day, same rings) is a no-op — skip the write.
     if coord._scoreboard_state.days.get(iso) == day_score:

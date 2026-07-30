@@ -14,6 +14,7 @@ Conventions (all internal):
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -68,6 +69,8 @@ from ..const import (
     SITE_BEAM_GAIN_MAX,
     SITE_BEAM_GAIN_MIN,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "HorizonRow",
@@ -479,11 +482,14 @@ class WeatherSlot:
     ghi: float  # global horizontal irradiance, W/m^2
     dni: float  # direct normal irradiance, W/m^2
     dhi: float  # diffuse horizontal irradiance, W/m^2
-    temp_c: float  # 2 m air temperature, deg C
+    temp_c: float | None  # 2 m air temperature, deg C; None == unknown (slot unusable)
     cloud_low: float = 0.0  # %
     cloud_mid: float = 0.0  # %
     cloud_high: float = 0.0  # %
-    visibility_m: float = 0.0  # m
+    # None == UNKNOWN (provider hole), never a fog reading: 0.0 is a REAL
+    # measured 0 m visibility (dense fog). The fetcher must not fabricate the
+    # old 0.0 sentinel — classify_cloud reads it as fog (SPEC §8).
+    visibility_m: float | None = None  # m
     snowfall_cm: float = 0.0  # cm (hourly)
     snow_depth_m: float = 0.0  # m
 
@@ -729,6 +735,25 @@ def _safe_float(v: object, default: float = 0.0, *, minimum: float | None = None
     return f
 
 
+def _version_guard(name: str, d: dict, current: int) -> bool:
+    """True when the blob's section ``version`` equals the CURRENT one.
+
+    SPEC §16.1 (the Docstrings of BiasState / ShademapState / ScoreboardState
+    promised this before it was enforced): an unknown / FUTURE section version
+    is DISCARDED with a warning rather than guessed at — a restructured v2
+    layout read by v1 code would silently mis-train every cell. A missing
+    version defaults to the current one (legacy blobs predate the field).
+    """
+    version = _safe_int(d.get("version", current), current)
+    if version != current:
+        _LOGGER.warning(
+            "%s: unknown section version %r (current: %d) — state discarded",
+            name, d.get("version"), current,
+        )
+        return False
+    return True
+
+
 def _quantile_entries_to_pairs(entries: object) -> list:
     """Normalise a QuantileState bin's entries to ``[iso_date, relerr]`` pairs.
 
@@ -902,6 +927,8 @@ class BiasState:
     def from_dict(cls, d: dict) -> BiasState:
         if not isinstance(d, dict):
             return cls()
+        if not _version_guard("BiasState", d, 1):
+            return cls()
         cells_raw = d.get("cells", {})
         cells: dict[str, BiasCell] = {}
         if isinstance(cells_raw, dict):
@@ -969,6 +996,8 @@ class ShademapState:
     @classmethod
     def from_dict(cls, d: dict) -> ShademapState:
         if not isinstance(d, dict):
+            return cls()
+        if not _version_guard("ShademapState", d, 1):
             return cls()
         chans_raw = d.get("channels", {})
         channels: dict[str, dict[str, ShademapBin]] = {}
@@ -1524,6 +1553,8 @@ class ScoreboardState:
     @classmethod
     def from_dict(cls, d: dict) -> ScoreboardState:
         if not isinstance(d, dict):
+            return cls()
+        if not _version_guard("ScoreboardState", d, 1):
             return cls()
         days_raw = d.get("days", {})
         days: dict[str, DayScore] = {}

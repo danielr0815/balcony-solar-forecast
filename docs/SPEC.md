@@ -578,6 +578,14 @@ Auswertung wertlos.
 3. Unterhalb `CLOUD_KC_MIN_ELEVATION_DEG` (Haurwitz zu grob) oder ohne GHI
    fällt die Klassifikation auf die **Random-Overlap-Schichtbedeckung** zurück.
 
+**Keine Sentinel-Werte.** Eine fehlende Sichtweite ist **unbekannt** (`None`),
+nicht „0 m": die Nebel-Regel feuert nur auf eine **gemessene** Sicht unter
+`FOG_VISIBILITY_M` — ein echter 0-m-Wert ist dichter Nebel, eine
+Provider-Lücke dagegen kein Nebelbeleg und löst die Regel nie aus (sonst
+klassifizierte jede Datenlücke als Nebel und vergiftete die fog-Zelle). Der
+Bootstrap (§12.4) mappt das Alt-Sentinel `0,0` historischer Daten weiterhin
+auf „unbekannt".
+
 `CLASSIFIER_VERSION` versioniert die **Bedeutung** dieser Klassen. Eine Änderung
 veraltet alle je Klasse gelernten Inhalte semantisch und geht deshalb in den
 Config-Fingerprint ein (§7.7).
@@ -642,6 +650,18 @@ Tiefstand grob), Stabilität gegenüber dem Nachbarslot, und ein modellierter
 Beam-Anteil > 5 % der Wp der Ebene. Zusätzlich ein **messseitiges** Klarheits-
 Gate (`SHADEMAP_MEASURED_CLEAR_MIN_FRAC`), damit ein Tag, den die Prognose
 fälschlich klar nannte, keinen geometrischen Bin verdunkelt.
+
+**Teilmengen-Regel (gemessene = modellierte Seite).** Gemessen wird nur an
+Ebenen **mit Messkanal** (`actual_entity`); jede modellierte Vergleichsseite —
+hier das Klarheits-Gate, in §9.5 die Bias-Stundenkurve — summiert deshalb nur
+**dieselbe gemeterte Teilmenge**, nicht die Gesamtanlage. Ein ungemetertes
+Modul in der modellierten Summe läse als permanenter Produktionsausfall: das
+Gate verwerfe jeden klaren Tag, und θ (§9.5) lernte die Metering-Quote statt
+des Prognosefehlers. Eine Anlage ganz ohne Messkanal lernt nicht. Die Regel
+gilt gleichermaßen im nächtlichen Live-Training und im Bootstrap (§12.4).
+Im Live-Nightly kommt der Stundenanteil der gemeterten Ebenen aus der
+per-Ebenen-Aufschlüsselung des Issued-Snapshots (§16.2) — fehlt sie
+(Alt-Snapshot), wird der Tag nicht trainiert.
 
 **Clamp [0,0 … 1,1]** — volle Okklusion muss darstellbar sein (Hauswand).
 
@@ -754,7 +774,13 @@ nächtlich trainiert, per Default aktiv, über den Options-Flow abschaltbar.
   Fallback-Kette Roh → Korrigiert bei inaktiver Slow-Schicht oder Alt-Snapshot.
   θ wird **auf** die schattenkarten-korrigierte Kurve aufgesetzt; ein Training
   gegen die **reine** Roh-Kurve korrigierte denselben Verschattungsfehler
-  doppelt, sobald die Schattenkarte lernt.
+  doppelt, sobald die Schattenkarte lernt. Die Kurve wird vor der Aggregation
+  auf die **gemeterten Ebenen** beschränkt (Teilmengen-Regel, §9.1).
+- **Trainings-Gate:** eine Zelle trainiert nur, wenn ihre aggregierte
+  modellierte Tagesabschnitts-Energie `RLS_MIN_DAY_SECTION_MODELED_WH`
+  übersteigt — die Slot-Schwelle `INTRADAY_MIN_MODELED_WH` gilt für
+  15-min-Slots, nicht für Tagesabschnitts-Aggregate (ein winterlich dunkler
+  Abschnitt trägt keine Bias-Information).
 - **Servier-Gate:** eine Zelle wird erst **ab `RLS_MIN_SAMPLES` trainierten
   Tagen** serviert; darunter liefert `BiasState.get_bias` exakt
   `DAY_AHEAD_BIAS_NEUTRAL`.
@@ -986,6 +1012,8 @@ P10/P50/P90-**Multiplikatoren** des Bins (`QUANTILE_P_LOW` / `QUANTILE_P_HIGH`).
 
 Trainiert wird nächtlich aus der **ausgelieferten korrigierten** Stundenkurve
 gegen die gemessene (§9.7); der Rahmen ist damit derselbe wie beim Servieren.
+Der Bootstrap-Seed (§12.6) beschränkt die modellierte Seite dabei wie der
+Bias auf die gemeterten Ebenen (Teilmengen-Regel, §9.1/§9.5).
 
 ### §11.2 Servieren
 
@@ -1362,9 +1390,13 @@ Vergleichsprognose, jeweils gegen die **gemessene** Ist-Summe, plus die
 Vergleichs-MAE über **nur die Tage** gerechnet, an denen dieser Vergleich
 gewertet ist. Ein fehlender Vergleichswert (leere Vergleichsliste, umbenannte
 Entität, gepurgter Recorder) ist **ABSENT**, nie eine fabrizierte Null — sonst
-läse eine fehlende Historie als „Motor gewinnt haushoch". NaN, inf oder negative
-Eingaben degradieren zu 0,0 statt eine Exception oder einen unsinnigen Fehler in
-die Aggregate zu tragen.
+läse eine fehlende Historie als „Motor gewinnt haushoch". Eine nicht-finite
+oder negative **Motor- oder Ist-Zahl** macht den Tag **ungewertet**
+(`score_day` verwirft ihn: kein Ring-Eintrag, keine Persistenz) — die frühere
+0,0-Klemmung fabrizierte mit `|Motor − 0|` den schlechtestmöglichen Motortag
+ins Kill-Gate-Fenster. Auf dem Aggregationspfad bereits gewerteter Tage
+degradieren nicht-finite Einzelwerte weiterhin zu 0,0, statt eine Exception
+oder einen unsinnigen Fehler in die Aggregate zu tragen.
 
 ### §15.3 Vergleichsprognosen
 

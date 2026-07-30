@@ -655,6 +655,49 @@ def site_measured_hourly(
     return site or None
 
 
+def metered_modeled_hourly(
+    coord, snap: IssuedSnapshot, modeled_hourly: dict[str, float]
+) -> dict[str, float] | None:
+    """Restrict a SITE-total modeled hourly curve to the METERED planes.
+
+    Teilmengen-Regel (SPEC §9.5/§9.1, mirrors the live
+    ``coordinator._rearm_samples_from_rows`` subset rule): learners compare
+    against the measured side, which only ever sums planes with an
+    ``actual_entity``. An unmetered plane inside the modeled total reads as a
+    permanent production deficit — the RLS theta would learn the METERING
+    SHARE instead of the forecast error, and the measured-clear day gate
+    would reject clear days as overcast busts. The per-hour metered share is
+    taken from the snapshot's per-plane UNGATED beam+diffuse breakdown (the
+    only per-plane modeled split the issued ring stores) and applied to the
+    passed (gated / slow-only / corrected) site curve — a first-order share
+    approximation, documented as such.
+
+    Returns None when the comparison is impossible or meaningless: no metered
+    plane at all (no measured side exists), or unmetered planes present but
+    no per-plane breakdown to scale them out (legacy v0.1 snapshot) — the
+    caller then SKIPS the day rather than training the metering gap.
+    """
+    planes = getattr(getattr(coord, "_site", None), "planes", ())
+    metered = {p.name for p in planes if p.actual_entity}
+    if not metered:
+        return None
+    if len(metered) == len(planes):
+        return dict(modeled_hourly)
+    if not snap.per_plane:
+        return None
+    out: dict[str, float] = {}
+    for hkey, wh in modeled_hourly.items():
+        total = 0.0
+        share = 0.0
+        for name, pm in snap.per_plane.items():
+            plane_wh = pm.beam_wh.get(hkey, 0.0) + pm.diffuse_wh.get(hkey, 0.0)
+            total += plane_wh
+            if name in metered:
+                share += plane_wh
+        out[hkey] = float(wh) * (share / total) if total > 0.0 else 0.0
+    return out
+
+
 def day_ahead_samples(
     coord,
     raw_hourly: dict[str, float],
@@ -666,8 +709,9 @@ def day_ahead_samples(
 
     Modeled Wh per part comes from the issued SLOW-ONLY hourly curve (shademap ∘
     physics; ``raw_hourly`` here is that curve, raw only as a legacy fallback —
-    see :func:`train_day_ahead`); the cloud class is the forecast cloud class of
-    each hour (snap.cloud_class_by_hour,
+    see :func:`train_day_ahead`), RESTRICTED to the metered planes
+    (:func:`metered_modeled_hourly`); the cloud class is the forecast cloud
+    class of each hour (snap.cloud_class_by_hour,
     SPEC §8) so a fog/overcast day trains its own cell, not a fixed "clear"
     one. When TRUE per-hour measured site energy is available
     (``site_measured_hourly``) each (class, part) cell carries its OWN
@@ -675,6 +719,13 @@ def day_ahead_samples(
     day's measured total is apportioned by the modeled shape (coarse
     fallback, daily ring only).
     """
+    # Teilmengen-Regel: modeled side restricted to the metered planes; None
+    # means the comparison is impossible (no metered plane / legacy snapshot
+    # on a partially metered site) -> the day is skipped, never poisoned.
+    metered_hourly = metered_modeled_hourly(coord, snap, raw_hourly)
+    if metered_hourly is None:
+        return []
+    raw_hourly = metered_hourly
     measured_total = sum(
         float(v) for v in actuals.values() if isinstance(v, (int, float))
     )
@@ -801,13 +852,20 @@ def day_is_measured_clear(
     SHADEMAP_MEASURED_CLEAR_MIN_FRAC of the modeled RAW forecast; otherwise
     the forecast over-predicted clearness (overcast reality) and training
     would write weather error into the geometry. The modeled reference is the
-    gated RAW hourly total (what the engine issued), sliced to the day.
+    gated RAW hourly total (what the engine issued), sliced to the day and
+    RESTRICTED to the metered planes (:func:`metered_modeled_hourly`) — an
+    unmetered plane would otherwise read as a permanent under-production and
+    reject every clear day. Returns False when the restriction is impossible
+    (no metered plane / legacy snapshot without the per-plane breakdown):
+    an unverifiable day trains nothing.
     """
-    modeled = sum(
-        _filter_hourly_to_local_day(
-            snap.raw_hourly_wh or snap.corrected_hourly_wh, iso
-        ).values()
+    modeled_hourly = _filter_hourly_to_local_day(
+        snap.raw_hourly_wh or snap.corrected_hourly_wh, iso
     )
+    metered_hourly = metered_modeled_hourly(coord, snap, modeled_hourly)
+    if metered_hourly is None:
+        return False
+    modeled = sum(metered_hourly.values())
     if modeled <= 0.0:
         return False
     measured = 0.0

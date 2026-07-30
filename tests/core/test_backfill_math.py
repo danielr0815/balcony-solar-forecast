@@ -153,6 +153,25 @@ def test_parse_broken_payload_raises():
         bf.parse_hourly_payload({"hourly": {"time": []}}, var_suffix="")
 
 
+def test_parse_missing_visibility_is_none_not_fog_sentinel():
+    """A provider hole in the visibility column is UNKNOWN (None), never the
+    0.0 sentinel — 0 m is a real dense-fog reading, so the old ``or 0.0``
+    classified every data gap as fog and poisoned the fog bias cell."""
+    payload = {
+        "hourly": {
+            "time": ["2025-06-21T09:00", "2025-06-21T10:00"],
+            "shortwave_radiation": [700.0, 750.0],
+            "direct_normal_irradiance": [800.0, 810.0],
+            "diffuse_radiation": [110.0, 120.0],
+            "temperature_2m": [22.0, 24.0],
+            "visibility": [None, 24000.0],
+        }
+    }
+    recs = bf.parse_hourly_payload(payload, var_suffix="")
+    assert recs[0].visibility_m is None
+    assert recs[1].visibility_m == 24000.0
+
+
 # ---------------------------------------------------------------------------
 # Engine mirror-invariant: reconstruct_plane_hour == engine raw plane physics
 # ---------------------------------------------------------------------------
@@ -632,6 +651,108 @@ def test_process_day_channel_dropout_skips_module(site: SiteConfig):
 
 
 # ---------------------------------------------------------------------------
+# Partial metering (SPEC §9.1/§9.5/§11.1 Teilmengen-Regel)
+# ---------------------------------------------------------------------------
+
+
+def _partial_metered_site() -> SiteConfig:
+    """Two identical front planes; only M1 carries a meter (actual_entity)."""
+    return SiteConfig.from_dict({
+        const.CONF_LATITUDE: 48.547853,
+        const.CONF_LONGITUDE: 12.187272,
+        const.CONF_PLANES: [
+            {
+                const.CONF_PLANE_NAME: "M1",
+                const.CONF_AZIMUTH: 115.0,
+                const.CONF_TILT: 70.0,
+                const.CONF_WP: 370,
+                const.CONF_ACTUAL_ENTITY: "sensor.m1",
+            },
+            {
+                const.CONF_PLANE_NAME: "M2",
+                const.CONF_AZIMUTH: 115.0,
+                const.CONF_TILT: 70.0,
+                const.CONF_WP: 370,
+                # no actual_entity: unmetered
+            },
+        ],
+        const.CONF_GROUPS: [],
+    })
+
+
+def _unmetered_site() -> SiteConfig:
+    """The same two planes, NEITHER metered."""
+    raw = {
+        const.CONF_LATITUDE: 48.547853,
+        const.CONF_LONGITUDE: 12.187272,
+        const.CONF_PLANES: [
+            {
+                const.CONF_PLANE_NAME: "M1",
+                const.CONF_AZIMUTH: 115.0,
+                const.CONF_TILT: 70.0,
+                const.CONF_WP: 370,
+            },
+        ],
+        const.CONF_GROUPS: [],
+    }
+    return SiteConfig.from_dict(raw)
+
+
+def test_process_day_bias_learns_forecast_error_not_metering_share():
+    """On a partially metered site the RLS must compare the metered subset.
+
+    Measured tracks the modeled energy of the ONE metered plane exactly; the
+    identical unmetered twin doubles the modeled site total. Summing ALL
+    planes on the modeled side teaches theta the metering share (~0.5, pinned
+    at the clamp floor) instead of the forecast error (~1.0).
+    """
+    site = _partial_metered_site()
+    weather = _clear_summer_noon_hours()
+    svf = _svf(site)
+    hourly_actuals = {"M1": _tracked_actuals(site, weather, svf)["M1"]}
+    acc = bf.BootstrapAccumulator()
+    used = bf.process_day_hourly(acc, site, weather, hourly_actuals, svf_by_plane=svf)
+    assert used is True
+    assert acc.bias, "expected at least one trained day-ahead cell"
+    thetas = [c.theta for c in acc.bias.values()]
+    assert all(t > 0.9 for t in thetas), thetas
+
+
+def test_process_day_shademap_gate_passes_with_unmetered_plane():
+    """The measured-clear day gate must compare the METERED subset: an
+    unmetered plane contributing >20 % of the modeled site energy must not
+    read as an overcast bust and block shademap training."""
+    site = _partial_metered_site()
+    weather = _clear_summer_noon_hours()
+    svf = _svf(site)
+    hourly_actuals = {"M1": _tracked_actuals(site, weather, svf)["M1"]}
+    acc = bf.BootstrapAccumulator()
+    bf.process_day_hourly(acc, site, weather, hourly_actuals, svf_by_plane=svf)
+    # The unmetered twin contributes 50 % of the modeled site energy; against
+    # the FULL modeled curve the gate fails (0.5 < 0.8) and no bin trains.
+    assert acc.shade_samples > 0
+    assert set(acc.shade) == {"M1"}  # never the unmetered channel
+    taus = [v[0] for v in acc.shade["M1"].values()]
+    assert taus and all(0.7 <= t <= 1.1 for t in taus)
+
+
+def test_process_day_without_any_metered_plane_learns_nothing():
+    """No plane with actual_entity -> no measured side exists: the day is
+    skipped entirely instead of training against a caller-supplied channel
+    nothing on the site measures."""
+    site = _unmetered_site()
+    weather = _clear_summer_noon_hours()
+    svf = _svf(site)
+    hourly_actuals = _tracked_actuals(site, weather, svf, factor=1.0)
+    acc = bf.BootstrapAccumulator()
+    used = bf.process_day_hourly(acc, site, weather, hourly_actuals, svf_by_plane=svf)
+    assert used is False
+    assert acc.shade_samples == 0
+    assert acc.bias_samples == 0
+    assert acc.quantile_samples == 0
+
+
+# ---------------------------------------------------------------------------
 # Shademap EMA warm-up parity: bootstrap _shade_update vs. live update_bin
 # ---------------------------------------------------------------------------
 
@@ -688,6 +809,21 @@ def test_rls_step_zero_modeled_is_noop():
     cell = BiasCell(theta=1.2, covariance=5.0, n=3)
     out = bf._rls_step(cell, modeled=0.0, measured=500.0)
     assert out == cell
+
+
+def test_rls_step_nonfinite_or_negative_is_noop():
+    """Guards mirroring bias._rls_step: a NaN/inf/negative sample must be a
+    no-op — before the guards a NaN measured poisoned theta (NaN -> clamped to
+    the 0.5 floor) and advanced n on pure garbage."""
+    cell = BiasCell(theta=1.2, covariance=5.0, n=3)
+    for modeled, measured in (
+        (float("nan"), 500.0),
+        (1000.0, float("nan")),
+        (float("inf"), 500.0),
+        (1000.0, float("inf")),
+        (1000.0, -1.0),
+    ):
+        assert bf._rls_step(cell, modeled=modeled, measured=measured) == cell
 
 
 # ---------------------------------------------------------------------------
@@ -780,6 +916,23 @@ def test_classify_cloud_fog_and_covers():
     )
     # High low-cloud in June (not a fog month) -> overcast, not fog.
     assert bf._classify_cloud(overcast) == const.CLOUD_CLASS_OVERCAST
+
+
+def test_classify_cloud_unknown_visibility_is_not_fog():
+    """None (unknown) visibility passes through to bias.classify_cloud as
+    'no fog evidence' — it must neither raise nor classify fog (Live =
+    Backfill parity, SPEC §8). The legacy 0.0 sentinel STILL maps to unknown
+    here: historical backfill data carries 0.0 for 'no reading', while the
+    live path can now tell a real 0 m reading (fog) apart from None."""
+    base = dict(ghi=780.0, dni=820.0, dhi=120.0, temp_c=24.0)
+    wx_none = bf.HourlyWeather(
+        start=datetime(2025, 6, 21, 9, tzinfo=UTC), visibility_m=None, **base
+    )
+    assert bf._classify_cloud(wx_none) == const.CLOUD_CLASS_CLEAR
+    wx_zero = bf.HourlyWeather(
+        start=datetime(2025, 6, 21, 9, tzinfo=UTC), visibility_m=0.0, **base
+    )
+    assert bf._classify_cloud(wx_zero) == const.CLOUD_CLASS_CLEAR
 
 
 def test_day_part_for_slot_solar_boundaries():

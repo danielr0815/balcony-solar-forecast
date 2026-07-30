@@ -74,8 +74,13 @@ def ensemble_band_factors(
             continue
         if not math.isfinite(detf) or detf < min_det_ghi:
             continue
+        if not isinstance(members, (list, tuple)):
+            # A corrupt cache entry (bare float instead of a member list)
+            # costs this hour's ensemble spread, never the whole cycle
+            # (totality — the degrade ethos of SPEC §11.3).
+            continue
         factors: list[float] = []
-        for m in members or ():
+        for m in members:
             try:
                 mv = float(m)
             except (TypeError, ValueError):

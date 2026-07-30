@@ -254,10 +254,22 @@ def test_parse_clamps_negative_and_none_radiation(good_payload):
 
 
 def test_parse_tolerates_none_temperature(good_payload):
+    # A temperature gap stays None (unknown) — the engine then treats the slot
+    # as unusable (zero production) instead of running the Ross derate on a
+    # fabricated 0 °C (freezing-cell efficiency on a summer afternoon).
     good_payload["minutely_15"]["temperature_2m"] = [None, 1.0, 2.0, 3.0]
     ws = parse_weather(good_payload)
-    assert ws.slots[0].temp_c == 0.0
+    assert ws.slots[0].temp_c is None
     assert ws.slots[1].temp_c == 1.0
+
+
+def test_parse_missing_visibility_is_none(good_payload):
+    # Same sentinel-free contract for visibility: a provider hole is None
+    # (unknown, never fog), not the 0.0 that classify_cloud reads as dense fog.
+    good_payload["hourly"]["visibility"] = [None, 30000.0]
+    ws = parse_weather(good_payload)
+    # All four slots fall in hour 00 (the None row).
+    assert all(s.visibility_m is None for s in ws.slots)
 
 
 def test_parse_validates_before_parsing():

@@ -465,6 +465,11 @@ DAY_AHEAD_BIAS_NEUTRAL = 1.0
 RLS_FORGETTING_FACTOR = 0.98    # lambda: <1 discounts old days
 RLS_INIT_COVARIANCE = 1000.0    # P0: large => fast initial adaptation
 RLS_MIN_SAMPLES = 3             # cells with fewer trained days stay neutral
+# The RLS regressor is a whole (cloud class x day part) DAY-SECTION aggregate
+# (several daylight hours), not a 15-min slot: INTRADAY_MIN_MODELED_WH (5 Wh)
+# gates SLOTS. A near-dark winter section (~10 Wh aggregated) carried no bias
+# information yet still trained on noise at the slot floor.
+RLS_MIN_DAY_SECTION_MODELED_WH = 25.0
 # When the forecast-relevant site config changes, the day-ahead bias cells were
 # learned against a now-stale geometry and re-adapt at only ~lambda's steady-
 # state gain (~0.001/day at n~100). On a fingerprint change every cell's RLS

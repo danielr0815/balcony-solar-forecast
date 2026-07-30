@@ -647,6 +647,14 @@ def compute_forecast(
             _append_zero_slot()
             continue
 
+        # _slot_is_usable just gated a None temperature; the local re-check
+        # keeps the narrowing explicit (WeatherSlot.temp_c is Optional since
+        # the fetcher stopped fabricating 0 °C for provider gaps).
+        temp_c = slot.temp_c
+        if temp_c is None:  # pragma: no cover - gated above, defensive only
+            _append_zero_slot()
+            continue
+
         midpoint = slot.midpoint
         sun_az, sun_el = solpos.sun_position(midpoint, lat, lon)
         doy = midpoint.timetuple().tm_yday
@@ -685,7 +693,7 @@ def compute_forecast(
 
             # RAW: the static horizon tau gates the beam.
             raw_split = _gate_split(comps, comps.static_tau)
-            raw_beam_dc, raw_diffuse_dc = _dc_split(raw_split, plane, slot.temp_c)
+            raw_beam_dc, raw_diffuse_dc = _dc_split(raw_split, plane, temp_c)
             raw_unclamped[plane.name] = raw_beam_dc + raw_diffuse_dc
 
             # SLOW-learner label reference (SPEC §9.1, FIX-3): UNGATED beam DC at
@@ -714,7 +722,7 @@ def compute_forecast(
                     plane.name, sun_az, sun_el, doy, comps.static_tau
                 )
                 cor_split = _gate_split(comps, cor_tau)
-                b_dc, d_dc = _dc_split(cor_split, plane, slot.temp_c)
+                b_dc, d_dc = _dc_split(cor_split, plane, temp_c)
             else:
                 b_dc, d_dc = raw_beam_dc, raw_diffuse_dc
 

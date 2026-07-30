@@ -246,7 +246,9 @@ def parse_weather(payload: dict) -> WeatherSeries:
     ``snowfall`` is already centimetres in the Open-Meteo hourly block
     (``hourly_units.snowfall == "cm"``) and is passed through unchanged onto
     the slot; ``snow_depth`` is metres. Missing radiation values default to 0
-    (night / gap); a missing temperature defaults to 0 °C but is rare.
+    (night / gap); a missing temperature or visibility stays None (unknown) —
+    the engine treats a temperature-less slot as unusable, and an unknown
+    visibility never reads as fog (no fabricated sentinels, SPEC §8).
     """
     validate_payload(payload)  # defensive: parse never trusts an unchecked body
 
@@ -278,11 +280,11 @@ def parse_weather(payload: dict) -> WeatherSeries:
                 ghi=max(0.0, _to_float(ghi[i]) or 0.0),
                 dni=max(0.0, _to_float(dni[i]) or 0.0),
                 dhi=max(0.0, _to_float(dhi[i]) or 0.0),
-                temp_c=_to_float(temp[i]) or 0.0,
+                temp_c=_to_float(temp[i]),
                 cloud_low=cloud_low.get(hour_key) or 0.0,
                 cloud_mid=cloud_mid.get(hour_key) or 0.0,
                 cloud_high=cloud_high.get(hour_key) or 0.0,
-                visibility_m=visibility.get(hour_key) or 0.0,
+                visibility_m=visibility.get(hour_key),
                 snowfall_cm=snowfall.get(hour_key) or 0.0,
                 snow_depth_m=snow_depth.get(hour_key) or 0.0,
             )

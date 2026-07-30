@@ -412,6 +412,72 @@ def test_day_ahead_samples_empty_on_zero_energy():
     assert c._day_ahead_samples({}, {"M1": 0.0}, snap, None) == []
 
 
+# ---------------------------------------------------------------------------
+# Partial metering (SPEC §9.5/§9.1 Teilmengen-Regel, nightly path)
+# ---------------------------------------------------------------------------
+
+
+def _partial_metered_site() -> SiteConfig:
+    """Two planes; only M1 carries a meter (actual_entity)."""
+    return SiteConfig(
+        latitude=48.5,
+        longitude=12.2,
+        planes=(
+            PlaneConfig(name="M1", azimuth_deg=115.0, tilt_deg=70.0, wp=370.0,
+                        actual_entity="sensor.m1"),
+            PlaneConfig(name="M2", azimuth_deg=115.0, tilt_deg=70.0, wp=370.0),
+        ),
+        groups=(),
+    )
+
+
+def test_day_ahead_samples_restrict_modeled_to_metered_planes():
+    """An unmetered plane must not inflate the modeled side of the RLS pair —
+    otherwise theta learns the metering SHARE (~0.5 here) instead of the
+    forecast error, pinned at the clamp floor every morning."""
+    from custom_components.balcony_solar_forecast.core.types import (
+        PlaneHourlyModeled,
+    )
+
+    c = _make_coordinator()
+    c._site = _partial_metered_site()
+    hkey = "2026-07-01T12:00:00+00:00"
+    raw_hourly = {hkey: 200.0}  # site total: M1 100 + M2 (unmetered) 100
+    snap = IssuedSnapshot(
+        issued_at="x", status="fresh",
+        raw_hourly_wh=raw_hourly,
+        per_plane={
+            "M1": PlaneHourlyModeled(
+                beam_wh={hkey: 80.0}, diffuse_wh={hkey: 20.0}
+            ),
+            "M2": PlaneHourlyModeled(
+                beam_wh={hkey: 80.0}, diffuse_wh={hkey: 20.0}
+            ),
+        },
+    )
+    samples = c._day_ahead_samples(
+        raw_hourly, {"M1": 110.0}, snap, {hkey: 110.0}
+    )
+    assert len(samples) == 1
+    assert samples[0].modeled_wh == pytest.approx(100.0)  # metered half only
+    assert samples[0].measured_wh == pytest.approx(110.0)
+
+
+def test_day_ahead_samples_skip_unmetered_without_per_plane_breakdown():
+    """A partially metered site with a LEGACY snapshot (no per-plane
+    breakdown) cannot scale the unmetered share out: skip the day rather
+    than train the metering gap into theta."""
+    c = _make_coordinator()
+    c._site = _partial_metered_site()
+    hkey = "2026-07-01T12:00:00+00:00"
+    raw_hourly = {hkey: 200.0}
+    snap = IssuedSnapshot(issued_at="x", status="fresh", raw_hourly_wh=raw_hourly)
+    samples = c._day_ahead_samples(
+        raw_hourly, {"M1": 100.0}, snap, {hkey: 100.0}
+    )
+    assert samples == []
+
+
 def test_day_ahead_training_moves_theta_up_not_to_min():
     """A near-1.0 day trained RLS_MIN_SAMPLES times pushes theta well above the
     0.5 clamp — the anti-pinned-at-DAY_AHEAD_BIAS_MIN assertion (FIX-2)."""
@@ -2271,6 +2337,37 @@ def test_shademap_day_gate_rejects_overcast_bust():
     hourly_actuals = {"M1": {hkey: 100.0}}  # 100 << 0.8 * 1000 -> reject
     assert c._day_is_measured_clear(iso, snap, hourly_actuals) is False
     hourly_actuals = {"M1": {hkey: 900.0}}  # 900 >= 800 -> accept
+    assert c._day_is_measured_clear(iso, snap, hourly_actuals) is True
+
+
+def test_day_is_measured_clear_compares_metered_subset():
+    """On a partially metered site the gate must compare the measured sum
+    against the modeled energy of the METERED planes only — an unmetered
+    plane contributing >20 % of the modeled total must not read as an
+    overcast bust and block shademap training."""
+    from custom_components.balcony_solar_forecast.core.types import (
+        PlaneHourlyModeled,
+    )
+
+    c = _make_coordinator()
+    c._site = _partial_metered_site()
+    iso = "2026-07-01"
+    hkey = "2026-07-01T11:00:00+00:00"
+    snap = IssuedSnapshot(
+        issued_at="x", status="fresh",
+        raw_hourly_wh={hkey: 1000.0},  # site total: M1 400 + M2 (unmetered) 600
+        per_plane={
+            "M1": PlaneHourlyModeled(
+                beam_wh={hkey: 320.0}, diffuse_wh={hkey: 80.0}
+            ),
+            "M2": PlaneHourlyModeled(
+                beam_wh={hkey: 480.0}, diffuse_wh={hkey: 120.0}
+            ),
+        },
+    )
+    # 380 >= 0.8 * 400 (metered modeled) -> accept; against the FULL 1000 the
+    # gate would reject (380 < 800).
+    hourly_actuals = {"M1": {hkey: 380.0}}
     assert c._day_is_measured_clear(iso, snap, hourly_actuals) is True
 
 

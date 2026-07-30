@@ -38,6 +38,7 @@ from balcony_solar_forecast.const import (
     INTRADAY_TAU_MINUTES,
     MIDDAY_SOLAR_HALFWIDTH_H,
     RLS_INIT_COVARIANCE,
+    RLS_MIN_DAY_SECTION_MODELED_WH,
     RLS_MIN_SAMPLES,
 )
 from balcony_solar_forecast.core.bias import (
@@ -464,6 +465,22 @@ def test_classify_nan_visibility_does_not_fire_fog():
     assert r == CLOUD_CLASS_CLEAR
 
 
+def test_classify_none_visibility_is_unknown_not_fog():
+    # None means "no reading" (provider hole) — the sentinel-free taxonomy
+    # (SPEC §8): unknown NEVER fires the fog rule, in no month.
+    r = classify_cloud(cloud_low=5, cloud_mid=5, cloud_high=5,
+                       visibility_m=None, month=1)
+    assert r == CLOUD_CLASS_CLEAR
+
+
+def test_classify_zero_visibility_is_real_fog():
+    # A MEASURED 0 m visibility is dense fog, not a sentinel: the fetcher no
+    # longer fabricates 0.0 for gaps, so 0.0 reaching the classifier is real.
+    r = classify_cloud(cloud_low=5, cloud_mid=5, cloud_high=5,
+                       visibility_m=0.0, month=6)
+    assert r == CLOUD_CLASS_FOG
+
+
 def test_classify_nan_cover_treated_as_zero():
     r = classify_cloud(cloud_low=float("nan"), cloud_mid=float("nan"),
                        cloud_high=float("nan"), visibility_m=20000, month=6)
@@ -723,6 +740,31 @@ def test_train_skips_nonfinite_energies():
     assert key not in state.cells
 
 
+def test_train_skips_dim_day_section_below_modeled_floor():
+    """A winter-dark day SECTION whose aggregated modeled energy stays under
+    RLS_MIN_DAY_SECTION_MODELED_WH carries no bias information and is skipped.
+
+    The RLS regressor here is a whole (cloud class x day part) day-section
+    aggregate, not a 15-min slot: the 5 Wh INTRADAY_MIN_MODELED_WH floor was
+    written for slots and let near-dark sections (a December 'morning' cell
+    with ~10 Wh) train on pure noise."""
+    state = BiasState()
+    state = train_day_ahead_bias(
+        state,
+        [DayAheadSample(cloud_class=CLOUD_CLASS_CLEAR, day_part=DAY_PART_MORNING,
+                        measured_wh=12.0, modeled_wh=10.0)],
+    )
+    key = BiasState.cell_key(CLOUD_CLASS_CLEAR, DAY_PART_MORNING)
+    assert key not in state.cells
+    # Just above the section floor the same day trains normally.
+    state = train_day_ahead_bias(
+        state,
+        [DayAheadSample(cloud_class=CLOUD_CLASS_CLEAR, day_part=DAY_PART_MORNING,
+                        measured_wh=40.0, modeled_wh=RLS_MIN_DAY_SECTION_MODELED_WH + 1.0)],
+    )
+    assert key in state.cells
+
+
 def test_train_skips_unknown_class_or_part():
     state = BiasState()
     state = train_day_ahead_bias(
@@ -783,6 +825,26 @@ def test_train_preserves_version():
                        measured_wh=1200.0, modeled_wh=1000.0)
     ])
     assert out.version == 1
+
+
+def test_from_dict_discards_unknown_version(caplog):
+    """SPEC §16.1: an unknown / FUTURE section version is discarded to the
+    empty state with a warning — never guessed at (a v2 layout read by v1
+    code would silently mis-train every cell)."""
+    import logging
+
+    blob = {
+        "version": 99,
+        "cells": {"clear|midday": {"theta": 1.4, "covariance": 5.0, "n": 50}},
+    }
+    with caplog.at_level(logging.WARNING):
+        st = BiasState.from_dict(blob)
+    assert st.cells == {}
+    assert st.version == 1
+    assert any("version" in r.message.lower() for r in caplog.records)
+    # The current version round-trips untouched (no over-eager discard).
+    ok = BiasState.from_dict(blob | {"version": 1})
+    assert ok.cells["clear|midday"].theta == pytest.approx(1.4)
 
 
 # --- reseed_day_ahead_bias (A4/FOR-4) --------------------------------------

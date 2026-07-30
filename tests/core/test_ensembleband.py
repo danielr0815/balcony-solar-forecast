@@ -94,6 +94,20 @@ def test_factors_non_dict_inputs_are_total():
     assert ensemble_band_factors({}, None, **_KW) == {}
 
 
+def test_factors_skip_non_iterable_members_value():
+    """A garbage members value (a bare float instead of a list) must SKIP the
+    hour, never raise TypeError — the function is total (degrade ethos, SPEC
+    §11.3): a corrupt cache entry costs one hour's ensemble spread, not the
+    whole forecast cycle."""
+    out = ensemble_band_factors(
+        {"bad": 5.0, "good": [100.0] * 10},  # type: ignore[dict-item]
+        {"bad": 100.0, "good": 100.0},
+        **_KW,
+    )
+    assert "bad" not in out
+    assert "good" in out
+
+
 # ---------------------------------------------------------------------------
 # fuse_bands
 # ---------------------------------------------------------------------------

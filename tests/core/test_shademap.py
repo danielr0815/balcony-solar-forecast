@@ -603,6 +603,25 @@ def test_bootstrap_non_dict_yields_empty_state():
     assert S.ingest_bootstrap_shademap([1, 2, 3], max_bin_n=5).channels == {}
 
 
+def test_from_dict_discards_unknown_version(caplog):
+    """SPEC §16.1: an unknown / FUTURE section version is discarded to the
+    empty state with a warning — never guessed at."""
+    import logging
+
+    blob = {
+        "version": 99,
+        "channels": {"M4": {"10:4:0": {"tau": 0.4, "n": 12}}},
+    }
+    with caplog.at_level(logging.WARNING):
+        st = ShademapState.from_dict(blob)
+    assert st.channels == {}
+    assert st.version == 1
+    assert any("version" in r.message.lower() for r in caplog.records)
+    # The current version round-trips untouched (no over-eager discard).
+    ok = ShademapState.from_dict(blob | {"version": 1})
+    assert ok.channels["M4"]["10:4:0"].tau == pytest.approx(0.4)
+
+
 # ---------------------------------------------------------------------------
 # PROPERTY TESTS
 # ---------------------------------------------------------------------------

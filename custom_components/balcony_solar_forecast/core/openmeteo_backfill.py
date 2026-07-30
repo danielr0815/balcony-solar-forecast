@@ -142,7 +142,7 @@ def parse_hourly_payload(
                 cloud_low=_at(cl_low, i) or 0.0,
                 cloud_mid=_at(cl_mid, i) or 0.0,
                 cloud_high=_at(cl_high, i) or 0.0,
-                visibility_m=_at(vis, i) or 0.0,
+                visibility_m=_at(vis, i),
                 snow_depth_m=_at(snow, i) or 0.0,
             )
         )

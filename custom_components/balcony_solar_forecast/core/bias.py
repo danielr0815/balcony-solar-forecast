@@ -109,6 +109,7 @@ from ..const import (
     MIDDAY_SOLAR_HALFWIDTH_H,
     RLS_FORGETTING_FACTOR,
     RLS_INIT_COVARIANCE,
+    RLS_MIN_DAY_SECTION_MODELED_WH,
 )
 from .clearsky import clear_sky_index
 from .types import BiasCell, BiasState
@@ -403,7 +404,7 @@ def classify_cloud(
     cloud_low: float,
     cloud_mid: float,
     cloud_high: float,
-    visibility_m: float,
+    visibility_m: float | None,
     month: int,
     ghi: float | None = None,
     elevation_deg: float | None = None,
@@ -412,7 +413,9 @@ def classify_cloud(
 
     Fog test FIRST (it overrides everything): fog when ``visibility_m`` <
     FOG_VISIBILITY_M OR (``cloud_low`` > FOG_CLOUD_LOW_PCT AND ``month`` in
-    FOG_MONTHS).
+    FOG_MONTHS). ``visibility_m`` is sentinel-free: ``None`` (no reading,
+    provider hole) means UNKNOWN and never fires the fog rule — only a real
+    measured visibility does (a measured 0 m IS dense fog).
 
     Otherwise split by the CLEAR-SKY INDEX ``k_c = ghi / haurwitz_ghi(elevation)``
     when both ``ghi`` and ``elevation_deg`` are supplied and the sun is at least
@@ -636,8 +639,10 @@ def _rls_step(cell: BiasCell, modeled_wh: float, measured_wh: float) -> BiasCell
     x = float(modeled_wh)
     y = float(measured_wh)
     # Both must be usable non-negative energies; a ~0 regressor carries no bias
-    # information (0 = theta*0 for any theta) so we skip it.
-    if x <= INTRADAY_MIN_MODELED_WH or y < 0.0:
+    # information (0 = theta*0 for any theta) so we skip it. The floor is the
+    # DAY-SECTION aggregate gate (the regressor sums several daylight hours),
+    # not the 15-min-slot INTRADAY_MIN_MODELED_WH.
+    if x <= RLS_MIN_DAY_SECTION_MODELED_WH or y < 0.0:
         return cell
 
     lam = RLS_FORGETTING_FACTOR

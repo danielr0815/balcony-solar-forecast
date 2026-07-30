@@ -10,8 +10,6 @@ kill-gate verdict (pending vs pass vs fail), plus the validate-and-clamp edges
 
 from __future__ import annotations
 
-import math
-
 import pytest
 from balcony_solar_forecast.const import (
     CLOUD_CLASS_CLEAR,
@@ -95,22 +93,46 @@ def test_score_day_missing_comparison_is_absent_not_zero():
 
 
 def test_score_day_drops_non_finite_and_negative_comparisons():
-    # measured/engine degrade to 0.0 (day still scored), but a non-finite /
-    # negative COMPARISON is DROPPED, never clamped to a fabricated 0.0 (which
-    # would charge the baseline the whole measured energy and unfairly inflate
-    # the engine's edge; a missing comparison is ABSENT, SPEC §15.2).
+    # A non-finite / negative COMPARISON is DROPPED, never clamped to a
+    # fabricated 0.0 (which would charge the baseline the whole measured
+    # energy and unfairly inflate the engine's edge; a missing comparison is
+    # ABSENT, SPEC §15.2).
     d = _day(
         "2026-07-01",
-        measured=float("nan"),
-        engine=float("-inf"),
+        measured=10.0,
+        engine=9.0,
         comparisons={"c": float("inf"), "neg": -5.0, "ok": 8.0},
     )
-    assert d.measured_kwh == 0.0
-    assert d.engine_kwh == 0.0
-    assert math.isfinite(d.engine_daily_abs_err)
     assert "c" not in d.comparison_kwh
     assert "neg" not in d.comparison_kwh
     assert d.comparison_kwh["ok"] == 8.0
+
+
+def test_score_day_unscorable_when_measured_or_engine_garbage():
+    # A non-finite or negative MEASURED / ENGINE number leaves the day
+    # UNSCORED (None), mirroring the _finite_or_none contract: the old 0.0
+    # clamp fabricated a day that never happened — measured=NaN scored as
+    # |engine - 0|, the engine's worst possible day, straight into the
+    # kill-gate window (SPEC §15.2).
+    def _scored(**kw):
+        args = dict(
+            iso_date="2026-07-01",
+            weather_class=CLOUD_CLASS_CLEAR,
+            measured_kwh=10.0,
+            engine_kwh=9.0,
+            comparison_kwh={},
+        )
+        args.update(kw)
+        return sb.score_day(**args)
+
+    assert _scored(measured_kwh=float("nan")) is None
+    assert _scored(measured_kwh=float("inf")) is None
+    assert _scored(measured_kwh=-1.0) is None
+    assert _scored(engine_kwh=float("nan")) is None
+    assert _scored(engine_kwh=float("-inf")) is None
+    assert _scored(engine_kwh=-0.5) is None
+    # Valid numbers still score (no over-eager discard).
+    assert _scored() is not None
 
 
 def test_score_day_carries_hourly_mae():
@@ -456,3 +478,35 @@ def test_scoreboard_summary_empty_state_is_neutral():
     assert summary["kill_gate_passed"] is None
     assert summary["scored_days"] == 0
     assert summary["strata"] == {}
+
+
+# ---------------------------------------------------------------------------
+# ScoreboardState.from_dict — version guard (SPEC §16.1)
+# ---------------------------------------------------------------------------
+
+
+def test_scoreboard_state_from_dict_discards_unknown_version(caplog):
+    """An unknown / FUTURE section version is discarded to the empty state
+    with a warning — never guessed at (SPEC §16.1)."""
+    import logging
+
+    blob = {
+        "version": 99,
+        "days": {
+            "2026-07-01": {
+                "iso_date": "2026-07-01",
+                "weather_class": CLOUD_CLASS_CLEAR,
+                "measured_kwh": 10.0,
+                "engine_kwh": 9.0,
+                "engine_daily_abs_err": 1.0,
+            }
+        },
+    }
+    with caplog.at_level(logging.WARNING):
+        st = ScoreboardState.from_dict(blob)
+    assert st.days == {}
+    assert st.version == 1
+    assert any("version" in r.message.lower() for r in caplog.records)
+    # The current version round-trips untouched (no over-eager discard).
+    ok = ScoreboardState.from_dict(blob | {"version": 1})
+    assert ok.days["2026-07-01"].engine_kwh == pytest.approx(9.0)

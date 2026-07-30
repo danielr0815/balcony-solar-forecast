@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -73,7 +74,7 @@ class HourlyWeather:
     cloud_low: float = 0.0
     cloud_mid: float = 0.0
     cloud_high: float = 0.0
-    visibility_m: float = 0.0
+    visibility_m: float | None = None  # None == unknown (never fog), NOT 0 m
     snow_depth_m: float = 0.0
 
 
@@ -346,10 +347,17 @@ def _rls_step(cell: BiasCell, modeled: float, measured: float) -> BiasCell:
         P     = (P - k*x*P) / lambda
     theta clamped to [DAY_AHEAD_BIAS_MIN, MAX]; n incremented. Returns a NEW
     BiasCell (frozen).
+
+    Guards mirror ``bias._rls_step``: non-finite inputs or a negative measured
+    energy SKIP the step (cell returned unchanged, n NOT incremented) — before
+    the guards a NaN sample poisoned theta (NaN -> clamped to the 0.5 floor)
+    and still aged the cell.
     """
+    if not (math.isfinite(modeled) and math.isfinite(measured)):
+        return cell
     x = float(modeled)
     y = float(measured)
-    if x <= 0.0:
+    if x <= 0.0 or y < 0.0:
         # No modeled signal -> the pair carries no bias information; skip but
         # still count the day so RLS_MIN_SAMPLES reflects real evidence only
         # for informative days. Return the cell unchanged.
@@ -456,6 +464,18 @@ def _process_day_impl(
     lat = site.latitude
     lon = site.longitude
     planes = site.planes
+    # Teilmengen-Regel (SPEC §9.1/§9.5/§11.1): every measured-vs-modeled
+    # comparison below sums ONLY the METERED planes (with actual_entity) on
+    # the modeled side — the measured side never contains anything else. An
+    # unmetered plane in the modeled total would read as a permanent
+    # production deficit: the RLS theta would learn the METERING SHARE instead
+    # of the forecast error, and the measured-clear day gate would reject
+    # clear days as overcast busts (mirrors the live
+    # coordinator._rearm_samples_from_rows subset rule).
+    metered = {p.name for p in planes if p.actual_entity}
+    if not metered:
+        # No measured side exists at all: the day carries no learnable signal.
+        return False
 
     # --- 1) Reconstruct every plane's modeled split for every hour. ---
     # recon[plane][iso_hour] = PlaneHourReconstruction
@@ -541,7 +561,8 @@ def _process_day_impl(
     shademap_day_ok = actuals_hourly is not None
     if shademap_day_ok:
         site_modeled_gated = sum(
-            sum(modeled_total_by_plane[p.name].values()) for p in planes
+            sum(modeled_total_by_plane[p.name].values())
+            for p in planes if p.name in metered
         )
         site_measured_true = sum(
             sum(hours.values()) for hours in actuals_hourly.values()
@@ -620,7 +641,8 @@ def _process_day_impl(
     for wx in day_weather:
         hkey = wx.start.isoformat()
         modeled_site = sum(
-            modeled_total_by_plane[p.name].get(hkey, 0.0) for p in planes
+            modeled_total_by_plane[p.name].get(hkey, 0.0)
+            for p in planes if p.name in metered
         )
         measured_site = site_measured_hourly.get(hkey)
         if measured_site is None:
@@ -659,7 +681,8 @@ def _process_day_impl(
     for wx in day_weather:
         hkey = wx.start.isoformat()
         modeled_site = sum(
-            modeled_total_by_plane[p.name].get(hkey, 0.0) for p in planes
+            modeled_total_by_plane[p.name].get(hkey, 0.0)
+            for p in planes if p.name in metered
         )
         if modeled_site <= 0.0:
             continue
@@ -810,13 +833,20 @@ def _classify_cloud(
     layer cover exactly as live does. The fog-month test uses the LOCAL month
     (``tz``) so a late-evening UTC hour does not fall into the wrong month near a
     boundary.
+
+    Visibility sentinel contract (SPEC §8, Live = Backfill parity): ``None``
+    (no reading) is passed through to ``bias.classify_cloud`` as "no fog
+    evidence"; the legacy ``0.0`` sentinel STILL maps to unknown here because
+    historical backfill data carries 0.0 for "no reading" — unlike the live
+    path, where a 0.0 that survives the fetcher is a REAL dense-fog reading.
     """
     _hr, month = _local_hour(wx.start, tz)
+    vis = wx.visibility_m
     return bias_mod.classify_cloud(
         cloud_low=wx.cloud_low,
         cloud_mid=wx.cloud_mid,
         cloud_high=wx.cloud_high,
-        visibility_m=wx.visibility_m if wx.visibility_m > 0.0 else float("inf"),
+        visibility_m=vis if (vis is not None and vis > 0.0) else float("inf"),
         month=month,
         ghi=wx.ghi,
         elevation_deg=elevation_deg,
