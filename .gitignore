@@ -2,12 +2,21 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 .venv/
 venv/
 .coverage
+coverage.xml
 htmlcov/
 .idea/
-.vscode/
+# (`.vscode/*` statt `.vscode/`: git kann keine Dateien unterhalb eines
+# ignorierten VERZEICHNISSES wieder aufnehmen — mit `/*` greifen die
+# Negationen darunter tatsächlich.)
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
 *.log
 scratchpad/
 .ha-dev/
+# uv.lock is deliberately NOT ignored: it is the single source of truth for
+# the dev toolchain and is committed.

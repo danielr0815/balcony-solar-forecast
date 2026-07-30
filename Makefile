@@ -1,45 +1,48 @@
-# Balcony Solar Forecast — developer environment.
+# Balcony Solar Forecast — developer environment (thin wrapper around uv).
 #
-#   make install     create ./.venv and install the dev tooling (Home Assistant,
-#                     pytest, pytest-homeassistant-custom-component, ruff) from
-#                     the [dependency-groups] dev in pyproject.toml — identical
-#                     to battery-manager-ha. HA is unpinned; the matching version
-#                     is pinned by pytest-homeassistant-custom-component.
-#   make test        run the full test suite (HA layer included)
+#   make install     create ./.venv from uv.lock and install the dev tooling
+#                    (Home Assistant, pytest, pytest-cov,
+#                    pytest-homeassistant-custom-component, ruff, mypy) —
+#                    uv.lock is the single source of truth, also used by CI
+#   make test        run the full test suite (HA layer included, PHACC plugin
+#                    disabled — see CONTRIBUTING.md §4)
 #   make test-core   run only the pure-core tests (no Home Assistant)
 #   make lint        ruff check
-#   make format      ruff check --fix
+#   make format      ruff check --fix   (lint autofix — `ruff format`, the
+#                    formatter, is deliberately NOT used: the code is
+#                    intentionally hand-formatted, see CONTRIBUTING.md §1)
 #   make clean       remove the venv
 #
-# Every target delegates to scripts/setup_env.py (pure stdlib) so it behaves
-# identically on Linux, macOS, WSL and Windows. On a machine WITHOUT make, run
-# scripts/setup-env.sh (Linux/macOS/WSL) or scripts/setup-env.ps1 (Windows) —
-# they call the same script.
+# uv is the only bootstrap: it installs Python 3.14 itself (`.python-version`)
+# and works identically on Linux, macOS, WSL and Windows. On a machine WITHOUT
+# uv, run scripts/setup-env.sh (Linux/macOS/WSL) or scripts/setup-env.ps1
+# (Windows) — they install uv first, then delegate to the same `uv sync`.
 
-# Bootstrap interpreter (only used to create the venv). Windows -> the py
-# launcher pinned to 3.13; POSIX -> python3. Override with `make PY=... install`.
+UV ?= uv
+
+# The only OS-specific target left: removing the venv (cmd vs POSIX shell).
 ifeq ($(OS),Windows_NT)
-    PY ?= py -3.13
+    RM = rmdir /s /q .venv
 else
-    PY ?= python3
+    RM = rm -rf .venv
 endif
 
 .PHONY: install test test-core lint format clean
 
 install:
-	$(PY) scripts/setup_env.py install
+	$(UV) sync --group dev
 
 test:
-	$(PY) scripts/setup_env.py test
+	$(UV) run pytest tests -p no:homeassistant
 
 test-core:
-	$(PY) scripts/setup_env.py test-core
+	$(UV) run pytest tests/core -p no:homeassistant
 
 lint:
-	$(PY) scripts/setup_env.py lint
+	$(UV) run ruff check .
 
 format:
-	$(PY) scripts/setup_env.py format
+	$(UV) run ruff check --fix .
 
 clean:
-	$(PY) scripts/setup_env.py clean
+	$(RM)

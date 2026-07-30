@@ -127,8 +127,9 @@ Ergänzende Anleitungen:
 Beiträge willkommen. Konventionen, Test-Architektur und Release-Prozess stehen
 in **[CONTRIBUTING.md](CONTRIBUTING.md)** — insbesondere: der Code ist bewusst
 handformatiert (`ruff format` wird **nicht** genutzt) und [docs/SPEC.md](docs/SPEC.md)
-ist der verbindliche Vertrag. Dev-Umgebung aufsetzen: `make install`; Tests:
-`make test` (Kern-Tests: `make test-core`).
+ist der verbindliche Vertrag. Dev-Umgebung aufsetzen: `uv sync --group dev`
+(oder `make install` — dünne Hülle um uv; auch als Devcontainer verfügbar);
+Tests: `make test` (Kern-Tests: `make test-core`).
 
 ## Lizenz
 

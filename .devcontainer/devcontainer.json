@@ -1,0 +1,21 @@
+{
+  "name": "balcony-solar-forecast",
+  "image": "mcr.microsoft.com/devcontainers/python:3.14",
+  // uv installs the locked dev environment (uv.lock is the single source of
+  // truth, same as CI). Requires network access on container creation.
+  "postCreateCommand": "python -m pip install uv && uv sync --group dev",
+  // Node for the JS card runtime harness (tests/harness/): without it the
+  // power-card harness test silently skips instead of running.
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "github.vscode-github-actions"
+      ]
+    }
+  }
+}

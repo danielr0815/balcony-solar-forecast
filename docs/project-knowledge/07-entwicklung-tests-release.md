@@ -13,6 +13,31 @@ Stand: `main` @ **v0.23.0** (2026-07-25). Belege sind *Datei + Funktions-/
 Konstantenname* (keine Zeilennummern — die veralten sofort). Zusätzlich verbindlich:
 `CONTRIBUTING.md` im Repo-Root.
 
+> **Update 2026-07-30 — Dev-Setup 2026 (uv):** Das Dev-Environment läuft jetzt
+> über **uv** mit committetem `uv.lock` (einzige Wahrheit für Tool-Versionen,
+> auch in CI; `uv.lock` wird bewusst **nicht** gitignoriert). Setup:
+> `uv sync --group dev` (bzw. `make install` — das Makefile ist nur noch eine
+> dünne Hülle um uv; `scripts/setup-env.{sh,ps1}`/`scripts/setup_env.py`
+> installieren uv, falls es fehlt). Python ist **3.14** (`.python-version`,
+> `requires-python >= 3.14.2`), HA-Floor der Dev-Tools `homeassistant>=2026.7.4`;
+> `pytest-homeassistant-custom-component` bleibt als einziges Paket voll gepinnt,
+> weil es die HA-Kopplung führt (Begründung im `pyproject.toml`-Kommentar).
+> Alle Kommandos heißen jetzt `uv run …` (`uv run pytest tests
+> -p no:homeassistant`, `uv run ruff check .`, `uv run mypy`) — die
+> Kommando-Blöcke in §3 unten zeigen noch den Pip-Vorgänger und sind durch
+> diesen Kasten ersetzt. Neu dazu: **mypy-Baseline** auf `core/` (acht ältere
+> Module mit bekannten Fehlern sind im `[tool.mypy]`-Kommentar namentlich
+> ausgenommen, die übrigen müssen sauber bleiben), **Coverage**-Config in
+> `pyproject.toml` (report-only, kein Gate), **Devcontainer**
+> (`.devcontainer/`, Python-3.14-Image + Node-Feature für den JS-Harness in
+> `tests/harness/`, postCreateCommand = `pip install uv && uv sync --group dev`),
+> **pre-commit** nur mit `ruff-check --fix` (kein `ruff-format` — Verbot
+> unverändert), `.editorconfig`/`.gitattributes` (LF-Zwang, `brand/*.png`
+> binär), CI auf `checkout@v7`/`setup-uv@v9.0.0` mit uv-Cache plus einem
+> `devcontainer`-Job, der die volle Suite im Container fährt. An den Regeln
+> dieses Dokuments (HA-Freiheit, SPEC-Vertrag, `-p no:homeassistant`, kein
+> `ruff format`, drei Versionsstellen) ändert das nichts.
+
 ---
 
 ## 1. Repo-Layout: was gehört wohin

@@ -1,0 +1,11 @@
+# Mirrors CI: same ruff as uv.lock fixes it. Bump `rev` in step with the
+# locked ruff (pyproject.toml only states a `>=` minimum). Install once
+# with `pre-commit install`.
+# Deliberately NO `ruff-format` hook: the code is intentionally
+# hand-formatted (E501 is off, see CONTRIBUTING.md §1) — lint only.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.0
+    hooks:
+      - id: ruff-check
+        args: [--fix]

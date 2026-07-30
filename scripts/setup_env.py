@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
 """Cross-platform dev-environment bootstrap for balcony-solar-forecast.
 
-Creates a local ``.venv`` and installs the ``[dependency-groups] dev`` tooling
-from ``pyproject.toml`` — Home Assistant, pytest,
-pytest-homeassistant-custom-component and ruff — the SAME setup as
-battery-manager-ha. Home Assistant is unpinned; the matching HA version is
-pinned transitively by ``pytest-homeassistant-custom-component``. The
-integration itself has NO runtime dependencies (``requirements: []`` in the
-manifest); these packages only run the tests + linter.
+Installs `uv` if it is missing, then runs ``uv sync --group dev`` — which
+creates ``./.venv`` from ``uv.lock`` (the single source of truth, also used
+by CI) with the dev tooling: Home Assistant, pytest, pytest-cov,
+pytest-homeassistant-custom-component, ruff and mypy. The integration itself
+has NO runtime dependencies (``requirements: []`` in the manifest); these
+packages only run the tests + linter/typer.
 
 Pure standard-library, so it runs on a fresh machine (Linux / macOS / WSL /
 Windows) before anything is installed. It is the single implementation behind
-``make install`` and ``scripts/setup-env.{sh,ps1}``.
+``scripts/setup-env.{sh,ps1}``; with `uv` already on PATH, plain
+``uv sync --group dev`` (or ``make install``) does the same thing directly.
 
 Usage::
 
-    python scripts/setup_env.py [install|test|test-core|lint|format|clean]
-
-``install`` (the default) creates the venv and installs the dev group. The
-other subcommands run the corresponding tool from inside the venv so they work
-identically on every OS (``make test`` / ``make lint`` delegate here).
+    python scripts/setup_env.py
 """
 
 from __future__ import annotations
@@ -28,18 +24,9 @@ import os
 import shutil
 import subprocess
 import sys
-import venv
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-VENV = ROOT / ".venv"
-
-
-def _venv_python() -> Path:
-    """Path to the venv's Python interpreter (OS-specific layout)."""
-    if os.name == "nt":
-        return VENV / "Scripts" / "python.exe"
-    return VENV / "bin" / "python"
 
 
 def _run(cmd: list[str]) -> None:
@@ -47,109 +34,48 @@ def _run(cmd: list[str]) -> None:
     subprocess.check_call(cmd, cwd=str(ROOT))
 
 
-def _ensure_venv() -> None:
-    if _venv_python().exists():
-        return
-    print(f"Creating virtual environment in {VENV} ...", flush=True)
-    venv.EnvBuilder(with_pip=True).create(str(VENV))
-
-
-def install() -> None:
-    """Create the venv (if needed) and install the dev dependency group."""
-    _ensure_venv()
-    py = str(_venv_python())
-    _run([py, "-m", "pip", "install", "--upgrade", "pip"])
-    # PEP 735 dependency group (pip >= 25.1). Fall back to explicit package
-    # names on an older pip so a new machine still works after the pip upgrade
-    # above (which normally lands pip >= 25.1) — belt and braces.
-    try:
-        _run([py, "-m", "pip", "install", "--group", "dev"])
-    except subprocess.CalledProcessError:
-        print("`pip install --group dev` failed; installing packages directly.")
-        _run(
-            [
-                py, "-m", "pip", "install",
-                "homeassistant",
-                "pytest",
-                "pytest-homeassistant-custom-component",
-                "ruff",
-            ]
+def _find_uv() -> str | None:
+    """Path to a `uv` executable — on PATH or in the per-user script dir."""
+    uv = shutil.which("uv")
+    if uv:
+        return uv
+    # `pip install --user uv` lands here; it is just not on PATH yet.
+    candidates = (
+        [Path.home() / ".local" / "bin" / "uv"]
+        if os.name != "nt"
+        else list(
+            Path.home().glob(
+                "AppData/Roaming/Python/Python*/Scripts/uv.exe"
+            )
         )
-    activate = (
-        r".venv\Scripts\activate" if os.name == "nt"
-        else "source .venv/bin/activate"
     )
-    print("\n[OK] Dev environment ready.", flush=True)
-    print(f"     Activate:   {activate}")
-    print("     Test:       make test        (or python scripts/setup_env.py test)")
-    print("     Lint:       make lint        (or python scripts/setup_env.py lint)")
+    for cand in candidates:
+        if cand.exists():
+            return str(cand)
+    return None
 
 
-def _venv_run(args: list[str]) -> None:
-    py = _venv_python()
-    if not py.exists():
+def install_uv() -> str:
+    """Install uv via the user-site pip, return the executable path."""
+    print("uv not found — installing it with `pip install --user uv` ...",
+          flush=True)
+    _run([sys.executable, "-m", "pip", "install", "--user", "uv"])
+    uv = _find_uv()
+    if uv is None:
         sys.exit(
-            "No .venv found. Run `make install` "
-            "(or `python scripts/setup_env.py install`) first."
+            "uv was installed but its executable is not findable. Add the "
+            "pip user-script directory to PATH (see the warning above), then "
+            "run `uv sync --group dev`."
         )
-    _run([str(py), *args])
-
-
-def test() -> None:
-    """Run the full test suite with the PHACC pytest plugin disabled.
-
-    The suite is unit-style: every HA-layer test runs against fakes/monkeypatch
-    and needs only ``import homeassistant``, not a real HA instance. The
-    pytest-homeassistant-custom-component plugin's autouse fixtures call
-    ``asyncio.get_event_loop()`` at setup (raises on Python 3.12+ for the sync
-    tests) and its import pulls the POSIX-only ``fcntl`` (unimportable on
-    Windows), so it only ever breaks a suite that never uses its fixtures.
-    Disabling it (``-p no:homeassistant``) runs the whole meaningful suite
-    identically on Linux, macOS, WSL and Windows (pytest-asyncio still drives the
-    async tests). Matches the CI ``tests`` job.
-    """
-    _venv_run(["-m", "pytest", "tests", "-p", "no:homeassistant"])
-
-
-def test_core() -> None:
-    """Run only the pure-core tests (no Home Assistant import)."""
-    _venv_run(["-m", "pytest", "tests/core", "-p", "no:homeassistant"])
-
-
-def lint() -> None:
-    _venv_run(["-m", "ruff", "check", "."])
-
-
-def fmt() -> None:
-    _venv_run(["-m", "ruff", "check", "--fix", "."])
-
-
-def clean() -> None:
-    """Remove the virtual environment."""
-    if VENV.exists():
-        print(f"Removing {VENV} ...", flush=True)
-        shutil.rmtree(VENV, ignore_errors=True)
-
-
-_COMMANDS = {
-    "install": install,
-    "test": test,
-    "test-core": test_core,
-    "lint": lint,
-    "format": fmt,
-    "clean": clean,
-}
+    return uv
 
 
 def main() -> None:
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "install"
-    handler = _COMMANDS.get(cmd)
-    if handler is None:
-        sys.exit(
-            f"Unknown command {cmd!r}. "
-            f"Choose from: {', '.join(_COMMANDS)}"
-        )
-    handler()
+    uv = _find_uv() or install_uv()
+    _run([uv, "sync", "--group", "dev"])
+    print("\n[OK] Dev environment ready.", flush=True)
+    print("     Test:  make test   (or: uv run pytest tests -p no:homeassistant)")
+    print("     Lint:  make lint   (or: uv run ruff check .)")
 
 
 if __name__ == "__main__":
