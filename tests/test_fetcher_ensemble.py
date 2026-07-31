@@ -140,7 +140,13 @@ def test_parse_clamps_negative_to_zero():
 
 
 def test_validate_accepts_fixture(live_fixture):
-    validate_ensemble(live_fixture)  # must not raise
+    validate_ensemble(live_fixture)
+    # Accepted means USABLE: the recorded payload parses into every hour
+    # carrying all 40 members (control + member01..member39).
+    parsed = parse_ensemble(live_fixture)
+    assert len(parsed) == 6
+    for members in parsed.values():
+        assert len(members) == 40
 
 
 def test_validate_rejects_non_dict():

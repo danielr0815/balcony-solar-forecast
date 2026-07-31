@@ -542,3 +542,191 @@ def test_train_quantiles_day_populates_ring_and_yields_spread():
     assert band.n == QUANTILE_MIN_SAMPLES
     assert not band.collapsed
     assert band.p10 < band.p50 < band.p90  # a real, data-backed spread
+
+
+# ---------------------------------------------------------------------------
+# Leakage guard + weather stratification + comparison value hygiene
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_issued_after_cutoff_stays_unscored():
+    """A snapshot issued at mid-day (startup catch-up recompute that already
+    assimilated the day's weather) is a hindcast, not a day-ahead forecast:
+    the day stays UNSCORED so it never flatters the kill-gate (SPEC §15.2)."""
+    store = _FakeStore()
+    iso = "2026-07-05"
+    day = date(2026, 7, 5)
+    store.issued[iso] = _issued_for_day(
+        iso, corrected_hourly={f"{iso}T11:00:00+00:00": 8000.0}
+    )
+    # Issued at 12:00 local — long after the 06:00 day-ahead cutoff.
+    store.issued[iso]["issued_at"] = f"{iso}T12:00:00+00:00"
+    store.actuals[iso] = {"M1": 8000.0}
+
+    c = _make_coordinator(store, ())
+    asyncio.run(c._score_scoreboard_day(day))
+
+    assert store.get_scoreboard_state().days == {}
+
+
+def test_issued_after_cutoff_treats_unparseable_stamp_as_valid():
+    store = _FakeStore()
+    c = _make_coordinator(store, ())
+    snap = IssuedSnapshot(
+        issued_at="", status="fresh",
+        raw_hourly_wh={}, corrected_hourly_wh={},
+    )
+    assert c._issued_after_cutoff(snap, date(2026, 7, 5)) is False
+
+
+def test_dominant_weather_class_skips_garbage_and_foreign_day():
+    store = _FakeStore()
+    iso = "2026-07-06"
+    c = _make_coordinator(store, ())
+    snap = IssuedSnapshot(
+        issued_at=f"{iso}T00:00:00+00:00",
+        status="fresh",
+        raw_hourly_wh={f"{iso}T11:00:00+00:00": 8000.0},
+        corrected_hourly_wh={f"{iso}T11:00:00+00:00": 8000.0},
+        cloud_class_by_hour={
+            "not-a-date": CLOUD_CLASS_OVERCAST,            # garbage: skipped
+            "2026-07-07T11:00:00+00:00": CLOUD_CLASS_OVERCAST,  # other day
+            f"{iso}T11:00:00+00:00": CLOUD_CLASS_CLEAR,
+        },
+    )
+    assert c._dominant_weather_class(snap, iso) == CLOUD_CLASS_CLEAR
+
+
+def test_dominant_weather_class_wh_less_snapshot_uses_hour_count():
+    """A legacy snapshot without Wh curves still stratifies: the unweighted
+    per-hour vote decides (never left unstratified, SPEC §15.2)."""
+    store = _FakeStore()
+    iso = "2026-07-06"
+    c = _make_coordinator(store, ())
+    snap = IssuedSnapshot(
+        issued_at=f"{iso}T00:00:00+00:00",
+        status="fresh",
+        raw_hourly_wh={},
+        corrected_hourly_wh={},
+        cloud_class_by_hour={
+            f"{iso}T08:00:00+00:00": CLOUD_CLASS_OVERCAST,
+            f"{iso}T09:00:00+00:00": CLOUD_CLASS_OVERCAST,
+            f"{iso}T10:00:00+00:00": CLOUD_CLASS_CLEAR,
+        },
+    )
+    assert c._dominant_weather_class(snap, iso) == CLOUD_CLASS_OVERCAST
+
+
+def test_dominant_weather_class_noncanonical_class_still_returned():
+    store = _FakeStore()
+    iso = "2026-07-06"
+    c = _make_coordinator(store, ())
+    snap = IssuedSnapshot(
+        issued_at=f"{iso}T00:00:00+00:00",
+        status="fresh",
+        raw_hourly_wh={f"{iso}T11:00:00+00:00": 100.0},
+        corrected_hourly_wh={f"{iso}T11:00:00+00:00": 100.0},
+        cloud_class_by_hour={f"{iso}T11:00:00+00:00": "hail"},
+    )
+    assert c._dominant_weather_class(snap, iso) == "hail"
+
+
+class _StatesHass:
+    """Hass double with a state machine for the unit-normalisation reads."""
+
+    def __init__(self, units_by_entity: dict[str, str]) -> None:
+        from homeassistant.core import State
+
+        self.config = _FakeConfig()
+        self._states = {
+            eid: State(eid, "0", attributes={"unit_of_measurement": unit})
+            for eid, unit in units_by_entity.items()
+        }
+
+    @property
+    def states(self):
+        return self
+
+    def get(self, entity_id):
+        return self._states.get(entity_id)
+
+
+def test_comparison_history_guards_drop_unusable_values(monkeypatch):
+    """Every rejected comparison is OMITTED for the day (unscored), never
+    zeroed (SPEC §15.2): None state, stale carry-in, non-finite, bad unit."""
+    store = _FakeStore()
+    day = date(2026, 7, 7)
+    comparisons = (
+        ComparisonConfig(name="none-state", daily_entity="sensor.a"),
+        ComparisonConfig(name="stale", daily_entity="sensor.b"),
+        ComparisonConfig(name="inf", daily_entity="sensor.c"),
+        ComparisonConfig(name="bad-unit", daily_entity="sensor.d"),
+        ComparisonConfig(name="good", daily_entity="sensor.e"),
+    )
+    _patch_recorder(
+        monkeypatch,
+        {
+            # A None state is skipped; the later numeric one is chosen.
+            "sensor.a": [_FakeHistoryState(None), _FakeHistoryState("7.0")],
+            # Pure start-of-day carry-in (explicit pre-day timestamp): stale.
+            "sensor.b": [
+                _FakeHistoryState("9.9", last_updated=datetime(2026, 7, 6, 23, 0))
+            ],
+            "sensor.c": [_FakeHistoryState("inf")],
+            "sensor.d": [_FakeHistoryState("12.0")],
+            "sensor.e": [_FakeHistoryState("7.5")],
+        },
+    )
+    c = _make_coordinator(store, comparisons)
+    c.hass = _StatesHass({"sensor.d": "W"})  # 'W' is not an energy unit
+
+    out = asyncio.run(c._async_read_comparison_history(day, list(comparisons)))
+
+    assert "stale" not in out
+    assert "inf" not in out
+    assert "bad-unit" not in out
+    # The first-None entity scored on its later usable state; 'good' scored.
+    assert out["none-state"] == pytest.approx(7.0)
+    assert out["good"] == pytest.approx(7.5)
+
+
+def test_comparison_history_without_comparisons_is_empty():
+    store = _FakeStore()
+    c = _make_coordinator(store, ())
+    assert asyncio.run(
+        c._async_read_comparison_history(date(2026, 7, 7), [])
+    ) == {}
+
+
+def test_normalise_comparison_kwh_unit_paths():
+    store = _FakeStore()
+    c = _make_coordinator(store, ())
+    c.hass = _StatesHass({"sensor.wh": "Wh", "sensor.w": "W"})
+    # Wh is normalised to kWh; an energy-incompatible unit is rejected.
+    assert c._normalise_comparison_kwh("sensor.wh", 7500.0) == pytest.approx(7.5)
+    assert c._normalise_comparison_kwh("sensor.w", 12.0) is None
+    # An entity without a live state passes through as documented kWh.
+    assert c._normalise_comparison_kwh("sensor.unknown", 8.0) == pytest.approx(8.0)
+
+
+def test_normalise_comparison_kwh_above_physical_ceiling_is_dropped():
+    """25 kWh from an 800-Wp site (ceiling 19.2 kWh/day) is a unit artifact —
+    discarded, not scored (the classic Wh-sensor-read-as-kWh case)."""
+    store = _FakeStore()
+    c = _make_coordinator(store, ())
+    c.hass = _StatesHass({})
+    assert c._normalise_comparison_kwh("sensor.big", 25.0) is None
+
+
+def test_site_daily_kwh_ceiling_zero_wp_is_none():
+    store = _FakeStore()
+    c = _make_coordinator(store, ())
+    c._site = SiteConfig(
+        latitude=48.5,
+        longitude=12.2,
+        planes=(
+            PlaneConfig(name="M0", azimuth_deg=115.0, tilt_deg=70.0, wp=0.0),
+        ),
+        groups=(),
+    )
+    assert c._site_daily_kwh_ceiling() is None

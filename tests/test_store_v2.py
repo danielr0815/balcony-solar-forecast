@@ -820,3 +820,86 @@ def test_bootstrap_rejects_wrong_site_signature():
         ShademapState(), BiasState(), payload,
         expected_signature="0000000000000000",
     )
+
+
+# ---------------------------------------------------------------------------
+# Trained-day marker + v3 scoreboard/comparison rings through the REAL store
+# ---------------------------------------------------------------------------
+
+
+def test_mark_day_trained_idempotent_sorted_and_trimmed():
+    store = _store()
+    store.mark_day_trained("2026-07-06")
+    store.mark_day_trained("2026-07-04")
+    store.mark_day_trained("2026-07-06")  # duplicate: no second entry
+    store.mark_day_trained("2026-07-05")
+    assert store.is_day_trained("2026-07-06") is True
+    assert store.is_day_trained("2026-07-03") is False
+
+    from custom_components.balcony_solar_forecast.const import (
+        STORE_KEY_TRAINED_DAYS,
+        TRAINED_DAYS_RING,
+    )
+
+    days = store._data[STORE_KEY_TRAINED_DAYS]
+    assert days == sorted(days)
+    assert days.count("2026-07-06") == 1
+    # The ring trims to TRAINED_DAYS_RING, keeping the NEWEST dates.
+    for i in range(TRAINED_DAYS_RING + 5):
+        store.mark_day_trained(f"2026-08-{i % 28 + 1:02d}")
+    days = store._data[STORE_KEY_TRAINED_DAYS]
+    assert len(days) <= TRAINED_DAYS_RING
+
+
+def test_mark_day_trained_recovers_from_corrupt_blob():
+    from custom_components.balcony_solar_forecast.const import (
+        STORE_KEY_TRAINED_DAYS,
+    )
+
+    store = _store()
+    store._data[STORE_KEY_TRAINED_DAYS] = "not-a-list"  # corrupt blob
+    store.mark_day_trained("2026-07-06")
+    assert store.is_day_trained("2026-07-06") is True
+    assert store._data[STORE_KEY_TRAINED_DAYS] == ["2026-07-06"]
+
+
+def test_scoreboard_state_round_trip_through_real_store():
+    from custom_components.balcony_solar_forecast.core.scoreboard import (
+        score_day,
+    )
+    from custom_components.balcony_solar_forecast.core.types import (
+        ScoreboardState,
+    )
+
+    store = _store()
+    assert store.get_scoreboard_state().days == {}
+    ds = score_day(
+        iso_date="2026-07-06",
+        weather_class="clear",
+        measured_kwh=9.0,
+        engine_kwh=10.0,
+        comparison_kwh={},
+        engine_hourly_mae=None,
+    )
+    store.set_scoreboard_state(ScoreboardState(days={"2026-07-06": ds}))
+    back = store.get_scoreboard_state()
+    assert back.days["2026-07-06"].engine_kwh == pytest.approx(10.0)
+    assert back.days["2026-07-06"].measured_kwh == pytest.approx(9.0)
+
+
+def test_comparison_ring_round_trip_and_trim():
+    store = _store()
+    assert store.get_comparison("2026-07-06") is None
+    store.record_comparison("2026-07-06", {"base": 6.0, "alt": 8.0})
+    assert store.get_comparison("2026-07-06") == {"base": 6.0, "alt": 8.0}
+    # Trimmed to the actuals-ring window (the oldest dates drop out).
+    from custom_components.balcony_solar_forecast.store import _ACTUALS_RING_DAYS
+
+    for i in range(_ACTUALS_RING_DAYS + 10):
+        store.record_comparison(f"2025-01-{(i % 28) + 1:02d}", {"x": 1.0})
+    from custom_components.balcony_solar_forecast.const import (
+        STORE_KEY_COMPARISON_RING,
+    )
+
+    ring = store._data[STORE_KEY_COMPARISON_RING]
+    assert len(ring) <= _ACTUALS_RING_DAYS

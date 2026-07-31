@@ -101,7 +101,13 @@ def test_build_params_lists_every_requested_variable():
 
 
 def test_validate_accepts_well_formed(good_payload):
-    validate_payload(good_payload)  # must not raise
+    validate_payload(good_payload)
+    # Accepted means USABLE: the payload parses into the full slot series with
+    # its distinguishable per-sample values intact.
+    ws = parse_weather(good_payload)
+    assert len(ws) == 4
+    assert [s.ghi for s in ws.slots] == [0.0, 1.0, 2.0, 3.0]
+    assert [s.dni for s in ws.slots] == [0.0, 2.0, 4.0, 6.0]
 
 
 def test_validate_rejects_non_dict():
@@ -189,7 +195,16 @@ def test_validate_accepts_null_tail_beyond_near_term():
         },
         "hourly": _hourly_block(100),
     }
-    validate_payload(payload)  # must not raise
+    validate_payload(payload)
+    # Accepted means USABLE: the near-term values survive the parse, and the
+    # null tail parses to 0 W/m² (the parse-time None clamp) — never to a
+    # rejection of the whole payload.
+    ws = parse_weather(payload)
+    assert len(ws) == n15
+    assert ws.slots[0].ghi == 100.0
+    assert ws.slots[95].ghi == 100.0   # last inside the 24 h near-term window
+    assert ws.slots[96].ghi == 0.0     # first null-tail sample
+    assert ws.slots[-1].ghi == 0.0
 
 
 def test_radiation_coverage_counts_non_null(good_payload):

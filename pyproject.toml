@@ -90,6 +90,10 @@ ignore = ["E501"]
 source = ["custom_components/balcony_solar_forecast"]
 
 [tool.coverage.report]
+# The 95 % statement-coverage gate lives in CI (.github/workflows/validate.yml,
+# tests job: `--cov-fail-under=95`) — deliberately NOT as `fail_under` here, so
+# a local `--cov` run stays report-only and never fails on a work-in-progress
+# tree. Keep the CI number in sync with this comment when it moves.
 show_missing = true
 exclude_also = [
     "if TYPE_CHECKING:",

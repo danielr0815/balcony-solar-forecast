@@ -227,12 +227,20 @@ async def test_nightly_score_failure_does_not_abort_later_days(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_startup_catchup_swallows_nightly_failure(monkeypatch):
+async def test_startup_catchup_swallows_nightly_failure(monkeypatch, caplog):
+    import logging
+
     c = _make_coordinator()
 
     async def _boom(now=None):
         raise RuntimeError("nightly blew up")
 
     monkeypatch.setattr(c, "_async_nightly_job", _boom)
-    # Must not raise (startup best-effort).
-    await c.async_startup_catchup()
+    # Startup catch-up is best-effort: the failure is swallowed so entry setup
+    # completes, but it IS logged (never degrade silently).
+    with caplog.at_level(logging.WARNING):
+        await c.async_startup_catchup()
+    assert any(
+        "Startup catch-up sweep failed" in r.getMessage()
+        for r in caplog.records
+    )
