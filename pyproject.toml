@@ -51,6 +51,11 @@ dev = [
 # Not a PyPI package (no [build-system] above): uv only manages the dev
 # environment, it must not try to build/install the project itself.
 package = false
+# Security overrides: homeassistant 2026.7.4 pins Pillow==12.2.0 / PyJWT==2.12.1
+# exactly, both flagged by Dependabot (multiple CVEs, fixed in 12.3.0 / 2.13.0).
+# HA 2026.8.0 already pins the patched versions, so these overrides only
+# anticipate upstream and can be dropped once the dev floor reaches 2026.8.
+override-dependencies = ["pillow>=12.3.0", "pyjwt>=2.13.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
