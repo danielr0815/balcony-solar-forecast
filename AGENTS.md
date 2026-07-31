@@ -47,6 +47,10 @@ pytest-asyncio (via PHACC installiert) treibt die async Tests weiterhin.
 Kein zweites `-q` auf der Kommandozeile: `pyproject.toml` setzt bereits
 `addopts = "-q"`, ein weiteres verschluckt die Ergebniszeile.
 
+Der `tests`-Job der CI gatet Coverage bei **`--cov-fail-under=95`** und
+installiert Node 22 per `actions/setup-node`, damit der JS-Harness
+(`tests/harness/`) garantiert läuft statt still zu skippen.
+
 ## Lint, Typen (vor jedem Push)
 
 ```bash
@@ -82,6 +86,12 @@ Version steht an **drei Stellen**, die immer gleich sein müssen:
 
 Die CI bricht bei Drift, der Release-Guard prüft zusätzlich gegen den Git-Tag.
 Version nur im Release-PR anfassen (HACS liefert den Zipball des Tags aus).
+
+**CI-Härtung:** alle Workflow-Actions sind per **Commit-SHA gepinnt** (der
+Versionskommentar steht dahinter, Dependabot zieht die SHAs hoch), Top-Level
+gilt `permissions: contents: read`. `hacs.json` pinnt die HA-Mindestversion
+**2026.3.0**, gegen die der Job `tests-ha-min` die volle Suite fährt — den
+Floor nur bewusst anheben, nie ohne Gegenprobe senken.
 
 **SPEC-Vertrag:** `tests/test_spec_integrity.py` (läuft in der normalen Suite,
 bricht den Build) erzwingt: `SPEC §…`-Zitate im Code müssen auflösen, jede

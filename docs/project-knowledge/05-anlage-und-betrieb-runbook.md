@@ -421,7 +421,7 @@ epoch-**Millisekunden** der Recorder-WS-API (automatisch erkannt), partielle Tag
 
 **Lernzustand zurück:** `action: balcony_solar_forecast.rollback_learners` mit
 `snapshots_back: 1` (1 = jüngster Snapshot = Stand vor letzter Nacht; max. 10).
-Der Ring hält `LEARNER_SNAPSHOT_RING = 10` nächtliche Snapshots — bewusst tiefer
+Der Ring hält `LEARNER_SNAPSHOT_RING = 10` nächtliche Snapshots — bewusst größer
 als `DRIFT_LOSS_STREAK_DAYS = 7`, damit beim Auto-Disable mindestens ein Zustand
 von **vor** der Verluststrecke überlebt. Ein Snapshot umfasst Bias-, Shademap-
 **und** Quantil-State, ein Bootstrap-Import ist also konsistent rücknehmbar.

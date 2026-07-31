@@ -13,6 +13,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A full review pass over the integration in five commits: four behaviour
+tranches (core learner data bugs, HA-layer fixes, service/CI hardening, a
+95 % coverage gate) plus one documentation tranche. The SPEC stays stamped
+**0.23.3** — no version bump; these changes ship with the next release.
+
+### Fixed
+
+- **Partially metered sites no longer train against the full model.** Every
+  modeled comparison side — the shademap clear-gate, the day-ahead bias
+  training curve, the quantile seeding — is now summed over only the metered
+  planes (those with `actual_entity`), in the nightly path and in the
+  bootstrap core alike. An unmetered module in the modeled sum read as a
+  permanent production outage: the clear-gate discarded every clear day and θ
+  learned the metering fraction instead of the forecast error. A site with no
+  measurement channel at all does not learn (SPEC §9.1/§9.5/§11.1).
+- **"Unknown" is no longer "fog".** A missing visibility is now `None`
+  (unknown), not `0.0`: the fog rule fires only on a *measured* visibility
+  below `FOG_VISIBILITY_M` — provider gaps used to classify as fog and poison
+  the fog cell. Same for temperature: a gap makes the slot unusable instead
+  of fabricating 0 °C (SPEC §8).
+- **`score_day` no longer fabricates scored days.** A non-finite or negative
+  engine or measured value makes the day unscored (no ring entry, no
+  persistence) — the old 0.0 clamp injected the worst possible engine day
+  into the kill-gate window (SPEC §15.2).
+- **Bootstrap RLS guards.** Non-finite or negative samples are discarded in
+  the bootstrap's RLS step (mirroring the live trainer) instead of clamping θ
+  to 0.5; and day-section aggregates now gate on
+  `RLS_MIN_DAY_SECTION_MODELED_WH` (25 Wh) — the 15-min slot threshold (5 Wh)
+  was meaningless for aggregates, so a dark winter section carried no bias
+  information yet trained anyway.
+- **Section version guards made true.** `BiasState` / `ShademapState` /
+  `ScoreboardState` `from_dict` now discard an unknown or future `version`
+  with a warning and a neutral state — the behaviour SPEC §16.1 and their
+  docstrings always claimed.
+- **`ensemble_band_factors` is total.** A non-iterable `members` value skips
+  the hour instead of raising `TypeError`.
+- **Reconfigure reloads exactly once.** `async_step_reconfigure` now uses
+  `async_update_entry` + abort and lets the update listener drive the single
+  reload — the previous `async_update_reload_and_abort` path reloaded twice
+  and runs into HA's 2026.12 deprecation.
+- **Bundled cards find their sensors on any UI language.** The power-history
+  and shade-profile cards auto-discover via the entity registry's stable
+  `unique_id` suffix (`{entry_id}_{key}`) instead of matching localized
+  `entity_id` slugs (regex kept as fallback), so a German install no longer
+  breaks the discovery.
+- **AC/DC labelling.** The power-history card's dashed line is labelled
+  "Prognose (live)" / "Prognose (Stand 01:30)" (with EN counterparts), and
+  the generated dashboard's measured-power title no longer claims a DC curve
+  were AC (SPEC §18.4).
+- **Entry removal cleans up after itself.** Removing a config entry deletes
+  its store file *and* every repair issue it raised (issues are entry-scoped
+  via the `_{entry_id}` suffix) — a reinstalled entry no longer inherits
+  stale, unactionable warnings.
+- **Failed fetches back off.** After a failed fetch the coordinator retries
+  at the earliest after `min(fetch_interval_seconds,
+  FAILED_FETCH_MIN_INTERVAL_SECONDS)` (15 min) instead of every recompute
+  tick; the served payload's age anchor keeps aging untouched (SPEC §3).
+- **Engine passes run off the event loop.** `compute_forecast` (recompute
+  tick and nightly snapshots) runs via `hass.async_add_executor_job`.
+
+### Changed
+
+- **`bifacial_beam_gain` is capped at 1.3** (was 1.6), enforced by the load
+  clamp in `SiteConfig.from_dict` and the form limit: real bifacial gain is
+  typically 5–25 % and the reference site validated 1.23–1.25 — beyond ~1.3
+  the factor is no longer a physics correction but the very overstatement it
+  replaces (SPEC §4.5).
+- **Kill-gate requires 3 paired days.** `SCOREBOARD_MIN_PAIRED_DAYS` is now 3
+  (was 1): a single lucky paired day no longer flips the verdict — a baseline
+  with fewer paired days is not eligible and the gate returns `None` (no
+  statement). The 10 % margin's reference is now spelled out: relative MAE
+  reduction vs. the best eligible baseline (SPEC §15.4).
+- **`DEFAULT_SITE` moved to generic central Germany** (51.1 N / 10.4 E, near
+  the geographic centre) — deliberately *not* a real operator site, so a
+  copied default config no longer borrows the reference plant's (Landshut)
+  geometry (SPEC §7.8).
+- **Config fingerprint includes latitude/longitude** (rounded to 4
+  decimals): a location change via reconfigure re-seeds the day-ahead bias
+  cells instead of silently training against the old geometry (SPEC §7.7).
+- **Duplicate entry bookkeeping removed.** `entry.runtime_data` is gone; all
+  readers use `hass.data`, which unload already cleans up.
+- **HA floor raised to 2026.3.** `hacs.json` pins `"homeassistant":
+  "2026.3.0"`, and a new `tests-ha-min` CI job runs the full suite against
+  exactly that floor (`uv pip install "homeassistant==2026.3.*"` over the
+  lockfile's HA, `uv run --no-sync pytest`) — a floor that is not tested is
+  not a floor.
+- **Test coverage raised to ≥ 95 % and gated.** The suite grew from ~92 % to
+  over 95 % of the integration's statements — new tests cover config-entry
+  diagnostics end-to-end (incl. coordinate redaction), real coordinator
+  constructor/setup paths, the `__init__` lifecycle (flush on HA stop,
+  unload, update listener), `core/openmeteo_backfill.py` fetch/parse with a
+  mocked aiohttp session, service error paths, and behaviour assertions for
+  previously assertion-less smoke tests. The `tests` job now enforces
+  `--cov-fail-under=95`.
+
+### Added
+
+- **Plausibility gate for mis-scaled measurement channels.** A full hour
+  above `CHANNEL_PLAUSIBILITY_MAX_WP_FRAC` (1.25) × the channel's configured
+  Wp is physically impossible (cloud-edge enhancement is sub-hourly) and
+  proves a mis-scaled *measurement* — the classic being kW instead of W. The
+  day is discarded for learning *and* scoring (`implausible_channel`), in the
+  nightly actuals path and the bootstrap core alike, with a WARNING naming
+  plane and entity (SPEC §9.8/§10).
+- **New repair issue `eta_out_of_band`.** When the nightly median of the raw
+  AC/DC ratios stays outside [0.90, 0.99] for
+  `INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS` days in a row, a persistent issue
+  names the mis-scaled measurement (streak, median, band, last day); the
+  first in-band day clears it. Same counting contract as the discard streak
+  (issued-day guard, day-idempotent, persisted in `learning_health`), purely
+  observational (SPEC §10).
+
+### Security
+
+- **`run_bootstrap` span cap.** An explicit range wider than
+  `BOOTSTRAP_MAX_RANGE_DAYS` (1826 days = 5 calendar years incl. a leap day)
+  is rejected with `ServiceValidationError`, and a future `end_date` is
+  clamped to yesterday — a single action call has no timeout, and an explicit
+  multi-year range does not cheaply self-correct like the capped default
+  range (SPEC §12.2, `services.yaml` documents both).
+- **Site quantity limits.** `SITE_MAX_PLANES` (8), `SITE_MAX_SHADE_GROUPS`
+  (8) and `SITE_MAX_HORIZON_POINTS` (64) are enforced by `validate_site`,
+  bounding what a site object pasted as free JSON via the object selector can
+  allocate per recompute tick (SPEC §7.2–§7.4).
+- **CI hardened.** All workflow actions are pinned by commit SHA (version
+  comment kept; Dependabot keeps updating them), top-level permissions are
+  `contents: read` with job-local elevation for the release job, and
+  `actions/setup-node` (Node 22) guarantees the JS card harness runs instead
+  of silently skipping.
+- **Token hygiene in the dev scripts.** `scripts/backfill.py` and
+  `scripts/validation/` default the HA token from the
+  `HA_LONG_LIVED_TOKEN` environment variable (`--token` remains an override);
+  the docs warn against `http://` (plaintext) and process-list exposure.
+
+### Docs
+
+- **SPEC accuracy corrections (code is the reality):** the issued ring never
+  stores `ghi`; the week view's running-today bar is summed from *hourly*
+  statistics (not day-mean × 24 h); the write budget is ≤ 4 bundled
+  writes/day (6 h gate); the degradation ladder's age limits are named as
+  constants (`MAX_PAYLOAD_AGE_HOURS` 24 h, `MAX_PHYSICS_FALLBACK_AGE_HOURS`
+  72 h) rather than "configurable"; the scoreboard window is documented as a
+  constant, not an option; the 15-min curve attributes are explicitly DC
+  against the AC sensor state; the bootstrap "attempt, not a blocker" rule
+  names its subject (the single run) and its fallback chain; the shademap
+  1.1 clamp is justified (reflection gains); the P10 day-aggregate formula is
+  spelled out; and the "recompute under 50 ms" claim became a qualitative
+  no-event-loop-impact requirement.
+- **New SPEC requirements** for previously undocumented behaviour:
+  deinstallation cleanup (store file and entry-scoped repair issues are
+  deleted; the globally registered Lovelace resources stay — documented
+  known limitation), entry migration (no `async_migrate_entry` is needed
+  today), DST/leap-year as a documented approximation, several entries
+  sharing one `actual_entity`, an outage beyond `NIGHTLY_CATCHUP_MAX_DAYS`
+  staying permanently unlearned, and the Oct–Feb fog-month boundary as a
+  deliberate trade-off.
+- **project-knowledge and ADR fixes:** `--site` is required (no
+  `DEFAULT_SITE` fallback) in 01, the snapshot ring is deliberately *larger*
+  than the drift streak in 05, the open items O8/O9 are marked overdue with
+  outcome open in 06 (no invented results), and ADR-0022 now points at the
+  reconfigure flow and the current SPEC section numbers.
+- **README brought up to 0.23.3** (status line, `bifacial_beam_gain`,
+  `tau_points`/`diffuse_tau`, the `run_bootstrap` action, the
+  learning-visibility repair issues), and **AGENTS.md** documents the 95 %
+  coverage gate, the HA 2026.3 floor, Node in CI and the SHA-pinned actions.
+
 ## [0.23.3] - 2026-07-30
 
 A tooling release: no runtime behaviour changes.

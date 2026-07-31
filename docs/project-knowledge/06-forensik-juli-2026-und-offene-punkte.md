@@ -268,8 +268,8 @@ Hauptgrund für die 0.22-Config-Kampagne.
 | O5 | Horizontsektoren Sep–Apr | unvermessen/extrapoliert | Emergenzpunkte im nächsten Winter |
 | O6 | Saisonale Nachprüfung `tau_points` | Profil nur auf Julitagen gefittet | Herbstfenster nachmessen |
 | O7 | Reviewer-Suggestions 0.21–0.23 | 3 offen, 1 erledigt, 1 als Doku-Falle abgehakt | siehe §4.6 |
-| O8 | Kill-Gate / Scoreboard-Fenster | erstes Verdikt ~27.07. | abwarten |
-| O9 | Validierungslauf | Paket liegt im Repo | ~01.08. ausführen |
+| O8 | Kill-Gate / Scoreboard-Fenster | **überfällig, Ergebnis offen** — erstes Verdikt war für ~27.07. erwartet; der Termin ist verstrichen, ohne dass ein Verdikt hier nachgetragen wurde (Stand 2026-07-31) | Verdikt am System abrufen, dann hier nachtragen |
+| O9 | Validierungslauf | **überfällig, Ergebnis offen** — Lauf war für ~01.08. terminiert; Paket liegt im Repo, Ergebnis wurde hier nicht nachgetragen (Stand 2026-07-31) | ausführen, Ergebnis hier nachtragen |
 
 ### 4.1 O1 — die Config-Kampagne ist der eigentliche nächste Schritt
 
@@ -376,6 +376,11 @@ nachholbar (`NIGHTLY_CATCHUP_MAX_DAYS` = 3); **06.–12.07.2026 bleiben dauerhaf
 (keine archivierten issued-Snapshots). Erstes echtes Verdikt daher um den **27.07.**; bis dahin
 ist `kill_gate_passed = None` korrekt, kein Fehler.
 
+**Nachtrag (2026-07-31):** Der 27.07. ist verstrichen, ohne dass ein Verdikt hier
+nachgetragen wurde — das Ergebnis ist offen. Beim Abrufen beachten: seit der
+Review-Tranche gilt `SCOREBOARD_MIN_PAIRED_DAYS` = 3 (vorher 1), das Gate
+verlangt also mindestens drei gepaarte Tage je Baseline (SPEC §15.4).
+
 ### 4.6 O7 — Reviewer-Suggestions aus den Release-Reviews
 
 Nicht-blockierende Punkte, am aktuellen Code nachgeprüft:
@@ -409,6 +414,10 @@ C1–C7 grün werden und C8 grün **bleiben**.
 Auswertungsreihenfolge laut Runbook: **erst C8, dann C3, dann der Rest** — C1/C2/C6 hängen kausal
 an der Morgen-Physik, C4/C7 am Bias-Reset. Termin: rund eine Woche nach der Config-Kampagne,
 also **~01.08.2026**.
+
+**Nachtrag (2026-07-31):** Der Termin steht unmittelbar bevor bzw. ist je nach
+Ausführung bereits verstrichen; ein Ergebnis wurde hier noch nicht nachgetragen
+— der Lauf bleibt offen.
 
 ---
 

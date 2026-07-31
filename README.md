@@ -5,11 +5,12 @@ Balkonkraftwerke mit mehreren Modulausrichtungen, starker
 Standortverschattung (Gelände, Bäume, Gebäude) und Mikrowechselrichtern
 mit Port-genauen Messwerten.
 
-**Status: v0.18.1** — selbstlernende PV-Prognose im Betrieb: Physik-Motor mit
-lokaler Transposition, zwei Lernschichten (Intraday-Bias + Shademap),
-Drift-Überwachung, P10/P50/P90-Quantilbänder und ein Skill-Scoreboard.
-Versionshistorie in [CHANGELOG.md](CHANGELOG.md), vollständige Spezifikation in
-[docs/SPEC.md](docs/SPEC.md).
+**Status: v0.23.3** — selbstlernende PV-Prognose im Betrieb: Physik-Motor mit
+lokaler Transposition und elevationsabhängigen Horizont-τ-Profilen, Lernschichten
+(Shademap, Intraday-Skalar, Day-ahead-Bias, η-Kalibrierung), Drift-Überwachung,
+P10/P50/P90-Quantilbändern, optionalem Ensemble-Band und einem Skill-Scoreboard
+mit Kill-Gate. Versionshistorie in [CHANGELOG.md](CHANGELOG.md), vollständige
+Spezifikation in [docs/SPEC.md](docs/SPEC.md).
 
 ## Installation
 
@@ -96,11 +97,30 @@ Ergänzende Anleitungen:
   Transmittanz) — Fernfeld aus PVGIS, Nahfeld vom Betreiber; Direktstrahl
   UND Diffusanteil (Sky-View-Faktor) werden korrigiert — der Himmel unter
   der Horizontlinie ist auch fürs Diffus halbtransparent (saisonal), eine
-  Baumreihe verdunkelt es also nicht wie eine Wand.
-- **Selbstlernend:** zwei Zeitskalen — ein geometrisches
+  Baumreihe verdunkelt es also nicht wie eine Wand. Optional je Zeile:
+  **`tau_points`**, die Transmittanz als Profil über der Sonnen-Elevation
+  (Kronen sind elevationsabhängig), und **`diffuse_tau`**, die effektive
+  Diffus-Radianz eines blockierten Sektors (helle Putzwand) — hebt nur den
+  Diffus-Floor, nie den Direktstrahl.
+- **Bifazial-Zugewinn in der Rohphysik:** der optionale Faktor
+  **`bifacial_beam_gain`** (1,0–1,3) hebt einen ehrlich unterschätzten
+  Direktstrahl (bifaziale Rückseite, steile Geometrie) in der Modellkurve,
+  statt ihn den gedeckelten Lernern als >1-Korrektur zu überlassen.
+- **Selbstlernend:** mehrere Zeitskalen — ein geometrisches
   Transmissionsfeld je Messkanal × Sonnenstand (lernt Hang, Bäume,
-  Gebäudekante) und ein Intraday-Bias-Korrektor (rettet Nebelmorgen).
-  Alles geclamped, driftüberwacht, abschaltbar.
+  Gebäudekante), ein nächtlich trainierter Day-ahead-Bias je Wetterzelle
+  und ein Intraday-Korrektor (rettet Nebelmorgen). Alles geclamped,
+  driftüberwacht, abschaltbar.
+- **Warmer Start aus der eigenen Historie:** die Aktion **`run_bootstrap`**
+  (Entwicklerwerkzeuge, `dry_run` standardmäßig an) rekonstruiert Bias,
+  Shademap und Quantilbänder aus den vorhandenen Recorder-Daten und
+  Open-Meteo-Previous-Runs — in-process, ohne Token, immer mit der
+  Live-Config; der Offline-Weg `scripts/backfill.py` bleibt für Dev- und
+  CI-Läufe ([docs/BACKFILL.md](docs/BACKFILL.md)).
+- **Lernen ist sichtbar:** fehlt ein konfigurierter Messkanal in dieser
+  Instanz oder verwirft das nächtliche Training mehrere Tage in Folge,
+  meldet die Integration einen persistenten **Repair-Issue** mit Ursache
+  und Handgriff (Ebene, Entity-ID) — statt still `cold_start` zu zeigen.
 - **AC-Standard (v0.17):** die Haupt-Sensoren (`energy_production_*`,
   `power_production_now`, Bänder) melden die **AC**-Leistung hinter den
   Wechselrichtern — der betreiberseitige Standard. Das DC-Modell rechnet und

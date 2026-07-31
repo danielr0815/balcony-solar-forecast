@@ -29,7 +29,8 @@ Konstantenname* (keine Zeilennummern — die veralten sofort). Zusätzlich verbi
 > aktualisiert). Neu dazu: **mypy-Baseline** auf `core/` (acht ältere
 > Module mit bekannten Fehlern sind im `[tool.mypy]`-Kommentar namentlich
 > ausgenommen, die übrigen müssen sauber bleiben), **Coverage**-Config in
-> `pyproject.toml` (report-only, kein Gate), **Devcontainer**
+> `pyproject.toml` (zunächst report-only; inzwischen mit 95-%-Gate in CI,
+> siehe §6.3), **Devcontainer**
 > (`.devcontainer/`, Python-3.14-Image + Node-Feature für den JS-Harness in
 > `tests/harness/`, postCreateCommand = `pip install uv && uv sync --group dev`),
 > **pre-commit** nur mit `ruff-check --fix` (kein `ruff-format` — Verbot
@@ -166,9 +167,10 @@ weil die Suite es nicht braucht und es zwei Schäden anrichtet (begründet in
 Da kein Test PHACC-Fixtures benutzt, bricht das Plugin nur eine Suite, die es nie
 verwendet. Abgeschaltet läuft die **volle** Suite identisch auf Linux, macOS, WSL
 und Windows; `pytest-asyncio` (kommt via PHACC mit) treibt die async-Tests weiter.
-CI schaltet das Plugin identisch ab (`.github/workflows/validate.yml`, Job `tests`),
-hängt aber `-q` und die Coverage-Flags an — dort fehlt die Abschlusszeile, und CI
-wertet ausschließlich den Exit-Code aus.
+CI schaltet das Plugin identisch ab (`.github/workflows/validate.yml`, Job `tests`)
+und hängt nur die Coverage-Flags an — **kein** `-q` (der Job-Kommentar begründet
+das: `pyproject.toml` setzt bereits `addopts = "-q"`, ein zweites verschluckt die
+Ergebniszeile); CI wertet ausschließlich den Exit-Code aus.
 
 ### `addopts` enthält bereits `-q`
 
@@ -180,7 +182,8 @@ worden. Konsequenz:
 
 * Beim manuellen Lauf **kein** `-q` anhängen.
 * Brauchst du eine maschinenlesbare Zahl: `--junitxml=<pfad>` verwenden oder
-  `$LASTEXITCODE` prüfen. (CI übergibt `-q` und verlässt sich auf den Exit-Code.)
+  `$LASTEXITCODE` prüfen. (CI hängt ebenfalls kein `-q` an und verlässt sich
+  auf den Exit-Code.)
 
 ### Lint
 
@@ -472,20 +475,29 @@ Bumpen oder CHANGELOG-Pflege *nach* dem Tag ist zu spät.
 
 ### 6.3 CI-Jobs im Überblick (`validate.yml`)
 
+Alle Actions sind per **Commit-SHA gepinnt** (der Versionskommentar steht
+dahinter, Dependabot zieht die SHAs hoch); Top-Level gilt
+`permissions: contents: read`, mehr deklariert ein Job lokal.
+
 | Job | Inhalt |
 |---|---|
-| `validate-hacs` | `hacs/action@main`, `category: integration`, `ignore: brands` (Brand-Assets liegen bewusst lokal unter `custom_components/.../brand/`) |
-| `validate-hassfest` | `home-assistant/actions/hassfest` — Manifest-/Struktur-Konformität |
-| `lint` | `ruff check .` **plus** der Versions-Konsistenz-Check |
-| `tests` | `python -m pytest tests -q -p no:homeassistant --cov=… --cov-report=term-missing:skip-covered` |
+| `validate-hacs` | `hacs/action` (SHA-gepinnt), `category: integration`, `ignore: brands` (Brand-Assets liegen bewusst lokal unter `custom_components/.../brand/`); läuft nur gegen **öffentliche** Repos (Sichtbarkeits-Guard, weil die Action `hacs.json` ohne Auth von raw.githubusercontent.com lädt) |
+| `validate-hassfest` | `home-assistant/actions/hassfest` (Master-SHA gepinnt, hassfest hat keine brauchbaren Release-Tags) — Manifest-/Struktur-Konformität |
+| `spec-reminder` | nur bei PRs, **advisory** (`continue-on-error`): warnt, wenn sich `custom_components/` ohne `docs/SPEC.md` ändert — der harte Teil des Vertrags läuft als `tests/test_spec_integrity.py` im `tests`-Job |
+| `lint` | `ruff check .` **plus** `mypy` (Baseline auf `core/`) **plus** der Versions-Konsistenz-Check (manifest == pyproject == const) |
+| `tests` | `uv run pytest tests -p no:homeassistant --cov --cov-fail-under=95 --cov-report=term-missing:skip-covered --cov-report=xml`; `actions/setup-node` (Node 22) stellt sicher, dass der JS-Karten-Harness (`tests/harness/`) nicht still skippt; das Coverage-XML landet als Build-Artefakt |
+| `tests-ha-min` | dieselbe Suite gegen die deklarierte HA-Untergrenze: `uv pip install "homeassistant==2026.3.*"` über das Lockfile drüber (Pin-Konflikt mit PHACC im Job-Kommentar dokumentiert), dann `uv run --no-sync pytest` |
+| `devcontainer` | baut `.devcontainer/` und fährt Suite + `ruff check` + `mypy` im Container |
 
-Coverage ist **report-only**: es gibt bewusst **kein** `--cov-fail-under`. Sie
-informiert, sie blockiert nicht.
+Coverage ist **gegatet**: `--cov-fail-under=95` bricht den `tests`-Job unter 95 %
+(Review 0.23.x — die Suite stand bei ~92 %, und jede neue Verhaltensänderung
+kommt per CLAUDE.md-Regel 6 mit ihrem Test; das Gate hält das so).
 
-`hacs.json` pinnt `"homeassistant": "2026.1.0"` — die HA-Untergrenze, gegen die die
-Config-Flow-Selectors und Entity-Konventionen validiert sind. Bewusst anheben (wenn
-du eine neuere API brauchst und darauf getestet hast), **nie** absenken ohne
-Gegenprobe.
+`hacs.json` pinnt `"homeassistant": "2026.3.0"` — die HA-Untergrenze, gegen die die
+Config-Flow-Selectors und Entity-Konventionen validiert sind und gegen die der
+Job `tests-ha-min` die Suite fährt (ein Floor, der nicht getestet wird, ist
+keiner). Bewusst anheben (wenn du eine neuere API brauchst und darauf getestet
+hast), **nie** absenken ohne Gegenprobe.
 
 ---
 

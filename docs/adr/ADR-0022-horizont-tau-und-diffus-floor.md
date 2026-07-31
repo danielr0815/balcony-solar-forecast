@@ -318,7 +318,9 @@ Sprungstelle entsteht.
 
 1. Release 0.22 ausrollen (Code versteht `tau_points`; Verhalten aller
    Bestands-Configs unverändert — Migrations-Nullschritt, kein Store-Touch).
-2. Operator-Config-Edit (Options-Flow, ObjectSelector): in allen 8 Planes die
+2. Operator-Config-Edit (**Reconfigure**-Flow, seit 0.6.0 der Weg für
+   strukturelle Site-Edits; das Site-Objekt wird weiterhin als freies
+   YAML/JSON über den ObjectSelector editiert): in allen 8 Planes die
    8 Interim-Rampen-Zeilen (az52…az89 mit tau 0→0,85→0) durch die 2 Zeilen aus
    §2.4 ersetzen. Reiner Datenedit, jederzeit rückrollbar.
 3. **Gleichzeitig** `reset_day_ahead_bias` ausführen (A4: raw ändert sich um
@@ -660,7 +662,7 @@ nach Reset im Band 0,9–1,15.
    Bit-Identitäts-Property-Tests für Alt-Configs abgesichert; (ii) die
    Übergangswoche mit Überschießen 04–06Z ist unvermeidlich (Clamp-Zelle) und
    kommuniziert; (iii) Doku-Pflicht: `diffuse_tau` ist ein EFFEKTIV-Wert —
-   Operatoren könnten ihn als Transmission missverstehen (SPEC-§13-Absatz +
+   Operatoren könnten ihn als Transmission missverstehen (SPEC-§5.1-Absatz +
    Validierungs-Obergrenze 0,8 als Leitplanke).
 5. **Nicht-Ziele festgeschrieben:** kein volles Bifacial-/Reflexionsmodell
    (D0), keine automatische Ableitung von tau_points aus Messdaten im Core
@@ -677,7 +679,7 @@ nach Reset im Band 0,9–1,15.
 | `custom_components/balcony_solar_forecast/core/engine.py` | sun_el an `transmittance_at` durchreichen | — (SVF-only) |
 | `custom_components/balcony_solar_forecast/_site_validation.py` | Regeln §2.5 | Regel §3.7 |
 | `scripts/backfill.py` | folgt automatisch (gleiche horizon-Funktionen); Re-Bootstrap-Empfehlung | dito |
-| `docs/SPEC.md` §4/§13 (+§5 Hinweis T-Referenz) | ja | ja |
+| `docs/SPEC.md` §4/§5.1 (+§9.1 Hinweis T-Referenz) | ja | ja |
 | `config_flow.py` | keine Änderung (ObjectSelector) | keine Änderung |
 
 *Nicht* betroffen: Store-Schema, Sensor-Contracts, Services, Shademap-Keying.

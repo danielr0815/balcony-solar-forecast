@@ -141,11 +141,20 @@ Upstream-PR mitbringt.
 **Takte.** Ein `DataUpdateCoordinator` je Config-Entry: Wetter-Fetch alle
 **30 min** (`FETCH_INTERVAL_SECONDS`), Neuberechnung alle **15 min**
 (`RECOMPUTE_INTERVAL_SECONDS`), nächtliches Training gegen **~01:30 lokal** im
-Executor (§9.7). Ein Rechenlauf bleibt unter **50 ms**. Beide Intervalle sind je
-Entry konfigurierbar (§7.1).
+Executor (§9.7). Ein Rechenlauf ist reine stdlib-Mathematik über
+15-min-Slots × N Ebenen und muss **ohne spürbaren Einfluss auf die
+Event-Loop** bleiben; der Engine-Pass läuft zusätzlich im Executor
+(`hass.async_add_executor_job`), sodass selbst ein Ausreißer den Loop nicht
+blockiert. Beide Intervalle sind je Entry konfigurierbar (§7.1).
 
 **Eine Config-Entry je Standort**, eindeutig über den Anlagennamen. Mehrere
 Anlagen sind zulässig; die Aktionen lösen ihr Ziel entsprechend auf (§19).
+Eine **geteilte `actual_entity`** (zwei Entries verweisen auf denselben
+Messkanal) ist nicht verboten und wird nicht validiert: jeder Entry hat
+eigenen Coordinator, Store und Lernzustand und trainiert unabhängig gegen
+dieselbe Grundwahrheit; Entitäten und Repair-Issues sind entry-gescoped
+(`{entry_id}` im Unique-ID bzw. Issue-Suffix), sodass nichts kollidiert.
+Praktisch ist das doppelter Fetch- und Lernaufwand ohne Erkenntnisgewinn.
 
 ## §3 Wetterbezug: Open-Meteo-Fetch, Validierung und Cache
 
@@ -332,6 +341,14 @@ denselben Config-Fingerprint ergibt (§7.6).
   `tau_leafed` (bzw. knotenweise zwischen `tau_points_bare` und `tau_points`)
   über den **Day-of-Year** geblendet — eine **Kosinus-Rampe über April und
   November** um die in `const` festgelegten Laub-Anker.
+- **Doy-Anker sind kalenderfest (bewusste Näherung).** Die Laub-Anker
+  (`FOLIAGE_LEAF_ON_DOY` = 105, `FOLIAGE_LEAF_OFF_DOY` = 315), der
+  Halbjahres-Split `SUMMER_SOLSTICE_DOY` (172, §9.1) und der Nenner 365 der
+  E0n-Exzentrizität (§4.3) kennen **kein Schaltjahr**: ab dem 29. Februar
+  eines Schaltjahres läuft die Jahreszahl um einen Tag versetzt. Gegen die
+  ±30-Tage-Rampenbreite und die 5°-/2,5°-Bins ist das unhörbar und wird
+  bewusst nicht korrigiert (Näherung im Stil von §17.3). Sommerzeit ist
+  hier ohnehin kein Thema — die Binnung folgt der Sonnenzeit (§8).
 - **Migrationsregel gegen die abgelöste az-Rampe.** Eine Transmittanzrampe, die
   als τ(az) entlang des Sonnenpfads eines Ankertags kodiert war, ist abgelöst:
   sie driftet strukturell (~0,3°/Tag) und erzeugt im Spätsommer Phantom-Beam in
@@ -443,6 +460,14 @@ denn Fetcher und Sonnenstand lesen ausschließlich die site-eigenen Koordinaten.
 Nur **Laufzeitschalter** (Kill-Switches der Lernschichten §9, der Quantile
 §11.2, der Ensemble-Bänder §11.3) und die **Vergleichsliste** (§15.3) leben in
 den Options — ein strukturelles Feld dort verschattet `entry.data` dauerhaft.
+
+**Entry-Migration (Feststellung).** Die Integration implementiert aktuell
+**kein** `async_migrate_entry` — das Entry-Schema (`version = 1`) hat seit
+Einführung keine Migration gebraucht: Alt-Configs laden unverändert, weil
+optionale Felder nur-wenn-gesetzt serialisiert werden (§7.6) und
+`SiteConfig.from_dict` fehlende Felder mit Defaults klemmt. Der Anker für eine
+künftige Entry-Form-Migration ist `async_migrate_entry`; die **Store**-Migration
+läuft davon getrennt über die innere `schema_version` (§16.1).
 
 ### §7.2 Site-Ebene (`site`)
 
@@ -606,6 +631,13 @@ Auswertung wertlos.
 3. Unterhalb `CLOUD_KC_MIN_ELEVATION_DEG` (Haurwitz zu grob) oder ohne GHI
    fällt die Klassifikation auf die **Random-Overlap-Schichtbedeckung** zurück.
 
+**Die Nebel-Monatsgrenze ist ein bewusster Trade-off.** Tiefe Bewölkung ist
+außerhalb der Nebelsaison selten Strahlungsnebel, deshalb zählt sie nur in
+`FOG_MONTHS` (Okt–Feb) als fog-Indiz. Die März-/September-Grenze ist dabei
+willkürlich — ein März-Hochnebel landet in der `overcast`- statt in der
+`fog`-Zelle — und wird dokumentiert statt auf historische Nebelhäufigkeit
+gefittet.
+
 **Keine Sentinel-Werte.** Eine fehlende Sichtweite ist **unbekannt** (`None`),
 nicht „0 m": die Nebel-Regel feuert nur auf eine **gemessene** Sicht unter
 `FOG_VISIBILITY_M` — ein echter 0-m-Wert ist dichter Nebel, eine
@@ -691,7 +723,10 @@ Im Live-Nightly kommt der Stundenanteil der gemeterten Ebenen aus der
 per-Ebenen-Aufschlüsselung des Issued-Snapshots (§16.2) — fehlt sie
 (Alt-Snapshot), wird der Tag nicht trainiert.
 
-**Clamp [0,0 … 1,1]** — volle Okklusion muss darstellbar sein (Hauswand).
+**Clamp [0,0 … 1,1]** — volle Okklusion muss darstellbar sein (Hauswand), und
+die Obergrenze **über** 1 hält reale **Reflexionsgewinne** darstellbar: eine
+helle Fassade oder Schnee kann den gemessenen Beam über den modellierten heben
+(T > 1 ist Physik, kein Messfehler), ohne dass der Bin unbegrenzt hochläuft.
 
 **Cold-Start:** ein Bin erbt den **statischen Horizont-Prior** seines
 Mittelpunkt-Azimuts; der Übergang läuft über **Shrinkage** w = n/(n+K) statt
@@ -858,6 +893,12 @@ Rollback-Ring (selbst-gatend).
   in Zeiträume **vor** der Installation zurück (siehe Anlaufphase-Regel §10).
   Jeder nachgeholte Tag durchläuft dieselben Gates und denselben
   Idempotenzmarker.
+- **Ausfall jenseits des Fensters bleibt dauerhaft ungelernt.** Dauert eine
+  Unterbrechung (HA aus, Kanal tot, Recorder-Lücke) länger als
+  `NIGHTLY_CATCHUP_MAX_DAYS` (3 Tage), schiebt das Fenster beim Wiederanlauf
+  an den neuesten erfassten Tag heran und deckelt auf N Tage — die älteren
+  fehlenden Tage werden **nie** nachgeholt. Der einzige Weg, eine solche Lücke
+  nachträglich zu füllen, ist der Bootstrap (§12).
 - **Zeitstempel-Semantik der Ist-Werte (kritisch):** numerische `start`-Werte
   einer Statistikzeile werden **nach Größenordnung** disambiguiert
   (`_actuals._EPOCH_MS_THRESHOLD`: darüber Millisekunden = WebSocket-Format,
@@ -1090,11 +1131,14 @@ Ebenen, §6.4).
 
 **Asymmetrische Intraday-Behandlung.** Die servierte Band-Kurve behält den
 Intraday-Skalar, aber das **Tages-P10-Aggregat** darf durch einen Hoch-Skalar
-nicht steigen: je Slot wird das servierte AC-P10-Band mit
-`min(1, skalarfrei/serviert)` des zentralen AC-Strips skaliert — ein Faktor > 1
-dividiert sich heraus, ein Faktor ≤ 1 behält das herunterkorrigierte Band. Das
-**Tages-P90** behält den Skalar (eine Aufwärtskorrektur darf die optimistische
-Flanke weiten).
+nicht steigen: je Slot werden die servierten AC-P10-Band-Watt mit
+`min(1, skalarfrei / serviert)` skaliert — *serviert* und *skalarfrei* kommen
+dabei aus der **zentralen (P50) AC-Kurve** desselben Slots
+(`coordinator._dayahead_slot_strips`), nicht aus dem Band selbst. Ein
+Intraday-Faktor > 1 dividiert sich damit heraus (das Tages-P10 fällt auf seinen
+Day-ahead-Wert zurück), ein Faktor ≤ 1 behält das bereits herunterkorrigierte
+Band. Das **Tages-P90** behält den Skalar (eine Aufwärtskorrektur darf die
+optimistische Flanke weiten).
 
 **Ausgabe:** über `get_forecast` (plane-agnostische Gesamt-P10/P50/P90 in 15 min
 und stündlich), über optionale Tages-P10/P90-Sensoren und über die
@@ -1166,10 +1210,15 @@ spät wie möglich, ohne Export).
 Ein Bootstrap füllt Bias-, Shademap- und Quantilspeicher aus **Forecasts
 as-issued** (Open-Meteo Previous-Runs) gegen die **gemessenen** Langzeitstatistiken
 vor — er verkürzt die kalte Anlaufzeit um Monate. Verbindlichkeit: **Pflicht zu
-versuchen, kein Blocker.** Das System muss ohne die Previous-Runs-API voll
-funktionieren; fehlt sie, greift der Historical-Forecast-Fallback mit einer
-WARNING (Analyse statt as-issued, für die geometrische Shademap weiterhin
-nützlich), und fehlt auch der, läuft die Integration einfach kalt an.
+versuchen, kein Blocker.** Subjekt ist dabei der **einzelne Bootstrap-Lauf**
+(die Aktion aus §12.2 wie der CLI-Weg aus §12.3), nicht die laufende
+Integration: der Lauf versucht zuerst die Previous-Runs-API; liefert sie für
+ein Chunk-Fenster keine as-issued-Strahlung, fällt **dieses Fenster** mit einer
+WARNING auf die Historical-Forecast-API zurück (Analyse statt as-issued, für
+die geometrische Shademap weiterhin nützlich — das Antwortfeld
+`weather_source` weist das aus). Schlägt auch der Fallback fehl, endet der Lauf
+mit einem klaren Fehler (§12.2) statt mit Halbdaten — und die Integration selbst
+blockiert zu keinem Zeitpunkt: ohne Bootstrap läuft sie einfach kalt an.
 
 ### §12.2 Standardweg: die Aktion `run_bootstrap`
 
@@ -1289,13 +1338,16 @@ overcast-Bins trainiert und alle anderen Bänder wochenlang auf P50 kollabiert.
 
 ```
 frische Prognose
-  → Last-Good-Cache (Store, konfigurierbare Altersgrenze MAX_PAYLOAD_AGE_HOURS)
+  → Last-Good-Cache (Store, bis `MAX_PAYLOAD_AGE_HOURS` = 24 h alt)
   → Reine-Physik-Kurve aus dem letzten gültigen Wetterbild
+    (bis `MAX_PHYSICS_FALLBACK_AGE_HOURS` = 72 h alt)
   → unavailable
 ```
 
-Konsumenten entscheiden selbst über ihre Fallbacks; die Integration erfindet
-keine Werte.
+Die beiden Altersgrenzen sind **Konstanten** in `const.py` (die Staffelung
+rechnet `coordinator._status_for_age`), keine betreiberkonfigurierbaren
+Schalter. Konsumenten entscheiden selbst über ihre Fallbacks; die Integration
+erfindet keine Werte.
 
 **Jede Stufe ist sichtbar:** das `status`-Feld der Coordinator-Daten, der
 `source_status`-Sensor, der `binary_sensor` „degraded" und — wo angebracht — ein
@@ -1375,6 +1427,13 @@ weil sie bulkig und je Zyklus neu sind), dazu die P10/P90-Bandkurven als
 zusätzliche Attribute, und die Aktion `get_forecast` (15-min und stündlich,
 P10/P50/P90 sobald vorhanden) nach dem Muster von `weather.get_forecasts`.
 
+**DC-Basis der Kurven-Attribute (Achtung beim Vergleich):** der **State** der
+Energie-Sensoren ist **AC** (§14.1), die 15-min-`watts`-/`wh_period`-Attribute
+und die 15-min-Bandattribute bleiben dagegen die **DC**-Modellkurve — eine
+15-min-AC-Kurve wird nicht als Attribut ausgeliefert (AC-Bänder gibt es nur
+stündlich, §14.1). Wer ein Kurven-Attribut gegen den Sensor-State
+plausibilisiert, misst sonst die ~8 %-DC/AC-Differenz als Fehler (§6.5).
+
 ### §14.5 Energy-Dashboard-Hook
 
 `async_get_solar_forecast(hass, config_entry_id)` liefert
@@ -1445,8 +1504,11 @@ Nächtlich, **pro Vortag**, berechnet der Coordinator den Tages-kWh-Fehler von
 (a) der Motor-Prognose **as issued** und (b) jeder konfigurierten externen
 Vergleichsprognose, jeweils gegen die **gemessene** Ist-Summe, plus die
 **Stunden-MAE** des Motors. Rollierendes Fenster
-`DEFAULT_SCOREBOARD_WINDOW_DAYS` (Default **14**, konfigurierbar),
-**stratifiziert** nach der **dominanten Wetterklasse** des Vortags (§8).
+`DEFAULT_SCOREBOARD_WINDOW_DAYS` (**14** Tage — eine Konstante in `const.py`;
+der Coordinator liest sie zwar defensiv per `cfg.get`, aber kein Feld des
+Config-/Options-Flows belegt sie, betreiberseitig ist sie also **nicht**
+einstellbar), **stratifiziert** nach der **dominanten Wetterklasse** des
+Vortags (§8).
 
 **Fairness / kein Leakage (kritisch):**
 
@@ -1556,7 +1618,9 @@ statt geraten.
 - **Forecast-as-issued-Ring** (`_ISSUED_RING_DAYS` = 90). Der nächtliche
   Snapshot hält je Tag **beide** Stundenkurven — **rohe Physik UND korrigiert** —
   plus die **Slow-only-Kurve** und die per-Ebenen-Stundenkomponenten
-  (`beam_wh`, `diffuse_wh`, `ghi`, `kc`). Das ist die konstruktive Voraussetzung
+  (`beam_wh`, `diffuse_wh`, `kc` — der mittlere Clear-Sky-Index der Stunde,
+  damit das Quasi-klar-Gate offline rekonstruierbar ist). Das ist die
+  konstruktive Voraussetzung
   der schichtgetrennten Drift-Attribution (§9.8), des leakagefreien Scoreboards
   (§15.2) und des Shademap-Trainings aus Stunden-LTS (§9.1). Der Ring ist die
   Quelle von `get_issued_forecast` inklusive des **eingefrorenen** `eta` /
@@ -1577,20 +1641,42 @@ statt geraten.
 
 Schreibvorgänge werden **gebündelt** über `async_delay_save` geplant.
 Payload-Writes sind zusätzlich **zeitgetaktet**
-(`PAYLOAD_MIN_SAVE_INTERVAL_SECONDS`), sodass eine Wetteränderung höchstens alle
-paar Stunden auf die Platte geht. Budget: **≤ 3 gebündelte Writes/Tag**
-(eMMC-Schonung). Der nächtliche Job und der Flush bei HA-Stop bzw. beim Unload
-garantieren eventuelle Persistenz.
+(`PAYLOAD_MIN_SAVE_INTERVAL_SECONDS` = 6 h), sodass eine Wetteränderung
+höchstens alle sechs Stunden auf die Platte geht. Budget: **≤ 4 gebündelte
+Writes/Tag** (eMMC-Schonung). Der nächtliche Job und der Flush bei HA-Stop bzw.
+beim Unload garantieren eventuelle Persistenz.
 
 Nach einem **harten Crash** dürfen Last-Good-Cache und As-issued-Log bis zu
 einige Stunden verlieren — akzeptiert, weil die Degradationsleiter (§13) greift.
 
-### §16.4 Lade-Robustheit
+#### §16.4 Lade-Robustheit
 
 **Validate-and-clamp je Sektion:** jede Sektion läuft durch ihre klemmende
 Dataclass. Ein korrupter, falsch geformter oder unbekannter Blob ergibt eine
 **neutrale** Sektion, **nie** einen Setup-Crash, und lässt alle übrigen Sektionen
 byte-treu. Auf sauberen Daten ist der Round-Trip die Identität.
+
+### §16.5 Deinstallation und Cleanup
+
+Beim **Entfernen eines Config-Entries** (`__init__.async_remove_entry`) räumt
+die Integration ihren persistierten Zustand selbst ab:
+
+- die **Store-Datei** `.storage/balcony_solar_forecast.<entry_id>` wird
+  gelöscht (`ForecastStore.async_remove`) — Lernzustand, Ringe und
+  Last-Good-Cache dieses Entries sind damit unwiderruflich weg;
+- alle **entry-gescopeden Repair-Issues** werden mitgelöscht: ihre IDs tragen
+  das Suffix `_{entry_id}` (`coordinator._issue_id_for`), und HA hebt Issues
+  über das Entfernen hinaus auf — ein neu installierter Entry erbte sonst
+  verwaiste, nicht mehr handhabbare Warnungen. Issues fremder Domains und
+  **anderer Entries derselben Domain** bleiben unberührt;
+- die **Entitäten** des Entries entfernt HA selbst aus State- und
+  Entity-Registry.
+
+**Bekannte Einschränkung:** die beim Start **integrationsglobal** registrierten
+Lovelace-Ressourcen der mitgelieferten Karten (§18.5) bleiben auch nach dem
+Entfernen des letzten Entries registriert — sie werden nirgends abgemeldet.
+Sie zeigen auf die gebündelten statischen Pfade, sind damit harmlos und lassen
+sich in den Dashboard-Einstellungen von Hand entfernen.
 
 ## §17 Verschattungsprofil-Diagramm
 
@@ -1742,8 +1828,13 @@ Live-Ansicht**; eine Vergangenheits-Ansicht ist statisch.
 **Tages-/Wochennavigation** (karten-lokal, nicht persistiert): eine Kopfzeile
 `◀ [Label] ▶` blättert den gewählten Tag (▶ deaktiviert am heutigen Tag); ein
 **Tag|Woche**-Umschalter zeigt eine Wochenansicht mit sieben gestapelten
-Tagesbalken (aus `period: "day"`-Mittelwertstatistiken, Mittel-W × 24 h =
-Tages-Wh; das Fenster endet am gewählten Tag und springt in 7-Tages-Schritten).
+Tagesbalken. Abgeschlossene Tage kommen aus `period: "day"`-Mittelwertstatistiken
+(Mittel-W × 24 h = Tages-Wh); **Ausnahme „heute":** der laufende Tag wird aus
+den **Stunden**statistiken summiert (Stundenmittel × 1 h, wie in der
+Tagesansicht) — das Tagesmittel eines unvollständigen Tages deckt nur die
+bereits vergangenen (sonnigen) Stunden, und die ×-24-h-Extrapolation
+überschätzte ihn massiv. Das Fenster endet am gewählten Tag und springt in
+7-Tages-Schritten.
 
 **Vergangene Tage: as-issued statt Nachrechnen.** Im Tagesmodus zeigt die
 gestrichelte Linie für vergangene Tage die Prognose **wie ausgegeben** aus dem

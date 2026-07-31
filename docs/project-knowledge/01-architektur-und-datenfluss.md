@@ -89,7 +89,7 @@ dokumentierte Ausnahme: `core/openmeteo_backfill.py` macht Netzwerk-IO (siehe un
 | `clearsky.py` | Haurwitz-Clear-Sky-GHI und Clear-Sky-Index `k_c` — ausschließlich als Lern-Gate und Normalisierer, **nie** als Prognosequelle. | `haurwitz_ghi`, `clear_sky_index` |
 | `electrical.py` | DC-Leistung (Ross-Zelltemperatur, Temperaturkoeffizient) und der Wechselrichter-Clamp je Gruppe — DC-seitig und DC→AC. | `dc_power`, `clamp_groups`, `clamp_groups_ac` |
 | `bias.py` | **Schneller Lerner**: (1) transienter Intraday-Skalar im Clear-Sky-Index-Raum (nie persistiert), (2) persistierter Day-Ahead-RLS-Bias je (Wolkenklasse × Tagesabschnitt). | Live-Pfad: `compute_intraday_scalar` + `intraday_factor_at`; `day_ahead_factor_solar`, `classify_cloud`. `apply_intraday_scalar` / `apply_day_ahead_bias` sind Hilfsfunktionen auf fertigen Stunden-Wh-Dicts, **nicht** der Engine-Pfad |
-| `shademap.py` | **Langsamer Lerner**: geometrisches Beam-Transmissionsfeld je Messkanal × (Sonnenazimut-Bin × Elevations-Bin × Halbjahr), EMA über `T = (P_gemessen − P_diffus_modelliert) / P_beam_modelliert`. Gespeichert wird je Modul-Kanal, gepoolt wird ausschließlich beim **Lesen** über die `shade_group`-Geschwister (`docs/SPEC.md` §5). | `effective_tau_pooled` (Live-Lesepfad), `effective_tau` (Einzelkanal), `update_bin` / `beam_referenced_t` (Training) |
+| `shademap.py` | **Langsamer Lerner**: geometrisches Beam-Transmissionsfeld je Messkanal × (Sonnenazimut-Bin × Elevations-Bin × Halbjahr), EMA über `T = (P_gemessen − P_diffus_modelliert) / P_beam_modelliert`. Gespeichert wird je Modul-Kanal, gepoolt wird ausschließlich beim **Lesen** über die `shade_group`-Geschwister (`docs/SPEC.md` §9.2). | `effective_tau_pooled` (Live-Lesepfad), `effective_tau` (Einzelkanal), `update_bin` / `beam_referenced_t` (Training) |
 | `shadeprofile.py` | Daten hinter dem Verschattungs-Diagramm: Sonnenbahn vs. gelernte Verschattung für eine Ebene an einem Datum. Repliziert das Engine-Gate exakt. | `compute_shade_profile` |
 | `quantiles.py` | P10/P50/P90-Bänder per nichtparametrischer historischer Simulation: 90-Tage-Ring relativer Fehler je (Wetterklasse × Tagesabschnitt). | `bands_for_bin` |
 | `ensembleband.py` | Wandelt Open-Meteo-Ensemble-Member-GHI in eine **relative** Stundenspreizung und verschmilzt sie per Hüllkurven-Maximum mit den gelernten Bändern (nie multiplizieren, nie verengen). | `ensemble_band_factors`, `fuse_bands` |
@@ -99,11 +99,12 @@ dokumentierte Ausnahme: `core/openmeteo_backfill.py` macht Netzwerk-IO (siehe un
 | `openmeteo_backfill.py` | **Die einzige `core/`-Datei mit Netzwerk-IO** (bewusste, dokumentierte Ausnahme): Open-Meteo *Previous-Runs* / Historical-Forecast-Abruf mit injizierter aiohttp-Session, damit CLI und In-Process-Action nicht auseinanderdriften. Bleibt HA-frei. | Fetch-Funktion mit `session`-Parameter |
 
 Außerhalb des Komponenten-Ordners: `scripts/backfill.py` (Dev-CLI-Wrapper um
-`bootstrap_build`; verpflichtend sind nur `--ha-url`/`--token` — ein Long-Lived-Token —
-sowie `--start`/`--end`. `--site` ist **optional** und fällt sonst auf das mitgelieferte
-`const.DEFAULT_SITE` zurück; wer die Site im Config-Flow geändert hat, MUSS sie
-exportieren und `--site` übergeben, sonst rekonstruiert das Skript still gegen die
-falsche Geometrie), `scripts/validation/` (Validierungslauf gegen Live-Daten), `tests/core/` (pure
+`bootstrap_build`; verpflichtend sind `--ha-url`/`--token` — ein Long-Lived-Token —
+sowie `--start`/`--end` und **`--site`**. Ohne `--site` bricht der Lauf **vor dem
+ersten Fetch** mit Exit-Code 2 und einer handlungsleitenden Meldung ab (die
+Aktion `run_bootstrap`, den Export der Live-Config und das Opt-in
+`--use-default-site` nennt) — ein stiller Rückfall auf `const.DEFAULT_SITE`
+existiert seit 0.23.1 nicht mehr (SPEC §12.3, `docs/BACKFILL.md`)), `scripts/validation/` (Validierungslauf gegen Live-Daten), `tests/core/` (pure
 pytest-Golden-Tests) und `tests/` (HA-Glue-Tests). Details in
 `07-entwicklung-tests-release.md`.
 
@@ -268,7 +269,7 @@ eigenen, langsameren Takt: `const.FETCH_INTERVAL_SECONDS = 1800`.
    den Collapse-Freeze und bindet über `coordinator._bind_beam_tau` eine Closure auf
    `shademap.effective_tau_pooled` in `beam_tau`: die Shademap wird je **Modul-Kanal**
    gespeichert, beim **Lesen** aber über die `shade_group`-Geschwister gepoolt
-   (Pool-Map aus `coordinator._build_shade_pool_map`, `docs/SPEC.md` §5) — eine Ebene
+   (Pool-Map aus `coordinator._build_shade_pool_map`, `docs/SPEC.md` §9.2) — eine Ebene
    ohne Gruppe liest nur ihren eigenen Kanal und verhält sich bit-identisch zum
    Vor-Gruppen-Stand. (Der Docstring von `engine.LearnerHooks` nennt noch das alte
    `effective_tau`; maßgeblich ist der Code in `_bind_beam_tau`.) Dieselbe Closure
@@ -354,10 +355,11 @@ Zwei Aufrufer, **ein** gemeinsamer Kern:
 
 - `scripts/backfill.py` (Dev-CLI): eigene aiohttp-Session, Long-Lived-Token
   (`--ha-url`/`--token`, dazu `--start`/`--end` — alle vier Pflicht), Actuals über die
-  HA-WebSocket-API. `--site` ist **optional**: ohne Angabe rechnet das Skript gegen das
-  mitgelieferte `const.DEFAULT_SITE`. Wer die Site im Config-Flow verändert hat, muss sie
-  exportieren und übergeben, sonst rekonstruiert der Lauf gegen die falsche Geometrie
-  (Optionstabelle in `docs/BACKFILL.md`).
+  HA-WebSocket-API. **`--site` ist Pflicht**: ohne Angabe bricht das Skript **vor dem
+  ersten Fetch** mit Exit-Code 2 ab und nennt die drei Auswege (Aktion
+  `run_bootstrap`, Export der Live-Config, Opt-in `--use-default-site`) — ein
+  stiller Rückfall auf `const.DEFAULT_SITE` existiert nicht (SPEC §12.3,
+  Optionstabelle in `docs/BACKFILL.md`).
 - `_bootstrap.async_run_bootstrap` (die `run_bootstrap`-Action, seit v0.23.0): nutzt die
   Live-Konfiguration, die integrationseigene aiohttp-Session und einen In-Process-
   Recorder-Read. `dry_run` ist **standardmäßig `true`**; erst ein expliziter
