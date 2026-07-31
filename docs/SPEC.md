@@ -1119,8 +1119,11 @@ P10/P50/P90-**Multiplikatoren** des Bins (`QUANTILE_P_LOW` / `QUANTILE_P_HIGH`).
 
 Trainiert wird nächtlich aus der **ausgelieferten korrigierten** Stundenkurve
 gegen die gemessene (§9.7); der Rahmen ist damit derselbe wie beim Servieren.
-Der Bootstrap-Seed (§12.6) beschränkt die modellierte Seite dabei wie der
-Bias auf die gemeterten Ebenen (Teilmengen-Regel, §9.1/§9.5).
+Die modellierte Seite wird dabei — im nächtlichen Live-Training wie im
+Bootstrap-Seed (§12.6) — wie der Bias auf die gemeterten Ebenen beschränkt
+(Teilmengen-Regel, §9.1/§9.5); fehlt auf einer teilgemeterten Anlage die
+per-Ebenen-Aufschlüsselung des Snapshots (Alt-Snapshot), wird der Tag nicht
+trainiert.
 
 ### §11.2 Servieren
 

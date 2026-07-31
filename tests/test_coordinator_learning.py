@@ -14,7 +14,7 @@ package), so HA must be installed; the whole module is skipped otherwise.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -488,6 +488,74 @@ def test_day_ahead_samples_skip_unmetered_without_per_plane_breakdown():
         raw_hourly, {"M1": 100.0}, snap, {hkey: 100.0}
     )
     assert samples == []
+
+
+def test_train_quantiles_day_restricts_modeled_to_metered_planes():
+    """The quantile relerr is measured vs issued-CORRECTED — and the corrected
+    side must be restricted to the SAME metered planes the measured sum covers
+    (Teilmengen-Regel, SPEC §11.1/§9.1). An unmetered plane inside the modeled
+    total otherwise reads as a permanent fractional deficit: every relerr (and
+    with it P50) sinks by the metering share (here 0.5)."""
+    from custom_components.balcony_solar_forecast.core.types import (
+        PlaneHourlyModeled,
+        QuantileState,
+    )
+
+    store = _FakeStore()
+    iso = "2026-07-01"
+    hkey = "2026-07-01T12:00:00+00:00"
+    # Site total 200 Wh: M1 (metered) 100 + M2 (unmetered) 100.
+    store.issued[iso] = IssuedSnapshot(
+        issued_at="x", status="fresh",
+        corrected_hourly_wh={hkey: 200.0},
+        cloud_class_by_hour={hkey: CLOUD_CLASS_CLEAR},
+        per_plane={
+            "M1": PlaneHourlyModeled(
+                beam_wh={hkey: 80.0}, diffuse_wh={hkey: 20.0}
+            ),
+            "M2": PlaneHourlyModeled(
+                beam_wh={hkey: 80.0}, diffuse_wh={hkey: 20.0}
+            ),
+        },
+    ).to_dict()
+    store.record_hourly_actuals(iso, {"M1": {hkey: 90.0}})
+    c = _make_coordinator(store)
+    c._site = _partial_metered_site()
+
+    c._train_quantiles_day(date(2026, 7, 1))
+
+    assert c._quantile_state != QuantileState()
+    (bin_key, entries), = c._quantile_state.bins.items()
+    assert bin_key.startswith("clear|")
+    assert entries[0][0] == iso
+    # relerr = measured / METERED corrected = 90/100, not 90/200.
+    assert entries[0][1] == pytest.approx(0.9)
+
+
+def test_train_quantiles_day_skips_unmetered_without_per_plane_breakdown():
+    """A partially metered site with a LEGACY snapshot (no per-plane
+    breakdown) cannot scale the unmetered share out: skip the day rather than
+    train the metering gap into the relerr ring — the same treatment
+    ``day_ahead_samples`` gives it."""
+    from custom_components.balcony_solar_forecast.core.types import (
+        QuantileState,
+    )
+
+    store = _FakeStore()
+    iso = "2026-07-01"
+    hkey = "2026-07-01T12:00:00+00:00"
+    store.issued[iso] = IssuedSnapshot(
+        issued_at="x", status="fresh",
+        corrected_hourly_wh={hkey: 200.0},
+        cloud_class_by_hour={hkey: CLOUD_CLASS_CLEAR},
+    ).to_dict()
+    store.record_hourly_actuals(iso, {"M1": {hkey: 100.0}})
+    c = _make_coordinator(store)
+    c._site = _partial_metered_site()
+
+    c._train_quantiles_day(date(2026, 7, 1))
+
+    assert c._quantile_state == QuantileState()
 
 
 def test_day_ahead_training_moves_theta_up_not_to_min():

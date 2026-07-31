@@ -430,8 +430,12 @@ def train_quantiles_day(coord, day: date) -> None:
 
     NO-LEAKAGE + consistent frame (SPEC §11.1): the relative error is
     ``measured_hourly / issued-CORRECTED-hourly`` — the SAME issued corrected
-    curve the scoreboard scores and the bands are later applied to. Each
-    daylight hour whose corrected Wh exceeds QUANTILE_MIN_FORECAST_WH becomes
+    curve the scoreboard scores and the bands are later applied to, RESTRICTED
+    to the metered planes (:func:`metered_modeled_hourly`): the measured sum
+    only ever covers planes with an ``actual_entity``, so an unmetered plane
+    inside the modeled total would read as a permanent fractional deficit and
+    drag every relerr (hence P50) down by the metering share. Each daylight
+    hour whose corrected Wh exceeds QUANTILE_MIN_FORECAST_WH becomes
     one sample, classed by the issued snapshot's forecast cloud class for that
     hour (``cloud_class_by_hour``) x the local day part — the identical
     (class x part) taxonomy the day-ahead bias and the applier use. Gated on
@@ -451,6 +455,12 @@ def train_quantiles_day(coord, day: date) -> None:
         snap.corrected_hourly_wh or snap.raw_hourly_wh, iso
     )
     if not corrected_hourly:
+        return
+    # Teilmengen-Regel: modeled side restricted to the metered planes; None
+    # means the comparison is impossible (no metered plane / legacy snapshot
+    # on a partially metered site) -> the day is skipped, never poisoned.
+    corrected_hourly = metered_modeled_hourly(coord, snap, corrected_hourly)
+    if corrected_hourly is None:
         return
     hourly_actuals = coord._store_hourly_actuals(iso)
     measured_hourly = coord._site_measured_hourly(iso, hourly_actuals)

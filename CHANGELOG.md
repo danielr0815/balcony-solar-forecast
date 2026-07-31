@@ -28,6 +28,13 @@ tranches (core learner data bugs, HA-layer fixes, service/CI hardening, a
   permanent production outage: the clear-gate discarded every clear day and θ
   learned the metering fraction instead of the forecast error. A site with no
   measurement channel at all does not learn (SPEC §9.1/§9.5/§11.1).
+- **Live quantile training uses the metered-plane subset too.** The nightly
+  `relerr` ring compared the issued corrected site curve over ALL planes
+  against the measured (metered-only) sum, so on partially metered sites
+  every hourly relative error — and with it P50 — sank by the metering
+  fraction. The corrected side is now restricted to the planes with
+  `actual_entity`; a partially metered legacy snapshot without the per-plane
+  breakdown skips the day, same as the day-ahead bias (SPEC §11.1/§9.1).
 - **"Unknown" is no longer "fog".** A missing visibility is now `None`
   (unknown), not `0.0`: the fog rule fires only on a *measured* visibility
   below `FOG_VISIBILITY_M` — provider gaps used to classify as fog and poison
