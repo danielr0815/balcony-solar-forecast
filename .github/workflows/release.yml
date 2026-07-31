@@ -4,13 +4,22 @@ on:
   release:
     types: [published]
 
+# Least privilege by default.
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: "ubuntu-latest"
     name: Validate for release
+    # Job-local write (overrides the read-only top level): this workflow runs
+    # on `release: published`, and release-scoped jobs are the ones allowed to
+    # touch release contents (e.g. attaching assets later).
+    permissions:
+      contents: write
     steps:
       - name: Checkout
-        uses: "actions/checkout@v7"
+        uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" # v7
 
       # HACS validation can only run against public repos: the action fetches
       # hacs.json/manifest.json from raw.githubusercontent.com without auth,
@@ -25,7 +34,7 @@ jobs:
 
       - name: HACS validation
         if: steps.visibility.outputs.private != 'true'
-        uses: "hacs/action@22.5.0"
+        uses: "hacs/action@d556e736723344f83838d08488c983a15381059a" # 22.5.0
         with:
           category: "integration"
           ignore: "brands"
