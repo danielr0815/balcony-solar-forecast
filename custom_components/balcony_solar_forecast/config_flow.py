@@ -26,8 +26,8 @@ permanently shadowed ``entry.data`` through the
 The options flow is therefore slimmed to RUNTIME TUNABLES only: the three
 learner kill switches (fast learner / shademap learning / day-ahead bias —
 SPEC §9 "Kill-Switches je Lernschicht im Options-Flow"; all default ON per the
-2026-07-06 operator decision to build v0.3 early), the v0.4 quantile kill
-switch (SPEC §11.2) and the editable comparison-sensors list (SPEC §15.3). Modern
+2026-07-06 operator decision to build v0.3 early) and the v0.4 quantile kill
+switch (SPEC §11.2). Modern
 HA 2026 pattern: the framework supplies ``self.config_entry`` as a read-only
 property — we never assign it. Turning a switch off writes ``False`` into the
 entry options; the coordinator resolves every tunable via ``LearnerConfig`` from
@@ -57,9 +57,6 @@ from ._site_validation import SiteValidationError, validate_site
 from .const import (
     CONF_AC_ACTUAL_ENTITY,
     CONF_AC_ACTUAL_INVERT,
-    CONF_COMPARISON_DAILY_ENTITY,
-    CONF_COMPARISON_NAME,
-    CONF_COMPARISON_SENSORS,
     CONF_DAY_AHEAD_BIAS_ENABLED,
     CONF_ENSEMBLE_ENABLED,
     CONF_FAST_LEARNER_ENABLED,
@@ -73,7 +70,6 @@ from .const import (
     CONF_SITE_ALBEDO,
     CONF_SITE_BEAM_GAIN,
     CONF_SLOW_LEARNER_ENABLED,
-    DEFAULT_COMPARISON_SENSORS,
     DEFAULT_DAY_AHEAD_BIAS_ENABLED,
     DEFAULT_ENSEMBLE_ENABLED,
     DEFAULT_FAST_LEARNER_ENABLED,
@@ -88,7 +84,7 @@ from .const import (
     SITE_BEAM_GAIN_MAX,
     SITE_BEAM_GAIN_MIN,
 )
-from .core.types import ComparisonConfig, SiteConfig
+from .core.types import SiteConfig
 
 # Re-export so consumers/tests can import the validation surface from here too.
 __all__ = [
@@ -144,41 +140,6 @@ def _bool_selector() -> selector.Selector:
     return selector.BooleanSelector()
 
 
-def _comparison_sensors_selector() -> selector.Selector:
-    """Editable list of comparison-forecast entries (SPEC §15.3).
-
-    Each row is a structured object with a required operator label and a
-    required daily-kWh forecast sensor (domain ``sensor``). The field keys are
-    EXACTLY ``CONF_COMPARISON_NAME`` / ``CONF_COMPARISON_DAILY_ENTITY`` so a
-    persisted row round-trips straight back into the editor. ``label_field``
-    shows the name as each row's header; ``multiple`` yields a list-of-dicts.
-    Ships EMPTY; the operator's two comparisons are documented
-    (docs/DASHBOARD.md), never hardcoded in the runtime defaults.
-    ``ComparisonConfig.list_from_options`` stays the lenient backstop on save —
-    half-filled / malformed rows are dropped rather than persisted.
-    """
-    return selector.ObjectSelector(
-        selector.ObjectSelectorConfig(
-            multiple=True,
-            label_field=CONF_COMPARISON_NAME,
-            fields={
-                CONF_COMPARISON_NAME: {
-                    "required": True,
-                    "selector": selector.TextSelector(
-                        selector.TextSelectorConfig()
-                    ),
-                },
-                CONF_COMPARISON_DAILY_ENTITY: {
-                    "required": True,
-                    "selector": selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="sensor")
-                    ),
-                },
-            },
-        )
-    )
-
-
 def _user_schema(
     *,
     name: str,
@@ -197,7 +158,7 @@ def _user_schema(
 
     ``include_name`` is False for the reconfigure step, where the name (and its
     unique-id) is immutable after setup. The runtime tunables (learner kill
-    switches, quantile bands, comparison sensors) are NOT first-setup fields and
+    switches, quantile bands, ensemble bands) are NOT first-setup fields and
     live in the options flow — see ``_options_schema``.
 
     ``ac_actual_entity`` / ``ac_actual_invert`` are the site-level TOTAL-AC meter
@@ -285,19 +246,16 @@ def _options_schema(
     day_ahead_bias_enabled: bool = DEFAULT_DAY_AHEAD_BIAS_ENABLED,
     quantiles_enabled: bool = DEFAULT_QUANTILES_ENABLED,
     ensemble_enabled: bool = DEFAULT_ENSEMBLE_ENABLED,
-    comparison_sensors: list[dict] | None = None,
 ) -> vol.Schema:
     """Schema for the options step: RUNTIME TUNABLES only.
 
     Structural setup lives in the reconfigure flow (see the module docstring).
     What remains here are the three per-layer learner kill switches (SPEC §9),
-    the v0.4 quantile kill switch (SPEC §11.2), the v0.16 ensemble-band kill switch
-    (SPEC §11.3, default OFF) and the editable comparison-sensors list (SPEC §15.3).
+    the v0.4 quantile kill switch (SPEC §11.2) and the v0.16 ensemble-band kill
+    switch (SPEC §11.3, default OFF).
     Every switch is a plain boolean toggle (no NumberSelector, so the HA-2026
     ``step >= 1e-3`` selector rule cannot bite here). The learner/quantile
-    switches default ON; the ensemble switch defaults OFF (opt-in). The comparison
-    list is Optional so an empty list means "no comparisons" without a
-    required-field error; the default is the current value.
+    switches default ON; the ensemble switch defaults OFF (opt-in).
     """
     return vol.Schema(
         {
@@ -316,10 +274,6 @@ def _options_schema(
             vol.Required(
                 CONF_ENSEMBLE_ENABLED, default=ensemble_enabled
             ): _bool_selector(),
-            vol.Optional(
-                CONF_COMPARISON_SENSORS,
-                default=list(comparison_sensors or []),
-            ): _comparison_sensors_selector(),
         }
     )
 
@@ -537,10 +491,7 @@ class BalconySolarForecastOptionsFlow(OptionsFlow):
             #
             # The learner kill switches (SPEC §9) round-trip as plain booleans;
             # a missing key falls back to the shipped ON default so an older
-            # entry that predates a switch keeps that layer active. The
-            # comparison list (SPEC §15.3) is normalised through
-            # ComparisonConfig so half-filled / malformed rows are dropped and
-            # only clean {name, daily_entity} objects are persisted.
+            # entry that predates a switch keeps that layer active.
             data = {
                 **self.config_entry.options,
                 CONF_FAST_LEARNER_ENABLED: bool(
@@ -571,13 +522,13 @@ class BalconySolarForecastOptionsFlow(OptionsFlow):
                         CONF_ENSEMBLE_ENABLED, DEFAULT_ENSEMBLE_ENABLED
                     )
                 ),
-                CONF_COMPARISON_SENSORS: [
-                    c.to_dict()
-                    for c in ComparisonConfig.list_from_options(
-                        user_input.get(CONF_COMPARISON_SENSORS)
-                    )
-                ],
             }
+            # Legacy cleanup: entries configured before the external-comparison
+            # machinery was removed may still carry a "comparison_sensors" list
+            # in options (spread in above). The key has no reader anymore, so
+            # drop it on this save instead of letting the dead list ride along
+            # in the entry forever.
+            data.pop("comparison_sensors", None)
             return self.async_create_entry(title="", data=data)
 
         merged = {**self.config_entry.data, **self.config_entry.options}
@@ -592,7 +543,6 @@ class BalconySolarForecastOptionsFlow(OptionsFlow):
                 day_ahead_bias_enabled=defaults["day_ahead_bias_enabled"],
                 quantiles_enabled=defaults["quantiles_enabled"],
                 ensemble_enabled=defaults["ensemble_enabled"],
-                comparison_sensors=defaults["comparison_sensors"],
             ),
         )
 
@@ -664,20 +614,6 @@ def _current_values(
             return bool(existing[key])
         return fallback
 
-    def _comparison_default() -> list[dict]:
-        # Same precedence as the bool switches. The value is a list of
-        # {name, daily_entity} objects; a just-submitted raw list (possibly with
-        # half-filled rows from the object editor) is passed through verbatim so
-        # an error re-render keeps the operator's in-progress edits, while a
-        # value pulled from the persisted entry is already normalised.
-        if CONF_COMPARISON_SENSORS in src:
-            raw = src[CONF_COMPARISON_SENSORS]
-            return list(raw) if isinstance(raw, list) else []
-        if existing is not None and CONF_COMPARISON_SENSORS in existing:
-            raw = existing[CONF_COMPARISON_SENSORS]
-            return list(raw) if isinstance(raw, list) else []
-        return list(DEFAULT_COMPARISON_SENSORS)
-
     return {
         "name": src.get(CONF_NAME, existing.get(CONF_NAME, "") if existing else ""),
         "latitude": src.get(CONF_LATITUDE, default_lat),
@@ -716,5 +652,4 @@ def _current_values(
         "ensemble_enabled": _bool_default(
             CONF_ENSEMBLE_ENABLED, DEFAULT_ENSEMBLE_ENABLED
         ),
-        "comparison_sensors": _comparison_default(),
     }

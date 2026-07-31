@@ -97,7 +97,7 @@ SPEC nachgezogen (oder im PR begründet, warum nicht nötig) — Checkliste in
 
 ## Live-Zustände sind nicht aus dem Repo belegbar
 
-Gelernte θ-Werte, Shademap-Bins, Quantil-Füllstände, Scoreboard/Kill-Gate, die
+Gelernte θ-Werte, Shademap-Bins, Quantil-Füllstände, das Scoreboard, die
 tatsächlich konfigurierte Geometrie, aktive Kill-Switches, Degradationsstatus:
 verbindlich ist der **Diagnostics-Download des Config-Entries**, ergänzend die
 Aktionen `dump_shademap`, `get_issued_forecast`, `get_forecast` und die

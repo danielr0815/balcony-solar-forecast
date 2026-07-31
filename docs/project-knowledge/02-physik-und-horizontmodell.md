@@ -188,7 +188,7 @@ auf die Ports zurückverteilt; Ebenen ohne Gruppe bekommen `DC · η_ungrouped`
 `electrical.clamp_groups_ac`; die Engine setzt ihn identisch zur η-Gewichtung des
 Pre-Clamp-AC, sodass Pre-Clamp-AC und servierte AC auf jedem ungeclippten Slot
 exakt übereinstimmen.
-**Trennung merken:** Lernschichten, Scoreboard und Kill-Gate arbeiten auf der
+**Trennung merken:** Lernschichten und Scoreboard arbeiten auf der
 **DC**-Kurve (gemessen gegen `measured_dc_power_total`); die
 Betreiber-Hauptsensoren melden die **AC**-Kurve.
 

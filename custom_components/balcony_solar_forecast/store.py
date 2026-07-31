@@ -481,6 +481,11 @@ def _validate_learner_sections(
 def _coerce_comparison_ring(raw: Any) -> dict[str, Any]:
     """Validate the comparison ring: {iso_date: {comparison_name: daily_kwh}}.
 
+    LEGACY LOAD TOLERANCE ONLY: the external-comparison machinery (and with it
+    every writer of this ring) was removed after v0.24 — the key survives in
+    the store schema so an existing v3 store keeps loading byte-faithful
+    (SPEC §16.1), but nothing reads or writes it anymore.
+
     Keeps string-date-keyed entries whose value is a dict of
     {str name: finite number}; trimmed to the issued/actuals ring window so it
     stays bounded alongside the daily rings. Never raises.
@@ -1036,25 +1041,3 @@ class ForecastStore:
         self._data[STORE_KEY_SCOREBOARD_STATE] = state.to_dict()
         self._schedule_save()
 
-    # ------------------------------------------------------------------
-    # v3: comparison ring (recorder-read cache) — owner: scoreboard/store
-    # ------------------------------------------------------------------
-
-    def record_comparison(
-        self, iso_date: str, per_comparison_kwh: dict[str, float]
-    ) -> None:
-        """Cache the per-comparison daily-kWh read from recorder for ``iso_date``.
-
-        ``per_comparison_kwh`` maps ``{comparison_name: daily_kwh}`` — each value
-        the comparison entity's own value AS IT STOOD during ``iso_date`` (read
-        from recorder history, no leakage). Idempotent per day; trimmed to the
-        actuals-ring window.
-        """
-        ring = self._data.setdefault(STORE_KEY_COMPARISON_RING, {})
-        ring[iso_date] = dict(per_comparison_kwh)
-        _trim_ring(ring, _ACTUALS_RING_DAYS)
-        self._schedule_save()
-
-    def get_comparison(self, iso_date: str) -> dict[str, float] | None:
-        """Per-comparison daily-kWh cached for a day, or None if absent."""
-        return self._data.get(STORE_KEY_COMPARISON_RING, {}).get(iso_date)

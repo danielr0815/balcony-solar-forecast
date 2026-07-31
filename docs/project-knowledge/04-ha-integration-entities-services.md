@@ -125,16 +125,11 @@ verschwindendes Attribut sah aus wie ein Bug). Quelle: `coordinator._bias_cells_
 |---|---|---|---|
 | `daily_kwh_mae` | `…_daily_kwh_mae` | kWh | Engine-MAE der Tagesenergie über das Rollfenster; Attribute `window_days`, `scored_days` |
 | `hourly_mae` | `…_hourly_mae` | Wh | Engine-MAE je Tageslichtstunde |
-| `vs_best_baseline_pct` | `…_vs_best_baseline_pct` | % | um wie viel Prozent die Engine die **beste** konfigurierte Vergleichsprognose auf Tages-MAE schlägt (positiv = Engine besser) |
-| `comparison_daily_kwh_mae_<slug>` | `sensor.balcony_solar_forecast_comparison_daily_kwh_mae_<slug>` | kWh | MAE **einer** konfigurierten Fremdprognose |
 
 Alle mit `state_class: MEASUREMENT`, ohne `device_class` (MAE ist keine kumulative Energie). Werte sind `None`
 statt 0, solange kein bewerteter Tag im Fenster liegt.
-Die Vergleichs-Sensoren sind **dynamisch**: einer je Eintrag in `CONF_COMPARISON_SENSORS` (Options-Flow),
-Auslieferung mit **leerer** Liste. Ihre Entity-ID wird explizit auf `sensor.{DOMAIN}_comparison_daily_kwh_mae_<slug>`
-gepinnt (`ComparisonDailyKwhMaeSensor.__init__` setzt `self.entity_id`, der Slug ist rein ASCII), Attribute
-`comparison_name` und `daily_entity`. Beim Umbenennen/Entfernen räumt `_prune_stale_comparison_sensors` die
-Registry-Leichen weg, sonst hängen sie für immer auf `unavailable`.
+*(Die Vergleichs-MAE-Sensoren `comparison_daily_kwh_mae_<slug>` und `vs_best_baseline_pct` sind mit den externen
+Vergleichsprognosen entfernt in v0.25.0.)*
 
 ### 2.7 Quantilbänder (P10/P90) — kein `state_class`
 
@@ -315,7 +310,6 @@ Entität (noch) nicht registriert ist und deren Karte deshalb weggelassen wurde.
 | `degraded` | `binary_sensor.balcony_solar_forecast_degraded` | `problem` | Prognose läuft auf **weniger als** einem frischen Pull (cached / physics_fallback / unavailable). Attribute: `source_status`, `last_fetch_age_min` |
 | `fast_learner_active` | `…_fast_learner_active` | `running` | FAST-Layer formt die servierte Kurve **jetzt** (Status genau `active`). Attribut: `status` |
 | `slow_learner_active` | `…_shademap_learner_active` | `running` | Shademap-Layer aktiv. Attribut: `status` |
-| `kill_gate_passed` | `…_kill_gate_passed` | — | Engine schlägt über ein **volles** Fenster die beste Baseline um mindestens die Gate-Marge. `None`/unknown, solange das Fenster nicht voll ist — nie ein verfrühtes Urteil. Attribute: `window_days`, `scored_days`, `engine_daily_kwh_mae`, `engine_vs_best_baseline_pct` |
 
 ### 5.2 Auswahl-Entitäten des Verschattungsdiagramms (beide `EntityCategory.CONFIG`, immer verfügbar)
 
@@ -367,7 +361,7 @@ APIs zugreift (Validierungslauf `scripts/validation/validate.py`, `scripts/backf
 | `forecast` | `slot_count`, `first_slot`, `last_slot`, `plane_names`, **`daily_kwh_dc`**, **`daily_kwh_ac`**, `hourly_count` | DC/AC sind getrennt ausgewiesen (vor 0.21.0 gab es nur ein mehrdeutiges `daily_kwh`, das ~8 % über der AC-Zahl lag). Randnotiz: der Docstring von `_forecast_summary` in `diagnostics.py` nennt dafür fälschlich „v0.20.7" — diese Version existiert weder im CHANGELOG noch als Git-Tag; der Split kam laut CHANGELOG mit 0.21.0 |
 | `store` | `issued_days`, `actuals_days`, `hourly_actuals_days`, `snapshot_ring` + `snapshot_ring_capacity`, `schema_version` | Füllstände der Persistenz — 0 issued_days bei laufendem Betrieb ist ein Alarm |
 | `learners` | `status` (je Layer), `intraday_scalar`, `drift_mae`, `correction_source`, `state: {bias_cells, quantile_bins, shademap_channels, shademap_bins: {kanal: n}}` | Hat die Schicht überhaupt gelernten Zustand? Steht ein Layer auf `disabled_by_drift`? |
-| `scoreboard` | `engine_daily_kwh_mae`, `engine_hourly_mae`, `comparison_daily_kwh_mae`, `engine_vs_best_baseline_pct`, `kill_gate_passed` (+ `kill_gate_passed_flag`), `window_days`, `scored_days`, `strata` | `strata` = Aufschlüsselung je Wetter-Stratum (clear/mixed/overcast/fog) — dort zeigt sich, in welchem Wetter die Engine verliert |
+| `scoreboard` | `engine_daily_kwh_mae`, `engine_hourly_mae`, `window_days`, `scored_days`, `strata` | `strata` = Aufschlüsselung je Wetter-Stratum (clear/mixed/overcast/fog) — dort zeigt sich, in welchem Wetter die Engine verliert |
 | `quantiles` | `enabled` plus je Bin `{n, days, trained}` | `trained` spiegelt **exakt** das Servier-Gate: `n >= QUANTILE_MIN_SAMPLES` **und** `days >= QUANTILE_MIN_DAYS`. Ein Bin ohne `trained` liefert kein Band |
 | `ensemble` | Enable-Flag, Alter des gecachten Payloads, Member-Zahl, abgedeckte Stunden, heutige Bandquelle | nur relevant, wenn der Ensemble-Schalter an ist (Default AUS) |
 
@@ -397,10 +391,9 @@ Die häufigste Verwechslung: **strukturelle Felder liegen NICHT in den Optionen.
 | Kill-Switch Day-ahead-Bias | nur Optionen | `CONF_DAY_AHEAD_BIAS_ENABLED` (Default AN) |
 | Kill-Switch Quantilbänder | nur Optionen | `CONF_QUANTILES_ENABLED` (Default AN) |
 | Kill-Switch Ensemble-Bänder | nur Optionen | `CONF_ENSEMBLE_ENABLED` (Default **AUS**, Opt-in) |
-| Vergleichsprognosen (Liste `{name, daily_entity}`) | nur Optionen | `CONF_COMPARISON_SENSORS` (Default **leer**) |
 
 Merksatz: **Beam-Gain und alles Geometrische liegen im Reconfigure — in den Optionen stehen ausschließlich
-Laufzeit-Schalter und die Vergleichsliste.**
+Laufzeit-Schalter.**
 
 Weitere Mechanik, die man kennen sollte:
 - **`_structural_data()`** ist für Setup und Reconfigure derselbe Code: die sichtbaren lat/lon-Felder werden **in das
@@ -413,8 +406,8 @@ Weitere Mechanik, die man kennen sollte:
   strukturelle Schlüssel (`_STRUCTURAL_OPTION_KEYS`) aus `entry.options` entfernt — Altlasten des früheren
   Options-Flows, die sonst die frisch gespeicherten Daten wieder verschatten würden.
 - **Options-Speichern erhält Unbekanntes:** der Options-Flow spreizt zuerst die bestehenden Optionen und schreibt
-  nur die sechs Laufzeitwerte darüber. Vergleichszeilen laufen durch `ComparisonConfig.list_from_options` — halb
-  ausgefüllte oder kaputte Zeilen werden verworfen statt persistiert.
+  nur die fünf Laufzeitwerte darüber. Ein evtl. noch aus Alt-Installationen vorhandener `comparison_sensors`-Schlüssel
+  wird beim nächsten Speichern entfernt (die Vergleichsliste ist mit v0.25.0 entfallen).
 - **Jede Options- oder Reconfigure-Änderung löst einen Entry-Reload aus** (`_async_reload_entry`); Entitäten
   werden neu aufgebaut, der Intraday-Skalar startet bei 1.0.
 - Das Site-Objekt wird beim Speichern validiert (`_site_validation.validate_site`: Azimut 0–360, Neigung 0–90,

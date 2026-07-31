@@ -20,7 +20,6 @@
       "learner_status_day_ahead": {"default": "mdi:brain"},
       "daily_kwh_mae": {"default": "mdi:chart-line"},
       "hourly_mae": {"default": "mdi:chart-bell-curve"},
-      "vs_best_baseline_pct": {"default": "mdi:trophy-outline"},
       "energy_production_today_p10": {"default": "mdi:solar-power"},
       "energy_production_today_p90": {"default": "mdi:solar-power"},
       "shade_profile": {"default": "mdi:sun-angle"}
@@ -28,8 +27,7 @@
     "binary_sensor": {
       "degraded": {"default": "mdi:alert-decagram-outline"},
       "fast_learner_active": {"default": "mdi:brain"},
-      "slow_learner_active": {"default": "mdi:brain"},
-      "kill_gate_passed": {"default": "mdi:gate"}
+      "slow_learner_active": {"default": "mdi:brain"}
     },
     "select": {
       "shade_profile_module": {"default": "mdi:solar-panel"}

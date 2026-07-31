@@ -266,17 +266,14 @@ def _make_coordinator(store: _FakeStore | None = None) -> BalconySolarCoordinato
     c._shade_profile_date = None
     c._shade_profile_cache = None
     # v0.4 scoreboard attributes (_build_data now assembles the scoreboard
-    # summary): neutral empty ring, defaults, no comparisons.
+    # summary): neutral empty ring, defaults.
     from custom_components.balcony_solar_forecast.const import (
-        DEFAULT_SCOREBOARD_GATE_MARGIN,
         DEFAULT_SCOREBOARD_WINDOW_DAYS,
     )
     from custom_components.balcony_solar_forecast.core.types import ScoreboardState
 
     c._scoreboard_enabled = True
     c._scoreboard_window_days = DEFAULT_SCOREBOARD_WINDOW_DAYS
-    c._scoreboard_gate_margin = DEFAULT_SCOREBOARD_GATE_MARGIN
-    c._comparisons = ()
     c._scoreboard_state = ScoreboardState()
     # v0.4 quantile lane: enabled by default, empty ring (cold start -> neutral).
     from custom_components.balcony_solar_forecast.core.types import QuantileState

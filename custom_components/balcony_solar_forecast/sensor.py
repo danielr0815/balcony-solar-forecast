@@ -72,7 +72,6 @@ from .const import (
     ATTR_WH_PERIOD_P10,
     ATTR_WH_PERIOD_P50,
     ATTR_WH_PERIOD_P90,
-    CONF_COMPARISON_SENSORS,
     DATA_KEY_BAND_SOURCE,
     DATA_KEY_BAND_SOURCE_BY_DAY,
     DATA_KEY_BIAS_CELLS,
@@ -97,7 +96,6 @@ from .const import (
     LEARNER_STATUS_FROZEN,
     LEARNER_STATUS_OFF,
     LEARNER_STATUS_VALUES,
-    SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX,
     SENSOR_DRIFT_MAE_CORRECTED,
     SENSOR_ENERGY_D2,
     SENSOR_ENERGY_D2_DC,
@@ -109,7 +107,6 @@ from .const import (
     SENSOR_ENERGY_TOMORROW_DC,
     SENSOR_FORECAST_DAILY_KWH_MAE,
     SENSOR_FORECAST_HOURLY_MAE,
-    SENSOR_FORECAST_VS_BEST_BASELINE_PCT,
     SENSOR_INTRADAY_SCALAR,
     SENSOR_MEASURED_AC_POWER,
     SENSOR_MEASURED_DC_TOTAL,
@@ -121,7 +118,6 @@ from .const import (
     STATUS_PHYSICS_FALLBACK,
     STATUS_UNAVAILABLE,
 )
-from .core.types import ComparisonConfig
 
 # Diagnostic sensor keys (owned here; not part of the consumer contract).
 SENSOR_LAST_FETCH_AGE = "last_fetch_age_min"
@@ -178,8 +174,6 @@ _ENERGY_KEYS_AC = (
 # not have populated it yet (validate-and-clamp: a missing field -> None).
 _SB_ENGINE_DAILY_MAE = "engine_daily_kwh_mae"
 _SB_ENGINE_HOURLY_MAE = "engine_hourly_mae"
-_SB_COMPARISON_DAILY_MAE = "comparison_daily_kwh_mae"
-_SB_ENGINE_VS_BEST_PCT = "engine_vs_best_baseline_pct"
 # Sub-keys inside the DATA_KEY_QUANTILE_CURVES dict (15-min band Wh curves keyed
 # by ISO-UTC slot start), matching the get_forecast response block names.
 _Q_P10 = FORECAST_RESP_KEY_P10
@@ -233,7 +227,6 @@ async def async_setup_entry(
         # --- v0.4 skill scoreboard (SPEC §15.5) ---
         EngineDailyKwhMaeSensor(coordinator),
         EngineHourlyMaeSensor(coordinator),
-        EngineVsBestBaselinePctSensor(coordinator),
         # --- v0.4 quantile bands (SPEC §11.2): today's P10/P90 ---
         EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P10, _Q_P10),
         EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P90, _Q_P90),
@@ -263,72 +256,10 @@ async def async_setup_entry(
     if ac_source:
         entities.append(MeasuredAcPowerSensor(coordinator, ac_source))
 
-    # One MAE sensor per configured comparison forecast (SPEC §15.3). The list
-    # is read from the merged entry config (data + options); it ships EMPTY, so
-    # a stock install adds zero comparison sensors. A rename produces a new
-    # sensor (slug-keyed unique_id) rather than silently rewriting history.
-    comparisons = _configured_comparisons(coordinator)
-    for cmp in comparisons:
-        entities.append(ComparisonDailyKwhMaeSensor(coordinator, cmp))
-
-    # Prune ghost per-comparison sensors left behind by a rename/removal via the
-    # options flow: any registry entry whose unique_id is a comparison-MAE slug
-    # not in the CURRENT configured set would otherwise linger permanently
-    # "unavailable" (a restored entity) on every rename. Remove those stale ids.
-    _prune_stale_comparison_sensors(hass, entry, comparisons)
-
     async_add_entities(entities)
     # NOTE: the get_forecast service is registered in async_setup (see
     # _services.async_register_services, quality-scale action-setup); only its
     # response builder (_build_forecast_response below) lives in this module.
-
-
-def _prune_stale_comparison_sensors(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    comparisons: tuple[ComparisonConfig, ...],
-) -> None:
-    """Remove registry entries for comparison sensors no longer configured.
-
-    A comparison MAE sensor's unique_id is
-    ``{entry_id}_{PREFIX}_{slug}``; after a rename/removal via the options flow
-    the old slug's registry entry lingers "unavailable" forever unless pruned.
-    We keep only the unique_ids of the CURRENTLY configured comparisons and drop
-    the rest. Best-effort: never raises (a registry hiccup must not block setup).
-    """
-    try:
-        from homeassistant.helpers import entity_registry as er
-
-        registry = er.async_get(hass)
-        prefix = f"{entry.entry_id}_{SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX}_"
-        keep = {
-            f"{entry.entry_id}_{SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX}_{c.slug}"
-            for c in comparisons
-        }
-        for reg_entry in er.async_entries_for_config_entry(
-            registry, entry.entry_id
-        ):
-            uid = reg_entry.unique_id
-            if uid.startswith(prefix) and uid not in keep:
-                registry.async_remove(reg_entry.entity_id)
-    except Exception:  # pragma: no cover - registry cleanup is best-effort
-        _LOGGER.debug("Comparison-sensor prune skipped", exc_info=True)
-
-
-def _configured_comparisons(coordinator: Any) -> tuple[ComparisonConfig, ...]:
-    """Resolve the configured comparison forecasts for a coordinator's entry.
-
-    Reads CONF_COMPARISON_SENSORS from the merged ``{**entry.data,
-    **entry.options}`` (options win) and parses it leniently via
-    ``ComparisonConfig.list_from_options`` (malformed / half-filled rows are
-    dropped). Ships EMPTY (SPEC §15.3), so a stock install returns no comparisons.
-    Never raises: an entry without options or a missing key yields ().
-    """
-    entry = getattr(coordinator, "entry", None)
-    if entry is None:
-        return ()
-    merged = {**getattr(entry, "data", {}), **getattr(entry, "options", {})}
-    return ComparisonConfig.list_from_options(merged.get(CONF_COMPARISON_SENSORS))
 
 
 def _build_forecast_response(
@@ -1125,88 +1056,6 @@ class EngineHourlyMaeSensor(_ScoreboardSensor):
     def native_value(self) -> float | None:
         value = self._summary().get(_SB_ENGINE_HOURLY_MAE)
         return None if value is None else round(float(value), 1)
-
-
-class EngineVsBestBaselinePctSensor(_ScoreboardSensor):
-    """Percent the engine beats the BEST baseline on daily-kWh MAE (SPEC §15.5).
-
-    Positive == engine better (smaller error) than the best configured
-    comparison. ``None`` when there is no scored engine day, no comparison with a
-    scored day, or an undefined ratio. Backs the dashboard gauge.
-    """
-
-    _attr_native_unit_of_measurement = "%"
-    _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(self, coordinator: Any) -> None:
-        super().__init__(coordinator, SENSOR_FORECAST_VS_BEST_BASELINE_PCT)
-
-    @property
-    def native_value(self) -> float | None:
-        value = self._summary().get(_SB_ENGINE_VS_BEST_PCT)
-        return None if value is None else round(float(value), 1)
-
-
-class ComparisonDailyKwhMaeSensor(_ScoreboardSensor):
-    """Daily-kWh MAE of one configured external comparison forecast (SPEC §15.5).
-
-    One instance per ``CONF_COMPARISON_SENSORS`` entry. The object_id is suffixed
-    with the comparison's stable slug so a rename mints a new sensor rather than
-    rewriting history; the friendly name carries the operator's label as an
-    attribute (the entity ``name`` translation is generic). Reads its own MAE
-    out of the scoreboard summary's ``comparison_daily_kwh_mae`` map by the
-    comparison NAME (the key core.scoreboard uses). ``None`` until that
-    comparison has a scored day in the window (a comparison added mid-window is
-    absent, not zero).
-    """
-
-    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    # Kept as _attr_icon (not migrated to icons.json): these dynamic per-
-    # comparison sensors set translation_key = None (see __init__), so there is
-    # no stable translation_key for icons.json to key an entity icon by.
-    _attr_icon = "mdi:chart-line-variant"
-
-    def __init__(self, coordinator: Any, comparison: ComparisonConfig) -> None:
-        super().__init__(
-            coordinator,
-            f"{SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX}_{comparison.slug}",
-        )
-        self._comparison = comparison
-        # A per-comparison entity name so the dynamic sensors are distinguishable
-        # in the UI (the shared translation_key would otherwise name them all
-        # identically). has_entity_name stays True: this becomes the object name.
-        self._attr_translation_key = None
-        self._attr_name = f"Comparison daily kWh MAE {comparison.name}"
-        # Pin the object_id to the documented dashboard id
-        # `…_comparison_daily_kwh_mae_<slug>` via the SUPPORTED integration-
-        # suggested path: a pre-set ``entity_id`` (HA 2026 stores it as the
-        # suggested object id for new registry entries). The formerly used
-        # ``_attr_suggested_object_id`` does not exist in HA — it was silently
-        # ignored and the id fell back to slugifying the name, which diverges
-        # from ComparisonConfig.slug for non-ASCII labels ("Süd"). The slug is
-        # strictly ASCII (types.ComparisonConfig.slug), so this entity_id is
-        # always valid.
-        self.entity_id = (
-            f"sensor.{DOMAIN}_"
-            f"{SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX}_{comparison.slug}"
-        )
-
-    def _comparison_mae_map(self) -> dict[str, Any]:
-        cmp_map = self._summary().get(_SB_COMPARISON_DAILY_MAE)
-        return cmp_map if isinstance(cmp_map, dict) else {}
-
-    @property
-    def native_value(self) -> float | None:
-        value = self._comparison_mae_map().get(self._comparison.name)
-        return None if value is None else round(float(value), 3)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        return {
-            "comparison_name": self._comparison.name,
-            "daily_entity": self._comparison.daily_entity,
-        }
 
 
 # ---------------------------------------------------------------------------

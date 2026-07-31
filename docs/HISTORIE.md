@@ -165,7 +165,8 @@ Literatur/Recherche: **30–50 % weniger Stunden-MAE** gegenüber dem Vorzustand
 intern `−180` (Quellcode verifiziert 2026-07-05); P1/P4 115, P2/P5 25, P3/P6
 205." Die rany2-Integration ist kein Vertragsbestandteil mehr.
 
-*Heute normativ:* die Gate- und Abbruchkriterien stehen in SPEC §15.1/§15.4, die
+*Heute normativ:* die Abbruchkriterien stehen in SPEC §15.1 (das Phase-1-
+Kill-Gate wurde nach seiner Abnahme wieder entfernt), die
 pvlib-Golden-Vektoren als Merge-Blocker in SPEC §21, der Issued-Snapshot mit
 beiden Stundenkurven in SPEC §16.2, die stdlib-only-Zusage in SPEC §2.
 
@@ -221,7 +222,7 @@ beiden Stundenkurven in SPEC §16.2, die stdlib-only-Zusage in SPEC §2.
   battery_manager wird **nicht** angefasst.
 
 *Heute normativ:* D-P1 in SPEC §2, D-P8 in SPEC §9 (Leitsatz) und §13, D-P9 in
-SPEC §2 / §7.8 / §15.3, die Attributionszusage aus D-P10 in SPEC §16.2.
+SPEC §2 / §7.8, die Attributionszusage aus D-P10 in SPEC §16.2.
 
 ## §H7 Betreiber-Antworten B1 … B12 (2026-07-05)
 
@@ -435,9 +436,9 @@ Lernschichten (heute §9), nicht den Horizont (heute §5).
 | §6.1 | Ensemble-Wetter-Bänder | SPEC §11.3 |
 | §7 | Degradationsleiter | SPEC §13 |
 | §8 | Schnittstellen für Konsumenten | SPEC §14 (battery_manager-Ausblick → §H12) |
-| §9 | Phasenplan | §H5; Gate-Kriterien → SPEC §15.1/§15.4; Golden-Vektoren → §21; Issued-Snapshot → §16.2 |
+| §9 | Phasenplan | §H5; Gate-Kriterien → SPEC §15.1 (Kill-Gate nach Phase-1-Abnahme entfernt); Golden-Vektoren → §21; Issued-Snapshot → §16.2 |
 | §10 | Validierung & Metriken | SPEC §15.1 (Erwartungswerte → §H5) |
-| §11 | Entscheidungspunkte D-P1…D-P11 | §H6 (D-P1 → SPEC §2, D-P8 → §9/§13, D-P9 → §2/§7.8/§15.3) |
+| §11 | Entscheidungspunkte D-P1…D-P11 | §H6 (D-P1 → SPEC §2, D-P8 → §9/§13, D-P9 → §2/§7.8) |
 | §12 | Betreiber-Antworten B1…B12 | §H7 (B4 → SPEC §20.2, B9 → §15.1, B1 → §7.8) |
 | §13 | Messdaten-Befunde | §H8 (Laub-Rampe → SPEC §5.2, Startwerte → §7.8, Sonnenanker → §4.1/§21) |
 | §13.4 | Horizonttabellen + Feldsemantik | Feldsemantik/Validierung → SPEC §5.1–§5.3 und §7.4; Startwerte → §7.8; Herleitung → §H8 |
@@ -445,7 +446,7 @@ Lernschichten (heute §9), nicht den Horizont (heute §5).
 | Anhang A | Konventionen + Checkliste | SPEC §20 (rany2-Zeile → §H5) |
 | Anhang B | Quellen | §H9 |
 | §14 (Präambel) | Phase-4-Deliverables | §H5 (stdlib-only → SPEC §2) |
-| §14.1 | Skill-Scoreboard / Kill-Gate | SPEC §15.2–§15.5 (Erst-Urteil → §H10) |
+| §14.1 | Skill-Scoreboard / Kill-Gate | SPEC §15.2/§15.5 (Erst-Urteil → §H10; Kill-Gate samt Vergleichsprognosen nach Phase-1-Abnahme entfernt) |
 | §14.2 | Quantile P10/P50/P90 | SPEC §11.1/§11.2 (Belegzahlen → §H10) |
 | §14.3 | Observability-Dashboard | SPEC §18.1 |
 | §14.4 | Store-Schema v3 | SPEC §16.1 (KRITISCH-Absatz → §H10) |

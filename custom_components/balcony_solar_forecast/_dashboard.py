@@ -31,7 +31,6 @@ from typing import Any
 
 from .const import (
     BINARY_SENSOR_DEGRADED,
-    BINARY_SENSOR_KILL_GATE_PASSED,
     DATE_SHADE_PROFILE_DATE,
     SELECT_SHADE_PROFILE_MODULE,
     SENSOR_DRIFT_MAE_CORRECTED,
@@ -41,7 +40,6 @@ from .const import (
     SENSOR_ENERGY_TODAY_P90,
     SENSOR_FORECAST_DAILY_KWH_MAE,
     SENSOR_FORECAST_HOURLY_MAE,
-    SENSOR_FORECAST_VS_BEST_BASELINE_PCT,
     SENSOR_INTRADAY_SCALAR,
     SENSOR_MEASURED_AC_POWER,
     SENSOR_MEASURED_DC_TOTAL,
@@ -73,13 +71,11 @@ _SHADE_PROFILE_CARD = "custom:balcony-shade-profile-card"
 # hourly production bars per module + a dashed forecast line.
 _POWER_HISTORY_CARD = "custom:balcony-power-history-card"
 
-# Every INTEGRATION-OWNED entity key the dashboard can reference (the comparison
-# MAE rows + the measured-power ids are dynamic and handled separately). A key
-# absent from the entity_map is reported in the response's ``missing_entities``
-# and its card/row is omitted.
+# Every INTEGRATION-OWNED entity key the dashboard can reference (the measured-
+# power ids are dynamic and handled separately). A key absent from the
+# entity_map is reported in the response's ``missing_entities`` and its card/row
+# is omitted.
 DASHBOARD_ENTITY_KEYS: tuple[str, ...] = (
-    BINARY_SENSOR_KILL_GATE_PASSED,
-    SENSOR_FORECAST_VS_BEST_BASELINE_PCT,
     SENSOR_FORECAST_DAILY_KWH_MAE,
     SENSOR_FORECAST_HOURLY_MAE,
     SENSOR_ENERGY_TODAY,
@@ -173,19 +169,16 @@ def is_managed(config: Any) -> bool:
 def build_dashboard_config(
     *,
     entity_map: dict[str, str],
-    comparison_slugs: list[tuple[str, str]],
     measured_entities: list[tuple[str, str]],
     version: str,
 ) -> dict[str, Any]:
     """Assemble the full Lovelace config, mirroring the shipped YAML.
 
     ``entity_map`` maps entity KEY (unique_id suffix) → real entity_id;
-    ``comparison_slugs`` is ``[(name, entity_id), ...]`` for the configured
-    comparison MAE sensors; ``measured_entities`` is ``[(plane_name,
-    entity_id), ...]`` for the planes' measured DC-power sensors — the
-    ``plane_name`` becomes each row's label so the graph reads M1…M8 instead
-    of the sensors' ambiguous own friendly names. ``version`` stamps the
-    :data:`MANAGED_MARKER`.
+    ``measured_entities`` is ``[(plane_name, entity_id), ...]`` for the planes'
+    measured DC-power sensors — the ``plane_name`` becomes each row's label so
+    the graph reads M1…M8 instead of the sensors' ambiguous own friendly names.
+    ``version`` stamps the :data:`MANAGED_MARKER`.
 
     A card referencing an entity missing from ``entity_map`` is omitted; an
     entities-card drops just that row. Returns
@@ -193,9 +186,7 @@ def build_dashboard_config(
     """
     cards: list[dict[str, Any]] = []
 
-    _add_kill_gate_verdict(cards, entity_map)
-    _add_vs_best_gauge(cards, entity_map)
-    _add_scoreboard(cards, entity_map, comparison_slugs)
+    _add_scoreboard(cards, entity_map)
     _add_forecast_history(cards, entity_map)
     _add_dc_diagnostics(cards, entity_map)
     # No per-module LTS statistics-graph here: the bundled power-history card
@@ -209,7 +200,6 @@ def build_dashboard_config(
     _add_drift_trend(cards, entity_map)
     _add_shademap_markdown(cards)
     _add_shade_profile_card(cards, entity_map)
-    _add_comparison_reminder(cards)
 
     view = {
         "title": "Forecast",
@@ -237,67 +227,19 @@ def _has_entity_row(rows: list[dict[str, Any]]) -> bool:
     return any("entity" in row for row in rows)
 
 
-def _add_kill_gate_verdict(
-    cards: list[dict[str, Any]], entity_map: dict[str, str]
-) -> None:
-    """Kill-gate verdict markdown (SPEC §15.4) — templated on the real ids."""
-    kill = entity_map.get(BINARY_SENSOR_KILL_GATE_PASSED)
-    pct = entity_map.get(SENSOR_FORECAST_VS_BEST_BASELINE_PCT)
-    if kill is None or pct is None:
-        return
-    # Placeholder tokens avoid escaping the Jinja braces in this file.
-    content = _KILL_GATE_TEMPLATE.replace("__KILL__", kill).replace("__PCT__", pct)
-    cards.append({"type": "markdown", "title": "Kill-gate verdict", "content": content})
-
-
-def _add_vs_best_gauge(
-    cards: list[dict[str, Any]], entity_map: dict[str, str]
-) -> None:
-    """Forecast-vs-best-baseline gauge (SPEC §15.5); positive = forecast better."""
-    entity_id = entity_map.get(SENSOR_FORECAST_VS_BEST_BASELINE_PCT)
-    if entity_id is None:
-        return
-    cards.append(
-        {
-            "type": "gauge",
-            "name": "Forecast vs best baseline",
-            "entity": entity_id,
-            "unit": "%",
-            "min": -50,
-            "max": 50,
-            "needle": True,
-            "segments": [
-                {"from": -50, "color": "#c0392b"},
-                {"from": -10, "color": "#e67e22"},
-                {"from": 0, "color": "#f1c40f"},
-                {"from": 10, "color": "#2ecc71"},
-            ],
-        }
-    )
-
-
 def _add_scoreboard(
     cards: list[dict[str, Any]],
     entity_map: dict[str, str],
-    comparison_slugs: list[tuple[str, str]],
 ) -> None:
-    """Skill scoreboard (SPEC §15.2/§15.1): forecast MAE + per-comparison MAE."""
+    """Skill scoreboard (SPEC §15.2/§15.1): the engine's forecast MAE metrics."""
     rows: list[dict[str, Any]] = []
     for key, name in (
-        (BINARY_SENSOR_KILL_GATE_PASSED, "Kill-gate passed"),
         (SENSOR_FORECAST_DAILY_KWH_MAE, "Forecast daily-kWh MAE"),
         (SENSOR_FORECAST_HOURLY_MAE, "Forecast hourly MAE"),
-        (SENSOR_FORECAST_VS_BEST_BASELINE_PCT, "Forecast vs best baseline"),
     ):
         row = _row(entity_map, key, name)
         if row is not None:
             rows.append(row)
-    if comparison_slugs:
-        rows.append(
-            {"type": "section", "label": "Comparison baselines (daily-kWh MAE)"}
-        )
-        for name, entity_id in comparison_slugs:
-            rows.append({"entity": entity_id, "name": name})
     if _has_entity_row(rows):
         cards.append(
             {
@@ -559,37 +501,9 @@ def _add_shade_profile_card(
     )
 
 
-def _add_comparison_reminder(cards: list[dict[str, Any]]) -> None:
-    """Comparison-sensor configuration reminder markdown (SPEC §15.3: ships EMPTY)."""
-    cards.append(
-        {
-            "type": "markdown",
-            "title": "Scoreboard comparison sensors",
-            "content": _COMPARISON_MARKDOWN,
-        }
-    )
-
-
 # ---------------------------------------------------------------------------
 # Static card content (mirrors the shipped YAML 1:1).
 # ---------------------------------------------------------------------------
-
-_KILL_GATE_TEMPLATE = (
-    "{% set passed = states('__KILL__') %} "
-    "{% set pct = states('__PCT__') %} "
-    "{% if passed == 'on' %} ## ✅ Kill-gate PASSED\n\n"
-    "The forecast is beating the best configured baseline on daily-kWh MAE by "
-    "the required margin over a full rolling window. It is safe to consider "
-    "re-pointing consumers (e.g. battery_manager) to the forecast sensors. "
-    "{% elif passed == 'off' %} ## ❌ Kill-gate NOT passed\n\n"
-    "Over the current full window the forecast is **not** yet the required "
-    "margin better than the best baseline. Keep the frozen baseline in place "
-    "(SPEC §15.4). {% else %} ## ⏳ Kill-gate: window not full yet\n\n"
-    "Not enough scored days in the rolling window to assert the gate "
-    "(`unknown` until a full window of nightly scores exists). {% endif %}\n\n"
-    "{% if pct not in ('unknown', 'unavailable') %} Forecast vs best baseline: "
-    "**{{ pct }} %** (positive = forecast better). {% endif %}"
-)
 
 _SHADEMAP_MARKDOWN = (
     "The slow learner holds a per-channel polar map of beam transmittance τ "
@@ -605,17 +519,4 @@ _SHADEMAP_MARKDOWN = (
     "cuts the beam.\n\n\n"
     "Shademap status and bin count are in the *Learners, drift & degradation* "
     "card above."
-)
-
-_COMPARISON_MARKDOWN = (
-    "The scoreboard ships with **no** comparison baselines configured "
-    "(generic, not hardcoded — SPEC §15.3). Add them in **Settings → Devices & "
-    "Services → Balcony Solar Forecast → Configure → Comparison sensors**. The "
-    "operator's live site uses:\n\n\n"
-    "| Name | Daily-kWh entity |\n"
-    "|---|---|\n"
-    "| `8-Entry Baseline` | `sensor.pv_prognose_heute_alle_module` |\n"
-    "| `Alt 1600W` | `sensor.energy_production_today_4` |\n\n\n"
-    "Each added comparison creates a `…_comparison_daily_kwh_mae_<slug>` "
-    "sensor. See docs/DASHBOARD.md."
 )

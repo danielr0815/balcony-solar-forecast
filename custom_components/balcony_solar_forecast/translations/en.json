@@ -85,9 +85,6 @@
       "hourly_mae": {
         "name": "Hourly MAE"
       },
-      "vs_best_baseline_pct": {
-        "name": "Vs best baseline pct"
-      },
       "energy_production_today_p10": {
         "name": "Energy production today P10"
       },
@@ -107,9 +104,6 @@
       },
       "slow_learner_active": {
         "name": "Shademap learner active"
-      },
-      "kill_gate_passed": {
-        "name": "Kill-gate passed"
       }
     },
     "select": {
@@ -407,16 +401,14 @@
           "slow_learner_enabled": "Shademap learner (per-channel shade map)",
           "day_ahead_bias_enabled": "Day-ahead bias correction",
           "quantiles_enabled": "Quantile bands (P10/P50/P90)",
-          "ensemble_enabled": "Ensemble-weather uncertainty bands",
-          "comparison_sensors": "Comparison forecast sensors"
+          "ensemble_enabled": "Ensemble-weather uncertainty bands"
         },
         "data_description": {
           "fast_learner_enabled": "Applies a short-lived intraday clear-sky-index correction to the next few hours (recovers from fog mornings).",
           "slow_learner_enabled": "Learns per-channel beam transmittance by sun position over a season (shade, trees, building edge).",
           "day_ahead_bias_enabled": "Applies a nightly-trained multiplicative bias per cloud class and day part.",
           "quantiles_enabled": "Emits empirical P10/P50/P90 uncertainty bands from the 90-day error ring (collapses to P50 until a bin has enough samples).",
-          "ensemble_enabled": "Widens the P10/P90 bands with today's Open-Meteo ensemble spread (envelope-max with the learned bands). Off by default; never affects P50, the headline or the scoreboard.",
-          "comparison_sensors": "List of external daily-kWh forecast sensors the scoreboard scores the engine against. Each row has a name plus a daily_entity. Ships empty; e.g. name \"8-Entry Baseline\" -> sensor.pv_prognose_heute_alle_module."
+          "ensemble_enabled": "Widens the P10/P90 bands with today's Open-Meteo ensemble spread (envelope-max with the learned bands). Off by default; never affects P50, the headline or the scoreboard."
         }
       }
     },

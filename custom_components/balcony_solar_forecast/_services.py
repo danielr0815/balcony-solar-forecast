@@ -99,7 +99,6 @@ from .const import (
     DOMAIN,
     INTEGRATION_VERSION,
     LEARNER_SNAPSHOT_RING,
-    SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX,
     SERVICE_DUMP_SHADEMAP,
     SERVICE_GET_FORECAST,
     SERVICE_GET_ISSUED_FORECAST,
@@ -580,12 +579,10 @@ async def _handle_install_dashboard(
     registry = er.async_get(hass)
     entries = er.async_entries_for_config_entry(registry, entry_id)
     entity_map = collect_entity_map(entries, entry_id)
-    comparison_slugs = _comparison_slugs(coordinator, entity_map)
     measured_entities = _measured_entities(coordinator)
 
     config = build_dashboard_config(
         entity_map=entity_map,
-        comparison_slugs=comparison_slugs,
         measured_entities=measured_entities,
         version=INTEGRATION_VERSION,
     )
@@ -638,27 +635,6 @@ def _resolve_storage_dashboard(
             "this action; create a new UI (storage-mode) dashboard and target it."
         )
     return dash
-
-
-def _comparison_slugs(
-    coordinator: Any, entity_map: dict[str, str]
-) -> list[tuple[str, str]]:
-    """``[(name, entity_id)]`` for the configured comparison MAE sensors.
-
-    Reuses ``sensor._configured_comparisons`` (lazy import — it lives on the
-    HA-importing sensor platform) and resolves each comparison's real entity_id
-    from ``entity_map`` via its slug-keyed unique_id suffix. A comparison with no
-    registered MAE sensor (not yet materialised) is skipped.
-    """
-    from .sensor import _configured_comparisons
-
-    out: list[tuple[str, str]] = []
-    for comparison in _configured_comparisons(coordinator):
-        key = f"{SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX}_{comparison.slug}"
-        entity_id = entity_map.get(key)
-        if entity_id:
-            out.append((comparison.name, entity_id))
-    return out
 
 
 def _measured_entities(coordinator: Any) -> list[tuple[str, str]]:

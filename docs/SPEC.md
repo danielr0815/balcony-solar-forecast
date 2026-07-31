@@ -54,7 +54,7 @@ die Überschriften dieses Dokuments geprüft (§1.4).
 | Bootstrap und Re-Bootstrap aus Historie | **§12** | §7.8 (Default-Site), §9.7 (Zeitstempel) |
 | Degradationsleiter | **§13** | §14 (Sensorik), §3 (Last-Good-Cache) |
 | Konsumenten-Schnittstellen, Entitäten, Attribute, Diagnostics | **§14** | §6.5 (DC/AC), §11.2 (Bänder) |
-| Metriken, Skill-Scoreboard, Kill-Gate | **§15** | §8 (Strata), §16.2 (Issued-Ring) |
+| Metriken, Skill-Scoreboard | **§15** | §8 (Strata), §16.2 (Issued-Ring) |
 | Persistenz: Store-Schema, Ringe, Schreibsemantik | **§16** | §9.8 (Rollback-Ring), §12.5 (Import) |
 | Verschattungsprofil-Diagramm | **§17** | §9.1/§9.2 (Datenquelle), §18.3 (Karte) |
 | Dashboard und mitgelieferte Lovelace-Karten | **§18** | §14 (Entitäten), §17 (Diagramm) |
@@ -118,11 +118,10 @@ Referenzvektoren der Golden-Tests und sind **niemals** Laufzeitabhängigkeiten
 (§21).
 
 **Generik statt Hardcoding.** Ebenen (Azimut/Neigung/Wp/η), Horizonttabellen,
-Wechselrichter-Gruppen, Ist-Mess-Entitäten und die Liste der Vergleichsprognosen
-sind **Konfiguration** (§7). Nichts ist an einen Wechselrichter-Hersteller oder
-einen Standort gebunden; die Vergleichsliste wird **leer** ausgeliefert (§15.3),
-und der mitgelieferte `const.DEFAULT_SITE` ist ein Struktur-/Formatbeispiel
-(§7.8), kein Pflichtverhalten.
+Wechselrichter-Gruppen und Ist-Mess-Entitäten sind **Konfiguration** (§7).
+Nichts ist an einen Wechselrichter-Hersteller oder
+einen Standort gebunden, und der mitgelieferte `const.DEFAULT_SITE` ist ein
+Struktur-/Formatbeispiel (§7.8), kein Pflichtverhalten.
 
 **Marken-Icon lokal.** Die PNGs unter `custom_components/<domain>/brand/`
 (`icon.png` / `icon@2x.png` / `logo.png` / `logo@2x.png`) werden vom lokalen
@@ -431,7 +430,7 @@ Slot-Obergrenze der Bänder ein (§11.2).
 ### §6.5 Trennung DC-intern / AC-Ausgang
 
 - **DC ist Lern- und Bewertungsgrundwahrheit:** Lernschichten (§9),
-  Skill-Scoreboard und Kill-Gate (§15) rechnen auf der DC-Kurve, gemessen gegen
+  Skill-Scoreboard (§15) rechnen auf der DC-Kurve, gemessen gegen
   `measured_dc_power_total` (§14.3).
 - **AC ist der betreiberseitige Standard:** die Haupt-Sensoren
   (`energy_production_today/_tomorrow/_d2`, `power_production_now`, die
@@ -458,7 +457,7 @@ Auf Entry-Ebene stehen `name`, `latitude`, `longitude`,
 denn Fetcher und Sonnenstand lesen ausschließlich die site-eigenen Koordinaten.
 
 Nur **Laufzeitschalter** (Kill-Switches der Lernschichten §9, der Quantile
-§11.2, der Ensemble-Bänder §11.3) und die **Vergleichsliste** (§15.3) leben in
+§11.2, der Ensemble-Bänder §11.3) leben in
 den Options — ein strukturelles Feld dort verschattet `entry.data` dauerhaft.
 
 **Entry-Migration (Feststellung).** Die Integration implementiert aktuell
@@ -1184,7 +1183,7 @@ Spreizung um p50 = 1,0 — echte Wetterstreuung, bevor der Ring Evidenz hat.
 Store-Schema-Bump). Eine Stunde mit zu wenigen nutzbaren Membern oder
 deterministischem GHI unter der Schwelle fällt auf das gelernte Band zurück.
 
-**Nie tragend.** P50, Headline, Scoreboard und Kill-Gate bleiben **unberührt**;
+**Nie tragend.** P50, Headline und Scoreboard bleiben **unberührt**;
 jeder Ausfall degradiert **nahtlos** auf die gelernten Bänder. Das Ensemble ist
 ein **Opt-in-Schalter, Standard AUS**, und ausdrücklich **keine Stufe der
 Degradationsleiter** (§13).
@@ -1481,9 +1480,9 @@ Ein Diagnose-Sensor behauptet nie eine Wirkung, die er nicht hat.
   bestehen (ein verschwindendes Attribut sah aus wie ein Defekt).
 - `band_source` erscheint **nur, solange ein Band existiert** (§11.3).
 - Scoreboard-Sensoren melden `None` statt einer fabrizierten Null, wenn das
-  Fenster keine gewerteten Tage hat (§15.4).
+  Fenster keine gewerteten Tage hat (§15).
 
-## §15 Metriken, Skill-Scoreboard und Kill-Gate
+## §15 Metriken und Skill-Scoreboard
 
 ### §15.1 Metrikdefinitionen
 
@@ -1503,9 +1502,8 @@ Ein Diagnose-Sensor behauptet nie eine Wirkung, die er nicht hat.
 
 ### §15.2 Scoreboard-Berechnung
 
-Nächtlich, **pro Vortag**, berechnet der Coordinator den Tages-kWh-Fehler von
-(a) der Motor-Prognose **as issued** und (b) jeder konfigurierten externen
-Vergleichsprognose, jeweils gegen die **gemessene** Ist-Summe, plus die
+Nächtlich, **pro Vortag**, berechnet der Coordinator den Tages-kWh-Fehler der
+Motor-Prognose **as issued** gegen die **gemessene** Ist-Summe, plus die
 **Stunden-MAE** des Motors. Rollierendes Fenster
 `DEFAULT_SCOREBOARD_WINDOW_DAYS` (**14** Tage — eine Konstante in `const.py`;
 der Coordinator liest sie zwar defensiv per `cfg.get`, aber kein Feld des
@@ -1519,55 +1517,15 @@ Vortags (§8).
   Issued-Ring, §16.2) — **nie** mit heutigem Lernstand nachgerechnet; gewertet
   wird nur ein Tag, dessen Snapshot **vor** dem morgendlichen Cutoff dieses
   lokalen Tages ausgegeben wurde;
-- die **Vergleichs**-Zahl ist der Wert **wie er am Vortag stand** (aus der
-  Recorder-Historie des Vergleichssensors, am **gleichen** Prognosehorizont
-  gelesen — der erste brauchbare State ab dem Ausgabezeitpunkt) — **nie** der
-  heutige Wert;
 - die **Ist**-Zahl ist die Summe der gemessenen Modulwerte aus dem
   Actuals-Ring.
 
-**Matched-Pair-Auswertung:** für jede Vergleichsprognose werden Motor- und
-Vergleichs-MAE über **nur die Tage** gerechnet, an denen dieser Vergleich
-gewertet ist. Ein fehlender Vergleichswert (leere Vergleichsliste, umbenannte
-Entität, gepurgter Recorder) ist **ABSENT**, nie eine fabrizierte Null — sonst
-läse eine fehlende Historie als „Motor gewinnt haushoch". Eine nicht-finite
-oder negative **Motor- oder Ist-Zahl** macht den Tag **ungewertet**
-(`score_day` verwirft ihn: kein Ring-Eintrag, keine Persistenz) — die frühere
-0,0-Klemmung fabrizierte mit `|Motor − 0|` den schlechtestmöglichen Motortag
-ins Kill-Gate-Fenster. Auf dem Aggregationspfad bereits gewerteter Tage
-degradieren nicht-finite Einzelwerte weiterhin zu 0,0, statt eine Exception
-oder einen unsinnigen Fehler in die Aggregate zu tragen.
-
-### §15.3 Vergleichsprognosen
-
-`CONF_COMPARISON_SENSORS` ist eine über den Options-Flow editierbare Liste von
-`{name, daily_entity}`. Sie ist **generisch, konfigurierbar und wird leer
-ausgeliefert** — es ist nichts im Runtime-Default hardcodiert. Halbgefüllte oder
-fehlerhafte Zeilen werden beim Normalisieren durch `ComparisonConfig` verworfen.
-Eine Beispielkonfiguration steht in `docs/DASHBOARD.md`.
-
-### §15.4 Kill-Gate
-
-`binary_sensor.kill_gate_passed` ist *on*, wenn der Motor über ein **volles**
-Fenster gewerteter Tage mindestens `DEFAULT_SCOREBOARD_GATE_MARGIN` (Default
-**0,10** = 10 %) besser auf Tages-kWh ist als die beste Baseline, mindestens
-`SCOREBOARD_MIN_WINDOW_DAYS` Tage gewertet und mindestens
-`SCOREBOARD_MIN_PAIRED_DAYS` (**3**) gepaarte Tage vorliegen, und der Ring nicht
-**stale** ist (der neueste gewertete Tag liegt innerhalb
-`SCOREBOARD_MAX_STALENESS_DAYS`).
-
-Die Bezugsgröße der 10 % ist der **relative MAE-Rückgang gegen die beste
-Baseline**, gepaart über genau die Tage, an denen **beide** Seiten gewertet
-wurden: `(Baseline-MAE − Engine-MAE) / Baseline-MAE ≥ 0,10`. „Beste Baseline"
-heißt dabei aus Sicht des Motors die **schwerste**: das Gate wertet den
-Vergleich, bei dem der Engine-Vorsprung am **kleinsten** ist — der Motor muss
-jede eligible Baseline schlagen. Eine Baseline mit weniger als 3 gepaarten
-Tagen ist **nicht eligible**: ein einzelner Glückstag (etwa ein
-Clear-day-Bust der Baseline) kippte sonst das Urteil; das Gate liefert dann
-`None` (keine Aussage), nicht etwa ein vorzeitiges *on*.
-
-Ein **unvolles Fenster liefert `None`** — das ist **korrekt, kein Fehlschlag**:
-ein Teilfenster darf das Gate nie behaupten.
+Eine nicht-finite oder negative **Motor- oder Ist-Zahl** macht den Tag
+**ungewertet** (`score_day` verwirft ihn: kein Ring-Eintrag, keine
+Persistenz) — die frühere 0,0-Klemmung fabrizierte mit `|Motor − 0|` den
+schlechtestmöglichen Motortag ins Fenster. Auf dem Aggregationspfad bereits
+gewerteter Tage degradieren nicht-finite Einzelwerte weiterhin zu 0,0, statt
+eine Exception oder einen unsinnigen Fehler in die Aggregate zu tragen.
 
 ### §15.5 Sensorik
 
@@ -1576,16 +1534,13 @@ Die ausgelieferten Objekt-IDs sind **unpräfixiert**, weil der Geräte-Slug bere
 erzeugte:
 
 - `daily_kwh_mae` (Primärmetrik),
-- `hourly_mae` (Wh je Tageslichtstunde, Zweitmetrik),
-- `vs_best_baseline_pct` (positiv = Motor besser als die beste Baseline),
-- `comparison_daily_kwh_mae_<slug>` je konfiguriertem Vergleich.
+- `hourly_mae` (Wh je Tageslichtstunde, Zweitmetrik).
 
 Die internen DATA-Keys der Scoreboard-Summary behalten dagegen ihre
-`engine_*`-Form. Der **informative** Within-Stratum-Prozentwert
-`engine_vs_best_baseline_pct` entfällt (`null` plus `low_n: true`) unter
-`SCOREBOARD_STRATUM_MIN_N` gewerteten Tagen — ein einzelnes fehlgepaartes Paar
-erzeugte sonst absurde Werte. Dazu eine **Diagnose-Aufschlüsselung je
-Wetterstratum** im Diagnose-Dump.
+`engine_*`-Form. Strata mit weniger als `SCOREBOARD_STRATUM_MIN_N` gewerteten
+Tagen tragen `low_n: true` — auf einer so dünnen Basis sind die Werte nicht
+aussagekräftig (ein einzelner Tag erzeugte absurde Werte). Dazu eine
+**Diagnose-Aufschlüsselung je Wetterstratum** im Diagnose-Dump.
 
 ## §16 Persistenz: Store-Schema, Ringe und Schreibsemantik
 
@@ -1599,7 +1554,9 @@ ist auf **1 gepinnt** und wird nie angehoben; migriert wird ausschließlich das
 zurückgesetzt.** Jeder v2-Schlüssel wird **byte-treu** durchgereicht; die neuen
 v3-Sektionen (`quantile_state`, `scoreboard_state`, `comparison_ring`) werden
 leer default-injiziert. Eine Migration, die irgendeinen Lernzustand verwirft, ist
-ein kritischer Fehler.
+ein kritischer Fehler. Der `comparison_ring` ist seit der Entfernung der externen
+Vergleichsprognosen ein **Legacy-Schlüssel**: er hat keinen Schreiber und keinen
+Leser mehr, bleibt aber im Schema, damit bestehende v3-Stores byte-treu laden.
 
 **Dasselbe Muster für additive Erweiterungen innerhalb von v3** (etwa
 `inverter_cal_state` §9.6, `config_fingerprint` §7.7, `learning_health` §10):
@@ -1754,8 +1711,7 @@ dokumentierte Näherung, die für CET/CEST mit der Engine identisch ist.
 `dashboards/balcony_solar_forecast.yaml` ist ein Lovelace-View-YAML **nur mit
 Bordmitteln**, das ohne Custom-Cards funktioniert: History-Graph Motor-Gesamt vs.
 gemessen (und je Ebene, wo praktikabel), Entities-Card für Lernstatus,
-Drift-MAE, Quellenstatus und Kill-Gate, ein Gauge für
-`vs_best_baseline_pct`, ein Markdown mit dem Kill-Gate-Verdikt sowie eine
+Drift-MAE, Quellenstatus und das Skill-Scoreboard, sowie eine
 kompakte Shademap-Transmittanz-Tabelle je Kanal (Template/Markdown) **plus** dem
 Hinweis, dass `dump_shademap` die rohen Polardaten für einen reicheren Plot
 liefert. Installationsschritte in `docs/DASHBOARD.md`.
@@ -1773,8 +1729,8 @@ Snippet durch die gebündelte `custom:balcony-shade-profile-card` (§18.3), bett
 an Stelle des per-Modul-History-Graphs die `custom:balcony-power-history-card`
 (§18.4) ein und **lässt Karten und Zeilen mit fehlenden Entitäten weg**, sodass
 eine Teilinstallation weiterhin rendert. Die IDs stammen aus der Entity-Registry
-(`{entry_id}_{key}` → reale `entity_id`), die Vergleichs-MAE-Zeilen und die
-gemessenen Modul-Sensoren aus Coordinator und Site-Config.
+(`{entry_id}_{key}` → reale `entity_id`), die gemessenen Modul-Sensoren aus
+Coordinator und Site-Config.
 
 **Schreibweg (verbindlich):** ausschließlich über die vorhandene
 `LovelaceStorage.async_save(config)` des jeweiligen `url_path` aus

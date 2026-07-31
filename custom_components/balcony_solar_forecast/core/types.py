@@ -94,7 +94,6 @@ __all__ = [
     "IssuedSnapshot",
     "PlaneHourlyModeled",
     # v0.4 contract: scoreboard + quantiles
-    "ComparisonConfig",
     "DayScore",
     "ScoreboardState",
     "QuantileBands",
@@ -1379,82 +1378,6 @@ class IssuedSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class ComparisonConfig:
-    """One configured external comparison forecast (SPEC §15.3 scoreboard).
-
-    GENERIC + CONFIGURABLE (SPEC §15.3): ``name`` is the operator-chosen label and
-    ``daily_entity`` is the HA sensor whose STATE is that comparison's daily-kWh
-    forecast for today. The scoreboard reads its RECORDER HISTORY for yesterday
-    (the value AS IT STOOD during yesterday — no leakage), never its live state.
-    Built by the coordinator from ``CONF_COMPARISON_SENSORS`` (ships EMPTY; the
-    operator's two comparisons are documented, not hardcoded).
-
-    ``slug`` is a stable, filesystem/entity-safe derivation of ``name`` used to
-    suffix the per-comparison MAE sensor object_id and to key the comparison
-    ring; it is derived deterministically so a rename produces a new sensor
-    rather than silently rewriting an old one's history.
-    """
-
-    name: str
-    daily_entity: str
-
-    @property
-    def slug(self) -> str:
-        """Lowercase ASCII-alnum slug of ``name`` (stable sensor/ring key).
-
-        STRICTLY ASCII: a non-ASCII letter ("Süd") becomes a separator — the
-        slug is embedded in the sensor's unique_id AND its pre-set entity_id,
-        where non-ASCII characters are invalid. Keeping this aligned with HA's
-        own slugify boundary means the documented dashboard id
-        ``…_comparison_daily_kwh_mae_<slug>`` always names the real entity.
-        """
-        out = []
-        for ch in self.name.strip().lower():
-            if ch.isascii() and ch.isalnum():
-                out.append(ch)
-            elif out and out[-1] != "_":
-                out.append("_")
-        slug = "".join(out).strip("_")
-        return slug or "comparison"
-
-    @classmethod
-    def from_dict(cls, d: dict) -> ComparisonConfig:
-        from ..const import CONF_COMPARISON_DAILY_ENTITY, CONF_COMPARISON_NAME
-
-        if not isinstance(d, dict):
-            return cls(name="", daily_entity="")
-        return cls(
-            name=str(d.get(CONF_COMPARISON_NAME, "")),
-            daily_entity=str(d.get(CONF_COMPARISON_DAILY_ENTITY, "")),
-        )
-
-    def to_dict(self) -> dict:
-        from ..const import CONF_COMPARISON_DAILY_ENTITY, CONF_COMPARISON_NAME
-
-        return {
-            CONF_COMPARISON_NAME: self.name,
-            CONF_COMPARISON_DAILY_ENTITY: self.daily_entity,
-        }
-
-    @staticmethod
-    def list_from_options(raw: object) -> tuple[ComparisonConfig, ...]:
-        """Parse the CONF_COMPARISON_SENSORS options list into configs.
-
-        Skips malformed rows and rows missing a name or a daily_entity so a
-        half-filled options row never yields a scoreboard column that can never
-        be scored. Never raises (validate-and-clamp).
-        """
-        if not isinstance(raw, list):
-            return ()
-        out: list[ComparisonConfig] = []
-        for row in raw:
-            cfg = ComparisonConfig.from_dict(row) if isinstance(row, dict) else None
-            if cfg is not None and cfg.name and cfg.daily_entity:
-                out.append(cfg)
-        return tuple(out)
-
-
-@dataclass(frozen=True, slots=True)
 class DayScore:
     """One scored day in the rolling scoreboard window (SPEC §15.2).
 
@@ -1463,19 +1386,14 @@ class DayScore:
       * ``engine_kwh`` is the engine forecast AS ISSUED for this date (read from
         the issued ring's snapshot logged during that day) — NEVER recomputed
         with today's learned state;
-      * each value in ``comparison_kwh`` is that comparison entity's own value
-        AS IT STOOD during this date (read from its recorder history) — NEVER
-        today's live state;
       * ``measured_kwh`` is the sum of the per-module actuals in the actuals
         ring for this date.
 
-    ``engine_daily_abs_err`` = |engine_kwh - measured_kwh|;
-    ``comparison_daily_abs_err`` maps ``{comparison_name: |cmp_kwh - measured|}``
-    (only names that had a usable recorded value that day — a missing comparison
-    is absent, not zero). ``engine_hourly_mae`` is the engine's mean absolute
-    per-daylight-hour Wh error for the day (issued corrected hourly vs measured
-    hourly), or None when hourly actuals were unavailable. ``weather_class`` is
-    the day's DOMINANT class (const CLOUD_CLASS_*), used for stratification.
+    ``engine_daily_abs_err`` = |engine_kwh - measured_kwh|.
+    ``engine_hourly_mae`` is the engine's mean absolute per-daylight-hour Wh
+    error for the day (issued corrected hourly vs measured hourly), or None
+    when hourly actuals were unavailable. ``weather_class`` is the day's
+    DOMINANT class (const CLOUD_CLASS_*), used for stratification.
     """
 
     iso_date: str
@@ -1483,27 +1401,19 @@ class DayScore:
     measured_kwh: float
     engine_kwh: float
     engine_daily_abs_err: float
-    comparison_kwh: dict[str, float] = field(default_factory=dict)
-    comparison_daily_abs_err: dict[str, float] = field(default_factory=dict)
     engine_hourly_mae: float | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> DayScore:
+        # The mapping is explicit, so legacy store entries that still carry the
+        # removed external-comparison fields (``comparison_kwh`` /
+        # ``comparison_daily_abs_err``) load cleanly — those keys are simply
+        # ignored (SPEC §16.1 store-migration invariant).
         if not isinstance(d, dict):
             return cls(
                 iso_date="", weather_class="", measured_kwh=0.0,
                 engine_kwh=0.0, engine_daily_abs_err=0.0,
             )
-
-        def _fmap(key: str) -> dict[str, float]:
-            v = d.get(key, {})
-            if not isinstance(v, dict):
-                return {}
-            return {
-                k: _safe_float(x)
-                for k, x in v.items()
-                if isinstance(k, str) and isinstance(x, (int, float))
-            }
 
         hmae = d.get("engine_hourly_mae")
         return cls(
@@ -1514,8 +1424,6 @@ class DayScore:
             engine_daily_abs_err=_safe_float(
                 d.get("engine_daily_abs_err", 0.0), minimum=0.0
             ),
-            comparison_kwh=_fmap("comparison_kwh"),
-            comparison_daily_abs_err=_fmap("comparison_daily_abs_err"),
             engine_hourly_mae=(
                 None if hmae is None else _safe_float(hmae, minimum=0.0)
             ),
@@ -1528,23 +1436,21 @@ class DayScore:
             "measured_kwh": self.measured_kwh,
             "engine_kwh": self.engine_kwh,
             "engine_daily_abs_err": self.engine_daily_abs_err,
-            "comparison_kwh": dict(self.comparison_kwh),
-            "comparison_daily_abs_err": dict(self.comparison_daily_abs_err),
             "engine_hourly_mae": self.engine_hourly_mae,
         }
 
 
 @dataclass(frozen=True, slots=True)
 class ScoreboardState:
-    """Rolling window of scored days + the kill-gate verdict (SPEC §15.2).
+    """Rolling window of scored days (SPEC §15.2).
 
     ``days`` maps ``{iso_date: DayScore}``; the store/scoreboard trims it to the
     configured window (SCOREBOARD_WINDOW_DAYS). Aggregates (engine daily-kWh MAE,
-    per-comparison daily-kWh MAE, engine hourly MAE, engine_vs_best_baseline_pct
-    and the per-weather-stratum breakdown) are DERIVED by ``core/scoreboard.py``
-    from ``days`` — they are NOT stored here (single source of truth is the day
-    ring), so a window-length change re-aggregates cleanly. ``version`` guards
-    forward-compat; unknown versions on load discard to an empty state.
+    engine hourly MAE and the per-weather-stratum breakdown) are DERIVED by
+    ``core/scoreboard.py`` from ``days`` — they are NOT stored here (single
+    source of truth is the day ring), so a window-length change re-aggregates
+    cleanly. ``version`` guards forward-compat; unknown versions on load discard
+    to an empty state.
     """
 
     days: dict[str, DayScore] = field(default_factory=dict)

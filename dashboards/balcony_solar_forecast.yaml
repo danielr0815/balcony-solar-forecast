@@ -7,21 +7,16 @@
 # Install: Settings -> Dashboards -> add a new (empty) dashboard, open its
 # three-dot menu -> "Edit dashboard" -> three-dot menu -> "Raw configuration
 # editor", then paste this file's contents. See docs/DASHBOARD.md for the
-# full copy-paste walkthrough and the operator's CONF_COMPARISON_SENSORS
-# example. The entity_ids below assume the single reference install
-# (device "Balcony Solar Forecast"); adjust the object_id suffixes if your
-# entities differ.
+# full copy-paste walkthrough. The entity_ids below assume the single
+# reference install (device "Balcony Solar Forecast"); adjust the object_id
+# suffixes if your entities differ.
 #
-# The integration's OWN scoreboard sensors (daily_kwh_mae,
-# vs_best_baseline_pct, kill_gate_passed) are REGISTERED as soon as v0.4
-# is installed; before the first nightly run they read "unknown", which the
-# cards render gracefully. TWO groups of ids are the exception and will show
-# "Entity not found" until you act:
-#   * the per-comparison MAE rows (…_comparison_daily_kwh_mae_<slug>) — those
-#     sensors are only CREATED once you configure CONF_COMPARISON_SENSORS
-#     (ships EMPTY, SPEC §15.3); add your comparisons in the options flow first;
-#   * the `sensor.inverter_port_*` rows — OPERATOR-SPECIFIC (see the ">>> EDIT
-#     ME <<<" marker further down); replace or delete them on a stock install.
+# The integration's OWN scoreboard sensors (daily_kwh_mae, hourly_mae) are
+# REGISTERED as soon as v0.4 is installed; before the first nightly run they
+# read "unknown", which the cards render gracefully. The `sensor.inverter_port_*`
+# rows are the exception and will show "Entity not found" until you act — they
+# are OPERATOR-SPECIFIC (see the ">>> EDIT ME <<<" marker further down);
+# replace or delete them on a stock install.
 
 title: Balcony Solar Forecast
 views:
@@ -30,75 +25,16 @@ views:
     icon: mdi:solar-power
     cards:
       # ----------------------------------------------------------------
-      # Kill-gate verdict (SPEC §15.4) — the headline the whole plan hangs on.
-      # ----------------------------------------------------------------
-      - type: markdown
-        title: Kill-gate verdict
-        content: >
-          {% set passed =
-          states('binary_sensor.balcony_solar_forecast_kill_gate_passed') %}
-          {% set pct =
-          states('sensor.balcony_solar_forecast_vs_best_baseline_pct')
-          %} {% if passed == 'on' %} ## ✅ Kill-gate PASSED
-
-          The forecast is beating the best configured baseline on daily-kWh MAE
-          by the required margin over a full rolling window. It is safe to
-          consider re-pointing consumers (e.g. battery_manager) to the forecast
-          sensors. {% elif passed == 'off' %} ## ❌ Kill-gate NOT passed
-
-          Over the current full window the forecast is **not** yet the required
-          margin better than the best baseline. Keep the frozen baseline in
-          place (SPEC §15.4). {% else %} ## ⏳ Kill-gate: window not full yet
-
-          Not enough scored days in the rolling window to assert the gate
-          (`unknown` until a full window of nightly scores exists). {% endif %}
-
-          {% if pct not in ('unknown', 'unavailable') %} Forecast vs best
-          baseline: **{{ pct }} %** (positive = forecast better). {% endif %}
-
-      # ----------------------------------------------------------------
-      # Forecast-vs-best-baseline gauge (SPEC §15.5). Positive = forecast better.
-      # ----------------------------------------------------------------
-      - type: gauge
-        name: Forecast vs best baseline
-        entity: sensor.balcony_solar_forecast_vs_best_baseline_pct
-        unit: "%"
-        min: -50
-        max: 50
-        needle: true
-        segments:
-          - from: -50
-            color: "#c0392b"
-          - from: -10
-            color: "#e67e22"
-          - from: 0
-            color: "#f1c40f"
-          - from: 10
-            color: "#2ecc71"
-
-      # ----------------------------------------------------------------
-      # Scoreboard entities: forecast + per-comparison daily-kWh MAE, gate.
-      # (SPEC §15.5). Per-comparison sensors carry a slug of the
-      # comparison name; the two shown are the operator's documented pair.
+      # Scoreboard entities: the engine's forecast MAE metrics (SPEC §15.5).
       # ----------------------------------------------------------------
       - type: entities
         title: Skill scoreboard
         show_header_toggle: false
         entities:
-          - entity: binary_sensor.balcony_solar_forecast_kill_gate_passed
-            name: Kill-gate passed
           - entity: sensor.balcony_solar_forecast_daily_kwh_mae
             name: Forecast daily-kWh MAE
           - entity: sensor.balcony_solar_forecast_hourly_mae
             name: Forecast hourly MAE
-          - entity: sensor.balcony_solar_forecast_vs_best_baseline_pct
-            name: Forecast vs best baseline
-          - type: section
-            label: Comparison baselines (daily-kWh MAE)
-          - entity: sensor.balcony_solar_forecast_comparison_daily_kwh_mae_8_entry_baseline
-            name: 8-Entry Baseline
-          - entity: sensor.balcony_solar_forecast_comparison_daily_kwh_mae_alt_1600w
-            name: Alt 1600W
 
       # ----------------------------------------------------------------
       # Forecast vs. measured POWER (SPEC §18.1): a W-vs-W comparison on one
@@ -333,27 +269,3 @@ views:
           `sensor.balcony_solar_forecast_shade_profile` **attributes**
           (`azimuth`, `sun_elevation`, `transmittance`, `shade_horizon`,
           `static_horizon`). See docs/DASHBOARD.md.
-
-      # ----------------------------------------------------------------
-      # Comparison-sensor configuration reminder (SPEC §15.3: shipped EMPTY).
-      # ----------------------------------------------------------------
-      - type: markdown
-        title: Scoreboard comparison sensors
-        content: >
-          The scoreboard ships with **no** comparison baselines configured
-          (generic, not hardcoded — SPEC §15.3). Add them in **Settings →
-          Devices & Services → Balcony Solar Forecast → Configure →
-          Comparison sensors**. The operator's live site uses:
-
-
-          | Name | Daily-kWh entity |
-
-          |---|---|
-
-          | `8-Entry Baseline` | `sensor.pv_prognose_heute_alle_module` |
-
-          | `Alt 1600W` | `sensor.energy_production_today_4` |
-
-
-          Each added comparison creates a
-          `…_comparison_daily_kwh_mae_<slug>` sensor. See docs/DASHBOARD.md.

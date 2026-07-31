@@ -18,7 +18,6 @@ from .transpose import hay_davies_poa
 from .types import (
     BiasCell,
     BiasState,
-    ComparisonConfig,
     DayScore,
     DriftState,
     ForecastResult,
@@ -65,7 +64,6 @@ __all__ = [
     "IssuedSnapshot",
     "PlaneHourlyModeled",
     # v0.4 contract types: scoreboard + quantiles
-    "ComparisonConfig",
     "DayScore",
     "ScoreboardState",
     "QuantileBands",

@@ -68,8 +68,8 @@ dokumentierte Ausnahme: `core/openmeteo_backfill.py` macht Netzwerk-IO (siehe un
 | `_frontend.py` | Liefert die zwei mitgelieferten Lovelace-Karten (`frontend/shade_profile_card.js`, `frontend/power_history_card.js`) als Static Path aus und registriert sie im Storage-Mode automatisch als Resource. | `async_register_frontend` |
 | `_site_validation.py` | HA-freie Validierung des Config-Flow-`site`-Objekts (Azimut 0..360, Neigung 0..90, wp>0, tau 0..1). Horizontzeilen werden **nicht abgelehnt**, sondern stabil nach aufsteigendem Azimut sortiert und in dieser kanonischen Form zurückgegeben (Voraussetzung für die lineare Interpolation in `core/horizon.py`; der Config-Flow persistiert die sortierte Form). Nur echte Wertverletzungen werfen `SiteValidationError` mit Übersetzungs-`code`. | `validate_site` |
 | `config_flow.py` | Config- und Options-Flow. Ein Config-Entry je benanntem Standort; das gesamte `site` ist ein editierbares Objekt mit `const.DEFAULT_SITE` als Vorgabe. | `async_step_user`, Options-Flow-Schritte |
-| `sensor.py` | Sensor-Plattform: Tages-kWh (heute/morgen/d2), Momentanleistung, DC-Diagnose-Pendants, Degradations- und Lerner-Diagnose, Scoreboard-MAE je Vergleich. Baut auch die `get_forecast`-Antwort. | `async_setup_entry`, `_build_forecast_response` |
-| `binary_sensor.py` | Vier Entities: ein `degraded`-Problem-Sensor (Degradationsleiter sichtbar), zwei `*_learner_active`-Diagnosen (fast/slow) und der `kill_gate_passed`-Sensor (`KillGatePassedSensor`, Scoreboard-Urteil). Alle bleiben verfügbar, auch wenn die Prognose es nicht ist. | `async_setup_entry` |
+| `sensor.py` | Sensor-Plattform: Tages-kWh (heute/morgen/d2), Momentanleistung, DC-Diagnose-Pendants, Degradations- und Lerner-Diagnose, Scoreboard-MAE. Baut auch die `get_forecast`-Antwort. | `async_setup_entry`, `_build_forecast_response` |
+| `binary_sensor.py` | Drei Entities: ein `degraded`-Problem-Sensor (Degradationsleiter sichtbar) und zwei `*_learner_active`-Diagnosen (fast/slow). Alle bleiben verfügbar, auch wenn die Prognose es nicht ist. | `async_setup_entry` |
 | `select.py` | Auswahl des Moduls für das Verschattungs-Diagramm (über Neustart hinweg gemerkt). | `async_setup_entry` |
 | `date.py` | Auswahl des Datums für das Verschattungs-Diagramm (**nicht** persistiert, öffnet immer auf heute). | `async_setup_entry` |
 | `diagnostics.py` | Diagnose-Download für Bug-Reports: Entry, Degradationszustand, Prognose-Zusammenfassung, Lerner-/Scoreboard-/Quantil-/Ensemble-/Store-Summary. Koordinaten werden redigiert. | `async_get_config_entry_diagnostics` |
@@ -93,7 +93,7 @@ dokumentierte Ausnahme: `core/openmeteo_backfill.py` macht Netzwerk-IO (siehe un
 | `shadeprofile.py` | Daten hinter dem Verschattungs-Diagramm: Sonnenbahn vs. gelernte Verschattung für eine Ebene an einem Datum. Repliziert das Engine-Gate exakt. | `compute_shade_profile` |
 | `quantiles.py` | P10/P50/P90-Bänder per nichtparametrischer historischer Simulation: 90-Tage-Ring relativer Fehler je (Wetterklasse × Tagesabschnitt). | `bands_for_bin` |
 | `ensembleband.py` | Wandelt Open-Meteo-Ensemble-Member-GHI in eine **relative** Stundenspreizung und verschmilzt sie per Hüllkurven-Maximum mit den gelernten Bändern (nie multiplizieren, nie verengen). | `ensemble_band_factors`, `fuse_bands` |
-| `scoreboard.py` | Das **Kill-Gate**: Tagesfehler-Scoring, rollierendes Fenster, Urteil gegen Vergleichsprognosen. Reine Fehlermathematik — das leak-freie IO macht der Glue. | Scoring-/Aggregationsfunktionen (siehe `_scoreboard_glue.py`) |
+| `scoreboard.py` | Das **Skill-Scoreboard**: Tagesfehler-Scoring as-issued gegen Messung, rollierendes Fenster, Strata-Breakdown. Reine Fehlermathematik — das leak-freie IO macht der Glue. (Kill-Gate und Vergleichsprognosen entfernt in v0.25.0.) | Scoring-/Aggregationsfunktionen (siehe `_scoreboard_glue.py`) |
 | `inverter_cal.py` | Lernt **einen** standortweiten Skalar `eta_inv` gegen den AC-Gesamtzähler. Nie tragend: unter `INVERTER_CAL_MIN_SAMPLES` liefert `effective_eta` `None` und die Engine nimmt die Konfig-/Default-Effizienz. | `effective_eta` |
 | `bootstrap_build.py` | HA-freier Kern des Lerner-Bootstraps: macht aus ~2 Jahren Historie einen Warmstart für Bias, Shademap und Quantil-Ring. Keine Netz-IO — die Datenbeschaffung liegt in den Aufrufern. | Rekonstruktions-/Akkumulator-Funktionen |
 | `openmeteo_backfill.py` | **Die einzige `core/`-Datei mit Netzwerk-IO** (bewusste, dokumentierte Ausnahme): Open-Meteo *Previous-Runs* / Historical-Forecast-Abruf mit injizierter aiohttp-Session, damit CLI und In-Process-Action nicht auseinanderdriften. Bleibt HA-frei. | Fetch-Funktion mit `session`-Parameter |
@@ -173,7 +173,7 @@ Snapshot. Deshalb steht in `core/scoreboard.py` ausdrücklich: hier wird die Pro
 | Clamp | `electrical.clamp_groups` (zweimal, s. u.) | `electrical.clamp_groups_ac` |
 | eta greift | **nirgends** — DC ist eta-frei | einmal, in `clamp_groups_ac`: `AC = min(eta_inv · Σ DC, ac_limit_w)`; DC-Clip bei `ac_limit_w / eta_inv` |
 | eta-Quelle | – | `LearnerHooks.inverter_efficiency` (gelernt, nur wenn vertrauenswürdig) überschreibt sonst `InverterGroup.inverter_efficiency`, sonst `const.DEFAULT_INVERTER_EFFICIENCY = 0.965` |
-| Rolle | **Lern- und Scoreboard-Wahrheit** (Kill-Gate, Shademap, Bias, Drift) | **operatorseitiger Standard**: Haupt-Sensoren, Energie-Dashboard |
+| Rolle | **Lern- und Scoreboard-Wahrheit** (Shademap, Bias, Drift) | **operatorseitiger Standard**: Haupt-Sensoren, Energie-Dashboard |
 
 Der DC-Pfad ist absichtlich byte-identisch zum Vor-AC-Stand geblieben; AC ist eine
 *zusätzliche*, physikalisch korrekte Kurve, gespeist aus dem korrigierten
@@ -309,7 +309,7 @@ Spätere ist additiv und meist über `const.DATA_KEY_*` benannt.
 | `raw_hourly_wh`, `corrected_hourly_wh` | RAW- vs. CORRECTED-Stundenkurve |
 | `intraday_scalar`, `correction_source` | aktueller Skalar, wirksame Lernschicht |
 | `learner_status`, `bias_cells`, `drift_mae` | Lerner-Diagnose |
-| `scoreboard`, `kill_gate_passed` | rollierendes Fenster + Kill-Gate-Urteil (`None` = Fenster noch zu kurz) |
+| `scoreboard` | rollierendes Fenster: Engine-MAE (Tages-kWh + stündlich), Strata |
 | `quantile_curves`, `quantile_curves_ac`, `band_source_by_day` | die Bandkurven (DC/AC) und die Herkunft je Tag — **nur vorhanden**, wenn dieser Zyklus wirklich Bänder ausgegeben hat |
 | `band_source` | **immer** vorhanden (`learned` / `ensemble` / `envelope`), Default `learned`. Achtung: `learned` heißt auch „Ensemble aus oder ohne Beitrag" — der Key sagt also **nichts** darüber aus, ob überhaupt eine Spreizung existiert; dafür ist `quantile_curves` der Indikator |
 | `energy_today_kwh_ac_p10` | AC-P10-Tages-Headline mit asymmetrisch herausgerechnetem Intraday-Faktor |

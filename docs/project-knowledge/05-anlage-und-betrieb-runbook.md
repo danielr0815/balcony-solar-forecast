@@ -493,21 +493,16 @@ fehlenden Stats sauber auf neutral zurück. In die Modellseite gehen nur
 nennenswerter Produktion). Dauerhaft neutral bei laufender Produktion und Status
 `active` ⇒ Bug-Verdacht, Issue aufmachen.
 
-### 5.4 „`kill_gate` ist unknown"
+### 5.4 „`kill_gate` ist unknown" — *(obsolet, Sensor entfernt in v0.25.0)*
 
-`binary_sensor.balcony_solar_forecast_kill_gate_passed` ist **absichtlich**
-`None`, solange kein Urteil belastbar ist (`core/scoreboard.kill_gate_passed`):
-rollendes Fenster `DEFAULT_SCOREBOARD_WINDOW_DAYS = 14` noch nicht gefüllt · zu
-wenige **gepaarte** Tage, an denen Engine **und** Vergleichsprognose bewertet
-wurden (`SCOREBOARD_MIN_PAIRED_DAYS`) · **Staleness**: jüngster bewerteter Tag
-älter als `SCOREBOARD_MAX_STALENESS_DAYS = 3` → Urteil wird ausgesetzt statt ein
-altes „bestanden" weiterzusenden · **keine Vergleichssensoren konfiguriert**
-(`comparison_sensors` ist per Default **leer**) → es gibt keine Baseline-Latte.
-**Prüfen:** Diagnostics → `scoreboard`: `window_days`, `scored_days`,
-`comparison_daily_kwh_mae`, `strata` (Zeilen mit `low_n: true` unter
-`SCOREBOARD_STRATUM_MIN_N = 3` liefern bewusst `null` statt absurder Prozente).
-**Gegenmittel:** Vergleichssensoren in den Optionen eintragen und Fenster füllen
-lassen; nicht bewertbare Vergangenheit bleibt es (kein Re-Score-Service).
+`binary_sensor.balcony_solar_forecast_kill_gate_passed` existiert nicht mehr:
+das Kill-Gate (Phase-1-Abnahmetest gegen externe Vergleichsprognosen) hatte
+seine Aufgabe erfüllt und wurde samt der Vergleichs-Maschinerie entfernt. Ein
+verwaister Registry-Eintrag, der auf `unavailable` steht, kann gelöscht werden.
+Das Engine-Scoreboard (`daily_kwh_mae`, `hourly_mae`, Strata) läuft weiter —
+**prüfen:** Diagnostics → `scoreboard`: `window_days`, `scored_days`, `strata`
+(Zeilen mit `low_n: true` unter `SCOREBOARD_STRATUM_MIN_N = 3` sind bewusst als
+dünne Basis markiert).
 
 ### 5.5 „Learner-Status `cold_start`"
 

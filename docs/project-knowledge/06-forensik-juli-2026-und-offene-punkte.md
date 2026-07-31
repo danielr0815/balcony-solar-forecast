@@ -268,7 +268,7 @@ Hauptgrund für die 0.22-Config-Kampagne.
 | O5 | Horizontsektoren Sep–Apr | unvermessen/extrapoliert | Emergenzpunkte im nächsten Winter |
 | O6 | Saisonale Nachprüfung `tau_points` | Profil nur auf Julitagen gefittet | Herbstfenster nachmessen |
 | O7 | Reviewer-Suggestions 0.21–0.23 | 3 offen, 1 erledigt, 1 als Doku-Falle abgehakt | siehe §4.6 |
-| O8 | Kill-Gate / Scoreboard-Fenster | **überfällig, Ergebnis offen** — erstes Verdikt war für ~27.07. erwartet; der Termin ist verstrichen, ohne dass ein Verdikt hier nachgetragen wurde (Stand 2026-07-31) | Verdikt am System abrufen, dann hier nachtragen |
+| O8 | Kill-Gate / Scoreboard-Fenster | **erledigt** — die Phase-1-Abnahme ist gelaufen; das Kill-Gate samt externen Vergleichsprognosen wurde in v0.25.0 entfernt, das Engine-Scoreboard läuft weiter | — |
 | O9 | Validierungslauf | **überfällig, Ergebnis offen** — Lauf war für ~01.08. terminiert; Paket liegt im Repo, Ergebnis wurde hier nicht nachgetragen (Stand 2026-07-31) | ausführen, Ergebnis hier nachtragen |
 
 ### 4.1 O1 — die Config-Kampagne ist der eigentliche nächste Schritt
@@ -370,16 +370,16 @@ entworfenen 0,63) — der ADR-Text ist korrigiert.
 
 ### 4.5 O8 — Scoreboard-Fenster
 
-Das Kill-Gate braucht ein **volles** 14-Tage-Fenster gewerteter Tage
+Das Kill-Gate brauchte ein **volles** 14-Tage-Fenster gewerteter Tage
 (`DEFAULT_SCOREBOARD_WINDOW_DAYS` = 14). Nach dem Epoch-Fix waren nur ~3 Tage Catch-up
-nachholbar (`NIGHTLY_CATCHUP_MAX_DAYS` = 3); **06.–12.07.2026 bleiben dauerhaft unbewertbar**
+nachholbar (`NIGHTLY_CATCHUP_MAX_DAYS` = 3); **06.–12.07.2026 blieben dauerhaft unbewertbar**
 (keine archivierten issued-Snapshots). Erstes echtes Verdikt daher um den **27.07.**; bis dahin
-ist `kill_gate_passed = None` korrekt, kein Fehler.
+war `kill_gate_passed = None` korrekt, kein Fehler.
 
-**Nachtrag (2026-07-31):** Der 27.07. ist verstrichen, ohne dass ein Verdikt hier
-nachgetragen wurde — das Ergebnis ist offen. Beim Abrufen beachten: seit der
-Review-Tranche gilt `SCOREBOARD_MIN_PAIRED_DAYS` = 3 (vorher 1), das Gate
-verlangt also mindestens drei gepaarte Tage je Baseline (SPEC §15.4).
+**Nachtrag (2026-07-31):** Die Phase-1-Abnahme ist gelaufen — das Kill-Gate
+wurde samt der externen Vergleichsprognosen in v0.25.0 entfernt (das
+Engine-Scoreboard mit `daily_kwh_mae` / `hourly_mae` / Strata bleibt). Damit ist
+dieser Punkt geschlossen.
 
 ### 4.6 O7 — Reviewer-Suggestions aus den Release-Reviews
 
@@ -388,7 +388,7 @@ Nicht-blockierende Punkte, am aktuellen Code nachgeprüft:
 | Punkt | Fundstelle | Status |
 |---|---|---|
 | Rollback mit einem **Legacy-Snapshot** (ohne `quantile`-Sektion) restauriert einen **leeren** Quantil-Ring und wischt live gelernte Bänder | `core/types.LearnerSnapshot.from_dict` (Default `QuantileState()`) | **offen** — ein None-Sentinel würde den Live-Ring erhalten |
-| Strata-Prozentwert kann weiterhin aus **einem einzigen gepaarten Tag** entstehen | `core/scoreboard._vs_best_baseline_pct_for_days`, `min_paired_days` defaultet auf 1 | **offen** — C1 deckelt nur die Anzahl gewerteter Tage (`SCOREBOARD_STRATUM_MIN_N` = 3) |
+| Strata-Prozentwert kann weiterhin aus **einem einzigen gepaarten Tag** entstehen | `core/scoreboard._vs_best_baseline_pct_for_days` | **erledigt** — mit den Vergleichsprognosen in v0.25.0 entfernt (es gibt keinen Strata-Prozentwert mehr; `low_n` bleibt als Dünn-Basis-Markierung) |
 | Backfill-Parität für `bifacial_beam_gain` ungetestet | `tests/core/test_backfill_math.py` | **erledigt** in 0.22 (expliziter Paritätstest Engine ↔ `reconstruct_plane_hour`) |
 | `az360`-Wrap bei Wandzeilen: der Horizont ist ein geschlossenes 360°-Profil (`core/horizon.interp_elevation`, `_wrap360`), eine Zeile bei az 360 sortiert auf az 0 — das Wrap-Segment interpoliert zwischen letzter und erster Zeile | `core/horizon` | **Falle, kein Bug** — bei den M4/M8-Wandzeilen (az195 el90 / az360 el90) korrekt; wer aber nur EINE Wandzeile setzt, erzeugt eine Rampe über den Nordsektor |
 | `classify_cloud`-Fallback bei fehlendem GHI ist im Livebetrieb praktisch toter Pfad, weil der Fetcher fehlendes GHI zu 0,0 coerct | `fetcher` / `core/bias.classify_cloud` | **offen (dokumentieren)** — bei Provider-Ausfall des GHI-Felds würde tagsüber alles `overcast`, harmlos weil die Physik dann ohnehin 0 prognostiziert |

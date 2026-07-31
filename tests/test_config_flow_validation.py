@@ -828,7 +828,7 @@ def test_translation_has_user_reconfigure_and_init_steps(locale) -> None:
         "slow_learner_enabled",
         "day_ahead_bias_enabled",
         "quantiles_enabled",
-        "comparison_sensors",
+        "ensemble_enabled",
     ):
         assert tunable in init_data
     for structural in (
@@ -953,11 +953,10 @@ def test_de_and_en_full_key_structure_matches() -> None:
 
 _PLATFORM_MODULES = ("sensor.py", "binary_sensor.py", "select.py", "date.py")
 
-# The single _attr_icon deliberately NOT migrated to icons.json: the dynamic
-# per-comparison MAE sensor sets translation_key = None (its object id is
-# slug-suffixed), so there is no stable translation_key for icons.json to key an
-# entity icon by. Any OTHER remaining _attr_icon in a platform module is a bug.
-_ALLOWED_SOURCE_ICONS = {"mdi:chart-line-variant"}
+# No platform module hardcodes an icon anymore: every entity icon lives in
+# icons.json (the one former exception — the dynamic per-comparison MAE sensor,
+# which had no stable translation_key — is gone with the external comparisons).
+_ALLOWED_SOURCE_ICONS: set[str] = set()
 
 
 def _load_icons() -> dict:
@@ -1003,8 +1002,7 @@ def test_platform_modules_do_not_hardcode_migrated_icons() -> None:
         assert not (found & migrated), (
             f"{module} still hardcodes migrated icon(s): {found & migrated}"
         )
-        # The only _attr_icon left anywhere is the translation_key-less
-        # comparison sensor's, which cannot be keyed in icons.json.
+        # No _attr_icon may be left anywhere (every icon lives in icons.json).
         assert found <= _ALLOWED_SOURCE_ICONS, (
             f"{module} hardcodes unexpected _attr_icon(s): "
             f"{found - _ALLOWED_SOURCE_ICONS}"

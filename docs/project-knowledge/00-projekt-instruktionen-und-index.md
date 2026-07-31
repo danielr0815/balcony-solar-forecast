@@ -35,7 +35,7 @@ Technische Eckdaten (alle am Code geprüft):
 | Architekturgrenze | `custom_components/balcony_solar_forecast/core/` importiert **nichts** aus `homeassistant`; genau eine dokumentierte Netz-Ausnahme (`core/openmeteo_backfill.py`, lazy `aiohttp`, injizierte Session) |
 | Vertrag | `docs/SPEC.md` (deutsch, Ist-Stand), Herleitung/Historie in `docs/HISTORIE.md`, Designentscheide in `docs/adr/`, Release-Chronik in `CHANGELOG.md` |
 | Plattformen in HA | `sensor`, `binary_sensor`, `select`, `date` — plus 10 Actions, Diagnostics, Energy-Dashboard-Hook, zwei mitgelieferte Lovelace-Karten |
-| Lernschichten | Intraday-Skalar (transient), Day-Ahead-RLS-Bias, Shademap (geometrisch), Quantil-Bänder, Inverter-η — dazu Scoreboard/Kill-Gate und Drift-Monitor als Wächter |
+| Lernschichten | Intraday-Skalar (transient), Day-Ahead-RLS-Bias, Shademap (geometrisch), Quantil-Bänder, Inverter-η — dazu Scoreboard und Drift-Monitor als Wächter |
 
 **Wofür diese Wissensbasis da ist:** Sie soll einen Assistenten (oder einen
 Menschen) ohne Vorwissen und ohne Chatverlauf in die Lage versetzen, am Projekt
@@ -71,7 +71,7 @@ oder entscheiden musst, ob eine Abweichung Physik, Lerner oder Config ist.
 Was jede adaptive Schicht lernt, **wogegen** sie trainiert, wo sie auf die
 servierte Kurve wirkt, welche Gates/Clamps/Konstanten sie begrenzen und wie man
 sie zurücksetzt. Dazu die Wächter (Drift-Monitor, Collapse-Detektor,
-Rollback-Ring, Scoreboard/Kill-Gate), der Config-Fingerprint und die
+Rollback-Ring, Scoreboard), der Config-Fingerprint und die
 Doppelkorrektur-Fallen.
 *Brauchst du:* wenn die Prognose systematisch danebenliegt oder du eine
 Config-Änderung planst, die die RAW-Kurve verschiebt.
@@ -246,7 +246,7 @@ TYPISCHE FALLSTRICKE
   WebSocket-API Millisekunden. Diese Verwechslung hat monatelang jedes Lernen
   still lahmgelegt.
 - Kalt-Start ist kein Defekt: learner_status "cold_start", neutrale Bänder
-  (p10 == p50 == p90), kill_gate_passed = None und ein gelerntes tau exakt
+  (p10 == p50 == p90) und ein gelerntes tau exakt
   gleich dem statischen Prior sind korrekte Zustände. Sie als Bug zu lesen führt
   zu Resets, die den Kalt-Start nur verlängern.
 - Bin-Abwesenheit heißt nicht "freie Sicht": eine fehlende Shademap-Zelle heißt
@@ -270,7 +270,7 @@ TYPISCHE FALLSTRICKE
 LIVE-ZUSTÄNDE VERIFIZIEREN
 
 Alles, was den aktuellen Zustand der laufenden Anlage betrifft — gelernte
-theta-Werte, Shademap-Bins, Quantil-Füllstände, Scoreboard/Kill-Gate, die
+theta-Werte, Shademap-Bins, Quantil-Füllstände, Scoreboard, die
 tatsächlich konfigurierte Site-Geometrie, Albedo, Beam-Gain, ross_coeff, aktive
 Kill-Switches, Degradationsstatus — ist NICHT aus dem Repo und nicht aus dieser
 Wissensbasis belegbar. Verbindlich ist der Diagnostics-Download des
@@ -346,5 +346,5 @@ Methodik-Lehren aus `06-…` §5.
 | **θ (theta)** | multiplikativer Day-Ahead-Biasfaktor einer RLS-Zelle (Wolkenklasse × Tagesteil) |
 | **Shademap** | gelernte Beam-Transmittanz je Messkanal × (Sonnenazimut × Elevation × Halbjahr) |
 | **SVF** | Sky-View-Faktor: relative Reduktion des isotropen Diffus durch den Horizont |
-| **Kill-Gate** | Urteil des Scoreboards gegen Vergleichsprognosen — rein informativ, schaltet nichts ab |
+| **Kill-Gate** | *(entfernt in v0.25.0)* Urteil des Scoreboards gegen Vergleichsprognosen — war rein informativ, schaltete nichts ab |
 | **Fingerprint** | Hash über alle kurvenformenden Config-Felder; Änderung ⇒ Re-Seed der Bias-Zellen |

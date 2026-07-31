@@ -823,7 +823,7 @@ def test_bootstrap_rejects_wrong_site_signature():
 
 
 # ---------------------------------------------------------------------------
-# Trained-day marker + v3 scoreboard/comparison rings through the REAL store
+# Trained-day marker + v3 scoreboard ring through the REAL store
 # ---------------------------------------------------------------------------
 
 
@@ -878,28 +878,9 @@ def test_scoreboard_state_round_trip_through_real_store():
         weather_class="clear",
         measured_kwh=9.0,
         engine_kwh=10.0,
-        comparison_kwh={},
         engine_hourly_mae=None,
     )
     store.set_scoreboard_state(ScoreboardState(days={"2026-07-06": ds}))
     back = store.get_scoreboard_state()
     assert back.days["2026-07-06"].engine_kwh == pytest.approx(10.0)
     assert back.days["2026-07-06"].measured_kwh == pytest.approx(9.0)
-
-
-def test_comparison_ring_round_trip_and_trim():
-    store = _store()
-    assert store.get_comparison("2026-07-06") is None
-    store.record_comparison("2026-07-06", {"base": 6.0, "alt": 8.0})
-    assert store.get_comparison("2026-07-06") == {"base": 6.0, "alt": 8.0}
-    # Trimmed to the actuals-ring window (the oldest dates drop out).
-    from custom_components.balcony_solar_forecast.store import _ACTUALS_RING_DAYS
-
-    for i in range(_ACTUALS_RING_DAYS + 10):
-        store.record_comparison(f"2025-01-{(i % 28) + 1:02d}", {"x": 1.0})
-    from custom_components.balcony_solar_forecast.const import (
-        STORE_KEY_COMPARISON_RING,
-    )
-
-    ring = store._data[STORE_KEY_COMPARISON_RING]
-    assert len(ring) <= _ACTUALS_RING_DAYS

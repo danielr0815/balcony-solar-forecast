@@ -28,10 +28,8 @@ pytest.importorskip("voluptuous")
 from balcony_solar_forecast import _dashboard as d  # noqa: E402
 from balcony_solar_forecast import _services as svc  # noqa: E402
 from balcony_solar_forecast.const import (  # noqa: E402
-    CONF_COMPARISON_SENSORS,
     DOMAIN,
     INTEGRATION_VERSION,
-    SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX,
     SENSOR_ENERGY_TOMORROW,
 )
 from homeassistant.components.lovelace.const import (  # noqa: E402
@@ -61,10 +59,6 @@ def test_build_full_inventory_matches_shipped_yaml():
     entity_map = _full_entity_map()
     config = d.build_dashboard_config(
         entity_map=entity_map,
-        comparison_slugs=[
-            ("8-Entry Baseline", "sensor.cmp_a"),
-            ("Alt 1600W", "sensor.cmp_b"),
-        ],
         measured_entities=[("M1", "sensor.m1"), ("M2", "sensor.m2")],
         version=INTEGRATION_VERSION,
     )
@@ -75,7 +69,7 @@ def test_build_full_inventory_matches_shipped_yaml():
     views = config["views"]
     assert len(views) == 1
     assert views[0]["path"] == "forecast"
-    # 12 cards: the shipped YAML's built-in-card inventory MINUS the redundant
+    # 9 cards: the shipped YAML's built-in-card inventory MINUS the redundant
     # "Shade profile (per date & module)" entities card (its module/date/fraction
     # controls are embedded in the bundled diagram card) — apexcharts markdown ->
     # bundled shade card, and the measured-DC-power history-graph -> bundled
@@ -84,9 +78,9 @@ def test_build_full_inventory_matches_shipped_yaml():
     # means of the same sensors, stacked and with the forecast overlay) — PLUS
     # the Phase-4 "DC model & inverter calibration (diagnostic)" entities card.
     cards = views[0]["cards"]
-    assert len(cards) == 12
+    assert len(cards) == 9
     types = _card_types(config)
-    for required in ("markdown", "gauge", "entities", "history-graph"):
+    for required in ("markdown", "entities", "history-graph"):
         assert required in types
     # The redundant per-module LTS card is not generated (still in the shipped
     # built-ins-only YAML, where the bundled card does not exist).
@@ -106,9 +100,6 @@ def test_build_full_inventory_matches_shipped_yaml():
     assert cc["title"]
     # No custom apexcharts card leaks in.
     assert not any(str(t).startswith("custom:apexcharts") for t in types)
-    # The gauge binds the vs-best-baseline entity.
-    gauge = next(c for c in cards if c["type"] == "gauge")
-    assert gauge["entity"] == "sensor.real_vs_best_baseline_pct"
     # The measured-DC-power history-graph is replaced by the bundled
     # power-history card, wired to the measured-total + forecast-today ids.
     power_hist = next(
@@ -172,80 +163,56 @@ def test_build_full_inventory_matches_shipped_yaml():
     )
     assert "East hill" not in shademap["content"]
     assert "dump_shademap" in shademap["content"]  # the how-to is kept
-    # Comparison rows carried through into the scoreboard card.
+    # The scoreboard card carries the two engine rows (no comparison section —
+    # the external comparisons were removed).
     scoreboard = next(c for c in cards if c.get("title") == "Skill scoreboard")
-    labels = [r.get("label") for r in scoreboard["entities"] if "label" in r]
-    assert "Comparison baselines (daily-kWh MAE)" in labels
-    cmp_ids = [r["entity"] for r in scoreboard["entities"] if "entity" in r]
-    assert "sensor.cmp_a" in cmp_ids and "sensor.cmp_b" in cmp_ids
+    names = [r.get("name") for r in scoreboard["entities"]]
+    assert names == ["Forecast daily-kWh MAE", "Forecast hourly MAE"]
     # Full map -> nothing missing.
     assert d.missing_entity_keys(entity_map) == []
 
 
 def test_build_omits_missing_entities():
     entity_map = _full_entity_map()
-    # Drop the two entities that gate whole cards + one entities-card row.
+    # Drop the entities that gate whole cards + one entities-card row.
     for gone in (
-        "vs_best_baseline_pct",  # gauge + a scoreboard row + kill-gate markdown
-        "kill_gate_passed",  # kill-gate markdown + a scoreboard row
         "drift_mae_corrected",  # the drift-trend history-graph + a learner row
         "shade_profile_date",  # the bundled custom card (needs all three ids)
     ):
         entity_map.pop(gone)
     config = d.build_dashboard_config(
         entity_map=entity_map,
-        comparison_slugs=[],
         measured_entities=[],  # no measured cards either
         version="1.2.3",
     )
     types = _card_types(config)
     # Whole cards dropped.
-    assert "gauge" not in types
     assert "custom:balcony-shade-profile-card" not in types
     assert "statistics-graph" not in types  # never generated at all
     assert types.count("history-graph") == 1  # forecast graph only; drift + measured gone
-    # The kill-gate markdown is gone but the two static markdown cards remain.
+    # The one static markdown card (the shademap how-to) remains.
     markdowns = [
         c for c in config["views"][0]["cards"] if c["type"] == "markdown"
     ]
-    assert all(c["title"] != "Kill-gate verdict" for c in markdowns)
-    assert len(markdowns) == 2
-    # Scoreboard survived with only its still-present rows (no comparison section).
+    assert len(markdowns) == 1
+    # Scoreboard survived with its two engine rows.
     scoreboard = next(
         c for c in config["views"][0]["cards"] if c.get("title") == "Skill scoreboard"
     )
     names = [r.get("name") for r in scoreboard["entities"]]
-    assert "Forecast daily-kWh MAE" in names
-    assert "Forecast vs best baseline" not in names
-    assert not any(r.get("type") == "section" for r in scoreboard["entities"])
+    assert names == ["Forecast daily-kWh MAE", "Forecast hourly MAE"]
     # Still a valid, marker-bearing shape.
     assert d.is_managed(config)
     assert d.config_has_cards(config)
     assert set(d.missing_entity_keys(entity_map)) == {
-        "vs_best_baseline_pct",
-        "kill_gate_passed",
         "drift_mae_corrected",
         "shade_profile_date",
     }
 
 
-def test_build_no_comparisons_drops_section():
-    config = d.build_dashboard_config(
-        entity_map=_full_entity_map(),
-        comparison_slugs=[],
-        measured_entities=[],
-        version="0.0.0",
-    )
-    scoreboard = next(
-        c for c in config["views"][0]["cards"] if c.get("title") == "Skill scoreboard"
-    )
-    assert not any(r.get("type") == "section" for r in scoreboard["entities"])
-
-
 def test_build_measured_cards_use_measured_entities():
     config = d.build_dashboard_config(
         entity_map=_full_entity_map(),
-        comparison_slugs=[],
         measured_entities=[("M1", "sensor.a"), ("M2", "sensor.b"), ("M3", "sensor.c")],
         version="0.0.0",
     )
@@ -273,7 +240,6 @@ def test_build_measured_power_falls_back_to_history_graph():
     entity_map.pop("measured_dc_power_total")
     config = d.build_dashboard_config(
         entity_map=entity_map,
-        comparison_slugs=[],
         measured_entities=[("M1", "sensor.a"), ("M2", "sensor.b")],
         version="0.0.0",
     )
@@ -303,7 +269,6 @@ def test_forecast_card_survives_without_measured_row():
     entity_map.pop("measured_dc_power_total")
     config = d.build_dashboard_config(
         entity_map=entity_map,
-        comparison_slugs=[],
         measured_entities=[],
         version="0.0.0",
     )
@@ -324,7 +289,6 @@ def test_forecast_card_dc_fallback_without_ac_meter():
     entity_map.pop("measured_ac_power")
     config = d.build_dashboard_config(
         entity_map=entity_map,
-        comparison_slugs=[],
         measured_entities=[],
         version="0.0.0",
     )
@@ -345,7 +309,6 @@ def test_dc_diagnostics_card_gated_on_dc_sensors():
     # Present in the full map.
     full = d.build_dashboard_config(
         entity_map=_full_entity_map(),
-        comparison_slugs=[],
         measured_entities=[],
         version="0.0.0",
     )
@@ -359,7 +322,6 @@ def test_dc_diagnostics_card_gated_on_dc_sensors():
     entity_map.pop("energy_production_today_dc")
     gone = d.build_dashboard_config(
         entity_map=entity_map,
-        comparison_slugs=[],
         measured_entities=[],
         version="0.0.0",
     )
@@ -376,7 +338,6 @@ def test_forecast_card_omitted_without_power_now():
     entity_map.pop("power_production_now")
     config = d.build_dashboard_config(
         entity_map=entity_map,
-        comparison_slugs=[],
         measured_entities=[],
         version="0.0.0",
     )
@@ -497,20 +458,12 @@ def _patch_registry(monkeypatch, entity_map_entries):
     )
 
 
-def _registry_for_all_keys(entry_id="e1", comparisons=()):
-    """Registry entries covering every dashboard key + given comparison slugs."""
-    entries = [
+def _registry_for_all_keys(entry_id="e1"):
+    """Registry entries covering every dashboard key."""
+    return [
         _RegEntry(f"{entry_id}_{key}", f"sensor.{key}")
         for key in d.DASHBOARD_ENTITY_KEYS
     ]
-    for slug in comparisons:
-        entries.append(
-            _RegEntry(
-                f"{entry_id}_{SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX}_{slug}",
-                f"sensor.cmp_{slug}",
-            )
-        )
-    return entries
 
 
 # --------------------------------------------------------------------------
@@ -595,21 +548,13 @@ async def test_marker_bearing_refreshed_without_overwrite(monkeypatch):
 async def test_empty_dashboard_saved_with_counts(monkeypatch):
     dash = _FakeDash(load_missing=True)  # ConfigNotFound -> empty
     coord = _FakeCoordinator(
-        entry=_FakeEntry(
-            options={
-                CONF_COMPARISON_SENSORS: [
-                    {"name": "8-Entry Baseline", "daily_entity": "sensor.ext_a"},
-                ]
-            }
-        ),
+        entry=_FakeEntry(),
         planes=["sensor.inv_1", "sensor.inv_2"],
     )
     hass = _FakeHass(
         {"e1": coord}, lovelace=_FakeLovelace({"balcony-solar": dash})
     )
-    _patch_registry(
-        monkeypatch, _registry_for_all_keys(comparisons=("8_entry_baseline",))
-    )
+    _patch_registry(monkeypatch, _registry_for_all_keys())
     resp = await svc._handle_install_dashboard(hass, _Call({"dashboard": "balcony-solar"}))
     assert dash.saved is not None
     result = resp["result"]
@@ -617,10 +562,8 @@ async def test_empty_dashboard_saved_with_counts(monkeypatch):
     assert result["views"] == 1
     assert result["cards"] > 0
     assert result["missing_entities"] == []  # all keys registered
-    # The configured comparison made it into the config.
     cards = dash.saved["views"][0]["cards"]
     all_ids = _all_entity_ids(cards)
-    assert "sensor.cmp_8_entry_baseline" in all_ids
     # The per-plane ids are NOT enumerated anywhere on this path (0.20.6): the
     # bundled power-history card resolves its module list at runtime from the
     # measured-total sensor's `sources`, and the LTS statistics-graph that used
@@ -647,7 +590,7 @@ async def test_empty_dashboard_reports_missing_keys(monkeypatch):
     _patch_registry(monkeypatch, partial)
     resp = await svc._handle_install_dashboard(hass, _Call({"dashboard": "balcony-solar"}))
     missing = resp["result"]["missing_entities"]
-    assert "vs_best_baseline_pct" in missing
+    assert "daily_kwh_mae" in missing
     assert "energy_production_today" not in missing
     assert dash.saved is not None
 

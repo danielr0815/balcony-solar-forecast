@@ -911,72 +911,24 @@ ISSUE_TRANSLATION_PLACEHOLDERS: dict[str, frozenset[str]] = {
 # (STORAGE_VERSION envelope pinned at 1, inner schema only).
 # ===========================================================================
 
-# --- SKILL SCOREBOARD (SPEC §15 — the kill-gate) ------------------------
-# Nightly, per yesterday: compute the daily-kWh error of (a) the ENGINE forecast
+# --- SKILL SCOREBOARD (SPEC §15) ----------------------------------------
+# Nightly, per yesterday: compute the daily-kWh error of the ENGINE forecast
 # AS ISSUED for yesterday (from the issued ring — NEVER recomputed with today's
-# learned state), (b) each configured external COMPARISON forecast AS IT STOOD
-# during yesterday (read from that entity's recorder history for yesterday —
-# NEVER today's value), all against (c) the MEASURED site energy for yesterday
-# (sum of the per-module actuals in the actuals ring). Also the engine's hourly
-# MAE. STRATIFIED by yesterday's dominant weather class (the coordinator already
+# learned state) against the MEASURED site energy for yesterday (sum of the
+# per-module actuals in the actuals ring). Also the engine's hourly MAE.
+# STRATIFIED by yesterday's dominant weather class (the coordinator already
 # classifies clear/mixed/overcast/fog — reuse, do not reinvent). A rolling
-# window (default SCOREBOARD_WINDOW_DAYS) feeds the kill-gate verdict.
+# window (default SCOREBOARD_WINDOW_DAYS) feeds the aggregate metrics.
 CONF_SCOREBOARD_ENABLED = "scoreboard_enabled"
 DEFAULT_SCOREBOARD_ENABLED = True
 CONF_SCOREBOARD_WINDOW_DAYS = "scoreboard_window_days"
-DEFAULT_SCOREBOARD_WINDOW_DAYS = 14  # rolling window length (SPEC §15.4 kill-gate)
-# The kill-gate passes when the engine is at least this fraction better than the
-# best baseline on daily-kWh MAE over a FULL window (SPEC §15.4: >=10% better
-# than the best configured baseline on the primary daily-kWh metric).
-CONF_SCOREBOARD_GATE_MARGIN = "scoreboard_gate_margin"
-DEFAULT_SCOREBOARD_GATE_MARGIN = 0.10
-# Minimum scored days before the gate can pass at all (a partial window can
-# never assert the kill-gate; SPEC §15.4 "over a full window").
-SCOREBOARD_MIN_WINDOW_DAYS = 1
-# Minimum number of PAIRED days (days on which BOTH the engine and the
-# candidate comparison were scored) before that comparison is eligible to set
-# the best-baseline bar for the gate. A comparison scored on one or two lucky
-# days must not decide the whole verdict; the gate is a matched-pair
-# comparison over the days both sides cover (fixes non-paired evaluation,
-# SPEC §15.2). Raised 1 -> 3: with a single paired day a 10 % margin is pure
-# weather luck (one clear-day bust of the baseline flips the verdict), three
-# is the smallest sample that separates a pattern from a coin flip.
-SCOREBOARD_MIN_PAIRED_DAYS = 3
-# Staleness bound (local days): the newest scored day must be within this many
-# days of "today" for the gate to assert at all, else the verdict is suspended
-# (None) — a ring whose scoring stopped weeks ago must not keep publishing a
-# live-looking pass/fail. The coordinator passes the current local date in.
-SCOREBOARD_MAX_STALENESS_DAYS = 3
+DEFAULT_SCOREBOARD_WINDOW_DAYS = 14  # rolling window length (SPEC §15)
 # Minimum scored days in a weather stratum before its informational
-# within-stratum vs-best-baseline percent is emitted (C1/SPEC-5). With fewer
-# days a single mismatched pair produced absurd figures (a -480 % row on n=2);
-# below this the percent is published as None and the row carries low_n=True so
-# the dashboard/diagnostics can hide it rather than render a meaningless number.
+# within-stratum metrics are treated as meaningful (C1/SPEC-5). With fewer
+# days a single day produced absurd figures (a -480 % row on n=2); the row
+# carries low_n=True so the dashboard/diagnostics can hide it rather than
+# render a meaningless number.
 SCOREBOARD_STRATUM_MIN_N = 3
-
-# --- Comparison forecast sensors (GENERIC + CONFIGURABLE; ship EMPTY) -------
-# CONF_COMPARISON_SENSORS is an editable list of objects, each:
-#   {CONF_COMPARISON_NAME: str, CONF_COMPARISON_DAILY_ENTITY: entity_id}
-# ``daily_entity`` is an HA sensor whose STATE is that comparison's daily-kWh
-# forecast for today (same pattern as our own energy_production_today). The
-# scoreboard reads its RECORDER HISTORY for yesterday (the value AS IT STOOD
-# during yesterday — no leakage). Ships EMPTY by default: the operator's two
-# comparisons are DOCUMENTED (docs/DASHBOARD.md + config example), never
-# hardcoded in the runtime defaults (SPEC §15.3: generic, not hardcoded).
-#
-#   Documented example (operator's live site — see docs/DASHBOARD.md):
-#     - name "8-Entry Baseline" -> sensor.pv_prognose_heute_alle_module
-#     - name "Alt 1600W"        -> sensor.energy_production_today_4
-CONF_COMPARISON_SENSORS = "comparison_sensors"
-CONF_COMPARISON_NAME = "name"
-CONF_COMPARISON_DAILY_ENTITY = "daily_entity"
-DEFAULT_COMPARISON_SENSORS: list[dict] = []  # EMPTY by default (SPEC §15.3)
-# The comparison entity's daily-kWh value for yesterday is read from recorder
-# history. We take the LAST recorded state on yesterday's LOCAL calendar day
-# (the settled end-of-day forecast the consumer saw). Unit assumed kWh (the
-# operator's two comparisons and our own sensor are all kWh). A non-numeric /
-# unavailable last state -> that comparison is unscored for the day (not zero).
-SCOREBOARD_COMPARISON_UNIT_KWH = True
 
 # --- QUANTILES P10/P50/P90 (SPEC §11.1) -----------------------------------
 # Historical-simulation bands: a 90-day ring of hourly RELATIVE errors
@@ -1040,7 +992,7 @@ STORAGE_DATA_VERSION_V3 = 3
 # New store keys (v3). All EXISTING v2 keys are unchanged and carried through.
 STORE_KEY_QUANTILE_STATE = "quantile_state"    # QuantileState: {bin_key: relerr ring}
 STORE_KEY_SCOREBOARD_STATE = "scoreboard_state"  # ScoreboardState: rolling window of DayScore
-STORE_KEY_COMPARISON_RING = "comparison_ring"  # {iso_date: {comparison_name: daily_kwh}} read-from-recorder cache
+STORE_KEY_COMPARISON_RING = "comparison_ring"  # legacy: {iso_date: {comparison_name: daily_kwh}} — no writers/readers anymore (external comparisons removed); kept so old v3 stores load byte-faithful (SPEC §16.1)
 # Inverter-efficiency site-calibration learner state (AC-side Phase 3). Added
 # ADDITIVELY WITHIN the v3 schema (NO version bump): _empty_state injects the
 # neutral InverterCalState and the shared load path default-reads a store that
@@ -1069,21 +1021,13 @@ STORE_KEY_LEARNING_HEALTH = "learning_health"
 
 # --- New diagnostic sensors / binary sensors (SPEC §14/§15.5) -----------------
 # Entity object_ids are unprefixed: the device slug already carries
-# "balcony_solar_forecast", so these ARE the forecast's own metrics (baselines
-# are the comparison_* sensors). Avoids the balcony_solar_forecast_forecast_*
-# stutter.
+# "balcony_solar_forecast", so these ARE the forecast's own metrics. Avoids the
+# balcony_solar_forecast_forecast_* stutter.
 SENSOR_FORECAST_DAILY_KWH_MAE = "daily_kwh_mae"
 SENSOR_FORECAST_HOURLY_MAE = "hourly_mae"
-# Per-comparison daily-kWh MAE sensor: object_id is suffixed with a slug of the
-# comparison name (built by sensor.py from CONF_COMPARISON_NAME).
-SENSOR_COMPARISON_DAILY_KWH_MAE_PREFIX = "comparison_daily_kwh_mae"
-# Positive percent = the integration's own forecast is better than the best
-# baseline on daily-kWh MAE.
-SENSOR_FORECAST_VS_BEST_BASELINE_PCT = "vs_best_baseline_pct"
 # Optional daily P10 / P90 energy sensors (today's band), SPEC §11.2.
 SENSOR_ENERGY_TODAY_P10 = "energy_production_today_p10"
 SENSOR_ENERGY_TODAY_P90 = "energy_production_today_p90"
-BINARY_SENSOR_KILL_GATE_PASSED = "kill_gate_passed"
 
 # --- Quantile curve attributes on the energy sensors (SPEC §11.2/§14.4) ----------
 # Additive to the existing ATTR_WATTS / ATTR_WH_PERIOD. Each is a {iso_utc: Wh}
@@ -1102,8 +1046,7 @@ DATA_KEY_QUANTILE_CURVES_AC = "quantile_curves_ac"
 # aggregate does not rise under a spike. P90 stays the plain today-sum of the
 # served AC P90 band curve, so no separate key is carried for it.
 DATA_KEY_ENERGY_TODAY_AC_P10 = "energy_today_kwh_ac_p10"
-DATA_KEY_SCOREBOARD = "scoreboard"                # dict: engine_mae / per-comparison mae / vs_best_pct / gate / strata
-DATA_KEY_KILL_GATE_PASSED = "kill_gate_passed"    # bool | None (None == not enough window yet)
+DATA_KEY_SCOREBOARD = "scoreboard"                # dict: engine mae / strata
 
 # --- get_forecast service response additions (SPEC §11.2/§14.4) ------------------
 # The extended get_forecast response carries plane-agnostic TOTAL p10/p50/p90

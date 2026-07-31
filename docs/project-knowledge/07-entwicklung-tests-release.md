@@ -333,7 +333,7 @@ aktuellen Fassung):
 | Bootstrap / Backfill | **§12** | `run_bootstrap`, `scripts/backfill.py`, gemeinsamer Kern, Import-Semantik, Quantil-Seeding |
 | Degradationsleiter | **§13** | frisch → Last-Good-Cache → reine Physik → `unavailable`, jede Stufe sichtbar |
 | Konsumenten-Schnittstellen | **§14** | Sensor-Namen, AC-Standard vs. `*_dc`, Headline-Semantik, Mess-Sensoren, Diagnostics-Dump, Energy-Hook, Statusehrlichkeit |
-| Scoreboard / Kill-Gate | **§15** | Metrikdefinitionen, Fairness/Leakage, Vergleichsliste, Gate-Schwellen, Sensorik |
+| Scoreboard | **§15** | Metrikdefinitionen, Fairness/Leakage, Sensorik |
 | Store / Persistenz | **§16** | Schema v3 + Migrationsinvariante, Ringe, Schreibsemantik, Lade-Robustheit |
 | Verschattungsprofil | **§17** | Entitäten, engine-exakte Semantik, `core/shadeprofile.py`-Tunables |
 | Dashboard / Karten | **§18** | Referenz-YAML, `install_dashboard`, die zwei gebündelten Karten, Auslieferung |

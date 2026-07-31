@@ -12,7 +12,7 @@ that make the dashboard a *zero-custom-card* deliverable:
      sensor.py that forgets the dashboard is caught here.
 
 The YAML is read as UTF-8 (Home Assistant always loads Lovelace YAML as UTF-8;
-the file contains ✅/❌ verdict glyphs in a markdown card).
+the file contains non-ASCII glyphs in markdown cards).
 """
 
 from __future__ import annotations
@@ -72,7 +72,6 @@ _ALLOWED_CARD_TYPES = frozenset(
         "entities",
         "history-graph",
         "statistics-graph",
-        "gauge",
         "grid",
         "vertical-stack",
         "horizontal-stack",
@@ -142,34 +141,19 @@ def test_only_builtin_card_types(dashboard):
     assert not any(str(t).startswith("custom:") for t in types)
 
 
-def test_uses_the_five_documented_builtin_cards(dashboard):
-    """SPEC §18.1 names history-graph, entities, gauge, markdown (+ statistics)."""
+def test_uses_the_documented_builtin_cards(dashboard):
+    """SPEC §18.1 names history-graph, entities, markdown (+ statistics)."""
     types = {card["type"] for card in _iter_cards(dashboard)}
-    for required in ("markdown", "entities", "history-graph", "gauge"):
+    for required in ("markdown", "entities", "history-graph"):
         assert required in types, f"missing required built-in card: {required}"
-
-
-def test_gauge_binds_engine_vs_best_baseline(dashboard):
-    """SPEC §18.1: a gauge bound to engine_vs_best_baseline_pct."""
-    gauges = [c for c in _iter_cards(dashboard) if c["type"] == "gauge"]
-    assert gauges, "expected a gauge card"
-    assert any(
-        g.get("entity")
-        == "sensor.balcony_solar_forecast_vs_best_baseline_pct"
-        for g in gauges
-    ), "the gauge must bind to engine_vs_best_baseline_pct"
 
 
 def test_required_scoreboard_and_learner_entities_referenced(dashboard):
     referenced = set(_iter_entity_ids(dashboard))
     required = {
-        # scoreboard / kill-gate (SPEC §15)
-        "binary_sensor.balcony_solar_forecast_kill_gate_passed",
+        # scoreboard (SPEC §15)
         "sensor.balcony_solar_forecast_daily_kwh_mae",
-        "sensor.balcony_solar_forecast_vs_best_baseline_pct",
-        # the two documented operator comparisons (SPEC §15.3)
-        "sensor.balcony_solar_forecast_comparison_daily_kwh_mae_8_entry_baseline",
-        "sensor.balcony_solar_forecast_comparison_daily_kwh_mae_alt_1600w",
+        "sensor.balcony_solar_forecast_hourly_mae",
         # quantile band sensors (SPEC §11.2)
         "sensor.balcony_solar_forecast_energy_production_today_p10",
         "sensor.balcony_solar_forecast_energy_production_today_p90",
@@ -214,34 +198,14 @@ def test_derived_object_ids_match_dashboard(dashboard):
     """
     referenced = set(_iter_entity_ids(dashboard))
     for platform, key in (
-        ("sensor", "vs_best_baseline_pct"),
         ("sensor", "daily_kwh_mae"),
         ("sensor", "hourly_mae"),
         ("sensor", "energy_production_today_p10"),
         ("sensor", "energy_production_today_p90"),
-        ("binary_sensor", "kill_gate_passed"),
     ):
         expected = _object_id_from_translation(platform, key)
         assert expected in referenced, (
             f"dashboard missing derived id {expected} for {platform}.{key}"
-        )
-
-
-def test_comparison_ids_follow_slug_pattern(dashboard):
-    """The per-comparison MAE ids follow ``…_comparison_daily_kwh_mae_<slug>``.
-
-    Derived from the comparison-name -> slug pattern (ComparisonConfig.slug and
-    the sensor's suggested_object_id), matching the documented operator pair, so
-    the dashboard cannot drift from the sensor's actual object_id.
-    """
-    referenced = set(_iter_entity_ids(dashboard))
-    for name in ("8-Entry Baseline", "Alt 1600W"):
-        slug = _ha_slugify(name)
-        expected = (
-            f"sensor.{_DEVICE_SLUG}_comparison_daily_kwh_mae_{slug}"
-        )
-        assert expected in referenced, (
-            f"dashboard missing comparison id {expected} for {name!r}"
         )
 
 
@@ -254,17 +218,6 @@ def test_shademap_documented_via_dump_service(dashboard):
     ]
     joined = "\n".join(blobs)
     assert "dump_shademap" in joined, "must document the dump_shademap service"
-
-
-def test_comparison_config_example_documented(dashboard):
-    """SPEC §15.3: the documented comparison entities are named in-dashboard."""
-    joined = "\n".join(
-        c.get("content", "")
-        for c in _iter_cards(dashboard)
-        if c["type"] == "markdown"
-    )
-    assert "sensor.pv_prognose_heute_alle_module" in joined
-    assert "sensor.energy_production_today_4" in joined
 
 
 def test_lts_card_never_asks_for_sum_on_power_sensors(dashboard):

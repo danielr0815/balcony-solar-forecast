@@ -379,10 +379,11 @@ async def test_load_v2_migrates_to_v3_and_schedules_writeback():
     assert store.get_drift_state().slow_disabled is True
     assert store.get_actuals("2026-07-05") == {"M1": 300.0, "M4": 250.0, "M7": 210.0}
     assert store.is_day_trained("2026-07-04")
-    # v3 sections are present + empty.
+    # v3 sections are present + empty (the comparison ring stays as a legacy
+    # key: no readers/writers anymore, but still schema-carried, SPEC §16.1).
     assert store.get_quantile_state().bins == {}
     assert store.get_scoreboard_state().days == {}
-    assert store.get_comparison("2026-07-05") is None
+    assert store._data[STORE_KEY_COMPARISON_RING] == {}
 
 
 async def test_load_v3_no_needless_writeback():
@@ -512,32 +513,39 @@ def test_corrupt_scoreboard_day_degrades_but_keeps_good_days():
         measured_kwh=6.4,
         engine_kwh=6.6,
         engine_daily_abs_err=0.2,
-        comparison_kwh={"8-Entry Baseline": 6.0},
-        comparison_daily_abs_err={"8-Entry Baseline": 0.4},
         engine_hourly_mae=12.0,
-    )
+    ).to_dict()
+    # Legacy shape (SPEC §16.1): stores written before the external-comparison
+    # machinery was removed still carry the comparison fields on each DayScore
+    # — they must load cleanly and be ignored (never resurrected).
+    good_day["comparison_kwh"] = {"8-Entry Baseline": 6.0}
+    good_day["comparison_daily_abs_err"] = {"8-Entry Baseline": 0.4}
     blob[STORE_KEY_SCOREBOARD_STATE] = {
         "version": 1,
         "days": {
-            "2026-07-05": good_day.to_dict(),
+            "2026-07-05": good_day,
             "2026-07-04": "not-a-dict",  # garbage -> neutral DayScore
         },
     }
     state = validate_state(blob)
     sb = ScoreboardState.from_dict(state[STORE_KEY_SCOREBOARD_STATE])
     assert set(sb.days) == {"2026-07-05", "2026-07-04"}
-    # Good day round-trips faithfully.
+    # Good day round-trips faithfully (legacy comparison keys dropped).
     d = sb.days["2026-07-05"]
     assert d.weather_class == "clear"
     assert d.engine_daily_abs_err == pytest.approx(0.2)
-    assert d.comparison_daily_abs_err["8-Entry Baseline"] == pytest.approx(0.4)
     assert d.engine_hourly_mae == pytest.approx(12.0)
+    assert "comparison_kwh" not in d.to_dict()
+    assert "comparison_daily_abs_err" not in d.to_dict()
     # Garbage day degraded to a neutral score (never raised).
     assert sb.days["2026-07-04"].measured_kwh == 0.0
 
 
 def test_v3_comparison_ring_validated_and_trimmed():
-    """The comparison ring keeps well-formed rows, drops garbage, trims."""
+    """Legacy load tolerance (SPEC §16.1): the comparison ring has no readers
+    or writers since the external comparisons were removed, but an old store's
+    ring still loads validated + trimmed — well-formed rows kept, garbage
+    dropped."""
     blob = validate_state(_populated_v2_store())
     blob = copy.deepcopy(blob)
     ring = {

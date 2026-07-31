@@ -83,13 +83,11 @@ from .const import (
     BAND_SOURCE_ENVELOPE,
     BAND_SOURCE_LEARNED,
     CLASSIFIER_VERSION,
-    CONF_COMPARISON_SENSORS,
     CONF_ENSEMBLE_ENABLED,
     CONF_FETCH_INTERVAL,
     CONF_QUANTILES_ENABLED,
     CONF_RECOMPUTE_INTERVAL,
     CONF_SCOREBOARD_ENABLED,
-    CONF_SCOREBOARD_GATE_MARGIN,
     CONF_SCOREBOARD_WINDOW_DAYS,
     CONF_SITE,
     CORRECTION_SOURCE_BOTH,
@@ -104,7 +102,6 @@ from .const import (
     DATA_KEY_DRIFT_MAE,
     DATA_KEY_ENERGY_TODAY_AC_P10,
     DATA_KEY_INTRADAY_SCALAR,
-    DATA_KEY_KILL_GATE_PASSED,
     DATA_KEY_LEARNER_STATUS,
     DATA_KEY_QUANTILE_CURVES,
     DATA_KEY_QUANTILE_CURVES_AC,
@@ -115,7 +112,6 @@ from .const import (
     DEFAULT_ENSEMBLE_ENABLED,
     DEFAULT_QUANTILES_ENABLED,
     DEFAULT_SCOREBOARD_ENABLED,
-    DEFAULT_SCOREBOARD_GATE_MARGIN,
     DEFAULT_SCOREBOARD_WINDOW_DAYS,
     DOMAIN,
     ENSEMBLE_FACTOR_MAX,
@@ -154,7 +150,6 @@ from .const import (
 )
 from .core import (
     BiasState,
-    ComparisonConfig,
     DriftState,
     ForecastResult,
     InverterCalState,
@@ -279,21 +274,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._learner_config = LearnerConfig.from_dict(cfg)
 
         # --- Skill scoreboard config (v0.4, SPEC §15) --------------------
-        # Enable flag + rolling-window length + kill-gate margin, all from the
-        # options flow (defaults from const). The comparison sensors are a
-        # GENERIC, CONFIGURABLE list (ships EMPTY, SPEC §15.3); a malformed/half-filled
-        # row is dropped by ComparisonConfig.list_from_options.
+        # Enable flag + rolling-window length, from the options flow (defaults
+        # from const).
         self._scoreboard_enabled = bool(
             cfg.get(CONF_SCOREBOARD_ENABLED, DEFAULT_SCOREBOARD_ENABLED)
         )
         self._scoreboard_window_days = int(
             cfg.get(CONF_SCOREBOARD_WINDOW_DAYS, DEFAULT_SCOREBOARD_WINDOW_DAYS)
-        )
-        self._scoreboard_gate_margin = float(
-            cfg.get(CONF_SCOREBOARD_GATE_MARGIN, DEFAULT_SCOREBOARD_GATE_MARGIN)
-        )
-        self._comparisons: tuple[ComparisonConfig, ...] = (
-            ComparisonConfig.list_from_options(cfg.get(CONF_COMPARISON_SENSORS))
         )
 
         # --- Quantile bands (v0.4, SPEC §11) -----------------------------
@@ -2231,11 +2218,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         data[DATA_KEY_BIAS_CELLS] = self._bias_cells_summary()
         data[DATA_KEY_DRIFT_MAE] = self._latest_drift_mae()
         # --- v0.4 additive scoreboard keys (SPEC §15) ---
-        # The rolling-window aggregate view + the kill-gate verdict, derived from
-        # the persisted DayScore ring. Cheap pure assembly; never raises.
-        summary = self._scoreboard_summary()
-        data[DATA_KEY_SCOREBOARD] = summary
-        data[DATA_KEY_KILL_GATE_PASSED] = summary.get("kill_gate_passed")
+        # The rolling-window aggregate view, derived from the persisted
+        # DayScore ring. Cheap pure assembly; never raises.
+        data[DATA_KEY_SCOREBOARD] = self._scoreboard_summary()
         # --- v0.4 additive quantile band curves (SPEC §11.2) ---
         # {p10: {iso_slot: Wh}, p50: ..., p90: ...} 15-min band Wh curves, from
         # the engine's per-slot band watts (only present when quantile bands were
@@ -2489,7 +2474,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return _nightly.set_collapse_frozen_date(self, iso)
 
     # ------------------------------------------------------------------
-    # Skill scoreboard (the kill-gate) — SPEC §15
+    # Skill scoreboard — SPEC §15
     # ------------------------------------------------------------------
 
     async def _score_scoreboard_day(self, day: date) -> None:
@@ -2503,28 +2488,6 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     def _dominant_weather_class(self, snap: IssuedSnapshot, iso: str) -> str:
         """Yesterday's DOMINANT cloud class from the issued snapshot (SPEC §8)."""
         return _scoreboard_glue.dominant_weather_class(self, snap, iso)
-
-    async def _comparison_kwh_for_day(self, day: date) -> dict[str, float]:
-        """Per-comparison daily-kWh AS IT STOOD during ``day`` (no leakage)."""
-        return await _scoreboard_glue.comparison_kwh_for_day(self, day)
-
-    async def _async_read_comparison_history(
-        self, day: date, comparisons: list[ComparisonConfig]
-    ) -> dict[str, float]:
-        """Read each comparison's daily-kWh AT THE ENGINE'S HORIZON for ``day``."""
-        return await _scoreboard_glue.async_read_comparison_history(
-            self, day, comparisons
-        )
-
-    def _normalise_comparison_kwh(
-        self, entity_id: str, value: float
-    ) -> float | None:
-        """Normalise a raw comparison state to daily kWh, or None if unusable."""
-        return _scoreboard_glue.normalise_comparison_kwh(self, entity_id, value)
-
-    def _site_daily_kwh_ceiling(self) -> float | None:
-        """The site's physical daily-energy ceiling: installed Wp x 24 h (kWh)."""
-        return _scoreboard_glue.site_daily_kwh_ceiling(self)
 
     def _persist_scoreboard_state(self) -> None:
         self._call_store_setter(

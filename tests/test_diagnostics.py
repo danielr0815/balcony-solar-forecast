@@ -33,7 +33,6 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     DATA_KEY_CORRECTION_SOURCE,
     DATA_KEY_DRIFT_MAE,
     DATA_KEY_INTRADAY_SCALAR,
-    DATA_KEY_KILL_GATE_PASSED,
     DATA_KEY_LEARNER_STATUS,
     DATA_KEY_SCOREBOARD,
     DOMAIN,
@@ -82,12 +81,10 @@ def _coordinator_data() -> dict:
         DATA_KEY_CORRECTION_SOURCE: "intraday",
         DATA_KEY_SCOREBOARD: {
             "engine_daily_kwh_mae": 0.31,
-            "kill_gate_passed": True,
             "window_days": 14,
             "scored_days": 9,
             "strata": {"clear": {"days": 4}},
         },
-        DATA_KEY_KILL_GATE_PASSED: True,
     }
 
 
@@ -175,8 +172,6 @@ async def test_diagnostics_state_forecast_and_scoreboard_blocks():
 
     scoreboard = out["scoreboard"]
     assert scoreboard["engine_daily_kwh_mae"] == pytest.approx(0.31)
-    assert scoreboard["kill_gate_passed"] is True
-    assert scoreboard["kill_gate_passed_flag"] is True
     assert scoreboard["strata"] == {"clear": {"days": 4}}
 
     assert out["store"] == {"issued_snapshots": 12, "learning_health": {"streak": 0}}

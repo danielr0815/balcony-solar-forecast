@@ -2,7 +2,7 @@
 
 A ready-to-paste Lovelace dashboard for Balcony Solar Forecast, using **only
 built-in Home Assistant cards** — it needs zero custom cards and zero HACS
-frontend resources. It surfaces the v0.4 skill scoreboard (the kill-gate), the
+frontend resources. It surfaces the v0.4 skill scoreboard, the
 P10/P50/P90 uncertainty band, the learner/drift/degradation status, and a
 best-effort shademap view (SPEC §15/§18.1).
 
@@ -41,7 +41,7 @@ Optional fields:
 
 The response reports the target `dashboard`, the number of `views` and `cards`
 written, and `missing_entities` — the keys of any entities not present yet (e.g.
-comparison sensors you have not configured), whose cards/rows were omitted so a
+sensors your site does not have), whose cards/rows were omitted so a
 partial install still renders. The generated dashboard already embeds the
 bundled shade-profile card (§4b) — no extra step.
 
@@ -76,10 +76,7 @@ Solar Forecast**), e.g.:
 | Forecast today kWh | `sensor.balcony_solar_forecast_energy_production_today` |
 | Forecast daily-kWh MAE | `sensor.balcony_solar_forecast_daily_kwh_mae` |
 | Forecast hourly MAE | `sensor.balcony_solar_forecast_hourly_mae` |
-| Forecast vs best baseline (%) | `sensor.balcony_solar_forecast_vs_best_baseline_pct` |
-| Kill-gate | `binary_sensor.balcony_solar_forecast_kill_gate_passed` |
 | Today P10 / P90 | `sensor.balcony_solar_forecast_energy_production_today_p10` / `_p90` |
-| Per-comparison MAE | `sensor.balcony_solar_forecast_comparison_daily_kwh_mae_<slug>` |
 | Measured site power (DC total) | `sensor.balcony_solar_forecast_measured_dc_power_total` |
 | Measured site power (AC meter) | `sensor.balcony_solar_forecast_measured_ac_power` (only when a total-AC meter is configured) |
 | DC model diagnostics | `sensor.balcony_solar_forecast_power_production_now_dc` / `sensor.balcony_solar_forecast_energy_production_today_dc` |
@@ -90,69 +87,13 @@ If your entity ids differ (multiple installs, renamed entities), fix the
 action above, which resolves them for you. Any entity that does not exist yet
 simply renders as *unknown* — the dashboard never errors on a missing one.
 
-The scoreboard sensors (`daily_kwh_mae`, `vs_best_baseline_pct`,
-the per-comparison MAE sensors, `kill_gate_passed`) only appear after v0.4 is
-installed **and** at least one nightly scoreboard run has completed. Until then
-they read *unknown*, and the kill-gate card shows the "window not full yet"
-state.
+The scoreboard sensors (`daily_kwh_mae`, `hourly_mae`) only produce a value
+after v0.4 is installed **and** at least one nightly scoreboard run has
+completed. Until then they read *unknown*, which the cards render gracefully.
 
 ---
 
-## 2. Configure the comparison baselines (the scoreboard's opponents)
-
-The scoreboard ships with **no comparison baselines** configured — they are
-generic and configurable, never hardcoded (SPEC §15.3). Add them so the kill-gate has
-something to beat:
-
-1. **Settings → Devices & Services → Balcony Solar Forecast → Configure**.
-2. In **Comparison sensors**, add one row per external forecast, each with:
-   - **name** — a label (becomes the MAE sensor's object-id suffix, slugified);
-   - **daily_entity** — an HA sensor whose *state* is that forecast's
-     **daily-kWh for today** (same shape as our own
-     `energy_production_today`).
-
-The scoreboard reads each comparison entity's **recorder history for
-yesterday** (the value *as it stood* during yesterday — no leakage), never its
-live value, and compares it against the measured site energy for yesterday.
-
-### The operator's live site (reference config)
-
-| name | daily_entity |
-|---|---|
-| `8-Entry Baseline` | `sensor.pv_prognose_heute_alle_module` |
-| `Alt 1600W` | `sensor.energy_production_today_4` |
-
-- **8-Entry Baseline** — the frozen 8-single-module rany2 ensemble sum template
-  (Phase 0), the primary baseline the Phase-1 kill-gate is measured against.
-- **Alt 1600W** — the old rany2 "Home-LA" single-1600 Wp today sensor
-  (`sensor.energy_production_today_4`), the pre-project baseline.
-
-With those two configured, the per-comparison MAE sensors materialise as:
-
-- `sensor.balcony_solar_forecast_comparison_daily_kwh_mae_8_entry_baseline`
-- `sensor.balcony_solar_forecast_comparison_daily_kwh_mae_alt_1600w`
-
-(the `<slug>` is the lowercased alphanumeric form of the name: `8-Entry
-Baseline` → `8_entry_baseline`, `Alt 1600W` → `alt_1600w`). These are the
-entity ids the shipped dashboard's *Skill scoreboard* card references — if you
-choose different comparison names, update those two `entity:` lines.
-
-### As YAML (options snippet)
-
-If you configure the entry via YAML/import rather than the UI, the option looks
-like:
-
-```yaml
-comparison_sensors:
-  - name: "8-Entry Baseline"
-    daily_entity: sensor.pv_prognose_heute_alle_module
-  - name: "Alt 1600W"
-    daily_entity: sensor.energy_production_today_4
-```
-
----
-
-## 2b. Configure the total-AC meter (optional, enables AC-vs-AC)
+## 2. Configure the total-AC meter (optional, enables AC-vs-AC)
 
 The main power/energy sensors report **AC** (behind the inverters) since Phase 2.
 If you have a single meter for the whole site's AC output, point the integration
@@ -185,15 +126,8 @@ deliberately stays **built-in cards only** — a per-module `history-graph` in
 place of the power-history card and no custom cards — so it renders on a bare HA
 without the bundled frontend resources.
 
-- **Kill-gate verdict** (markdown) — PASSED / not passed / window-not-full,
-  derived from `binary_sensor.…_kill_gate_passed` and the engine-vs-baseline
-  percent. This is the gate the whole plan hangs on (SPEC §15.4): once it is
-  green, it is safe to consider re-pointing consumers (e.g. battery_manager) at
-  the engine sensors.
-- **Engine vs best baseline** (gauge) — bound to
-  `sensor.…_vs_best_baseline_pct`; positive = engine better on daily-kWh MAE.
-- **Skill scoreboard** (entities) — engine daily-kWh MAE, engine hourly MAE,
-  engine-vs-best percent, plus each configured comparison's daily-kWh MAE.
+- **Skill scoreboard** (entities) — engine daily-kWh MAE and engine hourly MAE
+  over the rolling window.
 - **Forecast vs. measured (AC / DC power)** (history-graph) — the instantaneous
   forecast power (`power_production_now`, which reports **AC** since Phase 2)
   overlaid with a measured power row on one y-scale. When a **total-AC meter** is

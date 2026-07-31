@@ -1,17 +1,15 @@
 """Tests for the v0.4 platform layer (SPEC §11/§15).
 
-Covers the skill-scoreboard sensors (engine daily/hourly MAE, per-comparison
-MAE, engine-vs-best-baseline percent), the kill-gate binary sensor, the daily
+Covers the skill-scoreboard sensors (engine daily/hourly MAE), the daily
 P10/P90 quantile energy sensors, the p10/p90 wh_period band attributes on the
 served energy sensor, the extended get_forecast response band blocks, the
-options-flow comparison list + quantile switch, and the diagnostics scoreboard/
+options-flow quantile switch, and the diagnostics scoreboard/
 quantile summaries.
 
 All read the coordinator's flat ``self.data`` v0.4 keys and must:
   * stay available where they are diagnostics (never vanish);
   * report ``None`` — never a fabricated zero — when the scoreboard/quantiles
-    are absent, disabled or cold-started (SPEC §15.4 "no premature verdict",
-    SPEC §11.1 "no fake spread");
+    are absent, disabled or cold-started (SPEC §11.1 "no fake spread");
   * tolerate missing / malformed values without raising.
 
 Needs Home Assistant; skipped on the plain-core path.
@@ -27,16 +25,11 @@ pytest.importorskip("homeassistant")
 pytest.importorskip("voluptuous")
 
 from balcony_solar_forecast import sensor as sensor_mod  # noqa: E402
-from balcony_solar_forecast.binary_sensor import (  # noqa: E402
-    KillGatePassedSensor,
-)
 from balcony_solar_forecast.const import (  # noqa: E402
     ATTR_WH_PERIOD_P10,
     ATTR_WH_PERIOD_P90,
-    CONF_COMPARISON_SENSORS,
     DATA_KEY_BAND_SOURCE,
     DATA_KEY_BAND_SOURCE_BY_DAY,
-    DATA_KEY_KILL_GATE_PASSED,
     DATA_KEY_QUANTILE_CURVES,
     DATA_KEY_QUANTILE_CURVES_AC,
     DATA_KEY_SCOREBOARD,
@@ -44,21 +37,17 @@ from balcony_solar_forecast.const import (  # noqa: E402
     FORECAST_RESP_KEY_P50,
     FORECAST_RESP_KEY_P90,
 )
-from balcony_solar_forecast.core.types import ComparisonConfig  # noqa: E402
 from balcony_solar_forecast.diagnostics import (  # noqa: E402
     _quantile_summary,
     _scoreboard_summary,
 )
 from balcony_solar_forecast.sensor import (  # noqa: E402
-    ComparisonDailyKwhMaeSensor,
     EnergyBandSensor,
     EnergyProductionSensor,
     EngineDailyKwhMaeSensor,
     EngineHourlyMaeSensor,
-    EngineVsBestBaselinePctSensor,
     _band_blocks,
     _build_forecast_response,
-    _configured_comparisons,
     _hourly_from_slots,
 )
 
@@ -94,11 +83,9 @@ def _sb(**fields):
     base = {
         "engine_daily_kwh_mae": None,
         "engine_hourly_mae": None,
-        "comparison_daily_kwh_mae": {},
-        "engine_vs_best_baseline_pct": None,
-        "kill_gate_passed": None,
         "window_days": 14,
         "scored_days": 0,
+        "newest_scored_date": None,
         "strata": {},
     }
     base.update(fields)
@@ -142,168 +129,37 @@ def test_engine_hourly_mae_value_and_none():
     assert _bare(EngineHourlyMaeSensor, _FakeCoordinator({})).native_value is None
 
 
-def test_engine_vs_best_baseline_pct_sign_preserved():
-    # Positive == engine better.
-    coord = _FakeCoordinator(
-        {DATA_KEY_SCOREBOARD: _sb(engine_vs_best_baseline_pct=12.34)}
-    )
-    assert _bare(
-        EngineVsBestBaselinePctSensor, coord
-    ).native_value == pytest.approx(12.3)
-    # Negative == engine worse (must not be clamped to zero).
-    coord_neg = _FakeCoordinator(
-        {DATA_KEY_SCOREBOARD: _sb(engine_vs_best_baseline_pct=-8.77)}
-    )
-    assert _bare(
-        EngineVsBestBaselinePctSensor, coord_neg
-    ).native_value == pytest.approx(-8.8)
-    # None passes through.
-    assert _bare(
-        EngineVsBestBaselinePctSensor, _FakeCoordinator({})
-    ).native_value is None
+async def test_setup_registers_no_kill_gate_or_comparison_entities():
+    # The kill-gate binary sensor, the vs-best-baseline sensor and the
+    # per-comparison MAE sensors were removed with the external-comparison
+    # machinery: both platforms' async_setup_entry must not register any of
+    # them (a leftover registration would recreate orphaned entities on the
+    # live install).
+    from balcony_solar_forecast import binary_sensor as binary_sensor_mod
 
+    class _Plane:
+        actual_entity = None
+        name = "M1"
 
-# ==========================================================================
-# Per-comparison MAE sensors (dynamic)
-# ==========================================================================
+    class _Site:
+        planes = (_Plane(),)
+        ac_actual_entity = None
 
-
-def test_comparison_mae_reads_by_name():
-    cmp = ComparisonConfig(name="8-Entry Baseline", daily_entity="sensor.x")
-    coord = _FakeCoordinator(
-        {
-            DATA_KEY_SCOREBOARD: _sb(
-                comparison_daily_kwh_mae={"8-Entry Baseline": 0.812, "Other": 1.0}
-            )
-        }
-    )
-    sensor = _bare(ComparisonDailyKwhMaeSensor, coord, _comparison=cmp)
-    assert sensor.native_value == pytest.approx(0.812)
-    assert sensor.extra_state_attributes == {
-        "comparison_name": "8-Entry Baseline",
-        "daily_entity": "sensor.x",
-    }
-
-
-def test_comparison_mae_none_until_scored():
-    cmp = ComparisonConfig(name="Alt 1600W", daily_entity="sensor.y")
-    # Comparison configured but not yet in the map (no scored day) -> None.
-    coord = _FakeCoordinator({DATA_KEY_SCOREBOARD: _sb(comparison_daily_kwh_mae={})})
-    assert _bare(ComparisonDailyKwhMaeSensor, coord, _comparison=cmp).native_value is None
-    # No scoreboard at all -> None.
-    assert _bare(
-        ComparisonDailyKwhMaeSensor, _FakeCoordinator({}), _comparison=cmp
-    ).native_value is None
-
-
-def test_comparison_sensor_unique_id_and_slug():
-    cmp = ComparisonConfig(name="8-Entry Baseline!", daily_entity="sensor.x")
     coord = _FakeCoordinator({})
-    sensor = ComparisonDailyKwhMaeSensor(coord, cmp)
-    # Slug drops punctuation; unique id embeds it so a rename mints a new sensor.
-    assert cmp.slug == "8_entry_baseline"
-    assert sensor.unique_id == "abc123_comparison_daily_kwh_mae_8_entry_baseline"
-    assert sensor.name == "Comparison daily kWh MAE 8-Entry Baseline!"
-    # The object_id is pinned via the SUPPORTED integration-suggested path — a
-    # pre-set entity_id (the former _attr_suggested_object_id does not exist in
-    # HA and was silently ignored). It must equal the documented dashboard id.
-    assert sensor.entity_id == (
-        "sensor.balcony_solar_forecast_comparison_daily_kwh_mae_8_entry_baseline"
-    )
+    coord._site = _Site()
 
+    class _Hass:
+        data = {DOMAIN: {"abc123": coord}}
 
-def test_comparison_slug_is_strictly_ascii():
-    """A non-ASCII label ("Süd") must slugify to ASCII: the slug is embedded in
-    the unique_id AND the pre-set entity_id, where non-ASCII is invalid — and
-    the documented dashboard id must name the real entity."""
-    cmp = ComparisonConfig(name="PV Süd", daily_entity="sensor.z")
-    assert cmp.slug == "pv_s_d"
-    sensor = ComparisonDailyKwhMaeSensor(_FakeCoordinator({}), cmp)
-    assert sensor.entity_id == (
-        "sensor.balcony_solar_forecast_comparison_daily_kwh_mae_pv_s_d"
-    )
-    assert sensor.entity_id.isascii()
-
-
-# ==========================================================================
-# _configured_comparisons: reads merged entry config, drops malformed rows
-# ==========================================================================
-
-
-def test_configured_comparisons_from_options():
-    entry = _FakeEntry(
-        options={
-            CONF_COMPARISON_SENSORS: [
-                {"name": "A", "daily_entity": "sensor.a"},
-                {"name": "B", "daily_entity": "sensor.b"},
-                {"name": "", "daily_entity": "sensor.c"},  # dropped (no name)
-                {"name": "D"},  # dropped (no entity)
-                "garbage",  # dropped (not a dict)
-            ]
-        }
-    )
-    coord = _FakeCoordinator({}, entry=entry)
-    cmps = _configured_comparisons(coord)
-    assert [c.name for c in cmps] == ["A", "B"]
-
-
-def test_configured_comparisons_options_override_data():
-    entry = _FakeEntry(
-        data={CONF_COMPARISON_SENSORS: [{"name": "old", "daily_entity": "sensor.o"}]},
-        options={CONF_COMPARISON_SENSORS: [{"name": "new", "daily_entity": "sensor.n"}]},
-    )
-    coord = _FakeCoordinator({}, entry=entry)
-    assert [c.name for c in _configured_comparisons(coord)] == ["new"]
-
-
-def test_configured_comparisons_empty_by_default():
-    coord = _FakeCoordinator({}, entry=_FakeEntry())
-    assert _configured_comparisons(coord) == ()
-
-
-# ==========================================================================
-# Kill-gate binary sensor
-# ==========================================================================
-
-
-def test_kill_gate_on_off_none():
-    on = _FakeCoordinator({DATA_KEY_KILL_GATE_PASSED: True})
-    off = _FakeCoordinator({DATA_KEY_KILL_GATE_PASSED: False})
-    unknown = _FakeCoordinator({DATA_KEY_KILL_GATE_PASSED: None})
-    absent = _FakeCoordinator({})
-    assert _bare(KillGatePassedSensor, on).is_on is True
-    assert _bare(KillGatePassedSensor, off).is_on is False
-    # None (window not full) and absent both -> unknown, never a premature pass.
-    assert _bare(KillGatePassedSensor, unknown).is_on is None
-    assert _bare(KillGatePassedSensor, absent).is_on is None
-
-
-def test_kill_gate_always_available_and_attrs():
-    coord = _FakeCoordinator(
-        {
-            DATA_KEY_KILL_GATE_PASSED: True,
-            DATA_KEY_SCOREBOARD: _sb(
-                window_days=14,
-                scored_days=14,
-                engine_daily_kwh_mae=0.4,
-                engine_vs_best_baseline_pct=15.0,
-            ),
-        },
-        last_update_success=False,
-    )
-    sensor = _bare(KillGatePassedSensor, coord)
-    assert sensor.available is True  # survives an unavailable forecast
-    attrs = sensor.extra_state_attributes
-    assert attrs["window_days"] == 14
-    assert attrs["scored_days"] == 14
-    assert attrs["engine_daily_kwh_mae"] == 0.4
-    assert attrs["engine_vs_best_baseline_pct"] == 15.0
-
-
-def test_kill_gate_non_bool_flag_is_none():
-    # A stray non-bool value must not leak through as truthy.
-    coord = _FakeCoordinator({DATA_KEY_KILL_GATE_PASSED: "yes"})
-    assert _bare(KillGatePassedSensor, coord).is_on is None
+    added: list = []
+    await sensor_mod.async_setup_entry(_Hass(), coord.entry, added.extend)
+    await binary_sensor_mod.async_setup_entry(_Hass(), coord.entry, added.extend)
+    assert added  # sanity: the platforms did register their real entities
+    for entity in added:
+        uid = getattr(entity, "unique_id", "") or ""
+        assert "kill_gate" not in uid
+        assert "vs_best" not in uid
+        assert "comparison" not in uid
 
 
 # ==========================================================================
@@ -538,19 +394,14 @@ def test_diagnostics_scoreboard_summary():
         DATA_KEY_SCOREBOARD: _sb(
             engine_daily_kwh_mae=0.4,
             engine_hourly_mae=150.0,
-            comparison_daily_kwh_mae={"A": 0.6},
-            engine_vs_best_baseline_pct=33.3,
-            kill_gate_passed=True,
             scored_days=14,
             strata={"clear": {"n": 5, "engine_daily_kwh_mae": 0.2}},
         ),
-        DATA_KEY_KILL_GATE_PASSED: True,
     }
     out = _scoreboard_summary(_FakeCoordinator(data), data)
     assert out["engine_daily_kwh_mae"] == 0.4
-    assert out["comparison_daily_kwh_mae"] == {"A": 0.6}
+    assert out["engine_hourly_mae"] == 150.0
     assert out["strata"]["clear"]["n"] == 5
-    assert out["kill_gate_passed_flag"] is True
 
 
 def test_diagnostics_scoreboard_absent():

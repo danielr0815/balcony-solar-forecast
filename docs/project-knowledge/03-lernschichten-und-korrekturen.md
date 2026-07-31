@@ -27,7 +27,7 @@ mit exponentiellem Vergessen.
 | Shademap (`core/shademap`) | absolute Beam-Transmittanz T je Bin | Messung vs. **ungegatete** Beam-/Diffus-Referenz | Beam-Gate im Motor (ersetzt statisches τ) | ja (`shademap_state`) | Rollback, Re-Bootstrap |
 | Quantile (`core/quantiles`) | empirische P10/P50/P90-Multiplikatoren | Messung vs. **issued-corrected** Stunde | P10/P50/P90-Bänder (nicht P50-Kurve!) | ja (`quantile_state`) | Rollback, Re-Bootstrap |
 | Inverter-η (`core/inverter_cal`) | ein Site-Skalar η_inv | AC-Zähler vs. Summe DC-Stunden | nur die AC-Kurve | ja (`inverter_cal_state`) | kein Service; nie tragend |
-| Scoreboard (`core/scoreboard`) | nichts — **bewertet** nur | issued vs. Messung vs. Baselines | Diagnose, Kill-Gate-Verdikt | ja (`scoreboard_state`) | — |
+| Scoreboard (`core/scoreboard`) | nichts — **bewertet** nur | issued vs. Messung | Diagnose | ja (`scoreboard_state`) | — |
 | Drift-Monitor (`_nightly`) | rollierende Tages-MAE + Streaks | corrected/slow_only vs. raw | schaltet Layer ab, rollt zurück | ja (`drift_state`) | Options-Toggle OFF→ON |
 
 Scoreboard und Drift-Monitor sind bewusst **keine** Lerner: sie messen und
@@ -342,31 +342,23 @@ und Streak-Zähler sind *nicht* selbst idempotent, ohne diese Marke würde jeder
 Neustart via Catch-up (`NIGHTLY_CATCHUP_MAX_DAYS` = 3) denselben Tag doppelt
 trainieren. Markiert wird erst, wenn *beide* Seiten (issued + actuals) vorlagen.
 
-## 9. Scoreboard & Kill-Gate — `core/scoreboard.py` + `_scoreboard_glue.py`
+## 9. Scoreboard — `core/scoreboard.py` + `_scoreboard_glue.py`
 
-Das Scoreboard **lernt nichts**; es vergleicht nächtlich pro geschlossenem Tag:
-die eigene Prognose **as issued**, jede konfigurierte Vergleichs-Entity **wie
-sie damals stand**, gegen die gemessene Tagesenergie.
+Das Scoreboard **lernt nichts**; es vergleicht nächtlich pro geschlossenem Tag
+die eigene Prognose **as issued** gegen die gemessene Tagesenergie.
 
 * **Leckfreiheit:** der Engine-Wert kommt aus dem issued-Ring (nie neu
-  gerechnet); Vergleichswerte werden aus der Recorder-Historie am **gleichen
-  Day-ahead-Horizont** gelesen (erster brauchbarer Zustand ab 01:30 lokal,
-  Fenster 8 h). Ein Snapshot, der erst nach 06:00 lokal geschrieben wurde, wird
+  gerechnet). Ein Snapshot, der erst nach 06:00 lokal geschrieben wurde, wird
   gar nicht gewertet (Nowcast-Schutz).
 * **Fenster:** `DEFAULT_SCOREBOARD_WINDOW_DAYS` = 14, konfigurierbar.
 * **Strata:** dominante Wolkenklasse des Tages, **energiegewichtet** über die
   issued-Stunden (eine Nebelmorgen-Nacht kann den Tag nicht als „clear" wählen).
-  Unter `SCOREBOARD_STRATUM_MIN_N` (3) Tagen wird der Prozentwert unterdrückt
-  und `low_n: true` gesetzt.
-* **Baselines:** matched-pair — Engine- und Vergleichs-MAE nur über die
-  gemeinsamen Tage; gewertet wird der *kleinste* Vorsprung (die stärkste
-  Baseline). `SCOREBOARD_MIN_PAIRED_DAYS` = 1.
-* **Verdikt** (`kill_gate_passed`): `True` nur bei vollem Fenster, frischem Ring
-  (`SCOREBOARD_MAX_STALENESS_DAYS` = 3) und Vorsprung ≥ `gate_margin·100`
-  (Default 10 %). `None` heißt „unentschieden" — zu wenige Tage, veralteter Ring
-  oder **keine** Baseline; eine fehlende Baseline ist kein Verlust.
+  Unter `SCOREBOARD_STRATUM_MIN_N` (3) Tagen trägt das Stratum `low_n: true`.
 
-Das Verdikt ist rein informativ (Binary-Sensor + Dashboard + Diagnostics); es
+*(Kill-Gate und externe Vergleichsprognosen entfernt in v0.25.0 — das
+Phase-1-Gate hatte seine Abnahme erfüllt.)*
+
+Das Scoreboard ist rein informativ (Sensoren + Dashboard + Diagnostics); es
 schaltet nichts ab. Der einzige Automatismus, der Schichten deaktiviert, ist der
 Drift-Monitor.
 
@@ -473,7 +465,7 @@ Day-ahead-Bias**.
   `CLASSIFIER_VERSION`-Bump: dafür gibt es keinen automatischen Reset.
 
 **Kalt-Start ist ehrlich, nicht kaputt.** `cold_start` (Bias ohne Zellen),
-neutrale Bänder (Bin unter dem Doppel-Gate), `kill_gate_passed = None` (Fenster
-noch nicht voll) und ein τ exakt gleich dem statischen Prior (n=0) sind korrekte
+neutrale Bänder (Bin unter dem Doppel-Gate)
+und ein τ exakt gleich dem statischen Prior (n=0) sind korrekte
 Zustände. Sie als Fehler zu lesen führt zu unnötigen Resets — die den Kalt-Start
 nur verlängern.
