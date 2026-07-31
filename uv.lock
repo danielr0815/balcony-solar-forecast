@@ -382,7 +382,7 @@ wheels = [
 
 [[package]]
 name = "balcony-solar-forecast"
-version = "0.23.3"
+version = "0.24.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]

@@ -1,6 +1,6 @@
 # Spezifikation: Balcony Solar Forecast — Mehrebenen-PV-Prognose mit Selbstlernen
 
-> **Gilt für Version: 0.23.3** · Zuletzt aktualisiert: 2026-07-30
+> **Gilt für Version: 0.24.0** · Zuletzt aktualisiert: 2026-07-31
 >
 > Diese Spezifikation beschreibt **ausschließlich den Ist-Stand dieser Version**:
 > was die Integration `balcony_solar_forecast` heute tut und tun muss. Sie

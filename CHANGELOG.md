@@ -11,12 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > table in [docs/HISTORIE.md](docs/HISTORIE.md) §H13. Historical entries are
 > deliberately left untouched.
 
-## [Unreleased]
+## [0.24.0] - 2026-07-31
 
-A full review pass over the integration in five commits: four behaviour
-tranches (core learner data bugs, HA-layer fixes, service/CI hardening, a
-95 % coverage gate) plus one documentation tranche. The SPEC stays stamped
-**0.23.3** — no version bump; these changes ship with the next release.
+A full review pass over the integration: four behaviour tranches (core
+learner data bugs, HA-layer fixes, service/CI hardening, a 95 % coverage
+gate) plus one documentation tranche, and a follow-up fix extending the
+metered-plane subset to live quantile training.
 
 ### Fixed
 
