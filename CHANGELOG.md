@@ -11,6 +11,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > table in [docs/HISTORIE.md](docs/HISTORIE.md) §H13. Historical entries are
 > deliberately left untouched.
 
+## [0.25.0] - 2026-07-31
+
+The Phase-1 acceptance gate has served its purpose — the engine beat the
+best baseline by more than the 10 % margin over a full window for good —
+and with the external comparison forecasts decommissioned there is nothing
+left to compare against. This release removes the kill-gate and the whole
+external-comparison machinery. The engine scoreboard (daily-kWh MAE,
+hourly MAE, weather-strata breakdown) keeps running unchanged.
+
+### Removed
+
+- **`binary_sensor.kill_gate_passed`** and the gate logic behind it
+  (margin, full-window, paired-days and staleness rules in
+  `core/scoreboard.py`), plus the dashboard verdict card. The verdict's
+  job — prove the engine beats the old baseline before consumers switch —
+  is done. SPEC section 15.4 is gone with it.
+- **External comparison forecasts end to end.** The `comparison_sensors`
+  options-flow list and its selector, `ComparisonConfig`, the
+  per-comparison `…_comparison_daily_kwh_mae_<slug>` sensors (including
+  the registry ghost pruning), the `vs_best_baseline_pct` sensor and its
+  dashboard gauge, and the nightly recorder read of comparison entities
+  at the matched day-ahead horizon. SPEC section 15.3 is gone too.
+- **Dashboard cards** for the verdict, the vs-best-baseline gauge and the
+  comparison-sensors reminder, from both the shipped YAML and the
+  generated observability dashboard (re-run the `install_dashboard`
+  action after upgrading to refresh a managed dashboard).
+
+### Changed
+
+- **Options flow.** A leftover `comparison_sensors` key in an existing
+  config entry's options is dropped on the next save, so upgraded
+  installs clean themselves up.
+- **Storage tolerance.** Stores carrying a legacy `comparison_ring` or
+  comparison fields in scored days still load fine — the data is simply
+  no longer written or read (SPEC §16.1 migration invariant untouched).
+- **Scoreboard summary** (diagnostics) now reports the engine-only key
+  set: MAE figures, window/scored days, newest scored date and the strata
+  breakdown — no comparison or gate fields.
+
 ## [0.24.0] - 2026-07-31
 
 A full review pass over the integration: four behaviour tranches (core

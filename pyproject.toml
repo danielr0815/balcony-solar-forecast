@@ -9,7 +9,7 @@
 
 [project]
 name = "balcony-solar-forecast"
-version = "0.24.0"
+version = "0.25.0"
 description = "Self-learning multi-plane PV forecast for Home Assistant: raw-irradiance transposition, per-channel shade learning, quantile bands and a skill scoreboard."
 readme = "README.md"
 # Floor matches homeassistant's own requirement (HA >= 2026.3 needs 3.14.2+).
