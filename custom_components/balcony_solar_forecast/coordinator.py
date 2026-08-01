@@ -125,7 +125,9 @@ from .const import (
     FORECAST_RESP_KEY_P10,
     FORECAST_RESP_KEY_P50,
     FORECAST_RESP_KEY_P90,
+    INTRADAY_MAX_STEP_PER_TICK,
     INTRADAY_MIN_MODELED_WH,
+    INTRADAY_MIN_SUN_ELEVATION_DEG,
     INTRADAY_NEUTRAL,
     INTRADAY_TRAILING_WINDOW_MINUTES,
     ISSUE_CONFIG_CHANGED_BIAS_RESEED,
@@ -1639,7 +1641,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     def _update_intraday_scalar(self, now: datetime) -> None:
         """Refresh the transient intraday scalar from live actuals vs the RAW
         curve of the previous tick's result (raw, so the scalar never trains
-        against its own applied correction)."""
+        against its own applied correction). The freshly computed scalar is
+        rate-limited against the served one (SPEC §9.4:
+        INTRADAY_MAX_STEP_PER_TICK per tick); the reload start value is
+        INTRADAY_NEUTRAL."""
         fast_on = (self._learner_config.fast_enabled
                    and not self._drift_state.fast_disabled)
         if not fast_on:
@@ -1652,13 +1657,23 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self._intraday_samples.append(sample)
                 self._trim_intraday_ring(now)
         try:
-            self._intraday_scalar = bias_mod.compute_intraday_scalar(
+            new_scalar = bias_mod.compute_intraday_scalar(
                 list(self._intraday_samples), now=now)
         except NotImplementedError:
             self._intraday_scalar = INTRADAY_NEUTRAL
         except Exception:  # pragma: no cover - defensive
             _LOGGER.debug("compute_intraday_scalar failed", exc_info=True)
             self._intraday_scalar = INTRADAY_NEUTRAL
+        else:
+            # Rate limit (SPEC §9.4): |new - prev| <= INTRADAY_MAX_STEP_PER_TICK
+            # per 15-min recompute tick, so a full correction spreads over
+            # ~1.5-2 h and one-tick jumps (live-observed 1.0 -> 0.38 in the
+            # evening oscillation) become impossible. The reload start value
+            # is INTRADAY_NEUTRAL, so the first tick moves at most one step.
+            prev = self._intraday_scalar
+            step = new_scalar - prev
+            self._intraday_scalar = prev + max(
+                -INTRADAY_MAX_STEP_PER_TICK, min(INTRADAY_MAX_STEP_PER_TICK, step))
 
     def _build_intraday_sample(
         self, result: ForecastResult, now: datetime
@@ -1671,9 +1686,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         deficit: a DTU serving 4 of 8 ports would otherwise drive the ratio
         toward 0.5, SPEC §9.4 channel-dropout guard). Both sides are then
         normalised by the Haurwitz clear-sky reference so geometry/season cancel.
-        Returns None when no channel is usable or the modeled site energy for the
-        usable subset is below INTRADAY_MIN_MODELED_WH.
+        Returns None when the sun is below INTRADAY_MIN_SUN_ELEVATION_DEG (the
+        clear-sky reference is too coarse there and the ratio is dawn/dusk
+        noise — the sample is never created, SPEC §9.4), when no channel is
+        usable or when the modeled site energy for the usable subset is below
+        INTRADAY_MIN_MODELED_WH.
         """
+        if self._sun_elevation_deg(now) < INTRADAY_MIN_SUN_ELEVATION_DEG:
+            return None
         read = self._read_live_actuals_total(now)
         if read is None:
             return None
@@ -1734,6 +1754,17 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 total += series[idx]
         return total * theta
 
+    def _sun_elevation_deg(self, at: datetime) -> float:
+        """Sun elevation (deg) at the midpoint of the 15-min slot starting ``at``.
+
+        Single source for the slot-midpoint convention: the elevation gate and
+        the clear-sky reference must judge the SAME instant, or a slot could
+        pass the gate with a reference computed at a different sun height.
+        """
+        midpoint = at + timedelta(minutes=7, seconds=30)
+        _az, el = solpos.sun_position(midpoint, self._site.latitude, self._site.longitude)
+        return el
+
     def _clear_sky_ref_wh(self, now: datetime) -> float:
         """Haurwitz clear-sky GHI energy proxy (Wh/m^2) for the current slot.
 
@@ -1741,9 +1772,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         reference removes the geometry/season component from the intraday ratio
         (SPEC §9.4: condition in k_c space). Returns 0 when the sun is down.
         """
-        midpoint = now + timedelta(minutes=7, seconds=30)
-        _az, el = solpos.sun_position(midpoint, self._site.latitude, self._site.longitude)
-        ghi = clearsky.haurwitz_ghi(el)
+        ghi = clearsky.haurwitz_ghi(self._sun_elevation_deg(now))
         return ghi * 0.25  # W/m^2 over a 15-min slot -> Wh/m^2
 
     def _read_live_actuals_total(
@@ -1896,7 +1925,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         cancel. The slot
         CONTAINING ``now`` is skipped so the reconstruction never collides with
         the live sample the caller adds for the current tick (no double-samples).
-        Slots below INTRADAY_MIN_MODELED_WH or with no clear-sky reference (sun
+        Slots below INTRADAY_MIN_SUN_ELEVATION_DEG, below
+        INTRADAY_MIN_MODELED_WH or with no clear-sky reference (sun
         down) are dropped, exactly as :meth:`_build_intraday_sample` gates them.
         """
         metered_planes = {p.name for p in self._site.planes if p.actual_entity}
@@ -1911,6 +1941,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         samples: list[_IntradaySample] = []
         for idx in sorted(by_slot):
             slot_start = dt_util.as_utc(result.slot_starts[idx])
+            # Same sun-elevation gate as the live sampler (SPEC §9.4): sub-5-deg
+            # slots are dawn/dusk noise and must not enter the ring here either.
+            if self._sun_elevation_deg(slot_start) < INTRADAY_MIN_SUN_ELEVATION_DEG:
+                continue
             means = by_slot[idx]
             measured_w = sum(means) / len(means)
 

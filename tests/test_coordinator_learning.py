@@ -61,7 +61,10 @@ from custom_components.balcony_solar_forecast.coordinator import (  # noqa: E402
     _measured_power_rows,
     _usable_power,
 )
-from custom_components.balcony_solar_forecast.core import LearnerHooks  # noqa: E402
+from custom_components.balcony_solar_forecast.core import (  # noqa: E402
+    LearnerHooks,
+    solpos,
+)
 from custom_components.balcony_solar_forecast.core.bias import (  # noqa: E402
     compute_intraday_scalar,
 )
@@ -1443,6 +1446,112 @@ def test_update_intraday_scalar_survives_notimplemented(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# SPEC §9.4 robustness: sun-elevation gate at sample creation
+# ---------------------------------------------------------------------------
+
+
+def _low_sun_slot_start(c) -> datetime:
+    """A 15-min slot start whose MIDPOINT sun elevation is in (1.0, 4.5) deg:
+    the sun IS up (clear-sky reference > 0, so pre-gate code WOULD build a
+    sample here) but below the 5 deg INTRADAY_MIN_SUN_ELEVATION_DEG gate.
+    solpos is pure, so the scan is deterministic; the slot-midpoint
+    convention matches the coordinator's clear-sky reference.
+    """
+    day = datetime(2026, 7, 1, tzinfo=UTC)
+    for minute in range(24 * 60):
+        cand = day + timedelta(minutes=minute)
+        _az, el = solpos.sun_position(
+            cand + timedelta(minutes=7, seconds=30),
+            c._site.latitude, c._site.longitude,
+        )
+        if 1.0 < el < 4.5:
+            return cand
+    raise AssertionError("no low-sun slot found on 2026-07-01")
+
+
+def test_build_intraday_sample_none_below_min_sun_elevation():
+    """SPEC §9.4: no sample while the sun is under 5 deg elevation — even with
+    the sun up and the modeled energy far above the Wh gate."""
+    c = _make_coordinator()
+    start = _low_sun_slot_start(c)
+    result = ForecastResult(
+        slot_starts=(start,),
+        total_watts=(400.0,),
+        plane_results=(
+            PlaneResult(name="M1", watts=(400.0,), raw_watts=(400.0,)),
+        ),
+        hourly_wh={start.isoformat(): 100.0},
+        raw_total_watts=(400.0,),
+        raw_hourly_wh={start.isoformat(): 100.0},
+    )
+    c.hass.states.set("sensor.m1", 200.0, last_updated=start)
+    c.hass.states.set("sensor.m2", 0.0, last_updated=start)
+    assert c._build_intraday_sample(result, start) is None
+
+
+# ---------------------------------------------------------------------------
+# SPEC §9.4 robustness: per-tick rate limit on the served scalar
+# ---------------------------------------------------------------------------
+
+
+def _prefill_intraday_ring(c, now: datetime, *, ratio: float) -> None:
+    """Constant-ratio samples over the trailing window (coverage >= 120 min)."""
+    for i in range(13):
+        c._intraday_samples.append(
+            coord_mod._IntradaySample(
+                at=now - timedelta(minutes=15 * i),
+                measured_kc=ratio,
+                modeled_kc=1.0,
+                modeled_wh=200.0,
+            )
+        )
+
+
+def test_update_intraday_scalar_rate_limited_from_neutral_start():
+    """SPEC §9.4: the served scalar moves at most 0.15 per tick (literal =
+    INTRADAY_MAX_STEP_PER_TICK, so this file still imports against pre-limiter
+    code for the rule-6 check); the reload start value is INTRADAY_NEUTRAL."""
+    c = _make_coordinator()
+    assert c._intraday_scalar == INTRADAY_NEUTRAL  # neutral start after reload
+    now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    _prefill_intraday_ring(c, now, ratio=1.5)
+    c._update_intraday_scalar(now)  # _last_result is None -> no new sample
+    assert c._intraday_scalar == pytest.approx(1.15, rel=1e-9)
+
+
+def test_update_intraday_scalar_rate_limited_down_step():
+    c = _make_coordinator()
+    c._intraday_scalar = 1.5  # served scalar from earlier ticks
+    now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    _prefill_intraday_ring(c, now, ratio=1.0)
+    c._update_intraday_scalar(now)
+    assert c._intraday_scalar == pytest.approx(1.35, rel=1e-9)
+
+
+def test_update_intraday_scalar_rate_limit_step_sequence():
+    """Tick for tick: 1.15, 1.30, 1.45, then the full 1.5 — the limiter slows
+    the correction but never sticks."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    _prefill_intraday_ring(c, now, ratio=1.5)
+    seen = []
+    for _ in range(4):
+        c._update_intraday_scalar(now)
+        seen.append(c._intraday_scalar)
+    assert seen == pytest.approx([1.15, 1.30, 1.45, 1.5])
+
+
+def test_update_intraday_scalar_small_delta_not_clipped():
+    """A delta inside the 0.15 step passes whole — the limiter must not round
+    small corrections away."""
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    _prefill_intraday_ring(c, now, ratio=1.1)
+    c._update_intraday_scalar(now)
+    assert c._intraday_scalar == pytest.approx(1.1, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
 # A7/SCT-2: intraday sample-ring re-arm after a restart/reload
 # ---------------------------------------------------------------------------
 
@@ -1528,6 +1637,25 @@ def test_rearm_samples_from_seconds_epoch_rows_fill_ring_nonneutral():
     scalar = compute_intraday_scalar(list(c._intraday_samples), now=now)
     assert scalar != INTRADAY_NEUTRAL
     assert scalar == pytest.approx(1.5, rel=1e-6)
+
+
+def test_rearm_samples_drop_low_elevation_slots():
+    """The re-arm mirrors the live elevation gate: the sub-5-deg slot never
+    enters the ring, the later above-gate slots of the same morning do."""
+    c = _make_coordinator()
+    low = _low_sun_slot_start(c)
+    now = low + timedelta(minutes=90)
+    # 8 slots ending at ``now``: low-15 .. low+90, modeled site 2 x 400 W.
+    result = _forecast_window(now, n_slots=8, raw_w_per_plane=400.0)
+    c._last_result = result
+    rows = _measured_power_rows(
+        _stat_rows_seconds_epoch(
+            now - timedelta(minutes=INTRADAY_TRAILING_WINDOW_MINUTES), now, 800.0,
+        )
+    )
+    samples = c._rearm_samples_from_rows(result, rows, now)
+    assert samples, "expected the above-gate morning slots to be reconstructed"
+    assert low not in {s.at for s in samples}
 
 
 def test_rearm_skips_current_slot_no_double_sample():

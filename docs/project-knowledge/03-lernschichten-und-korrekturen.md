@@ -145,7 +145,9 @@ angefasst und rollt via `scoreboard.trim_window` binnen des Fensters (Default
 ## 5. Intraday-Skalar — `bias.compute_intraday_scalar`
 
 **Transient, nie persistiert.** Über ein Trailing-Fenster:
-`s = Σ wᵢ·measured_kcᵢ / Σ wᵢ·modeled_kcᵢ` mit `wᵢ = exp(−alterᵢ/τ)`, beide
+`s = Σ wᵢ·measured_kcᵢ / Σ wᵢ·modeled_kcᵢ` mit
+`wᵢ = exp(−alterᵢ/τ) × modeled_whᵢ` (energiegewichtet: Hochproduktions-Slots
+dominieren, Morgen-/Abend-Slots fallen heraus), beide
 Seiten vorher durch dieselbe Haurwitz-Referenz geteilt (k_c-Raum). Ein
 Verhältnis von Summen, kein Mittel von Verhältnissen — Slots mit winzigem
 Nenner können den Wert dadurch nicht dominieren; der Ebenen-Mix kürzt sich,
@@ -170,6 +172,9 @@ gibt also keine Rückkopplung.
 | `INTRADAY_TRAILING_WINDOW_MINUTES` | 240.0 | Fenster, ältere Samples fallen raus |
 | `INTRADAY_MIN_TRAILING_MINUTES` | 120.0 | Spanne ältestes↔jüngstes Sample; darunter neutral |
 | `INTRADAY_MIN_MODELED_WH` | 5.0 | Slot-Gate gegen Division nahe Null |
+| `INTRADAY_MIN_SUN_ELEVATION_DEG` | 5.0 | Elevations-Gate an der Sample-Erzeugung (Live + Re-Arm) |
+| `INTRADAY_NEUTRAL_FLOOR_WH` | 25.0 | Neutral-Boden: beidseitig dimme Samples werden übersprungen |
+| `INTRADAY_MAX_STEP_PER_TICK` | 0.15 | Ratenbegrenzung des servierten Skalars pro Tick |
 | `INTRADAY_APPLY_HORIZON_MINUTES` | 360.0 | Vorwärtsfenster |
 | `INTRADAY_SCALAR_MIN` / `_MAX` | 0.25 / 2.5 | Clamp |
 | `INTRADAY_NEUTRAL` | 1.0 | Rückfallwert |

@@ -38,13 +38,13 @@ signatures without updating this contract module.
 
 --- IMPLEMENTATION NOTES (bias owner) ------------------------------------
 
-Intraday k_c-space ratio, why energy-weighted (not a mean of per-sample
+Intraday k_c-space ratio, why ratio-of-sums (not a mean of per-sample
 ratios): each sample carries the site energy already normalised by the
 Haurwitz clear-sky reference (``measured_kc`` / ``modeled_kc``). We form the
 scalar as
 
     s = sum_i(w_i * measured_kc_i) / sum_i(w_i * modeled_kc_i),
-    w_i = exp(-age_i / tau).
+    w_i = exp(-age_i / tau) * modeled_wh_i.
 
 This ratio-of-sums is invariant to the plane mix (SPEC §9.4: "Geometrie/Saison
 cancel"): scaling every plane's contribution by the same measured/modeled
@@ -52,7 +52,14 @@ proportion leaves ``s`` unchanged regardless of how the total splits across
 planes, and low-elevation slots (tiny denominator, noisy per-sample ratio)
 cannot dominate because they contribute little to either sum. A plain mean of
 ``measured_kc_i / modeled_kc_i`` would over-weight those noisy dawn/dusk slots
-and is deliberately avoided.
+and is deliberately avoided. The weight is the time decay times the slot's
+modeled energy (SPEC §9.4): high-production slots dominate and dawn/dusk slots
+fall out on their own — the live analysis 2026-08 showed the unweighted scalar
+flipping 0.39<->1.0 in the evening while behaving correctly at midday. Samples
+whose measured AND modeled energy both sit under INTRADAY_NEUTRAL_FLOOR_WH are
+skipped outright (a ratio of two noise floors is meaningless); one-sided
+samples (modeled high, measured low) keep passing, that is the real
+over-forecast signal this layer exists for.
 
 Day-ahead RLS is the textbook single-regressor recursive least squares with
 exponential forgetting, specialised to one scalar parameter theta modelling
@@ -102,6 +109,7 @@ from ..const import (
     INTRADAY_MIN_MODELED_WH,
     INTRADAY_MIN_TRAILING_MINUTES,
     INTRADAY_NEUTRAL,
+    INTRADAY_NEUTRAL_FLOOR_WH,
     INTRADAY_SCALAR_MAX,
     INTRADAY_SCALAR_MIN,
     INTRADAY_TAU_MINUTES,
@@ -204,15 +212,16 @@ def compute_intraday_scalar(
     *,
     now: datetime,
 ) -> float:
-    """Exponentially-decayed measured/modeled ratio in k_c space (SPEC §9.4).
+    """Energy- and recency-weighted measured/modeled ratio in k_c space (SPEC §9.4).
 
     Over the trailing INTRADAY_TRAILING_WINDOW_MINUTES up to ``now``, weight
-    each sample by exp(-age_minutes / INTRADAY_TAU_MINUTES) and take the
-    weighted ratio of measured k_c to modeled k_c, using only samples with
-    ``modeled_wh`` > INTRADAY_MIN_MODELED_WH. Requires at least
-    INTRADAY_MIN_TRAILING_MINUTES of coverage; returns INTRADAY_NEUTRAL (1.0)
-    when there is too little data. The result is clamped to
-    [INTRADAY_SCALAR_MIN, INTRADAY_SCALAR_MAX].
+    each sample by exp(-age_minutes / INTRADAY_TAU_MINUTES) x ``modeled_wh``
+    and take the weighted ratio of measured k_c to modeled k_c, using only
+    samples with ``modeled_wh`` > INTRADAY_MIN_MODELED_WH whose measured AND
+    modeled slot energy are not both below INTRADAY_NEUTRAL_FLOOR_WH. Requires
+    at least INTRADAY_MIN_TRAILING_MINUTES of coverage; returns
+    INTRADAY_NEUTRAL (1.0) when there is too little data. The result is
+    clamped to [INTRADAY_SCALAR_MIN, INTRADAY_SCALAR_MAX].
 
     This value is TRANSIENT: the coordinator holds it in memory and re-inits to
     1.0 after any restart; it is never written to the store.
@@ -220,12 +229,18 @@ def compute_intraday_scalar(
     Robustness: samples in the future or older than the trailing window are
     dropped; a clock jump that leaves every sample out-of-window collapses to
     neutral rather than acting on stale data. The ratio is a ratio-of-sums of
-    the per-slot site k_c weighted ONLY by the exp(-age/tau) time decay — each
-    in-window sample counts with EQUAL energy weight (a low-production slot
-    weighs as much as a high-production one); it is not energy-weighted. The
-    plane mix cancels because measured and modeled are both site sums normalised
-    by the same clear-sky reference. Divide-by-near-zero is guarded by the
-    modeled-Wh gate plus a floor on the weighted modeled-k_c denominator.
+    the per-slot site k_c, each sample weighted by the exp(-age/tau) time
+    decay TIMES its modeled slot energy — high-production slots dominate and
+    noisy low-energy dawn/dusk slots fall out on their own (SPEC §9.4; the
+    equal-time-weighted scalar flipped 0.39<->1.0 on summer evenings).
+    Samples where BOTH sides sit under INTRADAY_NEUTRAL_FLOOR_WH are skipped
+    (the measured Wh is recovered exactly as measured_kc x modeled_wh /
+    modeled_kc — both sides share the same clear-sky reference); a one-sided
+    sample (modeled high, measured low) is a genuine over-forecast and keeps
+    its full weight. The plane mix cancels because measured and modeled are
+    both site sums normalised by the same clear-sky reference.
+    Divide-by-near-zero is guarded by the modeled-Wh gate plus a floor on the
+    weighted modeled-k_c denominator.
     """
     if not samples:
         return INTRADAY_NEUTRAL
@@ -263,8 +278,19 @@ def compute_intraday_scalar(
         f_kc = float(modeled_kc)
         if f_kc <= 0.0 or m_kc < 0.0:
             continue
+        # Neutral floor (SPEC §9.4): when BOTH sides are dim the ratio of two
+        # noise floors is meaningless — skip the sample. The measured Wh is
+        # recovered exactly (both k_c values share the slot's clear-sky
+        # reference). One-sided samples (modeled high, measured low = a REAL
+        # over-forecast) keep passing; that is the signal this layer is for.
+        e_wh = float(modeled_wh)
+        if (e_wh < INTRADAY_NEUTRAL_FLOOR_WH
+                and m_kc * e_wh / f_kc < INTRADAY_NEUTRAL_FLOOR_WH):
+            continue
 
-        w = math.exp(-age_min / INTRADAY_TAU_MINUTES)
+        # Weight: recency decay TIMES the modeled slot energy (SPEC §9.4) —
+        # high-production slots dominate, dim dawn/dusk slots fall out.
+        w = math.exp(-age_min / INTRADAY_TAU_MINUTES) * e_wh
         weighted_measured += w * m_kc
         weighted_modeled += w * f_kc
         used += 1

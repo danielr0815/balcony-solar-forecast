@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > table in [docs/HISTORIE.md](docs/HISTORIE.md) §H13. Historical entries are
 > deliberately left untouched.
 
+## [Unreleased]
+
+### Fixed
+
+- **Intraday scalar hardened at the sun's edge (SPEC §9.4).** The scalar
+  behaved correctly at midday but jumped uncontrolled at dawn/dusk (live
+  finding 2026-08: sunrise transient overshooting the day forecast by
+  +2.4 kWh, evening oscillation 0.39↔1.0, one-tick jump 1.0→0.38). Four
+  rules rein it in: samples are only created at a sun elevation of at least
+  `INTRADAY_MIN_SUN_ELEVATION_DEG` (5°, live sampler and ring re-arm alike);
+  samples with measured AND modeled slot energy below
+  `INTRADAY_NEUTRAL_FLOOR_WH` (25 Wh) are skipped as meaningless while
+  one-sided over-forecast samples keep passing; the sample weight is now
+  `exp(-age/τ) × modeled_wh` so high-production slots dominate; and the
+  served scalar is rate-limited to `INTRADAY_MAX_STEP_PER_TICK` (0.15) per
+  recompute tick from its neutral reload start, so a full correction spreads
+  over ~1.5–2 h and one-tick jumps disappear.
+
 ## [0.25.0] - 2026-07-31
 
 The Phase-1 acceptance gate has served its purpose — the engine beat the

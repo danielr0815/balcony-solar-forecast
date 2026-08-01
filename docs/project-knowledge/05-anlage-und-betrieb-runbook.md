@@ -483,7 +483,9 @@ Cold-Start-Regel verbietet **fabrizierte** Spreizung.
 **Typische Ursachen:** Fast-Learner auf `off` (Kill-Switch) oder
 `disabled_by_drift` · **zu wenig Historie** — der Scalar braucht
 `INTRADAY_MIN_TRAILING_MINUTES = 120` Minuten Samples und akkumuliert nur, wo
-die modellierte Energie `INTRADAY_MIN_MODELED_WH = 5` übersteigt (früh morgens
+die Sonne ≥ `INTRADAY_MIN_SUN_ELEVATION_DEG` (5°) steht, die modellierte Energie
+`INTRADAY_MIN_MODELED_WH = 5` übersteigt und nicht beide Seiten unter dem
+Neutral-Boden `INTRADAY_NEUTRAL_FLOOR_WH` (25 Wh) liegen (früh morgens
 und spät abends ist 1,0 also korrekt) · **nach Neustart/Reload**: der Sample-Ring
 liegt rein im Speicher und wird nie persistiert; seit v0.21 wird er beim ersten
 frischen Tick aus den 5-Minuten-Recorder-Statistiken rekonstruiert und fällt bei

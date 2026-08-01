@@ -487,6 +487,24 @@ INTRADAY_NEUTRAL = 1.0
 # Only accumulate the intraday ratio where the modeled site energy is
 # non-trivial (avoid divide-by-near-zero at dawn/dusk / deep shade).
 INTRADAY_MIN_MODELED_WH = 5.0
+# Samples are only CREATED while the sun is at least this high (checked at the
+# slot midpoint, live sampler and ring re-arm alike). Below ~5 deg the Haurwitz
+# clear-sky reference is too coarse and the measured/modeled ratio is noise:
+# live analysis 2026-08 showed the sunrise transient (day forecast +2.4 kWh
+# overshoot) and the evening oscillation (scalar flipping 0.39<->1.0) both fed
+# by sub-5-deg slots, while the midday scalar behaved correctly.
+INTRADAY_MIN_SUN_ELEVATION_DEG = 5.0
+# A sample whose measured AND modeled slot energy both sit below this floor
+# carries a meaningless ratio (25 Wh ~ 100 W average over a 15-min slot) and is
+# skipped inside compute_intraday_scalar. One-sided samples (modeled high,
+# measured low = a REAL over-forecast) must keep passing — that is exactly the
+# signal this layer exists for.
+INTRADAY_NEUTRAL_FLOOR_WH = 25.0
+# Per-tick rate limit on the served scalar: |new - prev| is clamped to this
+# step. At the 15-min recompute cadence a full 1.0->2.5 correction takes
+# ~1.5-2 h, and one-tick jumps (observed live: 1.0 -> 0.38 in a single tick)
+# become impossible.
+INTRADAY_MAX_STEP_PER_TICK = 0.15
 
 # --- FAST learner: day-ahead RLS bias per (cloud class x day part) ----------
 # One scalar recursive-least-squares state per cell; trained nightly from the

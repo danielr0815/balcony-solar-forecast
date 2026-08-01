@@ -826,6 +826,30 @@ Die gemessene Seite ist gegen partiellen Kanalausfall abgesichert: fällt ein
 Teil der Messkanäle aus, wird die modellierte Seite auf dieselbe Teilmenge
 skaliert, statt das Verhältnis in Richtung Ausfallanteil zu drücken.
 
+**Robustheitsregeln am Sonnenrand.** Der Skalar arbeitet mittags korrekt,
+sprang aber morgens/abends unkontrolliert (Live-Befund 2026-08:
+Sonnenaufgangs-Transient mit +2,4 kWh Tagesprognose-Überschuss,
+Abend-Oszillation 0,39↔1,0, Ein-Tick-Sprung 1,0→0,38). Vier Regeln zügeln ihn:
+
+- **Elevations-Gate an der Sample-Erzeugung** (Live-Sampler und
+  Ring-Rekonstruktion gleichermaßen): Samples nur bei Sonnenelevation ≥
+  `INTRADAY_MIN_SUN_ELEVATION_DEG` (5°, Slot-Mitte). Darunter ist die
+  Haurwitz-Referenz zu grob und das Verhältnis Rauschen — solche Samples
+  werden nie erzeugt.
+- **Neutral-Boden im Kern:** Samples, bei denen gemessene **und** modellierte
+  Slot-Energie unter `INTRADAY_NEUTRAL_FLOOR_WH` (25 Wh ≙ 100 W je 15-min-Slot)
+  liegen, werden übersprungen — das Verhältnis zweier Rauschböden ist
+  bedeutungslos. Einseitig hohe Samples (modelliert hoch, gemessen niedrig =
+  echte Überprognose) gehen durch; leert der Boden das Fenster, greift das
+  Coverage-Gate (neutral).
+- **Energiegewichtung:** das Sample-Gewicht ist `exp(−alter/τ) × modeled_wh`
+  (Verhältnis von Summen bleibt). Hochproduktions-Slots dominieren,
+  Morgen-/Abend-Slots fallen automatisch heraus.
+- **Ratenbegrenzung:** pro Recompute-Tick ändert sich der servierte Skalar um
+  höchstens `INTRADAY_MAX_STEP_PER_TICK` (0,15) gegenüber dem Vorgängerwert;
+  Startwert nach Reload ist `INTRADAY_NEUTRAL`. Beim 15-min-Tick ist die volle
+  Korrektur in ~1,5–2 h erreicht, Ein-Tick-Sprünge verschwinden.
+
 ### §9.5 Schicht 3 — Day-ahead-Bias (RLS)
 
 **Ein RLS-Bias-Skalar θ je Zelle** (`Wolkenklasse|Tagesabschnitt`, §8),

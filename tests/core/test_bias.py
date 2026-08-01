@@ -291,6 +291,75 @@ def test_intraday_result_always_in_band():
         assert INTRADAY_SCALAR_MIN <= s <= INTRADAY_SCALAR_MAX
 
 
+def test_intraday_neutral_floor_skips_dim_both_sides():
+    """SPEC §9.4 neutral floor: measured AND modeled both < 25 Wh -> skipped.
+
+    The dim slot carries a poison ratio; skipped, the run recovers 1.2 exactly.
+    (The 25.0 floor is INTRADAY_NEUTRAL_FLOOR_WH, kept as a literal so this
+    file still imports against pre-floor code for the rule-6 check.)
+    """
+    now = _now()
+    samples = _trailing_samples(now, ratio=1.2, n=12, step_min=15, modeled_wh=100.0)
+    samples.append(
+        IntradaySample(
+            at=now - timedelta(minutes=45),
+            measured_kc=0.05,   # measured Wh = 0.05 * 20 / 0.2 = 5 < 25
+            modeled_kc=0.2,
+            modeled_wh=20.0,    # < 25: BOTH sides dim -> meaningless ratio
+        )
+    )
+    s = compute_intraday_scalar(samples, now=now)
+    assert s == pytest.approx(1.2, rel=1e-9)
+
+
+def test_intraday_neutral_floor_all_dim_collapses_to_neutral():
+    """When the floor empties the window the neutral fallback fires."""
+    now = _now()
+    # modeled 20 Wh (< 25) and measured 0.5 * 20 = 10 Wh (< 25): every sample
+    # is floor-skipped, so no coverage remains -> neutral, not 0.5.
+    samples = _trailing_samples(now, ratio=0.5, n=12, step_min=15, modeled_wh=20.0)
+    assert compute_intraday_scalar(samples, now=now) == INTRADAY_NEUTRAL
+
+
+def test_intraday_neutral_floor_one_sided_high_still_counts():
+    """Modeled high + measured low is a REAL over-forecast: never floor-skipped."""
+    now = _now()
+    good = _trailing_samples(now, ratio=1.0, n=12, step_min=15, modeled_wh=100.0)
+    # measured Wh = 0.2 * 100 = 20 < 25, but modeled 100 >= 25 -> one-sided.
+    over = _trailing_samples(now, ratio=0.2, n=12, step_min=15, modeled_wh=100.0)
+    s = compute_intraday_scalar(good + over, now=now)
+    # Same ages and energies on both runs -> exactly the mean of the ratios.
+    assert s == pytest.approx(0.6, rel=1e-9)
+
+
+def test_intraday_energy_weighting_high_production_dominates():
+    """SPEC §9.4: weights are exp(-age/tau) x modeled_wh — verified exactly.
+
+    High-production slots (400 Wh, ratio 1.5) vs dim-but-above-floor slots
+    (30 Wh, ratio 0.5): the time-only weighted value (~1.12) the dim slots
+    used to pull the scalar to must become ~1.46.
+    """
+    now = _now()
+    spec = [
+        (0.0, 1.5, 400.0),
+        (30.0, 0.5, 30.0),
+        (60.0, 1.5, 400.0),
+        (90.0, 0.5, 30.0),
+        (120.0, 1.5, 400.0),
+    ]
+    samples = [
+        IntradaySample(at=now - timedelta(minutes=age),
+                       measured_kc=ratio, modeled_kc=1.0, modeled_wh=wh)
+        for age, ratio, wh in spec
+    ]
+    num = sum(math.exp(-a / INTRADAY_TAU_MINUTES) * wh * r for a, r, wh in spec)
+    den = sum(math.exp(-a / INTRADAY_TAU_MINUTES) * wh for a, r, wh in spec)
+    s = compute_intraday_scalar(samples, now=now)
+    assert s == pytest.approx(num / den, rel=1e-9)
+    # The dim slots carry ~5 % of the weight: the scalar stays near 1.5.
+    assert s > 1.4
+
+
 # ===========================================================================
 # apply_intraday_scalar
 # ===========================================================================
