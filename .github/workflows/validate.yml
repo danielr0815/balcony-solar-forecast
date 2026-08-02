@@ -47,7 +47,7 @@ jobs:
       # pins a master SHA instead of floating on @master. Bump manually:
       # https://github.com/home-assistant/actions/commits/master
       - name: Hassfest validation
-        uses: "home-assistant/actions/hassfest@e3fb68ebda13d88a0d695082f471ba2c83d025fb"
+        uses: "home-assistant/actions/hassfest@ab22029681aa532bfe7de5774a9972d67bfbd2c0"
 
   # Advisory ONLY — never a gate. docs/SPEC.md is the project's contract
   # (SPEC §1.3: every behavioural change updates it in the SAME PR), but "was the
