@@ -128,6 +128,13 @@ Ergänzende Anleitungen:
   auf den `*_dc`-Diagnose-Sensoren sichtbar. Ist ein **Gesamt-AC-Zähler**
   konfiguriert, kalibriert die Integration den DC→AC-Wirkungsgrad η daran
   (nie load-bearing) und das Dashboard vergleicht AC gegen AC.
+  **Kurven-Attribute:** `watts` / `wh_period` / `wh_period_p10` /
+  `wh_period_p90` sind die 15-min-**DC**-Modellkurve; die servierte
+  15-min-**AC**-Kurve liegt als `wh_period_ac` / `wh_period_ac_p10` /
+  `wh_period_ac_p90` bei (für `_tomorrow`/`_d2` gilt Σ == Sensor-State).
+  Ein Diagnose-Sensor `curve_audit` zeichnet kompakt auf, wie stabil die
+  publizierten Tageswerte sind (Revisionen > 0,5 kWh, Tages-Kurvensummen,
+  angewandtes η).
 - **Verschattung sichtbar:** für ein wählbares Modul und Datum zeigt ein
   Diagramm die Sonnenbahn (Elevation über Azimut) mit der aktuell gelernten
   Verschattung (Transmission τ, eingefärbt) und den Horizontlinien — die

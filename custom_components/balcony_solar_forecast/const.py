@@ -1037,6 +1037,17 @@ STORE_KEY_CONFIG_FINGERPRINT = "config_fingerprint"  # str | None
 # last_accepted_day: iso | None}.
 STORE_KEY_LEARNING_HEALTH = "learning_health"
 
+# Persisted half of the curve-audit diagnostic (SPEC §14.4): the headline
+# revision counters (today/yesterday, per day offset) + the last significant
+# revision with provenance. Same additive contract as learning_health — no
+# schema bump, old stores read back neutral. The per-tick comparison baseline
+# is deliberately NOT persisted: after a restart the first tick re-seeds it,
+# so a restart can never fabricate a revision. Shape: {day: iso | None,
+# revisions_today: {d0,d1,d2: int}, revisions_yesterday: {d0,d1,d2: int},
+# last_revision: {at, date, day_offset, old_kwh, new_kwh, payload_refreshed} |
+# None}.
+STORE_KEY_CURVE_AUDIT = "curve_audit"
+
 # --- New diagnostic sensors / binary sensors (SPEC §14/§15.5) -----------------
 # Entity object_ids are unprefixed: the device slug already carries
 # "balcony_solar_forecast", so these ARE the forecast's own metrics. Avoids the
@@ -1046,6 +1057,17 @@ SENSOR_FORECAST_HOURLY_MAE = "hourly_mae"
 # Optional daily P10 / P90 energy sensors (today's band), SPEC §11.2.
 SENSOR_ENERGY_TODAY_P10 = "energy_production_today_p10"
 SENSOR_ENERGY_TODAY_P90 = "energy_production_today_p90"
+# Curve-audit diagnostic (SPEC §14.4): state = today's count of significant
+# (> HEADLINE_REVISION_THRESHOLD_KWH) revisions of the published AC day
+# headlines across the three day offsets; the compact day-scalar block (curve
+# sums per base, effective eta, yesterday's counters, last revision with
+# provenance) rides along as attributes.
+SENSOR_CURVE_AUDIT = "curve_audit"
+
+# Significance bar for the headline-revision counter (SPEC §14.4): a published
+# AC day-headline change at or below this delta is planner noise, not a
+# revision. 0.5 kWh is the consumer-side (battery-manager) replan threshold.
+HEADLINE_REVISION_THRESHOLD_KWH = 0.5
 
 # --- Quantile curve attributes on the energy sensors (SPEC §11.2/§14.4) ----------
 # Additive to the existing ATTR_WATTS / ATTR_WH_PERIOD. Each is a {iso_utc: Wh}
@@ -1053,6 +1075,15 @@ SENSOR_ENERGY_TODAY_P90 = "energy_production_today_p90"
 ATTR_WH_PERIOD_P10 = "wh_period_p10"
 ATTR_WH_PERIOD_P50 = "wh_period_p50"
 ATTR_WH_PERIOD_P90 = "wh_period_p90"
+# Served-AC siblings of the 15-min curve attributes (SPEC §14.4): the same
+# bucket structure ({iso_utc: Wh}, same keys as their DC counterparts), but
+# carrying the served AC curve (per-group/learned eta + AC clamp) the sensor
+# STATE is also rolled up from. wh_period_ac is always present with curve data
+# (until the learned eta is trusted the CONFIG eta stands); the band pair only
+# when bands were issued. Recorder-excluded like the DC curve dicts.
+ATTR_WH_PERIOD_AC = "wh_period_ac"
+ATTR_WH_PERIOD_AC_P10 = "wh_period_ac_p10"
+ATTR_WH_PERIOD_AC_P90 = "wh_period_ac_p90"
 
 # --- Coordinator <-> platform contract additions (self.data keys, v0.4) -----
 DATA_KEY_QUANTILE_CURVES = "quantile_curves"      # {"p10": {iso: Wh}, "p50": ..., "p90": ...} 15-min
@@ -1065,6 +1096,11 @@ DATA_KEY_QUANTILE_CURVES_AC = "quantile_curves_ac"
 # served AC P90 band curve, so no separate key is carried for it.
 DATA_KEY_ENERGY_TODAY_AC_P10 = "energy_today_kwh_ac_p10"
 DATA_KEY_SCOREBOARD = "scoreboard"                # dict: engine mae / strata
+# Compact curve-audit block (SPEC §14.4): per-day wh_period / wh_period_ac
+# sums, the effective site eta with source, and the headline-revision counters
+# (today / yesterday) with last-revision provenance. Small and recorded — the
+# antidote to the bulky curve dicts being recorder-excluded.
+DATA_KEY_CURVE_AUDIT = "curve_audit"
 
 # --- get_forecast service response additions (SPEC §11.2/§14.4) ------------------
 # The extended get_forecast response carries plane-agnostic TOTAL p10/p50/p90

@@ -19,6 +19,7 @@
       "learner_status_slow": {"default": "mdi:brain"},
       "learner_status_day_ahead": {"default": "mdi:brain"},
       "daily_kwh_mae": {"default": "mdi:chart-line"},
+      "curve_audit": {"default": "mdi:counter"},
       "hourly_mae": {"default": "mdi:chart-bell-curve"},
       "energy_production_today_p10": {"default": "mdi:solar-power"},
       "energy_production_today_p90": {"default": "mdi:solar-power"},

@@ -44,6 +44,7 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     STORAGE_DATA_VERSION_V3,
     STORE_KEY_ACTUALS_LOG,
     STORE_KEY_BIAS_STATE,
+    STORE_KEY_CURVE_AUDIT,
     STORE_KEY_DRIFT_STATE,
     STORE_KEY_ISSUED_LOG,
     STORE_KEY_LAST_PAYLOAD,
@@ -884,3 +885,71 @@ def test_scoreboard_state_round_trip_through_real_store():
     back = store.get_scoreboard_state()
     assert back.days["2026-07-06"].engine_kwh == pytest.approx(10.0)
     assert back.days["2026-07-06"].measured_kwh == pytest.approx(9.0)
+
+
+# ===========================================================================
+# Curve-audit section (wh-period-ac order, point 3): additive, no schema bump
+# ===========================================================================
+
+
+_NEUTRAL_CURVE_AUDIT = {
+    "day": None,
+    "revisions_today": {"d0": 0, "d1": 0, "d2": 0},
+    "revisions_yesterday": {"d0": 0, "d1": 0, "d2": 0},
+    "last_revision": None,
+}
+
+
+def test_curve_audit_neutral_when_absent_and_byte_faithful():
+    """A store predating the curve-audit key loads the neutral section; every
+    other section stays byte-faithful (the additive v3 contract, same as
+    learning_health / inverter_cal_state)."""
+    blob = {
+        _SCHEMA_KEY: STORAGE_DATA_VERSION_V3,
+        STORE_KEY_ISSUED_LOG: {"2026-07-06": {"status": "fresh"}},
+    }
+    state = validate_state(blob)
+    assert state[STORE_KEY_CURVE_AUDIT] == _NEUTRAL_CURVE_AUDIT
+    assert state[STORE_KEY_ISSUED_LOG] == {"2026-07-06": {"status": "fresh"}}
+
+
+def test_curve_audit_roundtrip_through_real_store():
+    store = _store()
+    assert store.get_curve_audit() == _NEUTRAL_CURVE_AUDIT
+    audit = {
+        "day": "2026-08-07",
+        "revisions_today": {"d0": 1, "d1": 2, "d2": 0},
+        "revisions_yesterday": {"d0": 0, "d1": 3, "d2": 1},
+        "last_revision": {
+            "at": "2026-08-07T13:46:00+00:00",
+            "date": "2026-08-08",
+            "day_offset": 1,
+            "old_kwh": 11.503,
+            "new_kwh": 10.9,
+            "payload_refreshed": True,
+        },
+    }
+    store.set_curve_audit(audit)
+    assert store.get_curve_audit() == audit
+
+
+def test_curve_audit_corrupt_loads_neutral_and_clamped():
+    """Garbage in the curve-audit section degrades to neutral / clamped values,
+    never raising (SPEC §16.4) — negative counts, junk types, stray keys."""
+    store = _store()
+    store.set_curve_audit("not-a-dict")
+    assert store.get_curve_audit() == _NEUTRAL_CURVE_AUDIT
+    store.set_curve_audit(
+        {
+            "day": 123,
+            "revisions_today": {"d0": -4, "d1": "x"},
+            "revisions_yesterday": "junk",
+            "last_revision": {"day_offset": "one", "payload_refreshed": "yes"},
+        }
+    )
+    got = store.get_curve_audit()
+    assert got["day"] is None
+    assert got["revisions_today"] == {"d0": 0, "d1": 0, "d2": 0}
+    assert got["revisions_yesterday"] == {"d0": 0, "d1": 0, "d2": 0}
+    # A malformed last_revision keeps only its well-formed fields.
+    assert got["last_revision"]["payload_refreshed"] is False

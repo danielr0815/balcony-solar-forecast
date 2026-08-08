@@ -82,6 +82,9 @@
       "daily_kwh_mae": {
         "name": "Daily kWh MAE"
       },
+      "curve_audit": {
+        "name": "Forecast publication audit"
+      },
       "hourly_mae": {
         "name": "Hourly MAE"
       },

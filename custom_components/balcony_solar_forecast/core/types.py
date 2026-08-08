@@ -654,6 +654,11 @@ class ForecastResult:
     # daily P10 aggregate divides the transient factor back out on each slot while
     # the served band curve keeps it. Empty when no bands were issued this cycle.
     ac_p10_watts: tuple[float, ...] = ()
+    # Per-slot AC P90 band watts — the P90 sibling of ``ac_p10_watts`` (same
+    # per-slot ceiling cap). Backs the served 15-min ``wh_period_ac_p90`` curve
+    # attribute (SPEC §14.4); P50 == ac_watts, so no AC p50 field is carried.
+    # Empty when no bands were issued this cycle.
+    ac_p90_watts: tuple[float, ...] = ()
     # Hourly Wh roll-ups of the AC P10 / P90 band curves (keyed by ISO-8601 UTC
     # hour, the SAME keys as ``ac_hourly_wh``). The AC analogue of
     # ``p10_hourly_wh`` / ``p90_hourly_wh``: per slot ac_band_watts =

@@ -26,6 +26,9 @@ pytest.importorskip("voluptuous")
 
 from balcony_solar_forecast import sensor as sensor_mod  # noqa: E402
 from balcony_solar_forecast.const import (  # noqa: E402
+    ATTR_WH_PERIOD_AC,
+    ATTR_WH_PERIOD_AC_P10,
+    ATTR_WH_PERIOD_AC_P90,
     ATTR_WH_PERIOD_P10,
     ATTR_WH_PERIOD_P90,
     DATA_KEY_BAND_SOURCE,
@@ -231,6 +234,10 @@ def test_energy_sensor_band_attributes(monkeypatch):
     data = {
         "watts": {k: 400.0 for k in iso},
         "wh_period": {k: 100.0 for k in iso},
+        # Served AC curve + its 15-min band siblings (wh-period-ac order).
+        "wh_period_ac": {k: 90.0 for k in iso},
+        "wh_period_ac_p10": {k: 72.0 for k in iso},
+        "wh_period_ac_p90": {k: 108.0 for k in iso},
         "slot_starts": iso,
         "energy_today_kwh": 0.4,
         DATA_KEY_QUANTILE_CURVES: {
@@ -243,10 +250,26 @@ def test_energy_sensor_band_attributes(monkeypatch):
         EnergyProductionSensor, coord, _day_offset=0, _energy_key="energy_today_kwh"
     )
     attrs = sensor.extra_state_attributes
-    assert set(attrs) == {"watts", "wh_period", ATTR_WH_PERIOD_P10, ATTR_WH_PERIOD_P90}
+    assert set(attrs) == {
+        "watts", "wh_period", ATTR_WH_PERIOD_P10, ATTR_WH_PERIOD_P90,
+        ATTR_WH_PERIOD_AC, ATTR_WH_PERIOD_AC_P10, ATTR_WH_PERIOD_AC_P90,
+    }
     assert attrs[ATTR_WH_PERIOD_P10][iso[0]] == pytest.approx(80.0)
     assert attrs[ATTR_WH_PERIOD_P90][iso[0]] == pytest.approx(120.0)
     assert len(attrs[ATTR_WH_PERIOD_P10]) == 4
+    # The AC band siblings share the DC bands' slot keys and band factors:
+    # p10/median == 0.8 and p90/median == 1.2 on BOTH bases (same eta folds
+    # out of the ratio), so the AC band is consistent with the AC median.
+    assert set(attrs[ATTR_WH_PERIOD_AC_P10]) == set(attrs[ATTR_WH_PERIOD_AC])
+    for k in iso:
+        assert attrs[ATTR_WH_PERIOD_AC_P10][k] / attrs[ATTR_WH_PERIOD_AC][k] == (
+            pytest.approx(attrs[ATTR_WH_PERIOD_P10][k] / attrs["wh_period"][k])
+        )
+        assert attrs[ATTR_WH_PERIOD_AC_P90][k] / attrs[ATTR_WH_PERIOD_AC][k] == (
+            pytest.approx(attrs[ATTR_WH_PERIOD_P90][k] / attrs["wh_period"][k])
+        )
+    assert attrs[ATTR_WH_PERIOD_AC_P10][iso[0]] == pytest.approx(72.0)
+    assert attrs[ATTR_WH_PERIOD_AC_P90][iso[0]] == pytest.approx(108.0)
 
 
 def test_energy_sensor_band_attrs_empty_without_bands(monkeypatch):
@@ -259,6 +282,7 @@ def test_energy_sensor_band_attrs_empty_without_bands(monkeypatch):
     data = {
         "watts": {iso[0]: 400.0},
         "wh_period": {iso[0]: 100.0},
+        "wh_period_ac": {iso[0]: 90.0},
         "slot_starts": iso,
         "energy_today_kwh": 0.1,
     }
@@ -267,9 +291,11 @@ def test_energy_sensor_band_attrs_empty_without_bands(monkeypatch):
         EnergyProductionSensor, coord, _day_offset=0, _energy_key="energy_today_kwh"
     )
     attrs = sensor.extra_state_attributes
-    # Band attrs present but empty (no fabricated spread).
+    # Band attrs present but empty (no fabricated spread) — DC and AC alike.
     assert attrs[ATTR_WH_PERIOD_P10] == {}
     assert attrs[ATTR_WH_PERIOD_P90] == {}
+    assert attrs[ATTR_WH_PERIOD_AC_P10] == {}
+    assert attrs[ATTR_WH_PERIOD_AC_P90] == {}
 
 
 def test_energy_sensor_band_attrs_unrecorded():
@@ -277,6 +303,9 @@ def test_energy_sensor_band_attrs_unrecorded():
     excluded = EnergyProductionSensor._unrecorded_attributes
     assert ATTR_WH_PERIOD_P10 in excluded
     assert ATTR_WH_PERIOD_P90 in excluded
+    assert ATTR_WH_PERIOD_AC in excluded
+    assert ATTR_WH_PERIOD_AC_P10 in excluded
+    assert ATTR_WH_PERIOD_AC_P90 in excluded
 
 
 # ==========================================================================

@@ -313,6 +313,8 @@ Spätere ist additiv und meist über `const.DATA_KEY_*` benannt.
 | `quantile_curves`, `quantile_curves_ac`, `band_source_by_day` | die Bandkurven (DC/AC) und die Herkunft je Tag — **nur vorhanden**, wenn dieser Zyklus wirklich Bänder ausgegeben hat |
 | `band_source` | **immer** vorhanden (`learned` / `ensemble` / `envelope`), Default `learned`. Achtung: `learned` heißt auch „Ensemble aus oder ohne Beitrag" — der Key sagt also **nichts** darüber aus, ob überhaupt eine Spreizung existiert; dafür ist `quantile_curves` der Indikator |
 | `energy_today_kwh_ac_p10` | AC-P10-Tages-Headline mit asymmetrisch herausgerechnetem Intraday-Faktor |
+| `wh_period_ac_p10`, `wh_period_ac_p90` | die 15-min-**AC**-Bandkurven (SPEC §14.4) — **nur vorhanden**, wenn dieser Zyklus Bänder ausgegeben hat |
+| `curve_audit` | kompaktes Publikations-Audit (SPEC §14.4): Tages-Kurvensummen beider Basen + publizierter State, angewandtes η mit Quelle, Revisionszähler (> 0,5 kWh) heute/gestern je Offset + Provenienz der letzten Revision — vom `curve_audit`-Sensor aufgezeichnet |
 
 **Fallstrick `energy_today_kwh`.** Das ist bewusst eine **stabile Day-Ahead-Erwartung**,
 kein Nowcast: der transiente Intraday-Faktor wird für die Headline wieder

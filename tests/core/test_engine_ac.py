@@ -343,6 +343,42 @@ class TestAcBands:
         for i, acw in enumerate(res.ac_watts):
             assert res.ac_p10_watts[i] == pytest.approx(0.6 * acw)
 
+    def test_ac_p90_watts_per_slot_present_with_bands(self, patched_physics):
+        # Mirror of the ac_p10 per-slot test: the AC P90 band watts back the
+        # served 15-min wh_period_ac_p90 curve attribute (the wh_period_ac band
+        # siblings). Populated only when bands are issued, aligned to
+        # slot_starts, and == p90 factor * served AC where no ceiling bites.
+        site = _never_clamped_site()
+        weather = _clear_sky_series()
+        band = QuantileBands(p10=0.6, p50=1.0, p90=1.5, n=40)
+        base = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        assert base.ac_p90_watts == ()  # no bands -> empty
+        band_by_slot = {s: band for s in base.slot_starts}
+        res = engine.compute_forecast(
+            site, weather, now=_TEST_DATE,
+            hooks=LearnerHooks(band_by_slot=band_by_slot),
+        )
+        assert len(res.ac_p90_watts) == len(res.slot_starts)
+        for i, acw in enumerate(res.ac_watts):
+            assert res.ac_p90_watts[i] == pytest.approx(1.5 * acw)
+
+    def test_ac_p90_watts_capped_at_ac_ceiling(self, patched_physics):
+        # A clamp-biting site: the P90 factor (2.0) would double the noon AC,
+        # but the per-slot AC ceiling caps every ac_p90_watts slot (same cap
+        # the hourly AC P90 roll-up already gets).
+        site = _clamped_site()
+        weather = _clear_sky_series()
+        band = QuantileBands(p10=0.8, p50=1.0, p90=2.0, n=40)
+        base = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        band_by_slot = {s: band for s in base.slot_starts}
+        res = engine.compute_forecast(
+            site, weather, now=_TEST_DATE,
+            hooks=LearnerHooks(band_by_slot=band_by_slot),
+        )
+        assert len(res.ac_p90_watts) == len(res.slot_starts)
+        for i, w in enumerate(res.ac_p90_watts):
+            assert w <= res.ac_slot_ceilings[i] + 1e-6
+
     def test_slot_ceilings_always_present(self, patched_physics):
         # The DC + AC per-slot ceilings (the day-ahead headline strip source,
         # IRC-4) are populated on every run, aligned to slot_starts.

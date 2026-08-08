@@ -99,6 +99,7 @@ from .const import (
     DATA_KEY_BIAS_CELLS,
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_CORRECTION_SOURCE,
+    DATA_KEY_CURVE_AUDIT,
     DATA_KEY_DRIFT_MAE,
     DATA_KEY_ENERGY_TODAY_AC_P10,
     DATA_KEY_INTRADAY_SCALAR,
@@ -125,6 +126,7 @@ from .const import (
     FORECAST_RESP_KEY_P10,
     FORECAST_RESP_KEY_P50,
     FORECAST_RESP_KEY_P90,
+    HEADLINE_REVISION_THRESHOLD_KWH,
     INTRADAY_MAX_STEP_PER_TICK,
     INTRADAY_MIN_MODELED_WH,
     INTRADAY_MIN_SUN_ELEVATION_DEG,
@@ -192,9 +194,17 @@ from .fetcher import (
     parse_weather,
     radiation_coverage,
 )
-from .store import ForecastStore
+from .store import ForecastStore, _empty_curve_audit
 
 _LOGGER = logging.getLogger(__name__)
+
+# The three published AC day-headline keys, indexed by day offset (today=0) —
+# the values whose significant revisions the curve audit counts (SPEC §14.4).
+_HEADLINE_KEYS_AC = (
+    "energy_today_kwh_ac",
+    "energy_tomorrow_kwh_ac",
+    "energy_d2_kwh_ac",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +325,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._band_source: str = BAND_SOURCE_LEARNED
         # Per-LOCAL-day band-provenance counts (SCT-4), recomputed per hooks build.
         self._band_source_by_day: dict[str, dict[str, int]] = {}
+        # Curve audit (SPEC §14.4): the persisted revision counters (loaded
+        # lazily from the store on first use) + the RAM-only per-date baseline
+        # the next tick compares against. The baseline is deliberately NOT
+        # persisted: after a restart the first tick re-seeds it, so a restart
+        # can never fabricate a revision.
+        self._curve_audit: dict[str, Any] | None = None
+        self._curve_audit_baseline: dict[str, dict[int, float]] = {}
 
         # Cached weather image + provenance for the degradation ladder.
         # _last_fetched_at is the PAYLOAD's age anchor: it advances ONLY when the
@@ -2279,6 +2296,24 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
         data["watts_ac"] = watts_ac
         data["wh_period_ac"] = wh_period_ac
+        # Served 15-min AC BAND curves (SPEC §14.4): the wh_period_p10/p90
+        # siblings on the AC base, from the engine's per-slot AC band watts.
+        # Only when bands were issued this cycle — omitted otherwise (quantiles
+        # off / cold start), mirroring DATA_KEY_QUANTILE_CURVES above.
+        if result.ac_p10_watts:
+            data["wh_period_ac_p10"] = {
+                _iso(start): round(w * 0.25, 2)
+                for start, w in zip(
+                    result.slot_starts, result.ac_p10_watts, strict=False
+                )
+            }
+        if result.ac_p90_watts:
+            data["wh_period_ac_p90"] = {
+                _iso(start): round(w * 0.25, 2)
+                for start, w in zip(
+                    result.slot_starts, result.ac_p90_watts, strict=False
+                )
+            }
         data["hourly_wh_ac"] = dict(result.ac_hourly_wh)
         data["daily_kwh_ac"] = dict(daily_ac)
         # AC band curves (Phase 2): {p10/p90: {iso_hour: Wh}} HOURLY, only present
@@ -2293,6 +2328,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         data[DATA_KEY_ENERGY_TODAY_AC_P10] = self._dayahead_today_kwh_ac_p10(
             result, now
         )
+        # --- Curve audit (SPEC §14.4): significant revisions of the published
+        # AC headlines, counted per target calendar date, plus the compact
+        # recorded day-scalar block. Runs off the FINISHED payload: the
+        # revision comparison reads only the three headline values.
+        self._track_headline_revisions(data, now)
+        data[DATA_KEY_CURVE_AUDIT] = self._curve_audit_summary(data, now)
         return data
 
     def _quantile_curves(self, result: ForecastResult) -> dict[str, dict[str, float]]:
@@ -2339,6 +2380,156 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return {
             FORECAST_RESP_KEY_P10: {k: round(v, 2) for k, v in p10.items()},
             FORECAST_RESP_KEY_P90: {k: round(v, 2) for k, v in p90.items()},
+        }
+
+    # ------------------------------------------------------------------
+    # Curve audit (SPEC §14.4): revision counters + recorded day scalars
+    # ------------------------------------------------------------------
+
+    def _curve_audit_state(self) -> dict[str, Any]:
+        """The persisted half of the curve audit, lazily loaded from the store.
+
+        Falls back to the neutral section when the store lacks the accessor
+        (a bare/__new__-built coordinator) or returns junk.
+        """
+        audit = getattr(self, "_curve_audit", None)
+        if audit is None:
+            getter = getattr(self._store, "get_curve_audit", None)
+            loaded = getter() if callable(getter) else None
+            audit = (
+                dict(loaded)
+                if isinstance(loaded, dict) and "revisions_today" in loaded
+                else _empty_curve_audit()
+            )
+            self._curve_audit = audit
+        return audit
+
+    def _track_headline_revisions(
+        self, data: dict[str, Any], now: datetime
+    ) -> None:
+        """Count significant (> 0.5 kWh) revisions of the published AC headlines.
+
+        Compares the three ``energy_{today,tomorrow,d2}_kwh_ac`` values of this
+        freshly built payload against the per-target-date baseline of the
+        previous tick. Keying on the TARGET CALENDAR DATE (not the day offset)
+        is what keeps the midnight rollover from masquerading as a revision:
+        tomorrow's value becoming today's value for the same date compares
+        equal and counts nothing.
+
+        The counter rolls over lazily on the first tick of a new local day
+        (today -> yesterday, restart-safe via the store); ``yesterday`` is
+        zeroed when the stored day is not the actual previous day (a multi-day
+        gap must not relabel a stale count as "yesterday"). Each revision
+        records its provenance: ``payload_refreshed`` is True exactly when this
+        tick's fetch REPLACED the weather payload (``_last_fetched_at is now``
+        — the keep-richer branch deliberately does not advance it), separating
+        real model revisions from learner/bucket noise.
+        """
+        local_today = dt_util.as_local(now).date()
+        today_iso = local_today.isoformat()
+        audit = self._curve_audit_state()
+        baseline = getattr(self, "_curve_audit_baseline", None)
+        if baseline is None:
+            baseline = {}
+            self._curve_audit_baseline = baseline
+        changed = False
+        if audit["day"] != today_iso:
+            yesterday_iso = (local_today - timedelta(days=1)).isoformat()
+            audit["revisions_yesterday"] = (
+                audit["revisions_today"]
+                if audit["day"] == yesterday_iso
+                else {"d0": 0, "d1": 0, "d2": 0}
+            )
+            audit["revisions_today"] = {"d0": 0, "d1": 0, "d2": 0}
+            audit["day"] = today_iso
+            changed = True
+        # Prune baselines that can never compare again (outside the window
+        # yesterday..day-after-tomorrow).
+        keep = {
+            (local_today + timedelta(days=d)).isoformat() for d in range(-1, 3)
+        }
+        for date_iso in list(baseline):
+            if date_iso not in keep:
+                del baseline[date_iso]
+        for offset, key in enumerate(_HEADLINE_KEYS_AC):
+            new = data.get(key)
+            if new is None:
+                continue
+            date_iso = (local_today + timedelta(days=offset)).isoformat()
+            old = baseline.get(date_iso, {}).get(offset)
+            if (
+                old is not None
+                and abs(float(new) - old) > HEADLINE_REVISION_THRESHOLD_KWH
+            ):
+                audit["revisions_today"][f"d{offset}"] += 1
+                audit["last_revision"] = {
+                    "at": _iso(now),
+                    "date": date_iso,
+                    "day_offset": offset,
+                    "old_kwh": round(old, 3),
+                    "new_kwh": round(float(new), 3),
+                    "payload_refreshed": (
+                        self._last_fetched_at is not None
+                        and self._last_fetched_at == now
+                    ),
+                }
+                changed = True
+            baseline.setdefault(date_iso, {})[offset] = float(new)
+        if changed:
+            self._call_store_setter("set_curve_audit", audit)
+
+    def _curve_audit_summary(
+        self, data: dict[str, Any], now: datetime
+    ) -> dict[str, Any]:
+        """The compact, recorder-friendly audit block for ``self.data``.
+
+        Per local day (d0..d2): the wh_period day sums on BOTH bases (the DC
+        ``daily_kwh`` and served-AC ``daily_kwh_ac`` roll-ups are exactly the
+        curve sums the bulky — and recorder-excluded — attributes carry) plus
+        the published AC state, so a consumer can cross-check
+        Σ(wh_period_ac) == state without history access. The eta fields carry
+        the site scalar actually applied (the trusted learned eta, else the
+        datasheet default — observability only, see ``_effective_inverter_eta``)
+        with its source; the implicit per-day eta stays directly visible as
+        ac_wh / dc_wh. Revision counters come from ``_track_headline_revisions``.
+        """
+        local_today = dt_util.as_local(now).date()
+        daily_dc = data.get("daily_kwh") or {}
+        daily_ac = data.get("daily_kwh_ac") or {}
+        days: list[dict[str, Any]] = []
+        for offset, key in enumerate(_HEADLINE_KEYS_AC):
+            date_iso = (local_today + timedelta(days=offset)).isoformat()
+            dc = daily_dc.get(date_iso)
+            ac = daily_ac.get(date_iso)
+            state = data.get(key)
+            if dc is None and ac is None and state is None:
+                continue
+            days.append(
+                {
+                    "date": date_iso,
+                    "day_offset": offset,
+                    "dc_wh": (
+                        None if dc is None else round(float(dc) * 1000.0, 1)
+                    ),
+                    "ac_wh": (
+                        None if ac is None else round(float(ac) * 1000.0, 1)
+                    ),
+                    "state_kwh": (
+                        None if state is None else round(float(state), 3)
+                    ),
+                }
+            )
+        learned = self.inverter_efficiency_learned()
+        effective = learned.get("effective") if isinstance(learned, dict) else None
+        audit = self._curve_audit_state()
+        last = audit.get("last_revision")
+        return {
+            "eta_effective": round(self._effective_inverter_eta(), 4),
+            "eta_source": "learned" if effective is not None else "config",
+            "days": days,
+            "revisions_today": dict(audit["revisions_today"]),
+            "revisions_yesterday": dict(audit["revisions_yesterday"]),
+            "last_revision": dict(last) if isinstance(last, dict) else None,
         }
 
     def _learner_status(self) -> dict[str, Any]:
@@ -2651,6 +2842,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 schema = int(schema_getter())
             except Exception:  # noqa: BLE001 -- diagnostics must not raise
                 schema = None
+        audit_getter = getattr(store, "get_curve_audit", None)
+        curve_audit = None
+        if callable(audit_getter):
+            try:
+                curve_audit = audit_getter()
+            except Exception:  # noqa: BLE001 -- diagnostics must not raise
+                curve_audit = None
         return {
             "available": True,
             "issued_days": _count("issued_dates"),
@@ -2663,6 +2861,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # the channels that caused it, the streak length and the last day
             # actually accepted — remote diagnosis without log access (0.23.1).
             "learning_health": self.learning_health_summary(),
+            # Published-headline revision counters (SPEC §14.4): the persisted
+            # half of the curve audit (today/yesterday + last-revision
+            # provenance), so a diagnostics dump shows the planner-facing
+            # stability without recorder history.
+            "curve_audit": curve_audit,
         }
 
     def learner_state_summary(self) -> dict[str, Any]:

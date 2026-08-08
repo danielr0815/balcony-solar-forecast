@@ -113,6 +113,7 @@ from .const import (
     STORE_KEY_BIAS_STATE,
     STORE_KEY_COMPARISON_RING,
     STORE_KEY_CONFIG_FINGERPRINT,
+    STORE_KEY_CURVE_AUDIT,
     STORE_KEY_DRIFT_STATE,
     STORE_KEY_HOURLY_ACTUALS,
     STORE_KEY_INVERTER_CAL_STATE,
@@ -215,6 +216,85 @@ def _coerce_learning_health(raw: Any) -> dict[str, Any]:
     return out
 
 
+def _empty_curve_audit() -> dict[str, Any]:
+    """Neutral curve-audit section (SPEC §14.4): nothing revised, no day seen.
+
+    Same plain-validated-dict rationale as ``_empty_learning_health``: this is
+    publication bookkeeping, not a learner state — it never feeds the physics.
+    """
+    return {
+        "day": None,
+        "revisions_today": {"d0": 0, "d1": 0, "d2": 0},
+        "revisions_yesterday": {"d0": 0, "d1": 0, "d2": 0},
+        "last_revision": None,
+    }
+
+
+def _coerce_revision_counts(raw: Any) -> dict[str, int]:
+    """Validate the {d0,d1,d2} revision counters (never raises)."""
+    out = {"d0": 0, "d1": 0, "d2": 0}
+    if isinstance(raw, dict):
+        for key in out:
+            out[key] = max(0, _safe_int(raw.get(key), 0))
+    return out
+
+
+def _coerce_last_revision(raw: Any) -> dict[str, Any] | None:
+    """Validate the last-revision provenance record (never raises)."""
+    if not isinstance(raw, dict):
+        return None
+
+    def _num(key: str) -> float | None:
+        value = raw.get(key)
+        return (
+            float(value)
+            if isinstance(value, (int, float)) and math.isfinite(value)
+            else None
+        )
+
+    at = raw.get("at")
+    date = raw.get("date")
+    offset = raw.get("day_offset")
+    return {
+        "at": at if isinstance(at, str) else None,
+        "date": date if isinstance(date, str) else None,
+        "day_offset": (
+            offset
+            if isinstance(offset, int) and not isinstance(offset, bool)
+            and offset in (0, 1, 2)
+            else None
+        ),
+        "old_kwh": _num("old_kwh"),
+        "new_kwh": _num("new_kwh"),
+        # Strict bool: a truthy junk string must not masquerade as provenance.
+        "payload_refreshed": (
+            raw.get("payload_refreshed")
+            if isinstance(raw.get("payload_refreshed"), bool)
+            else False
+        ),
+    }
+
+
+def _coerce_curve_audit(raw: Any) -> dict[str, Any]:
+    """Validate-and-clamp the curve-audit section (never raises).
+
+    Additive contract identical to ``_coerce_learning_health``: a store
+    predating the key reads back neutral, a corrupt one degrades instead of
+    crashing setup (SPEC §16.4).
+    """
+    out = _empty_curve_audit()
+    if not isinstance(raw, dict):
+        return out
+    day = raw.get("day")
+    out["day"] = day if isinstance(day, str) else None
+    out["revisions_today"] = _coerce_revision_counts(raw.get("revisions_today"))
+    out["revisions_yesterday"] = _coerce_revision_counts(
+        raw.get("revisions_yesterday")
+    )
+    out["last_revision"] = _coerce_last_revision(raw.get("last_revision"))
+    return out
+
+
 def _empty_state() -> dict[str, Any]:
     """A well-formed, empty inner state at the CURRENT (v3) schema.
 
@@ -247,6 +327,9 @@ def _empty_state() -> dict[str, Any]:
         # Nightly whole-day-discard streak + its cause (0.23.1). Neutral on a
         # fresh / pre-feature store: nothing discarded, nothing accepted yet.
         STORE_KEY_LEARNING_HEALTH: _empty_learning_health(),
+        # Headline-revision audit (SPEC §14.4): additive, neutral on a fresh /
+        # pre-feature store — nothing published, nothing revised yet.
+        STORE_KEY_CURVE_AUDIT: _empty_curve_audit(),
         # --- v3 scoreboard + quantile sections (neutral / empty) ---
         STORE_KEY_QUANTILE_STATE: QuantileState().to_dict(),  # {bin_key: [relerr,...]}
         STORE_KEY_SCOREBOARD_STATE: ScoreboardState().to_dict(),  # {iso_date: DayScore}
@@ -475,6 +558,10 @@ def _validate_learner_sections(
     # key reads back the neutral section, a populated one round-trips unchanged.
     state[STORE_KEY_LEARNING_HEALTH] = _coerce_learning_health(
         raw.get(STORE_KEY_LEARNING_HEALTH)
+    )
+    # Curve audit (SPEC §14.4): ditto — neutral when absent, round-trips clean.
+    state[STORE_KEY_CURVE_AUDIT] = _coerce_curve_audit(
+        raw.get(STORE_KEY_CURVE_AUDIT)
     )
 
 
@@ -899,6 +986,19 @@ class ForecastStore:
     def set_learning_health(self, health: dict[str, Any]) -> None:
         """Persist the learning-health section (schedules a bundled write)."""
         self._data[STORE_KEY_LEARNING_HEALTH] = _coerce_learning_health(health)
+        self._schedule_save()
+
+    # ------------------------------------------------------------------
+    # Curve audit: published-headline revision counters (SPEC §14.4)
+    # ------------------------------------------------------------------
+
+    def get_curve_audit(self) -> dict[str, Any]:
+        """Return a COPY of the curve-audit section (validated/neutral)."""
+        return _coerce_curve_audit(self._data.get(STORE_KEY_CURVE_AUDIT))
+
+    def set_curve_audit(self, audit: dict[str, Any]) -> None:
+        """Persist the curve-audit section (schedules a bundled write)."""
+        self._data[STORE_KEY_CURVE_AUDIT] = _coerce_curve_audit(audit)
         self._schedule_save()
 
     # ------------------------------------------------------------------

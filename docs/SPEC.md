@@ -1400,7 +1400,8 @@ und Lernstatus.
 
 Die **Heute-Headline ist eine stabile Day-ahead-Erwartung**: der transiente
 Intraday-Skalar wird aus den Slots des aktuellen Tages wieder herausgerechnet
-(die servierte `watts`/`wh_period`-Kurve behält ihn).
+(die servierte `watts`/`wh_period`-Kurve behält ihn — ebenso ihre
+AC-Spiegelung `wh_period_ac`, §14.4).
 
 **Clamp-Interaktion.** Auf einem Slot, dessen hochkorrigierte Gruppenleistung
 die AC-Obergrenze trifft (der Re-Clamp greift, servierter Wert = Deckel), ist der
@@ -1453,12 +1454,41 @@ weil sie bulkig und je Zyklus neu sind), dazu die P10/P90-Bandkurven als
 zusätzliche Attribute, und die Aktion `get_forecast` (15-min und stündlich,
 P10/P50/P90 sobald vorhanden) nach dem Muster von `weather.get_forecasts`.
 
-**DC-Basis der Kurven-Attribute (Achtung beim Vergleich):** der **State** der
-Energie-Sensoren ist **AC** (§14.1), die 15-min-`watts`-/`wh_period`-Attribute
-und die 15-min-Bandattribute bleiben dagegen die **DC**-Modellkurve — eine
-15-min-AC-Kurve wird nicht als Attribut ausgeliefert (AC-Bänder gibt es nur
-stündlich, §14.1). Wer ein Kurven-Attribut gegen den Sensor-State
-plausibilisiert, misst sonst die ~8 %-DC/AC-Differenz als Fehler (§6.5).
+**DC- und AC-Basis der Kurven-Attribute (Achtung beim Vergleich):** der
+**State** der Energie-Sensoren ist **AC** (§14.1). Die 15-min-`watts`-/
+`wh_period`-Attribute und die 15-min-Bandattribute `wh_period_p10` /
+`wh_period_p90` bleiben die **DC**-Modellkurve (Lern- und Scoreboard-Wahrheit,
+§6.5). Die servierte **AC**-Kurve liegt als `wh_period_ac` /
+`wh_period_ac_p10` / `wh_period_ac_p90` vor: gleiche 15-min-Bucket-Struktur
+und dieselben ISO-Keys wie die DC-Geschwister, Werte aus der servierten
+AC-Kurve (je-Gruppe-η plus AC-Clamp am Gruppenlimit). Bis die η-Kalibrierung
+vertraut ist (§10), steht das konfigurierte η — die AC-Attribute werden
+trotzdem immer ausgeliefert, sobald Kurvendaten existieren; die Band-Paare
+bleiben leer, solange keine Bänder ausgegeben wurden. **Summen-Invariante:**
+für `_tomorrow` und `_d2` gilt Σ(`wh_period_ac` des Tages) == State
+(±1 Wh Rundung); `_today` weicht bei aktivem Intraday-Skalar bewusst ab — die
+Kurve behält den Nowcast-Skalar, die Headline rechnet ihn heraus (§14.1).
+Wer ein DC-Kurven-Attribut gegen den Sensor-State plausibilisiert, misst die
+~8 %-DC/AC-Differenz als Fehler (§6.5) — der Vergleich gehört gegen
+`wh_period_ac`.
+
+**Publikations-Audit (`curve_audit`):** weil die bulkigen Kurven-Dicts
+recorder-frei sind, hält ein kompakter, aufgezeichneter Diagnose-Sensor die
+Prüfgrößen vor. State: Anzahl signifikanter Revisionen (>
+`HEADLINE_REVISION_THRESHOLD_KWH` = 0,5 kWh) der drei publizierten
+AC-Tageswerte am laufenden lokalen Tag, Summe über die Tages-Offsets.
+Attribute: je lokalem Tag d0/d1/d2 die Kurvensummen beider Basen (`dc_wh` =
+Σ `wh_period`, `ac_wh` = Σ `wh_period_ac`) samt publiziertem `state_kwh`, das
+angewandte Standort-η mit Quelle (`eta_source`: `learned`/`config`), die
+Revisionszähler von heute und gestern je Offset sowie die letzte Revision mit
+Provenienz (`at`, `date`, `day_offset`, `old_kwh`, `new_kwh`,
+`payload_refreshed` — letzteres genau dann wahr, wenn der Zählzyklus zugleich
+das Wetter-Payload ersetzt hat: echte Modell-Revision statt Lerner-Rauschen).
+Gezählt wird pro **Ziel-Kalenderdatum** — der Mitternachts-Rollover eines
+Tageswerts ist keine Revision. Der Zählerstand wird persistiert (additive
+Store-Sektion, kein Schema-Bump, §16; die Vergleichs-Baseline bleibt bewusst
+flüchtig, damit ein Neustart keine Revision fabriziert) und steht im
+Diagnostics-Dump unter `store.curve_audit`.
 
 ### §14.5 Energy-Dashboard-Hook
 
@@ -1471,7 +1501,8 @@ dann keinen Overlay statt eines stillen Altwerts (§13).
 
 - `store`-Block mit **echten Füllständen** aus `coordinator.store_stats()`:
   `issued_days`, `actuals_days`, `hourly_actuals_days`, `snapshot_ring`,
-  `snapshot_ring_capacity`, `schema_version`, `learning_health`.
+  `snapshot_ring_capacity`, `schema_version`, `learning_health`,
+  `curve_audit` (die persistierten Revisionszähler aus §14.4).
 - `learners.state`-Block mit **echten Zählungen** aus
   `coordinator.learner_state_summary()`: `bias_cells`, `quantile_bins`,
   `shademap_channels`, `shademap_bins` je Kanal sowie `actual_channels`

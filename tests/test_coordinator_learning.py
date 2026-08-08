@@ -37,6 +37,7 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     DAY_PART_AFTERNOON,
     DAY_PART_MIDDAY,
     DAY_PART_MORNING,
+    DEFAULT_INVERTER_EFFICIENCY,
     DRIFT_LOSS_STREAK_DAYS,
     INTRADAY_MIN_TRAILING_MINUTES,
     INTRADAY_NEUTRAL,
@@ -2137,13 +2138,15 @@ def _one_slot_ac_result(
     start: datetime,
     ac_ceiling_w: float | None = None,
     ac_p10_w: float | None = None,
+    ac_p90_w: float | None = None,
 ) -> ForecastResult:
     """A single-slot ForecastResult carrying an explicit AC pre-clamp total.
 
     ``ac_prereclamp_w`` is ``ac_corrected_unclamped_watts[0]``; None leaves it
     empty (the legacy / older-cached case). ``ac_ceiling_w`` is
-    ``ac_slot_ceilings[0]``; ``ac_p10_w`` is ``ac_p10_watts[0]`` (the served AC
-    P10 band watts) — None leaves each field empty. The DC fields are filler.
+    ``ac_slot_ceilings[0]``; ``ac_p10_w`` / ``ac_p90_w`` are the served AC band
+    watts (``ac_p10_watts[0]`` / ``ac_p90_watts[0]``) — None leaves each field
+    empty. The DC fields are filler.
     """
     return ForecastResult(
         slot_starts=(start,),
@@ -2156,6 +2159,7 @@ def _one_slot_ac_result(
         ),
         ac_slot_ceilings=() if ac_ceiling_w is None else (ac_ceiling_w,),
         ac_p10_watts=() if ac_p10_w is None else (ac_p10_w,),
+        ac_p90_watts=() if ac_p90_w is None else (ac_p90_w,),
     )
 
 
@@ -2282,6 +2286,155 @@ def test_build_data_carries_ac_keys():
     # Tomorrow / d2 AC roll-ups: no slots there.
     assert data["energy_tomorrow_kwh_ac"] is None
     assert data["energy_d2_kwh_ac"] is None
+    # No bands issued in this result -> the 15-min AC band curve keys are
+    # omitted entirely (cold start stays byte-identical, no fabricated spread).
+    assert "wh_period_ac_p10" not in data
+    assert "wh_period_ac_p90" not in data
+
+
+def test_build_data_carries_ac_band_keys():
+    """_build_data carries the served 15-min AC band curves (wh-period-ac
+    order): per-slot Wh from ac_p10_watts / ac_p90_watts, keyed identically to
+    wh_period_ac, same band factor as the DC band (eta folds out of the ratio).
+    """
+    c = _make_coordinator()
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    now = start + timedelta(minutes=1)
+    result = _one_slot_ac_result(
+        ac_w=360.0, ac_prereclamp_w=360.0, start=start,
+        ac_p10_w=288.0, ac_p90_w=432.0,
+    )
+    data = c._build_data(result, dict(result.hourly_wh), now, "fresh", timedelta(minutes=1))
+    # Median AC bucket: 360 W * 0.25 h; p10 = 0.8x, p90 = 1.2x (same factors
+    # as the DC band: 400 -> 320 / 480).
+    assert data["wh_period_ac"] == {start.isoformat(): 90.0}
+    assert data["wh_period_ac_p10"] == {start.isoformat(): 72.0}
+    assert data["wh_period_ac_p90"] == {start.isoformat(): 108.0}
+
+
+# ---------------------------------------------------------------------------
+# Curve-audit (wh-period-ac order, points 2+3): headline revision tracking and
+# the compact recorded day-scalar block.
+# ---------------------------------------------------------------------------
+
+
+def _two_day_result(*, today_ac_w: float, tomorrow_ac_w: float, start: datetime):
+    """Two single slots: ``start`` (today) and ``start`` + 1 day (tomorrow).
+
+    DC stands in at 1/0.9 of the AC watts so the daily_kwh / daily_kwh_ac
+    roll-ups differ (the audit block must report BOTH bases).
+    """
+    slots = (start, start + timedelta(days=1))
+    ac = (today_ac_w, tomorrow_ac_w)
+    dc = tuple(w / 0.9 for w in ac)
+    return ForecastResult(
+        slot_starts=slots,
+        total_watts=dc,
+        plane_results=(PlaneResult(name="M1", watts=dc),),
+        hourly_wh={s.isoformat(): w * 0.25 for s, w in zip(slots, dc, strict=False)},
+        ac_watts=ac,
+        ac_hourly_wh={s.isoformat(): w * 0.25 for s, w in zip(slots, ac, strict=False)},
+    )
+
+
+def _build(c, result, now):
+    return c._build_data(result, dict(result.hourly_wh), now, "fresh", timedelta(minutes=1))
+
+
+def test_curve_audit_counts_revision_over_threshold():
+    """A > 0.5 kWh change of a published AC day headline between two recompute
+    ticks is counted as a revision of that day offset, with provenance."""
+    c = _make_coordinator()
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    now = start + timedelta(minutes=1)
+    # Tick 1: tomorrow AC 3600 W-slot -> 0.9 kWh. First sight = baseline, no
+    # revision counted yet.
+    data1 = _build(c, _two_day_result(today_ac_w=360.0, tomorrow_ac_w=3600.0, start=start), now)
+    audit1 = data1["curve_audit"]
+    assert isinstance(audit1, dict)
+    assert audit1["revisions_today"] == {"d0": 0, "d1": 0, "d2": 0}
+    assert audit1["last_revision"] is None
+    # Tick 2 (same local day): tomorrow drops by 0.675 kWh (> 0.5 threshold).
+    now2 = start + timedelta(minutes=16)
+    data2 = _build(c, _two_day_result(today_ac_w=360.0, tomorrow_ac_w=900.0, start=start), now2)
+    audit2 = data2["curve_audit"]
+    assert audit2["revisions_today"] == {"d0": 0, "d1": 1, "d2": 0}
+    last = audit2["last_revision"]
+    assert last["day_offset"] == 1
+    assert last["old_kwh"] == pytest.approx(0.9)
+    assert last["new_kwh"] == pytest.approx(0.225)
+    # No fetch happened in this tick (bare coordinator: _last_fetched_at None).
+    assert last["payload_refreshed"] is False
+
+
+def test_curve_audit_ignores_subthreshold_change():
+    """Revisions at or below the 0.5 kWh audit threshold are not counted (the
+    order's significance bar)."""
+    c = _make_coordinator()
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    now = start + timedelta(minutes=1)
+    _build(c, _two_day_result(today_ac_w=360.0, tomorrow_ac_w=3600.0, start=start), now)
+    # 3600 -> 5400 W: +0.45 kWh, just under the threshold.
+    now2 = start + timedelta(minutes=16)
+    data2 = _build(c, _two_day_result(today_ac_w=360.0, tomorrow_ac_w=5400.0, start=start), now2)
+    assert data2["curve_audit"]["revisions_today"] == {"d0": 0, "d1": 0, "d2": 0}
+    assert data2["curve_audit"]["last_revision"] is None
+
+
+def test_curve_audit_rollover_moves_today_to_yesterday():
+    """The midnight rollover is NOT a revision: counters are keyed per target
+    calendar date, and on the first tick of a new local day today's counters
+    move to yesterday and restart at zero."""
+    c = _make_coordinator()
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    now = start + timedelta(minutes=1)
+    _build(c, _two_day_result(today_ac_w=360.0, tomorrow_ac_w=3600.0, start=start), now)
+    now2 = start + timedelta(minutes=16)
+    _build(c, _two_day_result(today_ac_w=360.0, tomorrow_ac_w=900.0, start=start), now2)
+    # Next local day, same curves: the d1 revision stays yesterday's; today
+    # starts at zero and the unchanged values count nothing.
+    now3 = start + timedelta(days=1, minutes=1)
+    data3 = _build(c, _two_day_result(today_ac_w=900.0, tomorrow_ac_w=3600.0, start=start + timedelta(days=1)), now3)
+    audit3 = data3["curve_audit"]
+    assert audit3["revisions_yesterday"] == {"d0": 0, "d1": 1, "d2": 0}
+    assert audit3["revisions_today"] == {"d0": 0, "d1": 0, "d2": 0}
+
+
+def test_curve_audit_flags_fresh_payload_provenance():
+    """A revision whose tick also replaced the weather payload is flagged
+    payload_refreshed (a real model revision, not learner/bucket noise)."""
+    c = _make_coordinator()
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    now = start + timedelta(minutes=1)
+    _build(c, _two_day_result(today_ac_w=360.0, tomorrow_ac_w=3600.0, start=start), now)
+    now2 = start + timedelta(minutes=31)
+    c._last_fetched_at = now2  # this tick's fetch replaced the payload
+    data2 = _build(c, _two_day_result(today_ac_w=360.0, tomorrow_ac_w=900.0, start=start), now2)
+    assert data2["curve_audit"]["last_revision"]["payload_refreshed"] is True
+
+
+def test_curve_audit_day_scalars_and_eta():
+    """The audit block carries the compact per-day scalars the order asks for:
+    DC and AC wh_period day sums, the published AC state, and the effective
+    site eta with its source (config until the learned eta is trusted)."""
+    c = _make_coordinator()  # untrusted InverterCalState -> config eta
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    now = start + timedelta(minutes=1)
+    data = _build(c, _two_day_result(today_ac_w=360.0, tomorrow_ac_w=3600.0, start=start), now)
+    audit = data["curve_audit"]
+    assert isinstance(audit, dict)
+    assert audit["eta_source"] == "config"
+    assert audit["eta_effective"] == pytest.approx(DEFAULT_INVERTER_EFFICIENCY)
+    days = {d["date"]: d for d in audit["days"]}
+    day0 = (start).date().isoformat()
+    day1 = (start + timedelta(days=1)).date().isoformat()
+    # Tomorrow: DC 4000 W slot -> 1000 Wh; AC 3600 W slot -> 900 Wh; the
+    # published AC state matches the AC curve sum (0.9 kWh).
+    assert days[day1]["dc_wh"] == pytest.approx(1000.0)
+    assert days[day1]["ac_wh"] == pytest.approx(900.0)
+    assert days[day1]["state_kwh"] == pytest.approx(0.9)
+    assert days[day0]["day_offset"] == 0
+    assert days[day1]["day_offset"] == 1
 
 
 def test_learner_status_layer_strings():

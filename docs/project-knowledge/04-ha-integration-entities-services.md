@@ -94,6 +94,7 @@ negiert (`MeasuredAcPowerSensor._recompute`).
 |---|---|---|---|
 | `last_fetch_age_min` | `…_last_fetch_age` | min, `MEASUREMENT` | Alter des letzten guten Open-Meteo-Payloads. Liest bevorzugt `coordinator.weather_age_seconds_live`, damit der Wert im Ausfall **weiterklettert** statt einzufrieren |
 | `source_status` | `…_source_status` | ENUM | Sprosse der Degradationsleiter: `fresh`, `cached`, `physics_fallback`, `unavailable` |
+| `curve_audit` | `…_curve_audit` | Zähler (int) | Publikations-Audit (SPEC §14.4): State = heutige Anzahl signifikanter Revisionen (> 0,5 kWh) der drei AC-Tages-Headlines, gezählt pro Ziel-Kalenderdatum (Mitternachts-Rollover zählt nicht). Attribute: `days` (je d0/d1/d2 `dc_wh` = Σ `wh_period`, `ac_wh` = Σ `wh_period_ac`, `state_kwh`), `eta_effective` + `eta_source`, `revisions_today`/`revisions_yesterday` je Offset, `last_revision` mit `payload_refreshed`-Provenienz. Zähler persistiert (additive Store-Sektion, im Diagnostics-Dump unter `store.curve_audit`) |
 
 ### 2.5 Lernschichten (Diagnose)
 
@@ -159,17 +160,23 @@ State = verschatteter Anteil des Tageslichts (Anteil der Samples mit effektivem 
 
 ### 3.1 Auf den Energie-Sensoren (heute/morgen/übermorgen)
 
-| Attribut | Inhalt | Auflösung |
-|---|---|---|
-| `watts` | `{ISO-UTC-Slotstart: W}` — servierte Momentanleistung | 15 min |
-| `wh_period` | `{ISO-UTC-Slotstart: Wh}` — Energie je Slot | 15 min |
-| `wh_period_p10` | untere Bandkurve | 15 min |
-| `wh_period_p90` | obere Bandkurve | 15 min |
+| Attribut | Inhalt | Auflösung | Basis |
+|---|---|---|---|
+| `watts` | `{ISO-UTC-Slotstart: W}` — servierte Momentanleistung | 15 min | DC |
+| `wh_period` | `{ISO-UTC-Slotstart: Wh}` — Energie je Slot | 15 min | DC |
+| `wh_period_p10` | untere Bandkurve | 15 min | DC |
+| `wh_period_p90` | obere Bandkurve | 15 min | DC |
+| `wh_period_ac` | servierte AC-Kurve (η je Gruppe + AC-Clamp) | 15 min | **AC** |
+| `wh_period_ac_p10` | untere AC-Bandkurve (leer ohne ausgegebene Bänder) | 15 min | **AC** |
+| `wh_period_ac_p90` | obere AC-Bandkurve (leer ohne ausgegebene Bänder) | 15 min | **AC** |
 
 Jeder Tagessensor trägt **nur seinen eigenen lokalen Kalendertag**: die site-weite Kurve wird per
-`_local_date_of()` auf das Zieldatum geschnitten. Wichtig: die vier Kurven-Attribute sind die **DC**-Modellkurven
-(die AC-Bänder existieren nur stündlich), während der *State* AC ist — beim Nachrechnen „Attributsumme vs. State"
-ist das der erwartete Versatz (≈ η_inv). `wh_period_p50` ist in `_unrecorded_attributes` deklariert, wird aber vom
+`_local_date_of()` auf das Zieldatum geschnitten. Die `wh_period_ac*`-Attribute teilen die Bucket-Keys mit ihren
+DC-Geschwistern; bis die η-Kalibrierung vertraut ist, steht das konfigurierte η (ausgeliefert wird immer, sobald
+Kurvendaten existieren). **Summen-Invariante:** für morgen/übermorgen gilt Σ(`wh_period_ac` des Tages) == State
+(±1 Wh Rundung); heute weicht die Summe bei aktivem Intraday-Skalar bewusst ab (die Kurve behält den Nowcast-Skalar,
+die Headline rechnet ihn heraus, SPEC §14.1/§14.4). Wer dagegen eine **DC**-Attributsumme mit dem State vergleicht,
+misst den erwarteten Versatz (≈ η_inv). `wh_period_p50` ist in `_unrecorded_attributes` deklariert, wird aber vom
 Sensor **nicht** emittiert (die servierte Kurve *ist* der P50-Stand).
 
 ### 3.2 Band-Provenienz `band_source_by_day`
@@ -191,11 +198,12 @@ plus die jahresstabilen Achsgrenzen `axis_azimuth_min` / `axis_azimuth_max`. Ska
 
 ### 3.4 Recorder-Ausschluss — zwei Mechanismen
 
-1. `recorder.exclude_attributes()` (Datei `recorder.py`, integrationsweit): `watts`, `wh_period` und **alle**
+1. `recorder.exclude_attributes()` (Datei `recorder.py`, integrationsweit): `watts`, `wh_period`, die
+   Bandkurven `wh_period_p10/_p50/_p90`, die AC-Kurven `wh_period_ac`/`_p10`/`_p90` und **alle**
    Shade-Profil-Kurvenarrays.
-2. `_unrecorded_attributes` je Entität: `EnergyProductionSensor` schließt zusätzlich `wh_period_p10/_p50/_p90`
-   aus, `EnergyBandSensor` schließt `band_source_by_day` aus, `ShadeProfileSensor` zusätzlich die beiden
-   `axis_azimuth_*`.
+2. `_unrecorded_attributes` je Entität: `EnergyProductionSensor` schließt `watts` + alle `wh_period*`-Kurven
+   (DC und AC) aus, `EnergyBandSensor` schließt `band_source_by_day` aus, `ShadeProfileSensor` zusätzlich die
+   beiden `axis_azimuth_*`.
 
 Der Live-State und die Live-Attribute bleiben vollständig — beschnitten wird nur, was in die History-DB geschrieben
 wird. Wer Kurven historisch braucht, nutzt `get_issued_forecast` (§4.1), nicht den Recorder.

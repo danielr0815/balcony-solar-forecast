@@ -24,6 +24,12 @@ from .const import (
     ATTR_SP_TRANSMITTANCE_INDIVIDUAL,
     ATTR_WATTS,
     ATTR_WH_PERIOD,
+    ATTR_WH_PERIOD_AC,
+    ATTR_WH_PERIOD_AC_P10,
+    ATTR_WH_PERIOD_AC_P90,
+    ATTR_WH_PERIOD_P10,
+    ATTR_WH_PERIOD_P50,
+    ATTR_WH_PERIOD_P90,
 )
 
 
@@ -31,13 +37,20 @@ from .const import (
 def exclude_attributes(hass: HomeAssistant) -> set[str]:
     """Attribute names the recorder must not persist for this integration.
 
-    The energy sensors' 15-min curve dicts and the shade-profile diagram's curve
-    arrays change every recompute / selection and would bloat the database; only
-    what gets written to history is trimmed (live state/attributes are intact).
+    The energy sensors' 15-min curve dicts (DC + served-AC, bands included) and
+    the shade-profile diagram's curve arrays change every recompute / selection
+    and would bloat the database; only what gets written to history is trimmed
+    (live state/attributes are intact).
     """
     return {
         ATTR_WATTS,
         ATTR_WH_PERIOD,
+        ATTR_WH_PERIOD_P10,
+        ATTR_WH_PERIOD_P50,
+        ATTR_WH_PERIOD_P90,
+        ATTR_WH_PERIOD_AC,
+        ATTR_WH_PERIOD_AC_P10,
+        ATTR_WH_PERIOD_AC_P90,
         ATTR_SP_TIME,
         ATTR_SP_AZIMUTH,
         ATTR_SP_SUN_ELEVATION,

@@ -147,14 +147,23 @@ def test_energy_sensor_state_and_curve(monkeypatch):
     )
     assert today.native_value == pytest.approx(0.4 * _AC_FACTOR)
     attrs = today.extra_state_attributes
-    # The 15-min curve attributes stay the DC model curve (the AC bands are
-    # hourly-only, so the matching 15-min band attributes remain the DC band
-    # shape); the p10/p90 band curves are empty here (no DATA_KEY_QUANTILE_CURVES).
-    assert set(attrs) == {"watts", "wh_period", "wh_period_p10", "wh_period_p90"}
+    # The 15-min ``watts`` / ``wh_period`` / band attributes stay the DC model
+    # curve; their ``wh_period_ac*`` siblings carry the served AC curve (the
+    # band pair empty here: no DATA_KEY_QUANTILE_CURVES / no AC band keys).
+    assert set(attrs) == {
+        "watts", "wh_period", "wh_period_p10", "wh_period_p90",
+        "wh_period_ac", "wh_period_ac_p10", "wh_period_ac_p90",
+    }
     assert len(attrs["watts"]) == 4
     assert attrs["wh_period"][start.isoformat()] == pytest.approx(100.0)
     assert attrs["wh_period_p10"] == {}
     assert attrs["wh_period_p90"] == {}
+    # The served AC curve is sliced per day like its DC sibling — same slot
+    # keys, eta-scaled buckets (0.9 * 100 Wh).
+    assert set(attrs["wh_period_ac"]) == set(attrs["wh_period"])
+    assert attrs["wh_period_ac"][start.isoformat()] == pytest.approx(90.0)
+    assert attrs["wh_period_ac_p10"] == {}
+    assert attrs["wh_period_ac_p90"] == {}
 
     # Tomorrow: coordinator AC roll-up is None and no slots fall on that date.
     tomorrow = _bare(
@@ -169,7 +178,62 @@ def test_energy_sensor_state_and_curve(monkeypatch):
         "wh_period": {},
         "wh_period_p10": {},
         "wh_period_p90": {},
+        "wh_period_ac": {},
+        "wh_period_ac_p10": {},
+        "wh_period_ac_p90": {},
     }
+
+
+def test_energy_sensor_ac_curve_sum_matches_state(monkeypatch):
+    """The BM-facing invariant (wh-period-ac order): summing a day's
+    ``wh_period_ac`` buckets reproduces the sensor's AC state in Wh (±1 Wh
+    rounding) — pinned here for today AND tomorrow. Both roll up from the
+    same served AC curve; today's slot carries no intraday factor in this
+    fixture (neutral scalar), so the invariant holds on both days."""
+    fixed = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(sensor_mod.dt_util, "now", lambda: fixed)
+    monkeypatch.setattr(sensor_mod.dt_util, "as_local", lambda d: d)
+
+    starts = [datetime(2026, 7, 5, 10, 0, tzinfo=UTC) + timedelta(minutes=15 * i)
+              for i in range(4)]
+    starts += [datetime(2026, 7, 6, 10, 0, tzinfo=UTC) + timedelta(minutes=15 * i)
+               for i in range(4)]
+    iso = [s.isoformat() for s in starts]
+    watts = [400.0] * 8
+    ac_watts = [w * _AC_FACTOR for w in watts]
+    day0 = starts[0].date().isoformat()
+    day1 = starts[4].date().isoformat()
+    ac_today_kwh = sum(ac_watts[:4]) * 0.25 / 1000.0
+    ac_tomorrow_kwh = sum(ac_watts[4:]) * 0.25 / 1000.0
+    data = {
+        "watts": dict(zip(iso, watts, strict=False)),
+        "wh_period": {k: round(v * 0.25, 2) for k, v in zip(iso, watts, strict=False)},
+        "wh_period_ac": {k: round(v * 0.25, 2) for k, v in zip(iso, ac_watts, strict=False)},
+        "slot_starts": iso,
+        "energy_today_kwh_ac": round(ac_today_kwh, 3),
+        "energy_tomorrow_kwh_ac": round(ac_tomorrow_kwh, 3),
+        "energy_d2_kwh_ac": None,
+        "daily_kwh": {day0: 0.4, day1: 0.4},
+        "daily_kwh_ac": {day0: ac_today_kwh, day1: ac_tomorrow_kwh},
+    }
+    coord = _FakeCoordinator(data)
+    for offset, key, expected_kwh in (
+        (0, "energy_today_kwh_ac", ac_today_kwh),
+        (1, "energy_tomorrow_kwh_ac", ac_tomorrow_kwh),
+    ):
+        sensor = _bare(EnergyProductionSensor, coord, _day_offset=offset,
+                       _energy_key=key)
+        attrs = sensor.extra_state_attributes
+        # Bucket-for-bucket the AC curve is the DC curve scaled by eta.
+        assert set(attrs["wh_period_ac"]) == set(attrs["wh_period"])
+        for slot_iso, dc_wh in attrs["wh_period"].items():
+            assert attrs["wh_period_ac"][slot_iso] == pytest.approx(
+                dc_wh * _AC_FACTOR, abs=0.01
+            )
+        # The sum invariant: Σ(wh_period_ac of the day) == AC state (±1 Wh).
+        assert sum(attrs["wh_period_ac"].values()) == pytest.approx(
+            expected_kwh * 1000.0, abs=1.0
+        )
 
 
 def test_energy_sensor_no_data():
@@ -183,6 +247,9 @@ def test_energy_sensor_no_data():
         "wh_period": {},
         "wh_period_p10": {},
         "wh_period_p90": {},
+        "wh_period_ac": {},
+        "wh_period_ac_p10": {},
+        "wh_period_ac_p90": {},
     }
 
 
@@ -775,6 +842,14 @@ def test_recorder_excludes_curve_attributes():
     assert exclude_attributes(object()) == {
         "watts",
         "wh_period",
+        "wh_period_p10",
+        "wh_period_p50",
+        "wh_period_p90",
+        # The served 15-min AC curve siblings (wh-period-ac order) — same bulk,
+        # same exclusion.
+        "wh_period_ac",
+        "wh_period_ac_p10",
+        "wh_period_ac_p90",
         # Shade-profile diagram curve arrays (SPEC §17.1) — bulky, per-selection.
         "time",
         "azimuth",
@@ -786,6 +861,67 @@ def test_recorder_excludes_curve_attributes():
         "static_horizon",
         "shade_horizon",
     }
+
+
+# --------------------------------------------------------------------------
+# Curve-audit diagnostic (wh-period-ac order): revision counter + day scalars.
+# --------------------------------------------------------------------------
+
+
+def test_curve_audit_sensor_reports_revision_count():
+    # Local import: the class is the new behaviour under test (rule 6 — the
+    # suite must fail on the OLD code with a missing-symbol error here, not a
+    # collection error for the whole module).
+    from custom_components.balcony_solar_forecast.sensor import CurveAuditSensor
+
+    data = {
+        "curve_audit": {
+            "eta_effective": 0.965,
+            "eta_source": "config",
+            "days": [
+                {"date": "2026-07-05", "day_offset": 0, "dc_wh": 400.0,
+                 "ac_wh": 360.0, "state_kwh": 0.36},
+            ],
+            "revisions_today": {"d0": 1, "d1": 2, "d2": 0},
+            "revisions_yesterday": {"d0": 0, "d1": 3, "d2": 1},
+            "last_revision": None,
+        }
+    }
+    sensor = _bare(CurveAuditSensor, _FakeCoordinator(data))
+    # State is today's total revision count across the three day offsets.
+    assert sensor.native_value == 3
+    assert sensor.entity_category == EntityCategory.DIAGNOSTIC
+    # Diagnostics stay available even on a failed update (SPEC §13).
+    assert sensor.available is True
+    # The compact audit block rides along verbatim as attributes.
+    attrs = sensor.extra_state_attributes
+    assert attrs["eta_source"] == "config"
+    assert attrs["revisions_yesterday"] == {"d0": 0, "d1": 3, "d2": 1}
+    assert attrs["days"][0]["ac_wh"] == pytest.approx(360.0)
+
+
+def test_curve_audit_sensor_none_without_data():
+    from custom_components.balcony_solar_forecast.sensor import CurveAuditSensor
+
+    failed = _FakeCoordinator(None, last_update_success=False)
+    sensor = _bare(CurveAuditSensor, failed)
+    assert sensor.native_value is None
+    assert sensor.available is True
+    assert sensor.extra_state_attributes == {}
+
+
+async def test_curve_audit_sensor_registered_by_setup_entry():
+    """The curve-audit diagnostic is part of the platform's entity set: exactly
+    one instance per entry, stable unique_id, diagnostic category."""
+    from custom_components.balcony_solar_forecast.sensor import CurveAuditSensor
+
+    coord = _MeasuredCoordinator([None])
+    added: list = []
+    await sensor_mod.async_setup_entry(_MeasuredHass(coord), coord.entry, added.extend)
+    audit = [e for e in added if isinstance(e, CurveAuditSensor)]
+    assert len(audit) == 1
+    assert audit[0].unique_id == "abc123_curve_audit"
+    assert audit[0].entity_category == EntityCategory.DIAGNOSTIC
 
 
 async def test_energy_hook_returns_wh_hours():

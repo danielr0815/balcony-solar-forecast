@@ -3,8 +3,10 @@
 Consumer-facing outputs (SPEC §14):
 
   * ``energy_production_today`` / ``_tomorrow`` / ``_d2`` — daily kWh with the
-    full 15-min curve as ``watts`` / ``wh_period`` dict attributes (excluded
-    from the recorder via :mod:`recorder`). Deliberately compatible with the
+    full 15-min curve as ``watts`` / ``wh_period`` dict attributes, plus their
+    served-AC siblings ``wh_period_ac`` / ``wh_period_ac_p10`` /
+    ``wh_period_ac_p90`` (all excluded from the recorder via :mod:`recorder`;
+    SPEC §14.4). Deliberately compatible with the
     rany2 open-meteo-solar-forecast entity pattern so battery_manager only
     re-points its three forecast entity pickers, no code change.
   * ``power_production_now`` — instantaneous site AC power (W, measurement).
@@ -69,12 +71,16 @@ from .const import (
     ATTR_SP_TRANSMITTANCE_INDIVIDUAL,
     ATTR_WATTS,
     ATTR_WH_PERIOD,
+    ATTR_WH_PERIOD_AC,
+    ATTR_WH_PERIOD_AC_P10,
+    ATTR_WH_PERIOD_AC_P90,
     ATTR_WH_PERIOD_P10,
     ATTR_WH_PERIOD_P50,
     ATTR_WH_PERIOD_P90,
     DATA_KEY_BAND_SOURCE,
     DATA_KEY_BAND_SOURCE_BY_DAY,
     DATA_KEY_BIAS_CELLS,
+    DATA_KEY_CURVE_AUDIT,
     DATA_KEY_DRIFT_MAE,
     DATA_KEY_ENERGY_TODAY_AC_P10,
     DATA_KEY_INTRADAY_SCALAR,
@@ -96,6 +102,7 @@ from .const import (
     LEARNER_STATUS_FROZEN,
     LEARNER_STATUS_OFF,
     LEARNER_STATUS_VALUES,
+    SENSOR_CURVE_AUDIT,
     SENSOR_DRIFT_MAE_CORRECTED,
     SENSOR_ENERGY_D2,
     SENSOR_ENERGY_D2_DC,
@@ -151,6 +158,11 @@ _KEY_POWER_NOW_W = "power_now_w"
 _KEY_POWER_NOW_W_AC = "power_now_w_ac"
 _KEY_WATTS = "watts"
 _KEY_WH_PERIOD = "wh_period"
+# Served-AC curve siblings in the coordinator payload (SPEC §14.4); the band
+# pair is absent when no bands were issued this cycle.
+_KEY_WH_PERIOD_AC = "wh_period_ac"
+_KEY_WH_PERIOD_AC_P10 = "wh_period_ac_p10"
+_KEY_WH_PERIOD_AC_P90 = "wh_period_ac_p90"
 _KEY_HOURLY_WH = "hourly_wh"
 _LOGGER = logging.getLogger(__name__)
 
@@ -227,6 +239,8 @@ async def async_setup_entry(
         # --- v0.4 skill scoreboard (SPEC §15.5) ---
         EngineDailyKwhMaeSensor(coordinator),
         EngineHourlyMaeSensor(coordinator),
+        # --- curve audit (SPEC §14.4): published-headline stability ---
+        CurveAuditSensor(coordinator),
         # --- v0.4 quantile bands (SPEC §11.2): today's P10/P90 ---
         EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P10, _Q_P10),
         EnergyBandSensor(coordinator, SENSOR_ENERGY_TODAY_P90, _Q_P90),
@@ -426,8 +440,9 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
 
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-    # The bulky curve dicts (served + the three quantile bands) are all excluded
-    # from the recorder (SPEC §14.4) via _unrecorded_attributes + recorder.py.
+    # The bulky curve dicts (served + the three quantile bands, DC and the
+    # served-AC siblings alike) are all excluded from the recorder (SPEC §14.4)
+    # via _unrecorded_attributes + recorder.py.
     _unrecorded_attributes = frozenset(
         {
             ATTR_WATTS,
@@ -435,6 +450,9 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
             ATTR_WH_PERIOD_P10,
             ATTR_WH_PERIOD_P50,
             ATTR_WH_PERIOD_P90,
+            ATTR_WH_PERIOD_AC,
+            ATTR_WH_PERIOD_AC_P10,
+            ATTR_WH_PERIOD_AC_P90,
         }
     )
 
@@ -442,9 +460,11 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
         super().__init__(coordinator, key)
         self._day_offset = day_offset
         # AC is the operator-facing standard (Phase 2): the headline reads the
-        # served-AC day roll-up. The 15-min ``watts`` / ``wh_period`` curve
-        # attributes stay the DC model curve (the AC bands are hourly-only, so the
-        # matching 15-min band attributes remain the DC band shape).
+        # served-AC day roll-up. The plain 15-min ``watts`` / ``wh_period`` /
+        # band curve attributes stay the DC model curve; their
+        # ``wh_period_ac*`` siblings carry the served 15-min AC curve (the base
+        # the headline rolls up from — Σ over a day == state for tomorrow/d2;
+        # today keeps the intraday nowcast in the curve, SPEC §14.1/§14.4).
         self._energy_key = _ENERGY_KEYS_AC[day_offset]
 
     def _target_date(self):
@@ -462,6 +482,13 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
         data = self.coordinator.data or {}
         watts_all = data.get(_KEY_WATTS) or {}
         wh_all = data.get(_KEY_WH_PERIOD) or {}
+        # Served-AC siblings (SPEC §14.4): the 15-min AC curve + its band pair.
+        # wh_period_ac rides the coordinator payload always (until the learned
+        # eta is trusted the config eta stands); the band pair is absent when no
+        # bands were issued — sliced to empty dicts then, like the DC bands.
+        wh_ac_all = data.get(_KEY_WH_PERIOD_AC) or {}
+        wh_ac_p10_all = data.get(_KEY_WH_PERIOD_AC_P10) or {}
+        wh_ac_p90_all = data.get(_KEY_WH_PERIOD_AC_P90) or {}
         # v0.4 band curves (SPEC §11.2/§14.4): 15-min P10/P90 Wh, sliced to this day
         # like the served curve. Empty when quantiles are off / cold-started, so
         # the attrs are simply empty dicts (no fabricated spread).
@@ -475,6 +502,9 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
         wh_period: dict[str, float] = {}
         wh_p10: dict[str, float] = {}
         wh_p90: dict[str, float] = {}
+        wh_ac: dict[str, float] = {}
+        wh_ac_p10: dict[str, float] = {}
+        wh_ac_p90: dict[str, float] = {}
         for iso in data.get(_KEY_SLOT_STARTS, []):
             local = _local_date_of(iso)
             if local != target:
@@ -487,11 +517,20 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
                 wh_p10[iso] = p10_all[iso]
             if iso in p90_all:
                 wh_p90[iso] = p90_all[iso]
+            if iso in wh_ac_all:
+                wh_ac[iso] = wh_ac_all[iso]
+            if iso in wh_ac_p10_all:
+                wh_ac_p10[iso] = wh_ac_p10_all[iso]
+            if iso in wh_ac_p90_all:
+                wh_ac_p90[iso] = wh_ac_p90_all[iso]
         return {
             ATTR_WATTS: watts,
             ATTR_WH_PERIOD: wh_period,
             ATTR_WH_PERIOD_P10: wh_p10,
             ATTR_WH_PERIOD_P90: wh_p90,
+            ATTR_WH_PERIOD_AC: wh_ac,
+            ATTR_WH_PERIOD_AC_P10: wh_ac_p10,
+            ATTR_WH_PERIOD_AC_P90: wh_ac_p90,
         }
 
 
@@ -1056,6 +1095,40 @@ class EngineHourlyMaeSensor(_ScoreboardSensor):
     def native_value(self) -> float | None:
         value = self._summary().get(_SB_ENGINE_HOURLY_MAE)
         return None if value is None else round(float(value), 1)
+
+
+class CurveAuditSensor(_DiagnosticSensor):
+    """Published-headline stability audit (SPEC §14.4), compact and recorded.
+
+    State: today's count of significant (> HEADLINE_REVISION_THRESHOLD_KWH)
+    revisions of the three published AC day headlines (``energy_*_kwh_ac``),
+    summed across the day offsets — the planner-facing stability number a
+    consumer audit needs, without recorder access to the bulky (excluded)
+    curve attributes. The compact day-scalar block (per-day wh_period /
+    wh_period_ac sums on both bases, the published AC state, the effective
+    site eta with its source) plus yesterday's counters and the last
+    revision's provenance ride along as attributes. Always available, None
+    before the first payload (no fabricated zero).
+    """
+
+    def __init__(self, coordinator: Any) -> None:
+        super().__init__(coordinator, SENSOR_CURVE_AUDIT)
+
+    def _audit(self) -> dict[str, Any]:
+        data = self.coordinator.data or {}
+        audit = data.get(DATA_KEY_CURVE_AUDIT)
+        return audit if isinstance(audit, dict) else {}
+
+    @property
+    def native_value(self) -> int | None:
+        revisions = self._audit().get("revisions_today")
+        if not isinstance(revisions, dict):
+            return None
+        return sum(v for v in revisions.values() if isinstance(v, int))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return dict(self._audit())
 
 
 # ---------------------------------------------------------------------------

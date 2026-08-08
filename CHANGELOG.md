@@ -11,6 +11,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > table in [docs/HISTORIE.md](docs/HISTORIE.md) §H13. Historical entries are
 > deliberately left untouched.
 
+## [Unreleased]
+
+### Added
+
+- **Served 15-min AC curve attributes (SPEC §14.4).** The three daily energy
+  sensors (`energy_production_today` / `_tomorrow` / `_day_after_tomorrow`)
+  now carry `wh_period_ac` / `wh_period_ac_p10` / `wh_period_ac_p90` — the
+  served AC curve (per-group η + AC clamp) in the same 15-min bucket
+  structure and with the same ISO keys as their DC siblings `watts` /
+  `wh_period` / `wh_period_p10` / `wh_period_p90`, which stay the DC model
+  curve (backwards compatible). Until the learned inverter η is trusted the
+  config η stands (the AC attributes are always emitted once curve data
+  exists); the band pair is empty until bands are issued. Sum invariant:
+  Σ(`wh_period_ac` of a day) == the sensor's AC state (±1 Wh) for
+  `_tomorrow` / `_d2`; `_today` deviates by design while the intraday scalar
+  is active (the curve keeps the nowcast, the headline strips it, §14.1). All
+  curve dicts stay recorder-excluded — the DC band names are now excluded at
+  the recorder hook level too, closing a small gap.
+- **`curve_audit` diagnostic sensor (SPEC §14.4).** Because the bulky curve
+  dicts are recorder-excluded, a compact *recorded* diagnostic now carries
+  the audit numbers: state = today's count of significant (> 0.5 kWh)
+  revisions of the three published AC day headlines; attributes = per-day
+  curve sums on both bases (`dc_wh`, `ac_wh`) with the published state, the
+  applied site η with its source (`learned` / `config`), today's and
+  yesterday's revision counters per day offset, and the last revision with
+  provenance (`payload_refreshed` separates real weather-model revisions from
+  learner noise). Counting is keyed per target calendar date, so the midnight
+  rollover is not a revision; the counters persist across restarts (additive
+  store section, no schema bump) and ride the diagnostics dump under
+  `store.curve_audit`.
+
 ## [0.25.1] - 2026-08-01
 
 ### Fixed

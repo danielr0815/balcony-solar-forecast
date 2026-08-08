@@ -82,6 +82,9 @@
       "daily_kwh_mae": {
         "name": "Prognose Tages-kWh-Fehler"
       },
+      "curve_audit": {
+        "name": "Prognose-Publikationsaudit"
+      },
       "hourly_mae": {
         "name": "Prognose Stunden-Fehler"
       },

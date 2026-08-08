@@ -150,7 +150,9 @@ without the bundled frontend resources.
   install) — an energy-dashboard-style chart: one **stacked hourly production bar
   per module** (M1…M8, coloured segments — measured **DC**) with a **dashed
   forecast line** (also **DC**: today's live `wh_period` model curve, past days
-  the frozen issued `hourly_wh` curve, §18.4); the title and the line's
+  the frozen issued `hourly_wh` curve, §18.4 — the served 15-min **AC** curve is
+  available separately as the `wh_period_ac` attribute family, §14.4, but this
+  card deliberately compares DC against DC); the title and the line's
   provenance caption („Prognose (live)" vs. „Prognose (Stand 01:30)") spell the
   shared DC basis and the line's origin out so the overlay is never misread.
   Hovering (or touching) shows a crosshair with every module's Wh **and the
