@@ -185,17 +185,21 @@ views:
           - entity: sensor.balcony_solar_forecast_intraday_correction_scalar
             name: Intraday scalar (applied)
           - entity: sensor.balcony_solar_forecast_drift_mae_corrected
-            name: Drift MAE (corrected vs physics)
+            name: Drift MAE (hourly error magnitude, 7d)
+          - entity: sensor.balcony_solar_forecast_drift_bias_corrected
+            name: Corrected daily bias (+ over / − under, 7d)
 
       # ----------------------------------------------------------------
-      # Drift MAE over time — corrected curve error trend (SPEC §9.8).
+      # Corrected error over time — magnitude + direction (SPEC §9.8).
       # ----------------------------------------------------------------
       - type: history-graph
-        title: Drift MAE (corrected) trend
+        title: "Correction error: magnitude & direction (7d)"
         hours_to_show: 168
         entities:
           - entity: sensor.balcony_solar_forecast_drift_mae_corrected
-            name: Corrected MAE (Wh)
+            name: Hourly MAE · magnitude (Wh)
+          - entity: sensor.balcony_solar_forecast_drift_bias_corrected
+            name: Daily bias · +over / −under (Wh)
 
       # ----------------------------------------------------------------
       # Shademap (SPEC §9.1/§18.1): best-effort built-in representation.

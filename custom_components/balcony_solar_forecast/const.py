@@ -16,7 +16,7 @@ from __future__ import annotations
 DOMAIN = "balcony_solar_forecast"
 
 INTEGRATION_NAME = "Balcony Solar Forecast"
-INTEGRATION_VERSION = "0.26.0"
+INTEGRATION_VERSION = "0.27.0"
 
 # --- Update behaviour (SPEC §2: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
@@ -193,12 +193,12 @@ INVERTER_CAL_MIN_SAMPLES = 20  # distinct eligible hours before the learned eta 
 # resets it and clears the card. Same "only days we issued a forecast for"
 # counting contract as LEARNING_STALLED_STREAK_DAYS.
 INVERTER_CAL_OUT_OF_BAND_STREAK_DAYS = 3
-# Clip-headroom gate for a calibration hour (AC-side Phase 3): the datasheet-
-# derived AC (DEFAULT_INVERTER_EFFICIENCY * summed DC) must sit below this
-# fraction of the summed group AC ceiling for the hour to count as UNCLIPPED — a
-# clipped hour's AC is capped at the ceiling, so its measured-AC/DC ratio would
-# understate eta. Gated on the INDEPENDENT DC side (not the measured AC) so a
-# meter glitch cannot both pass the gate and corrupt the ratio.
+# Clip-headroom gate for a calibration hour: each configured group's
+# datasheet-derived AC must sit below this fraction of ITS OWN AC ceiling for
+# the hour to count as unclipped. Free headroom in a sibling group cannot hide
+# local clipping; a groupless site has no modeled ceiling. Gated on the
+# independent DC side (not measured AC) so a meter glitch cannot both pass the
+# gate and corrupt the ratio.
 INVERTER_CAL_CLIP_HEADROOM_FRAC = 0.90
 
 # Seasonal foliage ramp (SPEC §5.2: cosine ramp over April / November).
@@ -774,13 +774,17 @@ BOOTSTRAP_MAX_BIN_N = 5
 
 # --- Attribution / diagnostics (operator decision 2026-07-06, SPEC §16.2) ------
 # The engine computes BOTH curves each cycle; the nightly issued snapshot v2
-# stores hourly values of both plus per-plane modeled beam/diffuse/ghi/kc so
-# the shademap can be trained from hourly LTS. Diagnostics expose daily MAE of
-# raw vs corrected vs baseline.
+# stores hourly values of both plus Slow-only and exact per-plane curves / model
+# references so learners and partial-metering attribution use the issued basis.
+# Diagnostics expose rolling daylight-hour MAE plus daily energy audit fields.
 CORRECTION_SOURCE_NONE = "none"          # raw physics served (learner off/frozen)
 CORRECTION_SOURCE_INTRADAY = "intraday"  # intraday scalar applied
 CORRECTION_SOURCE_SHADEMAP = "shademap"  # shademap applied
-CORRECTION_SOURCE_BOTH = "both"
+CORRECTION_SOURCE_DAY_AHEAD = "day_ahead"
+CORRECTION_SOURCE_BOTH = "both"  # shademap + intraday (legacy value)
+CORRECTION_SOURCE_DAY_AHEAD_INTRADAY = "day_ahead+intraday"
+CORRECTION_SOURCE_SHADEMAP_DAY_AHEAD = "shademap+day_ahead"
+CORRECTION_SOURCE_ALL = "shademap+day_ahead+intraday"
 
 # Coordinator <-> platform contract additions (self.data keys, v0.2/v0.3):
 DATA_KEY_RAW_HOURLY_WH = "raw_hourly_wh"          # {iso_hour: Wh} pure physics
@@ -788,12 +792,13 @@ DATA_KEY_CORRECTED_HOURLY_WH = "corrected_hourly_wh"  # {iso_hour: Wh} served cu
 DATA_KEY_INTRADAY_SCALAR = "intraday_scalar"      # current applied scalar
 DATA_KEY_LEARNER_STATUS = "learner_status"        # dict: enabled/frozen/disabled per layer
 DATA_KEY_BIAS_CELLS = "bias_cells"                # dict: {"class|part": {theta, n, applied}} day-ahead RLS cells
-DATA_KEY_DRIFT_MAE = "drift_mae"                  # dict: {raw, corrected, baseline, +slow when attributed} rolling MAE
+DATA_KEY_DRIFT_MAE = "drift_mae"                  # dict: rolling MAE legs + corrected_bias
 DATA_KEY_CORRECTION_SOURCE = "correction_source"  # one of CORRECTION_SOURCE_*
 
 # --- New diagnostic entities (SPEC §14) -------------------------------------
 SENSOR_INTRADAY_SCALAR = "intraday_scalar"
 SENSOR_DRIFT_MAE_CORRECTED = "drift_mae_corrected"
+SENSOR_DRIFT_BIAS_CORRECTED = "drift_bias_corrected"
 BINARY_SENSOR_FAST_LEARNER = "fast_learner_active"
 BINARY_SENSOR_SLOW_LEARNER = "slow_learner_active"
 

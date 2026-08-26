@@ -95,7 +95,10 @@ async def async_read_actuals(
             None,
             {"mean", "state"},
         )
-        expected = _daylight_hours_in_local_day(coord._site, start, end)
+        daylight_keys = _daylight_hour_keys_in_local_day(
+            coord._site, start, end
+        )
+        expected = len(daylight_keys)
         # Wp per module for the SPEC §10 plausibility gate (kW-instead-of-W).
         wp_by_module = {
             p.name: p.wp for p in coord._site.planes if p.actual_entity
@@ -105,6 +108,7 @@ async def async_read_actuals(
             stats,
             entity_by_module,
             expected_daylight_hours=expected,
+            expected_daylight_hour_keys=daylight_keys,
             day=day,
             dropout_out=dropout,
             wp_by_module=wp_by_module,
@@ -201,12 +205,19 @@ def _daylight_hours_in_local_day(
     day SHOULD carry. Pure geometry (solpos); never raises — a bad site/time
     returns 0 (gate skipped). ``start``/``end`` are tz-aware local-day bounds.
     """
+    return len(_daylight_hour_keys_in_local_day(site, start, end))
+
+
+def _daylight_hour_keys_in_local_day(
+    site: SiteConfig, start: datetime, end: datetime
+) -> set[str]:
+    """UTC hour keys in the local day whose midpoint is above the horizon."""
     try:
         start_utc = dt_util.as_utc(start)
         end_utc = dt_util.as_utc(end)
     except Exception:  # pragma: no cover - defensive
-        return 0
-    count = 0
+        return set()
+    keys: set[str] = set()
     cur = start_utc
     step = timedelta(hours=1)
     # Guard against a runaway loop (DST safety): a local day is <= 25 hours.
@@ -219,9 +230,9 @@ def _daylight_hours_in_local_day(
         except Exception:  # pragma: no cover - defensive
             el = 0.0
         if el > 0.0:
-            count += 1
+            keys.add(cur.replace(minute=0, second=0, microsecond=0).isoformat())
         cur += step
-    return count
+    return keys
 
 
 def _actuals_from_stats(
@@ -230,6 +241,7 @@ def _actuals_from_stats(
     *,
     expected_daylight_hours: int,
     day: date,
+    expected_daylight_hour_keys: set[str] | None = None,
     dropout_out: dict[str, object] | None = None,
     wp_by_module: dict[str, float] | None = None,
 ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
@@ -332,7 +344,12 @@ def _actuals_from_stats(
             wh += m
         daily[module] = round(wh, 1)
         hourly[module] = per_hour
-        covered_hours[module] = len(set(hkeys))
+        observed = set(hkeys)
+        covered_hours[module] = (
+            len(observed & expected_daylight_hour_keys)
+            if expected_daylight_hour_keys is not None
+            else len(observed)
+        )
     # Per-module day-completeness gate: a mid-day recorder/LTS gap OR a module
     # dying mid-day yields a partial-hour sum that must NOT become the day's
     # ground truth. EVERY configured module has to clear the bar — using the

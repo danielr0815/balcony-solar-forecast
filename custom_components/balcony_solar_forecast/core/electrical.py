@@ -3,7 +3,7 @@
 Owner: engine. Pure, HA-free. Implements SPEC §6:
   - Ross cell temperature: Tcell = Tamb + ROSS_COEFF * POA.
   - Power derate TEMP_COEFF_PER_K per K vs TEMP_REF_C.
-  - Per-inverter-group AC clamp: min(sum of member ports, ac_limit_w).
+  - Per-inverter-group served-DC clamp at ac_limit_w / eta_inv.
   - Per-inverter-group DC->AC transform (clamp_groups_ac): served DC clipped at
     ac_limit_w / eta_inv and delivered AC = min(eta_inv * sum(DC), ac_limit_w).
 """
@@ -81,9 +81,12 @@ def clamp_groups(
     plane_watts: Mapping[str, float],
     groups: Sequence[InverterGroup],
 ) -> dict[str, float]:
-    """Apply each inverter group's AC clamp to its member planes.
+    """Apply each inverter group's physical DC clip to its member planes.
 
-    For every group the summed member power is limited to ``ac_limit_w``;
+    For every group the summed member DC power is limited to
+    ``ac_limit_w / inverter_efficiency``; the configured limit is an AC
+    nameplate value, so applying it directly to DC would clip too early. This
+    is the same clip point used by :func:`clamp_groups_ac`.
     when clamping bites, the reduction is distributed proportionally back
     onto the member planes so per-plane outputs stay consistent with the
     clamped total.
@@ -114,9 +117,9 @@ def clamp_groups(
         if not present:
             continue
 
-        limit = group.ac_limit_w
+        limit = group.ac_limit_w / _clamp_eta(group.inverter_efficiency)
         if total <= limit or total <= 0.0:
-            # Within the AC limit (or no power) -> nothing to redistribute.
+            # Within the physical served-DC limit (or no power) -> no-op.
             continue
 
         # Clamp bites: scale every member down by the same factor so the sum
@@ -182,9 +185,8 @@ def clamp_groups_ac(
     conversion is more faithful than pretending AC == DC. Their DC passes through
     unchanged. (The reference site groups every plane, so this is an edge case.)
 
-    NOTE: this is ADDITIONAL to :func:`clamp_groups`, which is left intact — the
-    DC learning / scoreboard path depends on its exact ``min(sum, ac_limit)``
-    clip at ``ac_limit_w`` (not at the corrected ``ac_limit_w / eta``).
+    :func:`clamp_groups` uses the same physical DC clip point. This function is
+    additive because it also returns the delivered AC allocation.
 
     Args:
         plane_watts: {plane_name: unclamped DC power W}.

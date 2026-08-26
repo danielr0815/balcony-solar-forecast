@@ -29,7 +29,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -95,16 +94,16 @@ class PlaneHourReconstruction:
     diffuse floor the panel sees (the diffuse is not what the shademap learns).
 
     ``gated_total_wh`` is the modeled DC energy WITH the static horizon beam
-    gate applied (what the live pure-physics engine issues); it feeds the
-    day-ahead bias aggregation so that layer trains against the forecast the
-    engine actually serves. ``ghi`` is the horizontal GHI, ``kc`` the clear-sky
+    gate applied (what the RAW engine issues); together with the ungated split
+    it reconstructs the static prior. Day-ahead is trained against the
+    walk-forward pre-day SLOW-only curve derived from that split. ``ghi`` is the horizontal GHI, ``kc`` the clear-sky
     index at the hour's sun position; sun az/el + ``beam_share`` (ungated) drive
     the quasi-clear gate + bin key.
     """
 
     beam_wh: float          # UNGATED beam+circumsolar DC (shademap reference)
     diffuse_wh: float       # SVF-gated diffuse+ground DC (the shade floor)
-    gated_total_wh: float   # static-horizon-gated total DC (day-ahead bias)
+    gated_total_wh: float   # static-horizon-gated RAW total DC
     ghi: float
     kc: float
     sun_az: float
@@ -353,27 +352,19 @@ def _rls_step(cell: BiasCell, modeled: float, measured: float) -> BiasCell:
     the guards a NaN sample poisoned theta (NaN -> clamped to the 0.5 floor)
     and still aged the cell.
     """
-    if not (math.isfinite(modeled) and math.isfinite(measured)):
-        return cell
-    x = float(modeled)
-    y = float(measured)
-    if x <= 0.0 or y < 0.0:
-        # No modeled signal -> the pair carries no bias information; skip but
-        # still count the day so RLS_MIN_SAMPLES reflects real evidence only
-        # for informative days. Return the cell unchanged.
-        return cell
-    lam = const.RLS_FORGETTING_FACTOR
-    p = cell.covariance if cell.covariance > 0.0 else const.RLS_INIT_COVARIANCE
-    denom = lam + x * p * x
-    if denom <= 0.0:
-        return cell
-    k = (p * x) / denom
-    theta = cell.theta + k * (y - cell.theta * x)
-    theta = _clamp(theta, const.DAY_AHEAD_BIAS_MIN, const.DAY_AHEAD_BIAS_MAX)
-    new_p = (p - k * x * p) / lam
-    if new_p <= 0.0:
-        new_p = const.RLS_INIT_COVARIANCE
-    return BiasCell(theta=theta, covariance=new_p, n=cell.n + 1)
+    # Reuse the live trainer instead of maintaining a nearly-identical RLS
+    # implementation. This keeps every evidence gate (especially the minimum
+    # modeled energy per day-section) identical between bootstrap and nightly.
+    key = BiasState.cell_key(const.CLOUD_CLASS_CLEAR, const.DAY_PART_MIDDAY)
+    state = BiasState(cells={key: cell})
+    sample = bias_mod.DayAheadSample(
+        cloud_class=const.CLOUD_CLASS_CLEAR,
+        day_part=const.DAY_PART_MIDDAY,
+        measured_wh=measured,
+        modeled_wh=modeled,
+    )
+    trained = bias_mod.train_day_ahead_bias(state, (sample,))
+    return trained.cells.get(key, cell)
 
 
 # ===========================================================================
@@ -502,9 +493,8 @@ def _process_day_impl(
         p.name: {} for p in planes
     }
     # Per-plane modeled GATED total DC Wh (the pure-physics forecast the engine
-    # issues), for the daily->hourly disaggregation shape AND the day-ahead bias
-    # modeled site energy. NOTE: this uses ``gated_total_wh`` (static-horizon
-    # beam gate applied), NOT the ungated shademap reference beam.
+    # issues), for daily->hourly disaggregation and reconstruction of the static
+    # prior. Day-ahead uses the frozen pre-day SLOW-only curve built below.
     modeled_total_by_plane: dict[str, dict[str, float]] = {
         p.name: {} for p in planes
     }
@@ -551,6 +541,63 @@ def _process_day_impl(
 
     hours_sorted = sorted(kc_by_hour.keys())
 
+    # Freeze the state that would have issued this historical day. Bootstrap is
+    # a walk-forward simulation: today's labels may update tomorrow's model,
+    # but they must never change the curve against which today is scored. The
+    # old path trained theta against static RAW and formed quantile residuals
+    # with the just-updated theta, stacking the geometric loss twice and leaking
+    # the target into its own forecast.
+    pre_day_shademap = ShademapState(
+        channels={
+            channel: {
+                key: ShademapBin(tau=float(values[0]), n=int(values[1]))
+                for key, values in bins.items()
+            }
+            for channel, bins in acc.shade.items()
+        }
+    )
+    pre_day_bias = BiasState(cells=dict(acc.bias))
+
+    members_by_channel: dict[str, list[str]] = {}
+    for plane in planes:
+        members_by_channel.setdefault(plane.shade_channel, []).append(plane.name)
+
+    issued_slow_by_plane: dict[str, dict[str, float]] = {
+        plane.name: {} for plane in planes
+    }
+    for hkey in hours_sorted:
+        slow_unclamped: dict[str, float] = {}
+        for plane in planes:
+            r = recon[plane.name].get(hkey)
+            if r is None:
+                continue
+            static_prior = (
+                (r.gated_total_wh - r.diffuse_wh) / r.beam_wh
+                if r.beam_wh > 0.0
+                else 1.0
+            )
+            static_prior = _clamp(static_prior, 0.0, 1.0)
+            pool = list(members_by_channel.get(plane.shade_channel, [plane.name]))
+            if (
+                plane.shade_channel in pre_day_shademap.channels
+                and plane.shade_channel not in pool
+            ):
+                pool.append(plane.shade_channel)
+            tau = shademap_mod.effective_tau_pooled(
+                pre_day_shademap,
+                channels=tuple(pool),
+                sun_az=r.sun_az,
+                sun_el=r.sun_el,
+                doy=_doy_of(hkey),
+                static_prior=static_prior,
+            )
+            slow_unclamped[plane.name] = r.beam_wh * tau + r.diffuse_wh
+        slow_clamped = electrical.clamp_groups(slow_unclamped, site.groups)
+        for plane in planes:
+            issued_slow_by_plane[plane.name][hkey] = slow_clamped.get(
+                plane.name, 0.0
+            )
+
     contributed = False
 
     # --- 2) SHADEMAP: per plane, per hour, gate quasi-clear + EMA-update. ---
@@ -577,14 +624,16 @@ def _process_day_impl(
     #     whose hourly means repeat byte-identically is a stuck sensor — drop
     #     the module-day.
     snow_by_hour = {wx.start.isoformat(): wx.snow_depth_m for wx in day_weather}
-    shademap_day_ok = actuals_hourly is not None
+    shademap_day_ok = actuals_hourly is not None and all(
+        bool(actuals_hourly.get(name)) for name in metered
+    )
     if shademap_day_ok:
         site_modeled_gated = sum(
             sum(modeled_total_by_plane[p.name].values())
             for p in planes if p.name in metered
         )
         site_measured_true = sum(
-            sum(hours.values()) for hours in actuals_hourly.values()
+            sum(actuals_hourly[name].values()) for name in metered
         )
         if site_modeled_gated <= 0.0 or site_measured_true < (
             const.SHADEMAP_MEASURED_CLEAR_MIN_FRAC * site_modeled_gated
@@ -660,7 +709,7 @@ def _process_day_impl(
     for wx in day_weather:
         hkey = wx.start.isoformat()
         modeled_site = sum(
-            modeled_total_by_plane[p.name].get(hkey, 0.0)
+            issued_slow_by_plane[p.name].get(hkey, 0.0)
             for p in planes if p.name in metered
         )
         measured_site = site_measured_hourly.get(hkey)
@@ -677,15 +726,17 @@ def _process_day_impl(
         if modeled_wh <= 0.0:
             continue
         cell = acc.bias.get(key, BiasCell())
-        acc.bias[key] = _rls_step(cell, modeled_wh, measured_wh)
-        acc.bias_samples += 1
-        contributed = True
+        updated = _rls_step(cell, modeled_wh, measured_wh)
+        if updated != cell:
+            acc.bias[key] = updated
+            acc.bias_samples += 1
+            contributed = True
 
-    # --- 4) QUANTILE SEED (SPEC §12.6): per-hour relerr against the theta-CORRECTED
-    # gated forecast, mirroring the live train_quantiles_day path so the day-0
+    # --- 4) QUANTILE SEED (SPEC §12.6): per-hour relerr against the pre-day
+    # theta-corrected SLOW-only forecast, mirroring the live path so the day-0
     # bands are not cold (only overcast bins were ever trained before A6). Per
-    # hour: corrected = clamp(theta_cell) x gated_modeled_site (theta AFTER this
-    # day's RLS step above), relerr = measured_site / corrected. Fed through the
+    # hour: corrected = pre-day theta x pre-day slow-only modeled site,
+    # relerr = measured_site / corrected. Fed through the
     # LIVE quantiles.train_quantiles so the seeded ring is byte-identical to a
     # live-trained one — same (cloud_class x day_part) taxonomy, same clamp
     # [QUANTILE_REL_ERR_MIN, MAX], same >QUANTILE_MIN_FORECAST_WH gate, same
@@ -700,7 +751,7 @@ def _process_day_impl(
     for wx in day_weather:
         hkey = wx.start.isoformat()
         modeled_site = sum(
-            modeled_total_by_plane[p.name].get(hkey, 0.0)
+            issued_slow_by_plane[p.name].get(hkey, 0.0)
             for p in planes if p.name in metered
         )
         if modeled_site <= 0.0:
@@ -711,10 +762,13 @@ def _process_day_impl(
         cloud_class = _classify_cloud(wx, tz, elevation_deg=el_by_hour.get(hkey))
         day_part = _day_part_for_slot(wx.start, lon)
         key = QuantileState.bin_key(cloud_class, day_part)
-        cell = acc.bias.get(key)
-        theta = (
-            cell.clamped_theta() if cell is not None
-            else const.DAY_AHEAD_BIAS_NEUTRAL
+        # Use the exact serving function, including RLS_MIN_SAMPLES and the
+        # solar-boundary blend. A raw cell theta with n<3 is learned state but
+        # was NOT part of the issued curve and must not enter its residual.
+        theta = bias_mod.day_ahead_factor_solar(
+            pre_day_bias,
+            cloud_class=cloud_class,
+            hours_from_noon=solpos.hours_from_solar_noon(wx.start, lon),
         )
         corrected = theta * modeled_site
         if corrected <= const.QUANTILE_MIN_FORECAST_WH:
@@ -836,7 +890,23 @@ def _site_measured_hourly(
     actuals_hourly: dict[str, dict[str, float]] | None,
     modeled_total_by_plane: dict[str, dict[str, float]],
 ) -> dict[str, float]:
-    """Sum module measured energy into a site total per hour (best-effort)."""
+    """Sum measured energy on a complete, metered site-hour basis."""
+    if actuals_hourly is not None:
+        names = tuple(p.name for p in planes if p.actual_entity)
+        if not names or any(not actuals_hourly.get(name) for name in names):
+            return {}
+        common_hours = set.intersection(
+            *(set(actuals_hourly[name]) for name in names)
+        )
+        return {
+            hkey: sum(actuals_hourly[name][hkey] for name in names)
+            for hkey in common_hours
+        }
+
+    # Coarse daily input has no recorder-hour presence information. Resolve
+    # each module through the documented modeled-shape disaggregation; an hour
+    # absent for one plane means that plane's modeled contribution is zero, not
+    # an observed recorder gap.
     site: dict[str, float] = {}
     have_any = False
     for plane in planes:
@@ -1058,17 +1128,60 @@ def build_bootstrap_json(
 
 
 def site_signature(site: SiteConfig) -> str:
-    """Stable lat/lon + plane-name digest for the import sanity check (SPEC §12.5).
+    """Semantic site digest for bootstrap compatibility (SPEC §12.5).
 
-    A short sha256 over the rounded coordinates and the ordered plane names, so
-    the import service can refuse a bootstrap built for a different site.
+    Correction state depends on geometry, horizons, electrical grouping and
+    shade pooling, not merely coordinates and names. Hash the canonical site
+    payload plus the classifier/schema versions so an import cannot silently
+    attach a learned model to a different feature space.
     """
-    parts = [
-        f"{round(site.latitude, 4)}",
-        f"{round(site.longitude, 4)}",
-        *[p.name for p in site.planes],
-    ]
-    raw = "|".join(parts).encode("utf-8")
+    shade_members: dict[str, list[str]] = {}
+    for plane in site.planes:
+        if plane.shade_group:
+            shade_members.setdefault(plane.shade_group, []).append(plane.name)
+    payload = {
+        "location": [site.latitude, site.longitude],
+        "planes": [
+            {
+                "name": plane.name,
+                "azimuth": plane.azimuth_deg,
+                "tilt": plane.tilt_deg,
+                "wp": plane.wp,
+                "efficiency": plane.efficiency,
+                "ross_coeff": plane.ross_coeff,
+                "horizon": [row.to_dict() for row in plane.horizon],
+            }
+            for plane in sorted(site.planes, key=lambda item: item.name)
+        ],
+        # Pool labels are operator-facing names; only which planes share
+        # evidence changes the learned feature space. Singleton labels have no
+        # pooling effect and are intentionally absent.
+        "shade_pools": sorted(
+            sorted(names) for names in shade_members.values() if len(names) > 1
+        ),
+        "groups": [
+            {
+                "planes": sorted(group.plane_names),
+                "ac_limit": group.ac_limit_w,
+                "inverter_efficiency": group.inverter_efficiency,
+            }
+            for group in sorted(
+                site.groups,
+                key=lambda item: (
+                    tuple(sorted(item.plane_names)),
+                    item.ac_limit_w,
+                    item.inverter_efficiency,
+                ),
+            )
+        ],
+        "albedo": site.albedo,
+        "bifacial_beam_gain": site.bifacial_beam_gain,
+        "classifier_version": const.CLASSIFIER_VERSION,
+        "bootstrap_schema": const.BOOTSTRAP_SCHEMA_VERSION,
+    }
+    raw = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
 
 

@@ -232,6 +232,7 @@ def _validate_shade_groups(site: SiteConfig) -> None:
 def _validate_groups(site: SiteConfig, plane_names: set[str]) -> None:
     """Check inverter groups reference real planes and have a sane AC limit."""
     group_names: set[str] = set()
+    grouped_planes: set[str] = set()
     for group in site.groups:
         if not group.name:
             raise SiteValidationError("group_no_name")
@@ -243,5 +244,11 @@ def _validate_groups(site: SiteConfig, plane_names: set[str]) -> None:
         for pn in group.plane_names:
             if pn not in plane_names:
                 raise SiteValidationError("group_unknown_plane")
+            if pn in grouped_planes:
+                # One physical DC port can feed exactly one inverter group.
+                # Repeating it within a group double-counts its power; placing
+                # it in two groups applies two incompatible clip ceilings.
+                raise SiteValidationError("group_duplicate_plane")
+            grouped_planes.add(pn)
         if not 0.0 < group.ac_limit_w <= AC_LIMIT_MAX_W:
             raise SiteValidationError("bad_ac_limit")

@@ -286,7 +286,9 @@ def test_train_quantiles_folds_only_measured_hours():
     store = _FakeStore()
     store.issued[_ISO] = _quantile_issued()
     # Only the 10:00 hour has measured energy; 11:00 is skipped.
-    store.record_hourly_actuals(_ISO, {"M1": {_h(10): 450.0}})
+    store.record_hourly_actuals(
+        _ISO, {"M1": {_h(10): 450.0}, "M2": {_h(10): 0.0}}
+    )
     c = _make_coordinator(store)
     c._train_quantiles_day(_DAY)
     assert c._quantile_state != QuantileState()
@@ -425,6 +427,39 @@ def test_site_measured_hourly_skips_garbage_and_foreign_day_keys():
         {"M1": {"not-a-date": 5.0, _h(10, _DAY + timedelta(days=1)): 3.0}},
     )
     assert out is None  # nothing usable left for the training day
+
+
+def test_site_measured_hourly_keeps_only_complete_channel_hours():
+    """A per-port gap must not masquerade as a low whole-site measurement."""
+    c = _make_coordinator()
+    out = c._site_measured_hourly(
+        _ISO,
+        {
+            "M1": {_h(10): 100.0, _h(11): 120.0},
+            "M2": {_h(10): 80.0},
+            "stale-channel": {_h(10): 9999.0},
+        },
+    )
+    assert out == {_h(10): 180.0}
+
+
+def test_day_ahead_samples_does_not_train_missing_hour_as_zero():
+    """Modeled hours without a complete measured label are omitted."""
+    c = _make_coordinator()
+    snap = IssuedSnapshot.from_dict(
+        _issued(
+            raw={_h(10): 100.0, _h(11): 100.0},
+            slow_only={_h(10): 100.0, _h(11): 100.0},
+        )
+    )
+    samples = c._day_ahead_samples(
+        {_h(10): 100.0, _h(11): 100.0},
+        {"M1": 100.0, "M2": 0.0},
+        snap,
+        {_h(10): 100.0},
+    )
+    assert sum(sample.modeled_wh for sample in samples) == 100.0
+    assert sum(sample.measured_wh for sample in samples) == 100.0
 
 
 def test_metered_modeled_hourly_without_metered_plane_is_none():

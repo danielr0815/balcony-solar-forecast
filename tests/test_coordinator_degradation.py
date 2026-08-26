@@ -34,7 +34,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed  # noqa: E402
 
 from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     CORRECTION_SOURCE_BOTH,
-    CORRECTION_SOURCE_INTRADAY,
+    CORRECTION_SOURCE_DAY_AHEAD_INTRADAY,
     FAILED_FETCH_MIN_INTERVAL_SECONDS,
     MAX_PAYLOAD_AGE_HOURS,
     MAX_PHYSICS_FALLBACK_AGE_HOURS,
@@ -409,7 +409,7 @@ def test_hooks_day_factor_and_intraday_boundary(monkeypatch):
     assert hooks.slot_factor(past) == pytest.approx(1.2)
     # Future slot: day-ahead factor PLUS the intraday factor (> day-ahead alone).
     assert hooks.slot_factor(future) > 1.2
-    assert hooks.correction_source == CORRECTION_SOURCE_INTRADAY
+    assert hooks.correction_source == CORRECTION_SOURCE_DAY_AHEAD_INTRADAY
 
 
 def test_hooks_correction_source_both_with_shademap(monkeypatch):

@@ -139,16 +139,15 @@ def test_materiality_floor_applies_per_leg():
 # ---------------------------------------------------------------------------
 
 
-def test_legacy_snapshot_drives_both_streaks_from_shared_signal():
-    """A snapshot WITHOUT a slow-only curve keeps the original behaviour: one
-    corrected-vs-raw signal advances BOTH streaks in lockstep."""
+def test_legacy_snapshot_does_not_invent_slow_attribution():
+    """Without slow-only evidence only day-ahead can be judged safely."""
     c = _make_coordinator()
     iso = "2026-05-01"
     snap = _snapshot(iso, raw=1000.0, corrected=1200.0)  # no slow -> legacy
     assert "slow_only_hourly_wh" not in snap  # store trim: omitted when empty
     c._update_drift(iso, snap, {"M1": 1000.0})
     assert c._drift_state.fast_loss_streak == 1
-    assert c._drift_state.slow_loss_streak == 1
+    assert c._drift_state.slow_loss_streak == 0
     # Dict shape stays stable (no "slow" leg recorded) on a legacy day.
     assert "slow" not in c._drift_state.daily_mae[iso]
 

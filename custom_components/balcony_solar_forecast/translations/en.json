@@ -49,6 +49,9 @@
       "drift_mae_corrected": {
         "name": "Drift MAE (corrected)"
       },
+      "drift_bias_corrected": {
+        "name": "Drift bias corrected"
+      },
       "learner_status_fast": {
         "name": "Fast learner status",
         "state": {
@@ -383,6 +386,7 @@
       "group_dup_name": "Group names must be unique.",
       "group_no_planes": "Every group must contain at least one plane.",
       "group_unknown_plane": "A group references an unknown plane.",
+      "group_duplicate_plane": "Each plane may occur exactly once and in only one inverter group.",
       "bad_ac_limit": "The AC limit must be greater than 0.",
       "shade_group_empty": "A shade group must be a non-empty name.",
       "shade_group_collision": "A shade group must not equal the name of a plane that is not itself in that group.",
@@ -438,6 +442,7 @@
       "group_dup_name": "Group names must be unique.",
       "group_no_planes": "Every group must contain at least one plane.",
       "group_unknown_plane": "A group references an unknown plane.",
+      "group_duplicate_plane": "Each plane may occur exactly once and in only one inverter group.",
       "bad_ac_limit": "The AC limit must be greater than 0.",
       "shade_group_empty": "A shade group must be a non-empty name.",
       "shade_group_collision": "A shade group must not equal the name of a plane that is not itself in that group.",

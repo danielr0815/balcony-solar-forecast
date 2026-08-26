@@ -316,8 +316,11 @@ class TestPipeline:
         )
         weather = _clear_sky_series()
         res = engine.compute_forecast(site, weather, now=_TEST_DATE)
-        assert max(res.total_watts) == pytest.approx(800.0)
-        assert all(w <= 800.0 + 1e-6 for w in res.total_watts)
+        assert max(res.total_watts) == pytest.approx(
+            group.ac_limit_w / group.inverter_efficiency
+        )
+        dc_limit = group.ac_limit_w / group.inverter_efficiency
+        assert all(w <= dc_limit + 1e-6 for w in res.total_watts)
 
     def test_hourly_wh_sums_to_slot_energy(self, patched_physics):
         site = _two_plane_site()

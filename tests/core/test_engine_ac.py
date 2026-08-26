@@ -141,30 +141,30 @@ class TestAcUnclipped:
 
 
 # ---------------------------------------------------------------------------
-# 3. Clipped slot: AC pinned to the AC limit; served DC stays the OLD clamp
+# 3. Clipped slot: AC pinned to the limit; served DC uses AC-limit / eta
 # ---------------------------------------------------------------------------
 
 
 class TestAcClipped:
-    def test_clipped_ac_equals_limit_dc_stays_at_old_clamp(self, patched_physics):
+    def test_clipped_ac_equals_limit_and_dc_uses_physical_clip(self, patched_physics):
         site = _clamped_site()
         weather = _clear_sky_series()
         res = engine.compute_forecast(site, weather, now=_TEST_DATE)
 
-        # Served DC at noon is the OLD min(sum, ac_limit) == 800 W (byte-identical
-        # DC path: NOT the corrected clip point ac_limit/eta ~ 829 W).
-        assert res.total_watts[_NOON_INDEX] == pytest.approx(800.0)
-        assert res.total_watts[_NOON_INDEX] < 800.0 / _ETA - 1.0
+        # The nameplate is AC; served DC therefore clips at ac_limit/eta.
+        assert res.total_watts[_NOON_INDEX] == pytest.approx(800.0 / _ETA)
         # AC at noon is pinned to the group AC limit (the inverter's own clamp),
-        # NOT eta * served DC (which would be ~772 W).
+        # and equals eta * served DC at the physical clip point.
         assert res.ac_watts[_NOON_INDEX] == pytest.approx(800.0)
-        assert res.ac_watts[_NOON_INDEX] > _ETA * res.total_watts[_NOON_INDEX]
+        assert res.ac_watts[_NOON_INDEX] == pytest.approx(
+            _ETA * res.total_watts[_NOON_INDEX]
+        )
         # No AC watt anywhere exceeds the single group's AC limit.
         assert all(w <= 800.0 + 1e-6 for w in res.ac_watts)
 
     def test_up_factor_cannot_lift_ac_past_the_limit(self, patched_physics):
         # A 1.3x fast-learner up-correction on a clamp-biting site: served DC is
-        # re-clamped to 800 W and the AC is still pinned to the 800 W AC limit
+        # re-clamped to AC-limit/eta and AC stays pinned to the 800 W limit
         # (the inverter caps AC regardless of the DC up-correction).
         site = _clamped_site()
         weather = _clear_sky_series()
@@ -172,7 +172,7 @@ class TestAcClipped:
             site, weather, now=_TEST_DATE,
             hooks=LearnerHooks(slot_factor=lambda s: 1.3),
         )
-        assert res.total_watts[_NOON_INDEX] == pytest.approx(800.0)
+        assert res.total_watts[_NOON_INDEX] == pytest.approx(800.0 / _ETA)
         assert res.ac_watts[_NOON_INDEX] == pytest.approx(800.0)
         assert all(w <= 800.0 + 1e-6 for w in res.ac_watts)
 
@@ -241,17 +241,14 @@ class TestDcUntouched:
             _ETA * res.total_watts[_NOON_INDEX]
         )
 
-    def test_clipped_served_dc_clips_at_ac_limit_not_the_corrected_point(
+    def test_clipped_served_dc_uses_the_physical_dc_point(
         self, patched_physics
     ):
-        # The served DC still clips at ac_limit (old clamp_groups semantics),
-        # never at the corrected ac_limit/eta point the AC curve uses internally.
+        # The served-DC and AC transforms share the same ac_limit/eta point.
         site = _clamped_site()
         weather = _clear_sky_series()
         res = engine.compute_forecast(site, weather, now=_TEST_DATE)
-        assert max(res.total_watts) == pytest.approx(800.0)
-        # The corrected clip point (~829 W) is never reached by the served DC.
-        assert max(res.total_watts) < 800.0 / _ETA - 1.0
+        assert max(res.total_watts) == pytest.approx(800.0 / _ETA)
 
 
 # ---------------------------------------------------------------------------

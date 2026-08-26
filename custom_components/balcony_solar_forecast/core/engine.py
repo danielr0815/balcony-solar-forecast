@@ -32,7 +32,7 @@ v0.1 build round-trips unchanged.
      scales the CORRECTED (already shademap-transposed) per-slot site power and
      is then RE-CLAMPED to the inverter groups (``electrical.clamp_groups`` runs
      a SECOND time, after the factor) so an up-correction (factor > 1) can never
-     push the served curve past the configured AC limit. The coordinator
+     push served DC past the physical ``AC limit / eta`` clip point. The coordinator
      composes intraday decay + day-ahead bias into this one factor so the 15-min
      ``total_watts`` and the hourly ``hourly_wh`` stay mutually consistent (both
      are derived from the same factored-then-re-clamped slot power). A hook that
@@ -73,13 +73,10 @@ at ac_limit/eta_inv (where the micro-inverter's AC clamp back-drives the MPP).
 This is emitted as the additive ``ac_watts`` / ``ac_hourly_wh`` /
 ``ac_daily_kwh`` fields.
 
-Phase 1 keeps the served DC path byte-identical (``total_watts`` / ``hourly_wh``
-/ ``daily_kwh`` and every per-plane / band series are unchanged, so the
-self-learning, scoreboard and kill-gate stay the DC truth); AC is an ADDITIONAL
-physically-correct curve fed the corrected UNCLAMPED DC so the corrected clip
-point ac_limit/eta_inv is reflected only in the AC curve. A later phase may move
-the served DC clip point to ac_limit/eta_inv once the DC-learner impact is
-assessed. This is the safe incremental choice — flagged for review.
+The served-DC path and the AC transform use the SAME physical clip point
+``ac_limit/eta_inv``. ``total_watts`` / ``hourly_wh`` / ``daily_kwh`` remain
+the DC learning and scoreboard truth; AC is the additional delivered curve
+``min(eta_inv * DC, ac_limit)``.
 
 Aggregation: the clamped site total (raw and corrected) is integrated to
 hourly Wh (keyed by ISO-8601 UTC hour) and daily kWh (keyed by ISO date in the
@@ -167,9 +164,10 @@ class LearnerHooks:
     path). When populated, the engine multiplies the CORRECTED per-slot site
     power by each band factor to produce the p10/p50/p90 15-min watts curves and
     their hourly Wh roll-ups, in the SAME instantaneous frame as ``total_watts``,
-    then caps each band curve at the slot's physical AC ceiling (sum of the group
-    AC limits + the corrected watts of any ceiling-free ungrouped planes) so a
-    P90 factor > 1 can never exceed what the inverters can deliver.
+    then caps each DC band curve at the slot's physical served-DC ceiling (sum
+    of group ``ac_limit / eta`` clip points + corrected watts of ceiling-free
+    ungrouped planes) so a P90 factor > 1 cannot exceed what the inverters can
+    accept. AC bands use the separate AC ceilings.
     The coordinator builds it (per-slot cloud-class classification -> bin ->
     ``quantiles.bands_for_bin``); the engine treats the bands as opaque scalars.
     """
@@ -464,7 +462,7 @@ def compute_forecast(
     scaled by ``hooks.slot_factor`` (fast learner) and RE-CLAMPED to the inverter
     groups (``electrical.clamp_groups`` a second time, after the factor) so an
     up-correction (factor > 1) can never push the served curve past the
-    configured AC limit; a factor <= 1 leaves the values within limits so the
+    configured served-DC clip point; a factor <= 1 leaves the values within limits so the
     re-clamp is a no-op (bit-exact common path). Planes in no inverter group
     have no configured ceiling and pass both clamps through unchanged. Aggregates
     BOTH curves to hourly Wh (keyed by ISO UTC hour) and daily kWh (keyed by ISO
@@ -531,10 +529,15 @@ def compute_forecast(
     # (audit #9b).
 
     # Static AC ceiling ingredients for the per-slot band cap (SPEC §11.2). The
-    # most the site can deliver in a slot is the sum of every group's AC limit
+    # most DC the site can serve in a slot is the sum of every group's
+    # ac_limit/eta clip point
     # plus the corrected watts of any plane in NO group (ceiling-free). The group
     # sum is static; the ungrouped contribution is added per slot below.
-    total_group_limit = sum(g.ac_limit_w for g in groups)
+    total_group_ac_limit = sum(g.ac_limit_w for g in groups)
+    total_group_dc_limit = sum(
+        g.ac_limit_w / electrical._clamp_eta(g.inverter_efficiency)
+        for g in groups
+    )
     grouped_names = {name for g in groups for name in g.plane_names}
 
     # AC-side inverter efficiency (AC-side Phase 3): when ``hooks`` carry a
@@ -574,6 +577,7 @@ def compute_forecast(
     # RAW (pure-physics) per-slot site total and per-plane series.
     raw_total_watts: list[float] = []
     raw_plane_series: dict[str, list[float]] = {p.name: [] for p in planes}
+    slow_plane_series: dict[str, list[float]] = {p.name: [] for p in planes}
     # CORRECTED per-slot site total and per-plane series.
     total_watts: list[float] = []
     # PRE-re-clamp corrected site total per slot (sum of cor_clamped * factor,
@@ -623,14 +627,15 @@ def compute_forecast(
         # No production => no pre-clamp AC and no ungrouped AC contribution; the
         # group ceiling is the slot's AC ceiling (band watts are zero here anyway).
         ac_corrected_unclamped_watts.append(0.0)
-        ac_slot_ceilings.append(total_group_limit)
+        ac_slot_ceilings.append(total_group_ac_limit)
         kc_series.append(0.0)
         # No production => no ungrouped contribution; the group ceiling is the
         # slot's ceiling (band watts are zero here anyway, so this only keeps the
         # list dense and aligned to slot_starts).
-        slot_ceilings.append(total_group_limit)
+        slot_ceilings.append(total_group_dc_limit)
         for p in planes:
             raw_plane_series[p.name].append(0.0)
+            slow_plane_series[p.name].append(0.0)
             plane_series[p.name].append(0.0)
             beam_series[p.name].append(0.0)
             diffuse_series[p.name].append(0.0)
@@ -748,9 +753,9 @@ def compute_forecast(
 
         # RE-CLAMP after the factor: the first clamp above ran BEFORE the factor,
         # so an up-correction (factor > 1) would otherwise lift the served curve
-        # past the physical inverter AC limit. Scale the already-clamped per-plane
+        # past the physical inverter DC clip point. Scale the already-clamped per-plane
         # watts by the factor, then clamp the groups AGAIN so the corrected curve
-        # is always bounded by the configured AC ceiling. When factor <= 1 the
+        # is always bounded by the configured DC clip point. When factor <= 1 the
         # values are already within limits and this is a mathematical no-op, so
         # the common path stays bit-exact. Ungrouped planes have no configured
         # ceiling and pass through both clamps (see electrical.clamp_groups).
@@ -779,6 +784,12 @@ def compute_forecast(
             raw_plane_series[plane.name].append(rw)
             raw_slot_total += rw
 
+            # Exact pre-fast curve: shademap has been applied and physically
+            # clamped, but neither day-ahead nor Intraday has touched it.
+            slow_plane_series[plane.name].append(
+                cor_clamped.get(plane.name, 0.0)
+            )
+
             cw = cor_final.get(plane.name, 0.0)
             plane_series[plane.name].append(cw)
             cor_slot_total += cw
@@ -803,7 +814,7 @@ def compute_forecast(
             for p in planes
             if p.name not in grouped_names
         )
-        slot_ceilings.append(total_group_limit + ungrouped_cor)
+        slot_ceilings.append(total_group_dc_limit + ungrouped_cor)
 
         # --- energy roll-ups (interval-mean power * slot hours) ---
         hour_start = start.astimezone(UTC).replace(
@@ -826,9 +837,8 @@ def compute_forecast(
         # Fed the corrected UNCLAMPED per-plane DC scaled by the fast-learner
         # factor (NOT cor_clamped): only the unclamped DC lets the inverter's own
         # AC clamp bite, so the corrected clip point ac_limit/eta_inv is reflected
-        # in the AC curve. The DC path above (cor_final / total_watts / hourly_wh /
-        # daily_kwh) is left byte-identical — it stays the learner/scoreboard truth
-        # (see module docstring: a later phase may move the served DC clip point).
+        # in the AC curve. The DC path above uses the same configured eta clip
+        # point and remains the learner/scoreboard truth.
         ac_input = {
             name: watts * factor for name, watts in cor_unclamped.items()
         }
@@ -857,13 +867,14 @@ def compute_forecast(
             for p in planes
             if p.name not in grouped_names
         )
-        ac_slot_ceilings.append(total_group_limit + ungrouped_ac)
+        ac_slot_ceilings.append(total_group_ac_limit + ungrouped_ac)
 
     plane_results = tuple(
         PlaneResult(
             name=plane.name,
             watts=tuple(plane_series[plane.name]),
             raw_watts=tuple(raw_plane_series[plane.name]),
+            slow_watts=tuple(slow_plane_series[plane.name]),
             beam_watts=tuple(beam_series[plane.name]),
             diffuse_watts=tuple(diffuse_series[plane.name]),
             kc=tuple(kc_series),

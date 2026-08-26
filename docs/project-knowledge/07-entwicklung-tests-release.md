@@ -9,7 +9,7 @@ ein Release exakt abläuft.
 taggst. Fachliche Inhalte stehen in `01`–`06`; hier geht es ausschließlich um
 Handwerk und Prozess.
 
-Stand: `main` @ **v0.23.0** (2026-07-25). Belege sind *Datei + Funktions-/
+Stand: `main` @ **v0.27.0** (2026-08-26). Belege sind *Datei + Funktions-/
 Konstantenname* (keine Zeilennummern — die veralten sofort). Zusätzlich verbindlich:
 `CONTRIBUTING.md` im Repo-Root.
 
@@ -119,9 +119,9 @@ installiert ist (der Import würde einfach gelingen). Die Greps sind der Beweis.
 
 | Menge | gesammelt | grün | übersprungen |
 |---|---|---|---|
-| `tests/` gesamt | 2480 | 2240 | 240 |
-| davon `tests/core/` | 1810 | 1570 | 240 |
-| daraus HA-Layer (`tests/*.py`) | 670 | 670 | 0 |
+| `tests/` gesamt | 2734 | 2494 | 240 |
+| davon `tests/core/` | 1843 | 1603 | 240 |
+| daraus HA-Layer (`tests/*.py`) | 891 | 891 | 0 |
 
 Die 240 Skips sind **keine Lücken**: es sind die Parametrisierungen von
 `tests/core/test_golden.py` mit Sonnenhöhe ≤ `LOW_SUN_CUTOFF_DEG` (3°), wo bewusst

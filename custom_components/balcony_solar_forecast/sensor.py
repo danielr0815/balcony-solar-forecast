@@ -103,6 +103,7 @@ from .const import (
     LEARNER_STATUS_OFF,
     LEARNER_STATUS_VALUES,
     SENSOR_CURVE_AUDIT,
+    SENSOR_DRIFT_BIAS_CORRECTED,
     SENSOR_DRIFT_MAE_CORRECTED,
     SENSOR_ENERGY_D2,
     SENSOR_ENERGY_D2_DC,
@@ -225,6 +226,7 @@ async def async_setup_entry(
         # --- learning-layer diagnostics (v0.2.0 + v0.3.0, SPEC §9) ---
         IntradayScalarSensor(coordinator),
         DriftMaeCorrectedSensor(coordinator),
+        DriftBiasCorrectedSensor(coordinator),
         LearnerStatusSensor(
             coordinator, SENSOR_LEARNER_STATUS_FAST, LEARNER_LAYER_FAST
         ),
@@ -971,6 +973,30 @@ class DriftMaeCorrectedSensor(_DiagnosticSensor):
             "corrected_mae": _r("corrected"),
             "baseline_mae": _r("baseline"),
         }
+
+
+class DriftBiasCorrectedSensor(_DiagnosticSensor):
+    """Rolling signed daily-energy bias of the corrected forecast.
+
+    Positive means overforecast, negative means underforecast. It deliberately
+    complements rather than replaces MAE: opposite hourly errors can cancel in
+    the bias, while MAE continues to report their magnitude.
+    """
+
+    _attr_native_unit_of_measurement = UnitOfEnergy.WATT_HOUR
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: Any) -> None:
+        super().__init__(coordinator, SENSOR_DRIFT_BIAS_CORRECTED)
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data or {}
+        metrics = data.get(DATA_KEY_DRIFT_MAE)
+        if not isinstance(metrics, dict):
+            return None
+        value = metrics.get("corrected_bias")
+        return None if value is None else round(float(value), 1)
 
 
 class LearnerStatusSensor(_DiagnosticSensor):

@@ -69,16 +69,19 @@ class TestFactorAtBoundary:
         )
         by = {p.name: p.watts for p in res.plane_results}
 
-        # At noon both groups saturate: corrected total == sum of limits.
-        assert res.total_watts[_NOON_INDEX] == pytest.approx(1300.0)
+        dc1 = g1.ac_limit_w / g1.inverter_efficiency
+        dc2 = g2.ac_limit_w / g2.inverter_efficiency
+        dc_total = dc1 + dc2
+        # At noon both groups saturate at their physical served-DC points.
+        assert res.total_watts[_NOON_INDEX] == pytest.approx(dc_total)
         # Not the buggy over-limit product.
-        assert res.total_watts[_NOON_INDEX] < 1300.0 * 1.2 - 1.0
+        assert res.total_watts[_NOON_INDEX] < dc_total * 1.2 - 1.0
         # Per-plane (== per-group here) totals respect each group's own limit.
         for i in range(len(weather)):
-            assert by["P1"][i] <= 800.0 + 1e-6
-            assert by["P2"][i] <= 500.0 + 1e-6
+            assert by["P1"][i] <= dc1 + 1e-6
+            assert by["P2"][i] <= dc2 + 1e-6
         # And the raw (physical) curve is likewise within the limits.
-        assert max(res.raw_total_watts) == pytest.approx(1300.0)
+        assert max(res.raw_total_watts) == pytest.approx(dc_total)
 
 
 # ---------------------------------------------------------------------------
@@ -130,8 +133,9 @@ class TestFactorAtOrBelowOne:
             for i in range(len(weather)):
                 # raw_watts is the clamped physical curve; corrected == it * 0.8.
                 assert pr.watts[i] == pr.raw_watts[i] * 0.8
-        # Corrected peak is 0.8 * the 800 W clamp.
-        assert max(res.total_watts) == pytest.approx(640.0)
+        # Corrected peak is 0.8 * the physical served-DC clamp.
+        dc_limit = group.ac_limit_w / group.inverter_efficiency
+        assert max(res.total_watts) == pytest.approx(0.8 * dc_limit)
 
 
 # ---------------------------------------------------------------------------
@@ -159,9 +163,9 @@ class TestAttributionUnderDoubleClamp:
                 assert pr.beam_watts[i] + pr.diffuse_watts[i] == pytest.approx(
                     pr.watts[i]
                 )
-        # The re-clamp really bit (corrected group sum held at the 800 W limit,
-        # not the 800 * 1.3 the factor alone would have produced).
-        assert max(res.total_watts) == pytest.approx(800.0)
+        # The re-clamp really bit at the physical served-DC point.
+        dc_limit = group.ac_limit_w / group.inverter_efficiency
+        assert max(res.total_watts) == pytest.approx(dc_limit)
 
 
 # ---------------------------------------------------------------------------
@@ -186,8 +190,9 @@ class TestUngroupedPlaneNoCeiling:
         )
         by = {p.name: p for p in res.plane_results}
 
-        # Grouped plane: re-clamped to its 800 W ceiling (factor cannot lift it).
-        assert max(by["G"].watts) == pytest.approx(800.0)
+        # Grouped plane: re-clamped to AC-limit/eta (factor cannot lift it).
+        dc_limit = group.ac_limit_w / group.inverter_efficiency
+        assert max(by["G"].watts) == pytest.approx(dc_limit)
         # Ungrouped plane: factor passes straight through, every slot uncapped.
         pu = by["U"]
         for i in range(len(weather)):
@@ -221,8 +226,11 @@ class TestCorrectedUnclampedWatts:
             hooks=LearnerHooks(slot_factor=lambda s: 1.3),
         )
         assert len(res.corrected_unclamped_watts) == len(res.total_watts)
-        assert res.total_watts[_NOON_INDEX] == pytest.approx(800.0)
-        assert res.corrected_unclamped_watts[_NOON_INDEX] == pytest.approx(1040.0)
+        dc_limit = group.ac_limit_w / group.inverter_efficiency
+        assert res.total_watts[_NOON_INDEX] == pytest.approx(dc_limit)
+        assert res.corrected_unclamped_watts[_NOON_INDEX] == pytest.approx(
+            1.3 * dc_limit
+        )
         assert (
             res.corrected_unclamped_watts[_NOON_INDEX]
             - res.total_watts[_NOON_INDEX]
@@ -286,17 +294,19 @@ class TestBandCeilingCap:
             hooks=LearnerHooks(band_by_slot=band_by_slot),
         )
 
-        # Sanity: the site is clamped at 800 W at noon.
-        assert base.total_watts[_NOON_INDEX] == pytest.approx(800.0)
-        # P90 curve is capped at the ceiling, not the factored 1040 W.
-        assert res.p90_watts[_NOON_INDEX] == pytest.approx(800.0)
-        assert res.p90_watts[_NOON_INDEX] < 1.3 * 800.0 - 1.0
+        group = site.groups[0]
+        dc_limit = group.ac_limit_w / group.inverter_efficiency
+        # Sanity: the site is clamped at the physical served-DC point at noon.
+        assert base.total_watts[_NOON_INDEX] == pytest.approx(dc_limit)
+        # P90 curve is capped at that ceiling, not the factored curve.
+        assert res.p90_watts[_NOON_INDEX] == pytest.approx(dc_limit)
+        assert res.p90_watts[_NOON_INDEX] < 1.3 * dc_limit - 1.0
         # P10 is well under the ceiling -> unaffected by the cap.
         assert res.p10_watts[_NOON_INDEX] == pytest.approx(
             0.7 * base.total_watts[_NOON_INDEX]
         )
-        # No band watt ever exceeds its slot's physical ceiling (800 W here).
-        assert all(w <= 800.0 + 1e-6 for w in res.p90_watts)
+        # No band watt ever exceeds its slot's physical served-DC ceiling.
+        assert all(w <= dc_limit + 1e-6 for w in res.p90_watts)
 
     def test_hourly_p90_reflects_capped_curve_p10_intact(self, patched_physics):
         """The hourly P90 Wh integrates the CAPPED p90 watts, so the peak hour is

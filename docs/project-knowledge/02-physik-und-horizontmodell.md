@@ -1,7 +1,7 @@
 # Physik & Horizontmodell
 
 **Worum es geht:** Dieses Dokument beschreibt die reine, HA-freie Prognosephysik von
-`balcony-solar-forecast` (Stand `main` @ v0.23.0) exakt so, wie sie im Code steht:
+`balcony-solar-forecast` (Stand `main` @ v0.27.0) exakt so, wie sie im Code steht:
 Sonnenstand, Clear-Sky, Hay-Davies-Transposition, Zelltemperatur/DC-Modell, der
 zweistufige AC-Clamp und — am ausführlichsten — das Horizontmodell inklusive der
 0.22-Erweiterungen `tau_points` und `diffuse_tau`.
@@ -143,7 +143,7 @@ bewusst **nicht** bei Wp gedeckelt; die Hardwaregrenze ist der AC-Clamp. POA ≤
 die Gesamt-DC einmal gerechnet und anteilig nach POA-Anteil in Beam-DC und
 Diffus-DC zerlegt — `beam_dc + diffuse_dc == dc_power(total_poa, …)` exakt.
 
-## 5. Ebenen-, Gruppen-Modell und der zweistufige AC-Clamp
+## 5. Ebenen-, Gruppen-Modell und die DC-/AC-Clamps
 
 **Ebene (`PlaneConfig`)** = ein MPPT/Messkanal: `name`, `azimuth_deg`, `tilt_deg`,
 `wp`, `efficiency` (DC-seitig, Default `DEFAULT_EFFICIENCY = 0.96`), `horizon`,
@@ -156,11 +156,12 @@ optional `actual_entity`, `shade_group`, `ross_coeff`. **Gruppe (`InverterGroup`
 
 `engine.compute_forecast` ruft `electrical.clamp_groups` **zweimal**:
 (1) **erster Clamp** auf die ungeclampten Plane-DC-Werte (RAW und CORRECTED
-getrennt): pro Gruppe `min(Σ Ports, ac_limit_w)`, beim Greifen proportional auf die
-Mitglieder zurückverteilt; (2) **Fast-Learner-Faktor** `hooks.slot_factor(start)`
+getrennt): pro Gruppe `min(Σ Ports, ac_limit_w / inverter_efficiency)`, beim
+Greifen proportional auf die Mitglieder zurückverteilt; (2) **Slot-Faktor**
+`hooks.slot_factor(start)` aus Day-ahead und Intraday
 multipliziert die bereits geclampte CORRECTED-Leistung; (3) **zweiter Clamp** auf
 das Produkt — damit kann eine Aufwärtskorrektur (Faktor > 1) die servierte Kurve
-**nie** über das AC-Limit heben. Für Faktor ≤ 1 ist der zweite Durchlauf
+**nie** über den physischen DC-Clip-Punkt `ac_limit/eta` heben. Für Faktor ≤ 1 ist der zweite Durchlauf
 mathematisch ein No-op (bit-exakt gleiche Zahlen).
 
 Ebenen ohne Gruppe haben keine Decke und passieren beide Clamps unverändert.

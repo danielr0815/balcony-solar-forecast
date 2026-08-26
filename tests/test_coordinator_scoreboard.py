@@ -283,6 +283,28 @@ def test_engine_hourly_mae_from_hourly_actuals():
     assert ds.engine_hourly_mae == pytest.approx((400.0 + 600.0) / 2.0)
 
 
+def test_scoreboard_skips_day_with_incomplete_metered_hour() -> None:
+    """Daily kWh skill must not score a recorder gap as zero production."""
+    store = _FakeStore()
+    iso = "2026-07-08"
+    day = date(2026, 7, 8)
+    h10 = f"{iso}T10:00:00+00:00"
+    h11 = f"{iso}T11:00:00+00:00"
+    store.issued[iso] = _issued_for_day(
+        iso, corrected_hourly={h10: 1000.0, h11: 1000.0}
+    )
+    store.actuals[iso] = {"M1": 1000.0, "M2": 500.0}
+    store.hourly_actuals[iso] = {
+        "M1": {h10: 500.0, h11: 500.0},
+        "M2": {h10: 500.0},
+    }
+    c = _make_coordinator(store)
+
+    asyncio.run(c._score_scoreboard_day(day))
+
+    assert store.get_scoreboard_state().days == {}
+
+
 # ---------------------------------------------------------------------------
 # Dominant weather class
 # ---------------------------------------------------------------------------
@@ -336,7 +358,10 @@ def test_train_quantiles_day_populates_ring_and_yields_spread():
         corrected_hourly={hkey: 1000.0},
         cloud_class_by_hour={hkey: CLOUD_CLASS_CLEAR},
     )
-    store.hourly_actuals[iso] = {"M1": {hkey: 1300.0}}  # relerr 1.3
+    store.hourly_actuals[iso] = {
+        "M1": {hkey: 1300.0},
+        "M2": {hkey: 0.0},
+    }  # complete site relerr 1.3
 
     c = _make_coordinator(store)
     # Seed the same bin one sample short of the spread threshold with a spread of
