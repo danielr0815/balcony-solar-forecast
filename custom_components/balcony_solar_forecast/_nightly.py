@@ -38,7 +38,7 @@ from .const import (
     COLLAPSE_MEASURED_MAX_FRAC,
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_RAW_HOURLY_WH,
-    DEFAULT_INVERTER_EFFICIENCY,
+    DAY_AHEAD_BIAS_RESEED_N,
     DRIFT_LOSS_MARGIN,
     DRIFT_LOSS_MIN_ABS_WH,
     DRIFT_LOSS_STREAK_DAYS,
@@ -48,6 +48,7 @@ from .const import (
     INVERTER_CAL_MIN,
     ISSUE_FAST_LEARNER_DISABLED,
     ISSUE_SLOW_LEARNER_DISABLED,
+    LEARNER_LAYER_DAY_AHEAD,
     LEARNER_LAYER_FAST,
     LEARNER_LAYER_SLOW,
     NIGHTLY_CATCHUP_MAX_DAYS,
@@ -57,8 +58,10 @@ from .core import (
     IssuedSnapshot,
     LearnerSnapshot,
     PlaneHourlyModeled,
+    QuantileState,
     ShademapState,
     clearsky,
+    electrical,
     solpos,
 )
 from .core import bias as bias_mod
@@ -317,6 +320,12 @@ def per_plane_modeled(coord, iso: str) -> dict[str, PlaneHourlyModeled]:
             continue  # engine without the reference export: do NOT train
         beam_wh: dict[str, float] = {}
         diffuse_wh: dict[str, float] = {}
+        raw_wh: dict[str, float] = {}
+        slow_wh: dict[str, float] = {}
+        corrected_wh: dict[str, float] = {}
+        raw_series = getattr(pr, "raw_watts", ())
+        slow_series = getattr(pr, "slow_watts", ()) or raw_series
+        corrected_series = getattr(pr, "watts", ())
         for i, start in enumerate(result.slot_starts):
             if dt_util.as_local(dt_util.as_utc(start)).date().isoformat() != iso:
                 continue
@@ -325,6 +334,14 @@ def per_plane_modeled(coord, iso: str) -> dict[str, PlaneHourlyModeled]:
                 beam_wh[hkey] = beam_wh.get(hkey, 0.0) + pr.beam_ref_watts[i] * 0.25
             if i < len(pr.diffuse_ref_watts):
                 diffuse_wh[hkey] = diffuse_wh.get(hkey, 0.0) + pr.diffuse_ref_watts[i] * 0.25
+            if i < len(raw_series):
+                raw_wh[hkey] = raw_wh.get(hkey, 0.0) + raw_series[i] * 0.25
+            if i < len(slow_series):
+                slow_wh[hkey] = slow_wh.get(hkey, 0.0) + slow_series[i] * 0.25
+            if i < len(corrected_series):
+                corrected_wh[hkey] = (
+                    corrected_wh.get(hkey, 0.0) + corrected_series[i] * 0.25
+                )
         # Store trim: the issued ring keeps 90 days of these — drop NIGHT
         # hours (all-zero, nothing to train on: the trainer skips beam<=0
         # anyway) and round to 0.01 Wh / 6-decimal kc, far below trainer
@@ -348,6 +365,11 @@ def per_plane_modeled(coord, iso: str) -> dict[str, PlaneHourlyModeled]:
                 h: round(v, 6)
                 for h, v in kc_by_hour.items()
                 if h in keep
+            },
+            raw_wh={h: round(v, 2) for h, v in raw_wh.items() if h in keep},
+            slow_wh={h: round(v, 2) for h, v in slow_wh.items() if h in keep},
+            corrected_wh={
+                h: round(v, 2) for h, v in corrected_wh.items() if h in keep
             },
         )
     return out
@@ -380,14 +402,16 @@ async def train_and_guard(coord, day: date) -> None:
     # All channels ~0 while forecast high => snow / total dropout: freeze
     # BOTH geometric learners for the FOLLOWING served day (SPEC §9.8), and
     # skip training the geometric learners on the collapse day itself.
-    if coord._is_collapse_day(iso, issued, actuals):
+    collapse = coord._is_collapse_day(iso, issued, actuals)
+    if collapse:
         coord._set_collapse_frozen_date(next_iso)
         _LOGGER.info(
             "Collapse detected for %s: freezing geometric learners for %s",
             iso, next_iso,
         )
-        # Still run the drift monitor so a persistently bad correction is
-        # caught; do NOT train the geometric learners on a collapse day.
+        # A collapse cannot distinguish snow-covered modules from failed
+        # measurement channels. Quarantine it from every empirical evaluator;
+        # otherwise one outage can poison uncertainty bands and drift streaks.
     else:
         # A non-collapse day closes: clear any freeze it (or an earlier day)
         # set that has not been superseded by a later collapse.
@@ -399,14 +423,13 @@ async def train_and_guard(coord, day: date) -> None:
         coord._train_shademap(iso, issued, actuals)
 
     # --- 5b) Quantile bands (SPEC §11.1) -----------------------------
-    # Sample the day's hourly relative errors (measured vs issued-CORRECTED)
-    # into the 90-day ring. Runs on every day (incl. collapse days: a
-    # dropout hour's relerr is legitimately near 0), inside the same
-    # date-keyed idempotence guard as the learners below.
-    coord._train_quantiles_day(day)
+    if not collapse:
+        # Sample the day's hourly relative errors and judge persisted layers
+        # only when the label passed the collapse quarantine.
+        coord._train_quantiles_day(day)
 
-    # --- 6) Drift monitor --------------------------------------------
-    coord._update_drift(iso, issued, actuals)
+        # --- 6) Drift monitor ----------------------------------------
+        coord._update_drift(iso, issued, actuals)
 
     # Mark the day consumed ONLY when both inputs existed: a day whose
     # actuals arrive later (LTS lag, manual re-run) must be retried by a
@@ -459,7 +482,9 @@ def train_quantiles_day(coord, day: date) -> None:
     # Teilmengen-Regel: modeled side restricted to the metered planes; None
     # means the comparison is impossible (no metered plane / legacy snapshot
     # on a partially metered site) -> the day is skipped, never poisoned.
-    corrected_hourly = metered_modeled_hourly(coord, snap, corrected_hourly)
+    corrected_hourly = metered_modeled_hourly(
+        coord, snap, corrected_hourly, layer="corrected"
+    )
     if corrected_hourly is None:
         return
     hourly_actuals = coord._store_hourly_actuals(iso)
@@ -506,9 +531,10 @@ async def train_inverter_cal(coord, day: date) -> None:
     whole-site AC meter, form ``(p_ac_w, p_dc_w) = (ac_wh, dc_wh)`` (Wh over one
     hour == mean W) and build an eligible ratio: the DC must clear
     INVERTER_CAL_MIN_LOAD_W and the hour must be UNCLIPPED (clip-headroom proxy:
-    the datasheet-derived AC sits below INVERTER_CAL_CLIP_HEADROOM_FRAC of the
-    summed group AC ceiling — gated on the INDEPENDENT DC side so a meter glitch
-    cannot both pass the gate and corrupt the ratio). The eligible ratios fold
+    datasheet-derived AC of EACH group sits below
+    INVERTER_CAL_CLIP_HEADROOM_FRAC of that group's AC ceiling — gated on the
+    INDEPENDENT DC side so a meter glitch cannot both pass the gate and corrupt
+    the ratio). Groupless sites have no modeled clip ceiling. The eligible ratios fold
     into the EMA via ``inverter_cal.update`` (out-of-band ratios self-drop), and
     the state is persisted only when it actually changed. A day with 0 eligible
     (or only out-of-band) hours leaves the calibration untouched.
@@ -522,7 +548,20 @@ async def train_inverter_cal(coord, day: date) -> None:
     # learners earlier in the sweep): {iso_hour: wh}. Absent -> nothing to
     # calibrate against (a later catch-up re-runs the day once LTS is complete).
     hourly_actuals = coord._store_hourly_actuals(iso)
-    dc_by_hour = coord._site_measured_hourly(iso, hourly_actuals)
+    if any(
+        not plane.actual_entity
+        or not (hourly_actuals or {}).get(plane.name)
+        for plane in site.planes
+    ):
+        # The AC meter covers the whole site. A partial DC denominator would
+        # inflate AC/DC and either poison eta or make every sample look
+        # implausible; calibration therefore requires complete DC metering.
+        return
+    # Coverage is a per-HOUR invariant too: the shared aggregator only returns
+    # the local-day intersection carried by every metered plane, so an AC/DC
+    # ratio can never receive a partial denominator after a recorder gap.
+    site_dc_by_hour = coord._site_measured_hourly(iso, hourly_actuals)
+    dc_by_hour = site_dc_by_hour or {}
     if not dc_by_hour:
         return
     # Whole-site AC hourly energy from the meter (sign-corrected at the read
@@ -539,7 +578,6 @@ async def train_inverter_cal(coord, day: date) -> None:
     if not ac_by_hour:
         return
 
-    ceiling = sum(g.ac_limit_w for g in site.groups)
     ratios: list[float] = []
     for hkey, dc_wh in dc_by_hour.items():
         ac_wh = ac_by_hour.get(hkey)
@@ -547,14 +585,23 @@ async def train_inverter_cal(coord, day: date) -> None:
             continue
         dc_w = float(dc_wh)  # Wh over 1 h == mean W
         ac_w = float(ac_wh)
-        # Clip-headroom gate on the INDEPENDENT DC side: the inverter clips AC at
-        # ``ceiling``, so a datasheet-derived AC comfortably below it means the
-        # hour is unclipped and its ratio does not understate eta.
-        dc_derived_ac = DEFAULT_INVERTER_EFFICIENCY * dc_w
-        clip_headroom_ok = (
-            ceiling > 0.0
-            and dc_derived_ac < ceiling * INVERTER_CAL_CLIP_HEADROOM_FRAC
-        )
+        # Test headroom per configured inverter, not against one summed site
+        # ceiling. A heavily loaded group cannot borrow unused headroom from a
+        # sibling. Ungrouped sites have no modeled clip and are therefore
+        # eligible; ungrouped planes on a mixed site likewise do not consume a
+        # configured group's headroom.
+        clip_headroom_ok = True
+        for group in site.groups:
+            group_dc = sum(
+                float(hourly_actuals.get(name, {}).get(hkey, 0.0))
+                for name in group.plane_names
+            )
+            eta = electrical._clamp_eta(group.inverter_efficiency)
+            if eta * group_dc >= (
+                group.ac_limit_w * INVERTER_CAL_CLIP_HEADROOM_FRAC
+            ):
+                clip_headroom_ok = False
+                break
         r = inverter_cal_mod.eligible_ratio(
             ac_w, dc_w, clip_headroom_ok=clip_headroom_ok
         )
@@ -613,6 +660,11 @@ def train_day_ahead(
     """
     if not coord._learner_config.day_ahead_enabled:
         return
+    if (
+        coord._drift_state.day_ahead_disabled
+        or coord._drift_state.fast_disabled  # legacy v1 alias
+    ):
+        return
     if not issued or not actuals:
         return
     snap = IssuedSnapshot.from_dict(issued)
@@ -636,6 +688,11 @@ def train_day_ahead(
     # actuals are absent (coordinator:935).
     hourly_actuals = coord._store_hourly_actuals(iso)
     site_measured_hourly = coord._site_measured_hourly(iso, hourly_actuals)
+    if hourly_actuals and site_measured_hourly is None:
+        # Hourly records exist, but no hour is complete across every measured
+        # channel. Falling back to the daily total here would silently turn an
+        # incomplete recorder day into a valid label.
+        return
     samples = coord._day_ahead_samples(
         raw_hourly, actuals, snap, site_measured_hourly
     )
@@ -654,27 +711,56 @@ def train_day_ahead(
 def site_measured_hourly(
     coord, iso: str, hourly_actuals: dict[str, dict[str, float]] | None
 ) -> dict[str, float] | None:
-    """Sum per-channel hourly measured Wh into a site total per hour.
+    """Sum complete per-channel hourly measured Wh into a site total.
 
-    Returns ``{iso_hour: wh}`` sliced to the local day ``iso``, or None when
-    no hourly actuals exist (the caller then apportions the daily total).
+    Only configured, metered planes participate. An hour is returned only when
+    EVERY such channel has a value for that exact hour; otherwise summing the
+    surviving channels would manufacture a site-wide production collapse.
+    Returns ``{iso_hour: wh}`` sliced to local day ``iso``, or None when no
+    complete hour exists.
     """
     if not hourly_actuals:
         return None
-    site: dict[str, float] = {}
-    for hours in hourly_actuals.values():
+    metered_names = tuple(
+        plane.name
+        for plane in getattr(getattr(coord, "_site", None), "planes", ())
+        if plane.actual_entity
+    )
+    if not metered_names:
+        return None
+    by_channel: dict[str, dict[str, float]] = {}
+    for name in metered_names:
+        hours = hourly_actuals.get(name)
+        if not hours:
+            return None
+        valid: dict[str, float] = {}
         for hkey, wh in hours.items():
             dt = dt_util.parse_datetime(hkey)
             if dt is None:
                 continue
             if dt_util.as_local(dt_util.as_utc(dt)).date().isoformat() != iso:
                 continue
-            site[hkey] = site.get(hkey, 0.0) + float(wh)
-    return site or None
+            valid[hkey] = float(wh)
+        if not valid:
+            return None
+        by_channel[name] = valid
+    common_hours = set.intersection(
+        *(set(hours) for hours in by_channel.values())
+    )
+    if not common_hours:
+        return None
+    return {
+        hkey: sum(by_channel[name][hkey] for name in metered_names)
+        for hkey in common_hours
+    }
 
 
 def metered_modeled_hourly(
-    coord, snap: IssuedSnapshot, modeled_hourly: dict[str, float]
+    coord,
+    snap: IssuedSnapshot,
+    modeled_hourly: dict[str, float],
+    *,
+    layer: str = "raw",
 ) -> dict[str, float] | None:
     """Restrict a SITE-total modeled hourly curve to the METERED planes.
 
@@ -683,12 +769,10 @@ def metered_modeled_hourly(
     against the measured side, which only ever sums planes with an
     ``actual_entity``. An unmetered plane inside the modeled total reads as a
     permanent production deficit — the RLS theta would learn the METERING
-    SHARE instead of the forecast error, and the measured-clear day gate
-    would reject clear days as overcast busts. The per-hour metered share is
-    taken from the snapshot's per-plane UNGATED beam+diffuse breakdown (the
-    only per-plane modeled split the issued ring stores) and applied to the
-    passed (gated / slow-only / corrected) site curve — a first-order share
-    approximation, documented as such.
+    SHARE instead of the forecast error. Snapshot v2 stores the exact RAW,
+    SLOW-only and CORRECTED curve for each plane; ``layer`` selects the one
+    matching the site curve. No beam-share approximation is allowed because
+    group clipping and learned factors make that share layer-dependent.
 
     Returns None when the comparison is impossible or meaningless: no metered
     plane at all (no measured side exists), or unmetered planes present but
@@ -701,18 +785,21 @@ def metered_modeled_hourly(
         return None
     if len(metered) == len(planes):
         return dict(modeled_hourly)
-    if not snap.per_plane:
+    if not snap.per_plane or layer not in {"raw", "slow", "corrected"}:
         return None
+    attr = f"{layer}_wh"
+    exact: dict[str, dict[str, float]] = {}
+    for name in metered:
+        pm = snap.per_plane.get(name)
+        curve = getattr(pm, attr, None) if pm is not None else None
+        if not curve:
+            # Legacy snapshot: exact subset attribution is impossible. Skip the
+            # day instead of manufacturing a metering-share correction.
+            return None
+        exact[name] = curve
     out: dict[str, float] = {}
-    for hkey, wh in modeled_hourly.items():
-        total = 0.0
-        share = 0.0
-        for name, pm in snap.per_plane.items():
-            plane_wh = pm.beam_wh.get(hkey, 0.0) + pm.diffuse_wh.get(hkey, 0.0)
-            total += plane_wh
-            if name in metered:
-                share += plane_wh
-        out[hkey] = float(wh) * (share / total) if total > 0.0 else 0.0
+    for hkey in modeled_hourly:
+        out[hkey] = sum(curve.get(hkey, 0.0) for curve in exact.values())
     return out
 
 
@@ -740,7 +827,9 @@ def day_ahead_samples(
     # Teilmengen-Regel: modeled side restricted to the metered planes; None
     # means the comparison is impossible (no metered plane / legacy snapshot
     # on a partially metered site) -> the day is skipped, never poisoned.
-    metered_hourly = metered_modeled_hourly(coord, snap, raw_hourly)
+    metered_hourly = metered_modeled_hourly(
+        coord, snap, raw_hourly, layer="slow"
+    )
     if metered_hourly is None:
         return []
     raw_hourly = metered_hourly
@@ -756,6 +845,13 @@ def day_ahead_samples(
     cell_modeled: dict[tuple[str, str], float] = {}
     cell_measured: dict[tuple[str, str], float] = {}
     for hkey, wh in raw_hourly.items():
+        if (
+            site_measured_hourly is not None
+            and hkey not in site_measured_hourly
+        ):
+            # A recorder gap is absence of evidence, never a zero-production
+            # label. Keep modeled and measured sides on the same hour set.
+            continue
         part = coord._day_part_for_hourkey(hkey)
         if part is None:
             continue
@@ -763,9 +859,9 @@ def day_ahead_samples(
         key = (cc, part)
         cell_modeled[key] = cell_modeled.get(key, 0.0) + float(wh)
         if site_measured_hourly is not None:
-            cell_measured[key] = cell_measured.get(
-                key, 0.0
-            ) + float(site_measured_hourly.get(hkey, 0.0))
+            cell_measured[key] = cell_measured.get(key, 0.0) + float(
+                site_measured_hourly[hkey]
+            )
 
     samples: list[_DayAheadSample] = []
     for (cc, part), modeled_wh in cell_modeled.items():
@@ -827,6 +923,8 @@ def train_shademap(
     """
     if not coord._learner_config.slow_enabled:
         return
+    if coord._drift_state.slow_disabled:
+        return
     if coord._slow_frozen():
         return  # collapse freeze silences the geometric learner today/next
     if not issued:
@@ -880,7 +978,9 @@ def day_is_measured_clear(
     modeled_hourly = _filter_hourly_to_local_day(
         snap.raw_hourly_wh or snap.corrected_hourly_wh, iso
     )
-    metered_hourly = metered_modeled_hourly(coord, snap, modeled_hourly)
+    metered_hourly = metered_modeled_hourly(
+        coord, snap, modeled_hourly, layer="raw"
+    )
     if metered_hourly is None:
         return False
     modeled = sum(metered_hourly.values())
@@ -1007,11 +1107,15 @@ def is_collapse_day(
     if not issued or not actuals:
         return False
     snap = IssuedSnapshot.from_dict(issued)
-    forecast_wh = sum(
-        _filter_hourly_to_local_day(
-            snap.raw_hourly_wh or snap.corrected_hourly_wh, iso
-        ).values()
+    raw_hourly = _filter_hourly_to_local_day(
+        snap.raw_hourly_wh or snap.corrected_hourly_wh, iso
     )
+    metered_hourly = metered_modeled_hourly(
+        coord, snap, raw_hourly, layer="raw"
+    )
+    if metered_hourly is None:
+        return False
+    forecast_wh = sum(metered_hourly.values())
     if forecast_wh < COLLAPSE_FORECAST_MIN_WH:
         return False
     measured_wh = sum(
@@ -1025,16 +1129,16 @@ def update_drift(
 ) -> None:
     """Rolling daylight-MAE drift monitor with per-layer auto-disable (SPEC §9.8).
 
-    Decomposes the served curve as ``corrected = slow ∘ fast`` and attributes a
+    Decomposes the persisted stack as ``corrected = slow ∘ day-ahead`` and attributes a
     "losing" day to the GUILTY layer only, so an innocent layer is never
     auto-disabled and rolled back alongside a drifting sibling (audit #13b). A
-    layer is "losing" when its challenger daily-kWh MAE beats its reference by
+    layer is "losing" when its challenger daylight-hour MAE beats its reference by
     more than DRIFT_LOSS_MARGIN (relative) AND by more than DRIFT_LOSS_MIN_ABS_WH
     (absolute) — the absolute floor keeps a rounding-scale delta on a
     well-trained/clear day from counting as a loss:
       * SLOW (shademap): slow-only MAE vs raw physics MAE — the shademap made
         pure physics worse;
-      * FAST (day-ahead): corrected MAE vs slow-only MAE — the day-ahead factor
+      * DAY-AHEAD: corrected MAE vs slow-only MAE — the day-ahead factor
         made the slow-only curve worse.
     The two streaks advance INDEPENDENTLY from their own signal (a non-losing
     leg resets only that layer's streak). DRIFT_LOSS_STREAK_DAYS consecutive
@@ -1042,10 +1146,8 @@ def update_drift(
     back; the flag stays until the user re-enables in the options flow. The
     window is trimmed to DRIFT_WINDOW_DAYS.
 
-    LEGACY fallback: when the snapshot carries NO slow-only curve (a pre-upgrade
-    snapshot, or a day the slow layer was inactive so slow-only == raw), the
-    decomposition has no independent slow signal — the monitor keeps exactly the
-    original single corrected-vs-raw signal driving BOTH streaks.
+    LEGACY fallback: without a slow-only curve the monitor can still judge the
+    day-ahead leg against RAW, but does not invent a slow-layer verdict.
 
     Scope note (FIX-1 residual): the 01:30 issued snapshot's corrected-vs-raw
     delta reflects shademap + day-ahead only (the intraday scalar is neutral
@@ -1065,29 +1167,92 @@ def update_drift(
         snap.raw_hourly_wh or snap.corrected_hourly_wh, iso)
     corrected_hourly = _filter_hourly_to_local_day(
         snap.corrected_hourly_wh or snap.raw_hourly_wh, iso)
+    raw_hourly = metered_modeled_hourly(
+        coord, snap, raw_hourly, layer="raw"
+    )
+    corrected_hourly = metered_modeled_hourly(
+        coord, snap, corrected_hourly, layer="corrected"
+    )
+    if raw_hourly is None or corrected_hourly is None:
+        return
     raw_total = sum(raw_hourly.values())
     corrected_total = sum(corrected_hourly.values())
-    if raw_total <= 0.0 and corrected_total <= 0.0:
+    if raw_total <= 0.0 and corrected_total <= 0.0 and measured_wh <= 0.0:
         return
     # Slow-only curve (shademap ∘ physics, no day-ahead) sliced the SAME way.
     # Empty on a legacy snapshot / slow-inactive day / failed compute: slow-only
-    # == raw, so the per-layer decomposition degrades to the legacy shared
-    # signal below.
-    slow_hourly = _filter_hourly_to_local_day(snap.slow_only_hourly_wh, iso)
+    # cannot be judged independently; only day-ahead-vs-raw remains attributable.
+    slow_site_hourly = _filter_hourly_to_local_day(
+        snap.slow_only_hourly_wh, iso
+    )
+    slow_hourly = (
+        metered_modeled_hourly(
+            coord, snap, slow_site_hourly, layer="slow"
+        )
+        if slow_site_hourly
+        else None
+    )
     has_slow = bool(slow_hourly)
     slow_total = sum(slow_hourly.values()) if has_slow else raw_total
-    # Daily-kWh absolute error as the MAE proxy (the operator's primary
-    # metric is daily kWh, SPEC §15.1; the issued ring stores hourly so a
-    # true daylight-hour MAE is available to a future finer implementation).
-    raw_mae = abs(raw_total - measured_wh)
-    corrected_mae = abs(corrected_total - measured_wh)
-    slow_mae = abs(slow_total - measured_wh)
+
+    hourly_actuals = coord._store_hourly_actuals(iso)
+    measured_hourly = coord._site_measured_hourly(iso, hourly_actuals)
+    if hourly_actuals and not measured_hourly:
+        # Hourly data exists but has no complete cross-channel hour. This is
+        # not a legacy daily-only store and must not silently downgrade to a
+        # coarser metric that can hide the recorder gap.
+        return
+
+    def _mae(curve: dict[str, float]) -> float | None:
+        if not measured_hourly:
+            return None
+        keys = [
+            hkey
+            for hkey in measured_hourly
+            if hkey in curve and (
+                curve.get(hkey, 0.0) > 0.0
+                or raw_hourly.get(hkey, 0.0) > 0.0
+                or measured_hourly.get(hkey, 0.0) > 0.0
+            )
+        ]
+        if not keys:
+            return None
+        return sum(
+            abs(float(curve[h]) - float(measured_hourly[h])) for h in keys
+        ) / len(keys)
+
+    # Current stores always carry hourly actuals. A legacy store without them
+    # degrades to the old daily absolute-energy error rather than fabricating an
+    # hourly shape; diagnostics expose that fallback via ``hourly_basis``.
+    raw_hourly_mae = _mae(raw_hourly)
+    corrected_hourly_mae = _mae(corrected_hourly)
+    slow_hourly_mae = _mae(slow_hourly) if has_slow else raw_hourly_mae
+    hourly_basis = raw_hourly_mae is not None and corrected_hourly_mae is not None
+    raw_mae = (
+        raw_hourly_mae if hourly_basis else abs(raw_total - measured_wh)
+    )
+    corrected_mae = (
+        corrected_hourly_mae
+        if hourly_basis
+        else abs(corrected_total - measured_wh)
+    )
+    slow_mae = (
+        slow_hourly_mae
+        if hourly_basis and slow_hourly_mae is not None
+        else abs(slow_total - measured_wh)
+    )
     baseline_mae = raw_mae  # pure physics is the baseline comparison here
 
     entry = {
         "raw": round(raw_mae, 2),
         "corrected": round(corrected_mae, 2),
         "baseline": round(baseline_mae, 2),
+        "hourly_basis": 1.0 if hourly_basis else 0.0,
+        "raw_daily_abs": round(abs(raw_total - measured_wh), 2),
+        "corrected_daily_abs": round(
+            abs(corrected_total - measured_wh), 2
+        ),
+        "corrected_daily_bias": round(corrected_total - measured_wh, 2),
     }
     # Record the slow-only leg's MAE only when the snapshot carried a slow-only
     # curve (keep the dict shape stable on legacy/slow-inactive days).
@@ -1107,58 +1272,87 @@ def update_drift(
             and (challenger_mae - reference_mae) > DRIFT_LOSS_MIN_ABS_WH
         )
 
-    fast_streak = coord._drift_state.fast_loss_streak
+    day_ahead_streak = (
+        coord._drift_state.day_ahead_loss_streak
+        or coord._drift_state.fast_loss_streak
+    )
     slow_streak = coord._drift_state.slow_loss_streak
-    fast_on = coord._learner_config.fast_enabled and not coord._drift_state.fast_disabled
+    day_ahead_on = (
+        coord._learner_config.day_ahead_enabled
+        and not coord._drift_state.day_ahead_disabled
+        and not coord._drift_state.fast_disabled
+    )
     slow_on = coord._learner_config.slow_enabled and not coord._drift_state.slow_disabled
     if has_slow:
-        # Per-layer decomposition (corrected = slow ∘ fast): each active layer's
+        # Per-layer decomposition (corrected = slow ∘ day-ahead): each active layer's
         # streak advances or resets from ITS OWN leg — the slow layer on
-        # slow-only-vs-physics, the fast layer on corrected-vs-slow-only.
+        # slow-only-vs-physics, Day-ahead on corrected-vs-slow-only.
         slow_losing = _losing(slow_mae, raw_mae)
-        fast_losing = _losing(corrected_mae, slow_mae)
-        if fast_on:
-            fast_streak = fast_streak + 1 if fast_losing else 0
+        day_ahead_losing = _losing(corrected_mae, slow_mae)
+        if day_ahead_on:
+            day_ahead_streak = (
+                day_ahead_streak + 1 if day_ahead_losing else 0
+            )
         if slow_on:
             slow_streak = slow_streak + 1 if slow_losing else 0
     else:
-        # LEGACY fallback (no slow-only curve): the original single
-        # corrected-vs-raw signal drives BOTH layers' streaks in lockstep, so
-        # pre-upgrade snapshots and slow-inactive days behave exactly as before.
+        # Without slow-only attribution, only day-ahead can be judged safely.
         losing = _losing(corrected_mae, raw_mae)
-        if losing:
-            if fast_on:
-                fast_streak += 1
-            if slow_on:
-                slow_streak += 1
-        else:
-            fast_streak = 0
-            slow_streak = 0
+        if day_ahead_on:
+            day_ahead_streak = day_ahead_streak + 1 if losing else 0
 
-    fast_disabled = coord._drift_state.fast_disabled
+    day_ahead_disabled = (
+        coord._drift_state.day_ahead_disabled
+        or coord._drift_state.fast_disabled
+    )
     slow_disabled = coord._drift_state.slow_disabled
-    if fast_on and fast_streak >= DRIFT_LOSS_STREAK_DAYS:
-        fast_disabled = True
-        fast_streak = 0
-        coord._restore_layer_snapshot(LEARNER_LAYER_FAST)
+    day_ahead_just_disabled = False
+    slow_just_disabled = False
+    if day_ahead_on and day_ahead_streak >= DRIFT_LOSS_STREAK_DAYS:
+        day_ahead_disabled = True
+        day_ahead_just_disabled = True
+        day_ahead_streak = 0
+        coord._restore_layer_snapshot(LEARNER_LAYER_DAY_AHEAD)
         coord._raise_repair_issue(ISSUE_FAST_LEARNER_DISABLED)
-        _LOGGER.warning("Fast learner auto-disabled after %d losing days", DRIFT_LOSS_STREAK_DAYS)
+        _LOGGER.warning(
+            "Day-ahead learner auto-disabled after %d losing days",
+            DRIFT_LOSS_STREAK_DAYS,
+        )
     if slow_on and slow_streak >= DRIFT_LOSS_STREAK_DAYS:
         slow_disabled = True
+        slow_just_disabled = True
         slow_streak = 0
         coord._restore_layer_snapshot(LEARNER_LAYER_SLOW)
         coord._raise_repair_issue(ISSUE_SLOW_LEARNER_DISABLED)
         _LOGGER.warning("Slow learner auto-disabled after %d losing days", DRIFT_LOSS_STREAK_DAYS)
+
+    if slow_just_disabled:
+        # Day-ahead theta is fitted on Slow-only. Removing Slow changes that
+        # feature basis immediately, so reopen RLS adaptation while retaining
+        # theta as a bounded starting estimate.
+        coord._bias_state = bias_mod.reseed_day_ahead_bias(
+            coord._bias_state, n_cap=DAY_AHEAD_BIAS_RESEED_N
+        )
+        coord._persist_bias_state()
+    if day_ahead_just_disabled or slow_just_disabled:
+        # Quantile residuals are relative to the issued corrected stack. Once a
+        # layer is removed, the old population no longer describes served P50.
+        coord._quantile_state = QuantileState()
+        coord._persist_quantile_state()
 
     # Preserve the option-seen + collapse-freeze fields (replace, not
     # reconstruct, so the FIX-5 transition memory + FIX-7 freeze survive).
     coord._drift_state = _replace_drift(
         coord._drift_state,
         daily_mae=daily,
-        fast_loss_streak=fast_streak,
+        day_ahead_loss_streak=day_ahead_streak,
+        # Keep v1 aliases synchronized for old dashboards/store readers.
+        fast_loss_streak=day_ahead_streak,
         slow_loss_streak=slow_streak,
-        fast_disabled=fast_disabled,
+        day_ahead_disabled=day_ahead_disabled,
+        fast_disabled=day_ahead_disabled,
         slow_disabled=slow_disabled,
+        version=2,
     )
     coord._persist_drift_state()
 
@@ -1186,7 +1380,7 @@ def restore_layer_snapshot(coord, layer: str) -> str | None:
         )
         return None
     snap = snaps[max(0, len(snaps) - DRIFT_LOSS_STREAK_DAYS)]
-    if layer == LEARNER_LAYER_FAST:
+    if layer in (LEARNER_LAYER_FAST, LEARNER_LAYER_DAY_AHEAD):
         coord._bias_state = snap.bias
         coord._persist_bias_state()
     else:

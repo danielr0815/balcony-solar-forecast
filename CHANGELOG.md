@@ -11,6 +11,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > table in [docs/HISTORIE.md](docs/HISTORIE.md) §H13. Historical entries are
 > deliberately left untouched.
 
+## [0.27.0] - 2026-08-26
+
+This release makes the complete correction stack layer-exact and leakage-free,
+hardens its physical and measurement boundaries, and keeps dependent learning
+state coherent whenever a correction basis changes. Diagnostics now distinguish
+the magnitude of hourly error from the direction of daily-energy bias.
+
+### Fixed
+
+- **Correction-stack references are layer-exact.** Intraday now compares live
+  measurements with `slow_only × day_ahead` instead of `raw × day_ahead`, so a
+  learned shade loss is not corrected a second time. Issued snapshots carry
+  exact per-plane RAW/SLOW/CORRECTED curves; partial-metering bias, quantile,
+  drift, collapse and scoreboard paths use those curves and skip legacy days
+  that cannot be attributed exactly instead of estimating a beam share.
+- **Drift attribution measures hourly shape.** The persisted guard now computes
+  true daylight-hour MAE, keeps daily absolute error and signed bias as audit
+  fields, exposes the rolling-window mean, and treats Day-ahead independently
+  from the transient Intraday switch. Legacy stores without hourly actuals use
+  an explicit daily-error fallback; snapshots without Slow-only never fabricate
+  a Slow verdict. Auto-disabled persistent learners no longer keep training;
+  their removal also invalidates dependent quantiles and reopens θ adaptation
+  when the Slow-only basis disappears.
+- **Historical learning is walk-forward and leakage-free.** Bootstrap builds
+  each day's physically clamped Slow-only forecast from pre-day Shademap state,
+  trains Day-ahead against it, seeds quantiles with pre-day θ, and delegates RLS
+  eligibility to the live trainer. Quantile expiry now trims every bin and is
+  also enforced at forecast read time.
+- **Guards no longer accept misleading labels.** Recorder coverage counts only
+  expected daylight-hour keys; collapse days are quarantined from quantiles,
+  drift and the scoreboard. Inverter calibration requires a complete whole-site
+  DC denominator, checks clipping headroom per inverter group, and can learn on
+  an explicitly groupless site. Every site-aggregated hourly learner and
+  calibration path, live and bootstrap, uses only the channel intersection in
+  which every measured DC port is present; recorder gaps are never summed as
+  partial site values or trained as zero. The daily-kWh scoreboard leaves a
+  current incomplete day unscored instead of treating the gap as production.
+- **Electrical limits and dependency invalidation are physical.** Served DC
+  clips at `ac_limit_w / inverter_efficiency` while AC clips at `ac_limit_w`.
+  Site validation rejects a plane repeated within or across inverter groups,
+  preventing double-counted ports and incompatible double clipping.
+  Config fingerprints now include shade pools, group membership and η; the
+  bootstrap signature covers the full semantic feature geometry. Changing a
+  correction-layer basis reopens dependent RLS adaptation and clears stale
+  quantile residuals and loss streaks from the previous basis; semantic config
+  changes likewise clear residuals learned against the old corrected curve.
+- **Diagnostics report only effective state.** Empty Shademap channels and
+  immature Day-ahead cells remain `cold_start`, and `correction_source`
+  distinguishes the actual Shademap/Day-ahead/Intraday combination.
+- **Dashboard shows error magnitude and direction separately.** The existing
+  rolling corrected daylight-hour MAE remains the nonnegative magnitude
+  metric; the new `drift_bias_corrected` sensor and dashboard trace expose the
+  rolling signed corrected daily-energy bias (positive = overforecast,
+  negative = underforecast) without hiding cancellation behind the MAE.
+
 ## [0.26.0] - 2026-08-08
 
 ### Added

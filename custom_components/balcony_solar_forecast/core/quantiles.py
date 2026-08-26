@@ -289,6 +289,7 @@ def bands_for_bin(
     *,
     cloud_class: str,
     day_part: str,
+    as_of_date: str = "",
 ) -> QuantileBands:
     """Empirical P10/P50/P90 multipliers for one (class x part) bin (SPEC §11.1).
 
@@ -315,6 +316,17 @@ def bands_for_bin(
     ring = state.bins.get(key)
     if not ring:
         return QuantileBands.neutral()
+    if as_of_date:
+        normalised = [
+            [parsed[0], parsed[1]]
+            for entry in ring
+            if (parsed := _entry_date_relerr(entry)) is not None
+        ]
+        ring = _trim_ring(
+            normalised, cutoff=_window_cutoff(as_of_date)
+        )
+        if not ring:
+            return QuantileBands.neutral()
 
     # Extract relerr VALUES, tolerating both the dated-pair and the legacy
     # bare-number entry shapes (the loader normalises, but a directly constructed
@@ -372,11 +384,13 @@ def train_quantiles(
     [QUANTILE_REL_ERR_MIN, QUANTILE_REL_ERR_MAX] and append it to the
     ``bin_key(cloud_class, day_part)`` ring as a ``[training_date, relerr]`` pair.
     ``training_date`` is the trained day's ISO date (the coordinator supplies it);
-    it left absent ("") the samples are stored un-dated (the ring then behaves
-    like the pre-date-window count-capped ring for that call). Each TOUCHED bin
-    is then trimmed: DATED samples older than QUANTILE_RING_DAYS relative to the
-    training day are dropped, and the count cap (_BIN_RING_CAP) is enforced as a
-    hard backstop (oldest-first, un-dated first). Returns a NEW QuantileState
+    if left absent ("") the samples are stored un-dated (the ring then behaves
+    like the pre-date-window count-capped ring for that call). Every bin is then
+    trimmed against the same as-of date: DATED samples older than
+    QUANTILE_RING_DAYS are dropped even when their sparse bin received no new
+    sample, and the count cap (_BIN_RING_CAP) is enforced as a hard backstop
+    (oldest-first, un-dated first). Empty bins are removed. Returns a NEW
+    QuantileState
     (input untouched); the returned rings are normalised to the ``[date, relerr]``
     pair shape (any legacy bare-number entries in ``state`` become ``["", relerr]``
     without being date-trimmed — their age is unknown). Samples with an unknown
@@ -401,7 +415,6 @@ def train_quantiles(
         bins = {}
         version = 1
 
-    touched: set[str] = set()
     for s in samples or ():
         cloud_class = getattr(s, "cloud_class", None)
         day_part = getattr(s, "day_part", None)
@@ -431,14 +444,16 @@ def train_quantiles(
             ring = []
             bins[key] = ring
         ring.append([training_date, relerr])
-        touched.add(key)
 
-    # Trim only the bins we touched (date window + count-cap backstop). Untouched
-    # bins are left exactly as normalised — a bin only grows when it is touched,
-    # and it is date-windowed on that same call.
+    # The window is global, not conditional on a bin being hit today. Sparse
+    # weather classes must age out on the same wall clock as busy ones.
     cutoff = _window_cutoff(training_date)
-    for key in touched:
-        bins[key] = _trim_ring(bins[key], cutoff=cutoff)
+    for key in tuple(bins):
+        trimmed = _trim_ring(bins[key], cutoff=cutoff)
+        if trimmed:
+            bins[key] = trimmed
+        else:
+            bins.pop(key, None)
 
     return QuantileState(bins=bins, version=version)
 

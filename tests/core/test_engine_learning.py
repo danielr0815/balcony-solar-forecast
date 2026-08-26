@@ -365,11 +365,12 @@ class TestSlotFactor:
         res = engine.compute_forecast(
             site, weather, now=_TEST_DATE, hooks=LearnerHooks(slot_factor=lambda s: 1.5)
         )
-        # Raw stays clamped at 800 W; a 1.5x up-correction on the already-clamped
-        # peak is re-clamped back to the 800 W AC limit (NOT 1200 W).
-        assert max(res.raw_total_watts) == pytest.approx(800.0)
-        assert max(res.total_watts) == pytest.approx(800.0)
-        assert all(w <= 800.0 + 1e-6 for w in res.total_watts)
+        # DC is clipped at the physical AC-limit/eta point; a 1.5x
+        # up-correction is re-clamped to that same served-DC ceiling.
+        dc_limit = group.ac_limit_w / group.inverter_efficiency
+        assert max(res.raw_total_watts) == pytest.approx(dc_limit)
+        assert max(res.total_watts) == pytest.approx(dc_limit)
+        assert all(w <= dc_limit + 1e-6 for w in res.total_watts)
 
     def test_intraday_linear_decay_over_horizon(self, patched_physics):
         """An intraday-style factor that starts at 1.5 at ``now`` and ramps
@@ -499,7 +500,9 @@ class TestAttributionSplit:
                     pr.watts[i]
                 )
         # And the clamp still holds on the raw (physical) total.
-        assert max(res.raw_total_watts) == pytest.approx(800.0)
+        assert max(res.raw_total_watts) == pytest.approx(
+            group.ac_limit_w / group.inverter_efficiency
+        )
 
     def test_kc_series_populated_and_aligned(self, patched_physics):
         site = _two_plane_site()

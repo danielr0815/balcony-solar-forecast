@@ -168,6 +168,27 @@ def test_build_full_inventory_matches_shipped_yaml():
     scoreboard = next(c for c in cards if c.get("title") == "Skill scoreboard")
     names = [r.get("name") for r in scoreboard["entities"]]
     assert names == ["Forecast daily-kWh MAE", "Forecast hourly MAE"]
+    learners = next(
+        c for c in cards if c.get("title") == "Learners, drift & degradation"
+    )
+    learner_names = [r.get("name") for r in learners["entities"]]
+    assert "Drift MAE (hourly error magnitude, 7d)" in learner_names
+    assert "Corrected daily bias (+ over / − under, 7d)" in learner_names
+    drift = next(
+        c
+        for c in cards
+        if c.get("title") == "Correction error: magnitude & direction (7d)"
+    )
+    assert drift["entities"] == [
+        {
+            "entity": "sensor.real_drift_mae_corrected",
+            "name": "Hourly MAE · magnitude (Wh)",
+        },
+        {
+            "entity": "sensor.real_drift_bias_corrected",
+            "name": "Daily bias · +over / −under (Wh)",
+        },
+    ]
     # Full map -> nothing missing.
     assert d.missing_entity_keys(entity_map) == []
 
@@ -176,7 +197,8 @@ def test_build_omits_missing_entities():
     entity_map = _full_entity_map()
     # Drop the entities that gate whole cards + one entities-card row.
     for gone in (
-        "drift_mae_corrected",  # the drift-trend history-graph + a learner row
+        "drift_mae_corrected",  # together these gate the drift trend
+        "drift_bias_corrected",
         "shade_profile_date",  # the bundled custom card (needs all three ids)
     ):
         entity_map.pop(gone)
@@ -205,6 +227,7 @@ def test_build_omits_missing_entities():
     assert d.is_managed(config)
     assert d.config_has_cards(config)
     assert set(d.missing_entity_keys(entity_map)) == {
+        "drift_bias_corrected",
         "drift_mae_corrected",
         "shade_profile_date",
     }

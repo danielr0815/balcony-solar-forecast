@@ -164,6 +164,7 @@ def test_required_scoreboard_and_learner_entities_referenced(dashboard):
         "binary_sensor.balcony_solar_forecast_degraded",
         "sensor.balcony_solar_forecast_fast_learner_status",
         "sensor.balcony_solar_forecast_shademap_learner_status",
+        "sensor.balcony_solar_forecast_drift_bias_corrected",
         "sensor.balcony_solar_forecast_drift_mae_corrected",
     }
     missing = required - referenced
@@ -202,6 +203,8 @@ def test_derived_object_ids_match_dashboard(dashboard):
         ("sensor", "hourly_mae"),
         ("sensor", "energy_production_today_p10"),
         ("sensor", "energy_production_today_p90"),
+        ("sensor", "drift_mae_corrected"),
+        ("sensor", "drift_bias_corrected"),
     ):
         expected = _object_id_from_translation(platform, key)
         assert expected in referenced, (

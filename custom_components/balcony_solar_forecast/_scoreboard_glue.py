@@ -22,7 +22,9 @@ from typing import Any
 
 from homeassistant.util import dt as dt_util
 
+from ._actuals import _daylight_hour_keys_in_local_day
 from ._glue_util import _filter_hourly_to_local_day
+from ._nightly import metered_modeled_hourly
 from .const import (
     CLOUD_CLASS_CLEAR,
 )
@@ -63,6 +65,11 @@ async def score_scoreboard_day(coord, day: date) -> None:
     if not issued or not actuals:
         return
 
+    # Snow / total dropout is not a forecast label. Keep it out of the skill
+    # window for the same reason the nightly learner quarantine does.
+    if coord._is_collapse_day(iso, issued, actuals):
+        return
+
     snap = IssuedSnapshot.from_dict(issued)
     # LEAKAGE GUARD (SPEC §15.2): only score a day whose snapshot was issued
     # before the early-morning cutoff of that local day. A snapshot issued
@@ -81,6 +88,33 @@ async def score_scoreboard_day(coord, day: date) -> None:
     corrected_hourly = _filter_hourly_to_local_day(
         snap.corrected_hourly_wh or snap.raw_hourly_wh, iso
     )
+    corrected_hourly = metered_modeled_hourly(
+        coord, snap, corrected_hourly, layer="corrected"
+    )
+    if corrected_hourly is None:
+        return
+
+    hourly_actuals = coord._store_hourly_actuals(iso)
+    measured_hourly = coord._site_measured_hourly(iso, hourly_actuals)
+    if hourly_actuals:
+        # The primary scoreboard number is DAILY kWh MAE, not an error over an
+        # arbitrary covered subset. A current store with recorder gaps must
+        # therefore leave the day unscored. The daily-only fallback below is
+        # reserved for a genuine legacy store with no hourly ring at all.
+        if not measured_hourly:
+            return
+        start = dt_util.start_of_local_day(
+            datetime(day.year, day.month, day.day)
+        )
+        end = dt_util.start_of_local_day(
+            datetime(day.year, day.month, day.day) + timedelta(days=1)
+        )
+        expected = (
+            _daylight_hour_keys_in_local_day(coord._site, start, end)
+            & set(corrected_hourly)
+        )
+        if expected and not expected.issubset(measured_hourly):
+            return
     engine_kwh = sum(corrected_hourly.values()) / 1000.0
     # Measured site energy for the day = sum of the per-module actuals.
     measured_kwh = (
@@ -95,8 +129,6 @@ async def score_scoreboard_day(coord, day: date) -> None:
 
     # Engine hourly MAE: issued corrected hourly (Wh) vs measured hourly (Wh).
     engine_hourly_mae = None
-    hourly_actuals = coord._store_hourly_actuals(iso)
-    measured_hourly = coord._site_measured_hourly(iso, hourly_actuals)
     if measured_hourly:
         engine_hourly_mae = scoreboard_mod.hourly_mae(
             corrected_hourly, measured_hourly

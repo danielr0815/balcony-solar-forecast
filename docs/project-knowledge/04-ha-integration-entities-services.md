@@ -1,6 +1,6 @@
 # HA-Integration: Entities, Services, Diagnostics
 
-Dies ist die **Außenschnittstelle** von `balcony_solar_forecast` (Stand `main` @ v0.23.0): welche Home-Assistant-Entitäten
+Dies ist die **Außenschnittstelle** von `balcony_solar_forecast` (Stand `main` @ v0.27.0): welche Home-Assistant-Entitäten
 die Integration anlegt, welche Attribute die Prognosekurven tragen, welche Aktionen (Services) es gibt und was der
 Diagnostics-Download enthält. Du brauchst dieses Dokument, wenn du eine Automation/Karte an die Integration anbindest,
 einen Entity-State interpretierst, eine Aktion aufrufst oder einen Bugreport-Dump liest.
@@ -101,16 +101,24 @@ negiert (`MeasuredAcPowerSensor._recompute`).
 | Key | Entity-ID | Einheit / Typ | Bedeutung |
 |---|---|---|---|
 | `intraday_scalar` | `…_intraday_correction_scalar` | dimensionslos, `MEASUREMENT` | aktuell angewandter Skalar des FAST-Learners; 1.0 = keine Korrektur. Transient (nicht persistiert) |
-| `drift_mae_corrected` | `…_drift_mae_corrected` | Wh, `MEASUREMENT` | rollierender Tageslicht-MAE der **korrigierten** (servierten) Kurve. Attribute: `raw_mae`, `corrected_mae`, `baseline_mae` |
+| `drift_mae_corrected` | `…_drift_mae_corrected` | Wh, `MEASUREMENT` | Mittelwert der echten Tageslicht-**Stunden-MAE** im 7-Tage-Ring für die korrigierte Kurve. Attribute: `raw_mae`, `corrected_mae`, `baseline_mae`; ein Legacy-Tag ohne Stunden-Istwerte fällt intern sichtbar auf absoluten Tagesenergiefehler zurück |
+| `drift_bias_corrected` | `…_drift_bias_corrected` | Wh, `MEASUREMENT` | Mittelwert des signierten korrigierten **Tagesenergiefehlers** im 7-Tage-Ring; positiv = Überprognose, negativ = Unterprognose. Ergänzt den MAE um die Richtung, ersetzt ihn wegen möglicher Fehleraufhebung aber nicht |
 | `learner_status_fast` | `…_fast_learner_status` | ENUM | Status FAST-Layer |
 | `learner_status_slow` | `…_shademap_learner_status` | ENUM | Status Shademap-Layer |
 | `learner_status_day_ahead` | `…_day_ahead_bias_status` | ENUM | Status Day-ahead-Bias-Layer |
 
 ENUM-Werte (`LEARNER_STATUS_VALUES` in `const.py`): `active`, `off`, `disabled_by_drift`, `frozen`,
-`cold_start` (aktiviert, aber **ohne** gelernten Zustand — z. B. direkt nach `reset_day_ahead_bias`; „active" wäre
-hier eine Statuslüge, v0.19.2). Unbekannte Werte melden `None`, nie einen erfundenen Status.
-`drift_mae_corrected` trägt **absichtlich keine `device_class`**: `ENERGY` + `MEASUREMENT` ist in HA eine
-ungültige Kombination (Energie verlangt `total`/`total_increasing`), und ein MAE ist ohnehin keine Energiemenge.
+`cold_start` (aktiviert, aber **ohne wirksamen** gelernten Zustand — z. B. leere
+Shademap-Kanäle oder keine θ-Zelle mit `n >= RLS_MIN_SAMPLES`; „active" wäre
+hier eine Statuslüge). Unbekannte Werte melden `None`, nie einen erfundenen Status.
+`drift_mae_corrected` und `drift_bias_corrected` tragen **absichtlich keine
+`device_class`**: `ENERGY` + `MEASUREMENT` ist in HA eine ungültige Kombination
+(Energie verlangt `total`/`total_increasing`); beide sind Fehlermetriken, keine
+Energiemengenzähler.
+`correction_source` im Coordinator/Diagnostics benennt nur tatsächlich wirkende
+Layer und unterscheidet `none`, `intraday`, `day_ahead`, `shademap`, ihre
+Zweierkombinationen und `shademap+day_ahead+intraday`; ein aktivierter, aber
+kalter Layer wird nicht behauptet.
 
 **Nur der Day-ahead-Sensor** trägt Attribute (`LearnerStatusSensor.extra_state_attributes`):
 `bias_cells` = `{"<cloud_class>|<day_part>": {cloud_class, day_part, theta, n, applied, clamped}}` und `cells_n`.

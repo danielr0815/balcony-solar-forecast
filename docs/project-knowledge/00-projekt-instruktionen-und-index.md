@@ -1,6 +1,6 @@
 # Projekt-Instruktionen & Index
 
-**Stand: `main` @ v0.23.0 (2026-07-25).** Diese Datei ist der Einstieg in die
+**Stand: `main` @ v0.27.0 (2026-08-26).** Diese Datei ist der Einstieg in die
 Wissensbasis zum Repository **`danielr0815/balcony-solar-forecast`**
 (<https://github.com/danielr0815/balcony-solar-forecast>). Sie erklärt, was das
 Projekt ist, welches der sieben Wissensdokumente wofür zuständig ist, über welchen
@@ -30,7 +30,7 @@ Technische Eckdaten (alle am Code geprüft):
 
 | Punkt | Wert |
 |---|---|
-| Aktueller Stand | `main` @ **v0.23.0**, `manifest.json` / `pyproject.toml` / `const.INTEGRATION_VERSION` synchron |
+| Aktueller Stand | `main` @ **v0.27.0**, `manifest.json` / `pyproject.toml` / `const.INTEGRATION_VERSION` synchron |
 | Laufzeit-Abhängigkeiten | **keine** (`manifest.json` → `requirements: []`) — reine stdlib, kein numpy/pandas/pvlib |
 | Architekturgrenze | `custom_components/balcony_solar_forecast/core/` importiert **nichts** aus `homeassistant`; genau eine dokumentierte Netz-Ausnahme (`core/openmeteo_backfill.py`, lazy `aiohttp`, injizierte Session) |
 | Vertrag | `docs/SPEC.md` (deutsch, Ist-Stand), Herleitung/Historie in `docs/HISTORIE.md`, Designentscheide in `docs/adr/`, Release-Chronik in `CHANGELOG.md` |
@@ -41,7 +41,7 @@ Technische Eckdaten (alle am Code geprüft):
 Menschen) ohne Vorwissen und ohne Chatverlauf in die Lage versetzen, am Projekt
 zu arbeiten: Code ändern, ein Prognoseproblem diagnostizieren, die Anlage
 umkonfigurieren, ein Release bauen. Sie ist **destillierte Analyse**, kein Ersatz
-für den Code: Jede Verhaltensaussage ist gegen `main` @ v0.23.0 geprüft, aber
+für den Code: Jede Verhaltensaussage ist gegen `main` @ v0.27.0 geprüft, aber
 Code altert schneller als Prosa. Im Zweifel gilt der Code.
 
 ---
@@ -198,15 +198,15 @@ ARBEITSREGELN (hart)
    Upgrade byte-identisch dasselbe Dict ergeben (kein neuer Schlüssel, kein
    null). Sonst kippt der Config-Fingerprint und setzt ohne fachlichen Grund
    Lernzustand zurück. Spiegelbildlich im Fingerprint: nur-wenn-gesetzt anhängen,
-   Werte runden, Sentinels kollisionsfrei wählen. Ein Feld, das die RAW-Kurve
-   verändert, MUSS in den Fingerprint. Store-Migrationen sind additiv: der
+   Werte runden, Sentinels kollisionsfrei wählen. Ein Feld, das die RAW- oder
+   Slow-only-Kurve bzw. ihre Clip-Grenze verändert, MUSS in den Fingerprint. Store-Migrationen sind additiv: der
    äußere Store-Envelope bleibt für immer Version 1, migriert wird die innere
    schema_version, alte Schlüssel gehen byte-treu durch. Eine Migration, die
    Lernzustand verwirft, ist ein kritischer Fehler.
-9. RAW IST DIE LERN-WAHRHEIT. Jede Lernschicht trainiert gegen genau die Kurve,
+9. SCHICHTTREUE IST DIE LERN-WAHRHEIT. Jede Lernschicht trainiert gegen genau die Kurve,
    auf die sie angewandt wird: Shademap gegen die ungegatete, unclamped
    Physik-Referenz; Day-Ahead-Bias gegen slow_only (Shademap ohne Bias);
-   Intraday-Skalar gegen raw x theta; Quantile gegen die issued-corrected Kurve.
+   Intraday-Skalar gegen slow_only x theta; Quantile gegen die issued-corrected Kurve.
    Wer diese Schichtung bricht, baut eine Doppelkorrektur — historisch die
    häufigste Fehlerklasse dieses Projekts, sichtbar als Übertreibung am Morgen.
    Und: ein besserer statischer Prior schlägt immer einen kompensierenden
@@ -286,7 +286,7 @@ heutigen Zustand.
 
 ## 5. Aktualität & Pflege
 
-**Stand dieser Wissensbasis:** `main` @ **v0.23.0**, erstellt am **2026-07-25**.
+**Stand dieser Wissensbasis:** `main` @ **v0.27.0**, geprüft am **2026-08-26**.
 Alle Code-Aussagen sind gegen diesen Stand geprüft; Betriebs- und Messzahlen
 stammen aus Live-Abzügen vom 16.–25.07.2026 und sind **Momentaufnahmen**.
 

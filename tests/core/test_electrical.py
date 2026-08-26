@@ -133,6 +133,10 @@ def _group(name: str, planes: tuple[str, ...], limit: float) -> InverterGroup:
     return InverterGroup(name=name, plane_names=planes, ac_limit_w=limit)
 
 
+def _dc_limit(group: InverterGroup) -> float:
+    return group.ac_limit_w / group.inverter_efficiency
+
+
 def test_clamp_below_limit_passes_through():
     watts = {"M1": 300.0, "M2": 250.0}
     groups = [_group("WR1", ("M1", "M2"), 800.0)]
@@ -145,10 +149,11 @@ def test_clamp_two_430w_modules_cannot_exceed_800():
     watts = {"M7": 430.0, "M8": 430.0}
     groups = [_group("WR4", ("M7", "M8"), 800.0)]
     out = clamp_groups(watts, groups)
-    assert out["M7"] + out["M8"] == pytest.approx(800.0)
+    limit = _dc_limit(groups[0])
+    assert out["M7"] + out["M8"] == pytest.approx(limit)
     # Proportional split of an equal pair -> equal halves.
-    assert out["M7"] == pytest.approx(400.0)
-    assert out["M8"] == pytest.approx(400.0)
+    assert out["M7"] == pytest.approx(limit / 2.0)
+    assert out["M8"] == pytest.approx(limit / 2.0)
 
 
 def test_clamp_distributes_proportionally_for_unequal_pair():
@@ -156,17 +161,18 @@ def test_clamp_distributes_proportionally_for_unequal_pair():
     groups = [_group("G", ("A", "B"), 800.0)]
     out = clamp_groups(watts, groups)
     total = out["A"] + out["B"]
-    assert total == pytest.approx(800.0)
+    limit = _dc_limit(groups[0])
+    assert total == pytest.approx(limit)
     # Shares preserved: A had 2/3, B had 1/3.
-    assert out["A"] == pytest.approx(800.0 * 2 / 3)
-    assert out["B"] == pytest.approx(800.0 * 1 / 3)
+    assert out["A"] == pytest.approx(limit * 2 / 3)
+    assert out["B"] == pytest.approx(limit * 1 / 3)
 
 
 def test_clamp_planes_outside_any_group_pass_through_unchanged():
     watts = {"M1": 500.0, "loose": 999.0}
     groups = [_group("WR1", ("M1",), 400.0)]
     out = clamp_groups(watts, groups)
-    assert out["M1"] == pytest.approx(400.0)
+    assert out["M1"] == pytest.approx(_dc_limit(groups[0]))
     assert out["loose"] == 999.0
 
 
@@ -176,7 +182,7 @@ def test_clamp_ignores_missing_member_names():
     watts = {"M1": 500.0}
     groups = [_group("WR1", ("M1", "M2_absent"), 400.0)]
     out = clamp_groups(watts, groups)
-    assert out["M1"] == pytest.approx(400.0)
+    assert out["M1"] == pytest.approx(_dc_limit(groups[0]))
     assert "M2_absent" not in out
 
 
@@ -209,7 +215,7 @@ def test_clamp_multiple_independent_groups():
         _group("WR2", ("M3", "M4"), 800.0),  # 200 -> untouched
     ]
     out = clamp_groups(watts, groups)
-    assert out["M1"] + out["M2"] == pytest.approx(800.0)
+    assert out["M1"] + out["M2"] == pytest.approx(_dc_limit(groups[0]))
     assert out["M3"] == 100.0
     assert out["M4"] == 100.0
 

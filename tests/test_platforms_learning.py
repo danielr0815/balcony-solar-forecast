@@ -1,6 +1,6 @@
 """Tests for the learning-layer diagnostic entities (SPEC §9/§14.7).
 
-Covers the intraday-scalar sensor, the drift-MAE sensor (state + attributes),
+Covers the intraday-scalar sensor, the drift-MAE and signed daily-bias sensors,
 the per-layer learner-status ENUM sensors, and the fast/slow learner-active
 binary sensors. All read the coordinator's flat ``self.data`` learner keys and
 must stay available (diagnostics never vanish) and tolerate missing/unknown
@@ -31,6 +31,7 @@ from balcony_solar_forecast.sensor import (  # noqa: E402
     LEARNER_STATUS_ACTIVE,
     LEARNER_STATUS_DISABLED_BY_DRIFT,
     LEARNER_STATUS_OFF,
+    DriftBiasCorrectedSensor,
     DriftMaeCorrectedSensor,
     IntradayScalarSensor,
     LearnerStatusSensor,
@@ -110,6 +111,23 @@ def test_drift_mae_non_dict_tolerated():
     coord = _FakeCoordinator({DATA_KEY_DRIFT_MAE: "oops"})
     sensor = _bare(DriftMaeCorrectedSensor, coord)
     assert sensor.native_value is None
+
+
+def test_drift_bias_preserves_direction_and_rounds():
+    coord = _FakeCoordinator(
+        {DATA_KEY_DRIFT_MAE: {"corrected_bias": -125.64}}
+    )
+
+    sensor = _bare(DriftBiasCorrectedSensor, coord)
+
+    assert sensor.native_value == pytest.approx(-125.6)
+
+
+@pytest.mark.parametrize("metrics", [None, "oops", {}])
+def test_drift_bias_missing_or_non_dict_is_none(metrics):
+    data = {} if metrics is None else {DATA_KEY_DRIFT_MAE: metrics}
+
+    assert _bare(DriftBiasCorrectedSensor, _FakeCoordinator(data)).native_value is None
 
 
 # --------------------------------------------------------------------------

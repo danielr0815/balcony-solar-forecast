@@ -15,6 +15,7 @@
       "source_status": {"default": "mdi:stairs"},
       "intraday_scalar": {"default": "mdi:tune-variant"},
       "drift_mae_corrected": {"default": "mdi:chart-bell-curve-cumulative"},
+      "drift_bias_corrected": {"default": "mdi:swap-vertical"},
       "learner_status_fast": {"default": "mdi:brain"},
       "learner_status_slow": {"default": "mdi:brain"},
       "learner_status_day_ahead": {"default": "mdi:brain"},

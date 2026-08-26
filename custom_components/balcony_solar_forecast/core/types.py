@@ -526,6 +526,9 @@ class PlaneResult:
     All additive fields default to empty so v0.1 constructions still work.
 
       - ``raw_watts``: pure-physics per-plane clamped power (learner OFF).
+      - ``slow_watts``: shademap-only per-plane clamped power, before the
+        day-ahead and Intraday factors. This is the exact reference curve for
+        the fast learners and partial-metering attribution.
       - ``beam_watts`` / ``diffuse_watts``: modeled DC power attributable to
         the beam+circumsolar vs. the diffuse+ground POA components, pre-clamp
         (the shademap references beam only; diffuse is the shade floor).
@@ -537,6 +540,7 @@ class PlaneResult:
     name: str
     watts: tuple[float, ...]  # CORRECTED per-plane clamped power, aligned to starts
     raw_watts: tuple[float, ...] = ()      # pure-physics per-plane clamped power
+    slow_watts: tuple[float, ...] = ()     # shademap-only, before slot factor
     beam_watts: tuple[float, ...] = ()     # modeled DC from beam+circumsolar POA
     diffuse_watts: tuple[float, ...] = ()  # modeled DC from diffuse+ground POA
     kc: tuple[float, ...] = ()             # clear-sky index per slot (gate)
@@ -857,7 +861,7 @@ class PlaneSlotBreakdown:
 
 
 # ---------------------------------------------------------------------------
-# FAST learner: day-ahead RLS bias (intraday scalar is NEVER persisted, so it
+# DAY-AHEAD learner: RLS bias (the FAST/Intraday scalar is NEVER persisted, so it
 # has no dataclass here — it lives transiently in the coordinator/engine and
 # re-inits to 1.0 on restart, SPEC §9.4).
 # ---------------------------------------------------------------------------
@@ -1076,15 +1080,17 @@ class InverterCalState:
 class DriftState:
     """Rolling drift-monitor state per learner layer (SPEC §9.8).
 
-    ``daily_mae`` holds recent per-day daylight MAE triples keyed by ISO date:
+    ``daily_mae`` holds recent per-day daylight-hour MAE triples keyed by ISO date:
     ``{iso_date: {"raw": mae, "corrected": mae, "baseline": mae}}`` (trimmed to
     DRIFT_WINDOW_DAYS), plus an optional ``"slow"`` key on days whose snapshot
-    carried a slow-only curve (per-layer attribution, audit #13b).
-    ``fast_loss_streak`` / ``slow_loss_streak`` count consecutive days each
-    layer lost — the fast (day-ahead) layer on corrected-vs-slow-only, the slow
+    carried a slow-only curve (per-layer attribution, audit #13b). Audit fields
+    include the absolute daily-energy errors, ``hourly_basis`` provenance and
+    the signed ``corrected_daily_bias`` (forecast minus measured energy).
+    ``day_ahead_loss_streak`` / ``slow_loss_streak`` count consecutive days each
+    persisted layer lost — day-ahead on corrected-vs-slow-only, the slow
     (shademap) layer on slow-only-vs-physics; at DRIFT_LOSS_STREAK_DAYS the
     coordinator auto-disables that layer and raises a repair issue, setting
-    ``fast_disabled`` / ``slow_disabled``. Disabled layers stay off until the
+    ``day_ahead_disabled`` / ``slow_disabled``. Disabled layers stay off until the
     user re-enables via the options flow (which clears the flag).
     """
 
@@ -1093,16 +1099,22 @@ class DriftState:
     slow_loss_streak: int = 0
     fast_disabled: bool = False
     slow_disabled: bool = False
+    # v2 names the persisted layer precisely. The legacy ``fast_*`` fields are
+    # retained for store compatibility and migrated on read; Intraday is
+    # transient and is not judged by an overnight snapshot where it is neutral.
+    day_ahead_loss_streak: int = 0
+    day_ahead_disabled: bool = False
     # Last-seen option value at the previous rebuild (the OFF->ON transition
     # detector's memory, SPEC §9.8). ``None`` == never recorded (legacy blob /
     # pre-upgrade): a rebuild with all-default options must NOT be treated as a
     # user re-enable, so a drift auto-disable survives a restart untouched.
     fast_option_seen: bool | None = None
     slow_option_seen: bool | None = None
+    day_ahead_option_seen: bool | None = None
     # ISO local date the collapse detector froze the geometric learners for
     # (snow / total dropout). Persisted so a mid-day restart keeps the freeze.
     collapse_frozen_date: str | None = None
-    version: int = 1
+    version: int = 2
 
     @classmethod
     def from_dict(cls, d: dict) -> DriftState:
@@ -1119,26 +1131,45 @@ class DriftState:
                         if isinstance(kk, str) and isinstance(vv, (int, float))
                     }
         cf = d.get("collapse_frozen_date")
+        legacy_fast_streak = _safe_int(
+            d.get("fast_loss_streak", 0), 0, minimum=0
+        )
+        legacy_fast_disabled = bool(d.get("fast_disabled", False))
+        legacy_fast_seen = (
+            None
+            if d.get("fast_option_seen") is None
+            else bool(d.get("fast_option_seen"))
+        )
         return cls(
             daily_mae=daily_mae,
-            fast_loss_streak=_safe_int(d.get("fast_loss_streak", 0), 0, minimum=0),
+            fast_loss_streak=legacy_fast_streak,
             slow_loss_streak=_safe_int(d.get("slow_loss_streak", 0), 0, minimum=0),
-            fast_disabled=bool(d.get("fast_disabled", False)),
+            fast_disabled=legacy_fast_disabled,
             slow_disabled=bool(d.get("slow_disabled", False)),
-            fast_option_seen=(
-                None if d.get("fast_option_seen") is None
-                else bool(d.get("fast_option_seen"))
+            day_ahead_loss_streak=_safe_int(
+                d.get("day_ahead_loss_streak", legacy_fast_streak),
+                legacy_fast_streak,
+                minimum=0,
             ),
+            day_ahead_disabled=bool(
+                d.get("day_ahead_disabled", legacy_fast_disabled)
+            ),
+            fast_option_seen=legacy_fast_seen,
             slow_option_seen=(
                 None if d.get("slow_option_seen") is None
                 else bool(d.get("slow_option_seen"))
+            ),
+            day_ahead_option_seen=(
+                None
+                if d.get("day_ahead_option_seen") is None
+                else bool(d.get("day_ahead_option_seen"))
             ),
             collapse_frozen_date=(str(cf) if isinstance(cf, str) and cf else None),
             version=_safe_int(d.get("version", 1), 1),
         )
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "version": self.version,
             "daily_mae": {k: dict(v) for k, v in self.daily_mae.items()},
             "fast_loss_streak": self.fast_loss_streak,
@@ -1149,6 +1180,17 @@ class DriftState:
             "slow_option_seen": self.slow_option_seen,
             "collapse_frozen_date": self.collapse_frozen_date,
         }
+        # A read-only v1->v3 store migration promises byte-faithful learner
+        # sections. Emit the precise v2 names only once state is actually
+        # created or mutated under the new model; update/rebuild paths bump the
+        # version before persisting.
+        if self.version >= 2:
+            out.update(
+                day_ahead_loss_streak=self.day_ahead_loss_streak,
+                day_ahead_disabled=self.day_ahead_disabled,
+                day_ahead_option_seen=self.day_ahead_option_seen,
+            )
+        return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -1211,6 +1253,8 @@ class PlaneHourlyModeled:
     backfill and the nightly LTS path both work at hourly resolution, SPEC §12.4).
     Each dict is keyed by ISO-8601 UTC hour start.
       - ``beam_wh`` / ``diffuse_wh``: modeled DC energy split for the plane;
+      - ``raw_wh`` / ``slow_wh`` / ``corrected_wh``: exact issued per-plane
+        curves for attribution against a partially metered site;
       - ``ghi_wh`` proxy and ``kc``: the mean clear-sky index that hour, so the
         quasi-clear gate can be reconstructed offline.
     """
@@ -1219,6 +1263,9 @@ class PlaneHourlyModeled:
     diffuse_wh: dict[str, float] = field(default_factory=dict)
     ghi: dict[str, float] = field(default_factory=dict)
     kc: dict[str, float] = field(default_factory=dict)
+    raw_wh: dict[str, float] = field(default_factory=dict)
+    slow_wh: dict[str, float] = field(default_factory=dict)
+    corrected_wh: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict) -> PlaneHourlyModeled:
@@ -1237,6 +1284,9 @@ class PlaneHourlyModeled:
             diffuse_wh=_fd("diffuse_wh"),
             ghi=_fd("ghi"),
             kc=_fd("kc"),
+            raw_wh=_fd("raw_wh"),
+            slow_wh=_fd("slow_wh"),
+            corrected_wh=_fd("corrected_wh"),
         )
 
     def to_dict(self) -> dict:
@@ -1250,6 +1300,9 @@ class PlaneHourlyModeled:
             ("diffuse_wh", self.diffuse_wh),
             ("ghi", self.ghi),
             ("kc", self.kc),
+            ("raw_wh", self.raw_wh),
+            ("slow_wh", self.slow_wh),
+            ("corrected_wh", self.corrected_wh),
         ):
             if curve:
                 out[key] = dict(curve)
@@ -1260,18 +1313,19 @@ class PlaneHourlyModeled:
 class IssuedSnapshot:
     """The v2 forecast-as-issued snapshot (one per calendar day, SPEC §16.2).
 
-    Stores BOTH hourly curves plus the per-plane modeled beam/diffuse/ghi/kc
-    the shademap trainer needs. Round-trips through the issued ring in the
+    Stores BOTH site-hourly curves plus the per-plane modeled
+    beam/diffuse/ghi/kc and exact RAW/SLOW/CORRECTED curves needed by the
+    shademap trainer and partial-metering evaluators. Round-trips through the issued ring in the
     store. ``version`` == 2 distinguishes it from the v1 issued dict (which had
     only ``hourly_wh`` / ``daily_kwh`` / ``status``); the store carries v1
     entries forward untouched and writes v2 going forward.
 
     ``slow_only_hourly_wh`` (audit #13b) is the hourly Wh curve with ONLY the
     SLOW layer (shademap beam_tau) applied — no day-ahead factor — so the drift
-    monitor can decompose ``corrected = slow ∘ fast`` and attribute a losing day
+    monitor can decompose ``corrected = slow ∘ day-ahead`` and attribute a losing day
     to the guilty layer. It is written only when the slow layer was active (else
     it equals raw and is omitted); an empty value means the monitor falls back
-    to the legacy shared corrected-vs-raw signal.
+    to day-ahead-vs-raw only; it does not invent a slow-layer verdict.
     """
 
     issued_at: str  # iso utc

@@ -7,7 +7,7 @@ und ein Diagnose-Kochbuch für die fünf häufigsten Symptome — gebraucht, wen
 am laufenden System etwas änderst oder ein Verhalten einordnen musst. Das *Warum*
 der Physik steht in `02-physik-und-horizontmodell.md`, das der Korrekturen in
 `03-lernschichten-und-korrekturen.md`, die Entity-/Service-Referenz in
-`04-ha-integration-entities-services.md`. Stand: `main` @ **v0.23.0**.
+`04-ha-integration-entities-services.md`. Stand: `main` @ **v0.27.0**.
 
 ## 1. Die reale Anlage
 

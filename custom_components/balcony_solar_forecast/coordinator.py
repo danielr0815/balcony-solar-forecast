@@ -90,10 +90,14 @@ from .const import (
     CONF_SCOREBOARD_ENABLED,
     CONF_SCOREBOARD_WINDOW_DAYS,
     CONF_SITE,
+    CORRECTION_SOURCE_ALL,
     CORRECTION_SOURCE_BOTH,
+    CORRECTION_SOURCE_DAY_AHEAD,
+    CORRECTION_SOURCE_DAY_AHEAD_INTRADAY,
     CORRECTION_SOURCE_INTRADAY,
     CORRECTION_SOURCE_NONE,
     CORRECTION_SOURCE_SHADEMAP,
+    CORRECTION_SOURCE_SHADEMAP_DAY_AHEAD,
     DATA_KEY_BAND_SOURCE,
     DATA_KEY_BAND_SOURCE_BY_DAY,
     DATA_KEY_BIAS_CELLS,
@@ -146,6 +150,7 @@ from .const import (
     MAX_PAYLOAD_AGE_HOURS,
     MAX_PHYSICS_FALLBACK_AGE_HOURS,
     RECOMPUTE_INTERVAL_SECONDS,
+    RLS_MIN_SAMPLES,
     SENSOR_MEASURED_DC_TOTAL,
     STATUS_CACHED,
     STATUS_FRESH,
@@ -172,6 +177,7 @@ from .core import (
     solpos,
 )
 from .core import bias as bias_mod
+from .core import bootstrap_build as bootstrap_build_mod
 from .core import (
     ensembleband as ensembleband_mod,
 )
@@ -545,14 +551,32 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         drift = self._drift_state
         changed = False
 
-        fast_reenabled = (
-            self._learner_config.fast_enabled and drift.fast_option_seen is False
+        day_ahead_reenabled = (
+            self._learner_config.day_ahead_enabled
+            and drift.day_ahead_option_seen is False
         )
         slow_reenabled = (
             self._learner_config.slow_enabled and drift.slow_option_seen is False
         )
-        if fast_reenabled and drift.fast_disabled:
-            drift = _replace_drift(drift, fast_disabled=False, fast_loss_streak=0)
+        slow_basis_changed = (
+            drift.slow_option_seen is not None
+            and drift.slow_option_seen != self._learner_config.slow_enabled
+        )
+        day_ahead_basis_changed = (
+            drift.day_ahead_option_seen is not None
+            and drift.day_ahead_option_seen
+            != self._learner_config.day_ahead_enabled
+        )
+        if day_ahead_reenabled and (
+            drift.day_ahead_disabled or drift.fast_disabled
+        ):
+            drift = _replace_drift(
+                drift,
+                day_ahead_disabled=False,
+                day_ahead_loss_streak=0,
+                fast_disabled=False,
+                fast_loss_streak=0,
+            )
             self._delete_repair_issue(ISSUE_FAST_LEARNER_DISABLED)
             changed = True
         if slow_reenabled and drift.slow_disabled:
@@ -563,16 +587,53 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if (
             drift.fast_option_seen != self._learner_config.fast_enabled
             or drift.slow_option_seen != self._learner_config.slow_enabled
+            or drift.day_ahead_option_seen
+            != self._learner_config.day_ahead_enabled
         ):
             drift = _replace_drift(
                 drift,
                 fast_option_seen=self._learner_config.fast_enabled,
                 slow_option_seen=self._learner_config.slow_enabled,
+                day_ahead_option_seen=self._learner_config.day_ahead_enabled,
+            )
+            changed = True
+
+        if slow_basis_changed:
+            # A new Slow basis invalidates both attribution legs: Slow is now a
+            # different challenger and Day-ahead is evaluated on a different
+            # reference curve. Never let an old six-day streak condemn the new
+            # stack on its first sample.
+            drift = _replace_drift(
+                drift,
+                slow_loss_streak=0,
+                day_ahead_loss_streak=0,
+                fast_loss_streak=0,
+            )
+            changed = True
+        elif day_ahead_basis_changed:
+            drift = _replace_drift(
+                drift,
+                day_ahead_loss_streak=0,
+                fast_loss_streak=0,
             )
             changed = True
 
         self._drift_state = drift
+        if slow_basis_changed:
+            # Slow-only is the feature curve theta is trained against. Preserve
+            # its estimate but reopen RLS adaptation when that basis enters or
+            # leaves the served stack.
+            self._bias_state = bias_mod.reseed_day_ahead_bias(
+                self._bias_state, n_cap=DAY_AHEAD_BIAS_RESEED_N
+            )
+            self._persist_bias_state()
+        if slow_basis_changed or day_ahead_basis_changed:
+            # Quantile residuals are defined against the corrected issued
+            # curve; never mix rings from two different correction stacks.
+            self._quantile_state = QuantileState()
+            self._persist_quantile_state()
         if changed:
+            self._drift_state = _replace_drift(self._drift_state, version=2)
             self._persist_drift_state()
 
     async def async_import_bootstrap(self, data: dict) -> dict:
@@ -707,7 +768,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._learner_config.slow_enabled
             and not self._drift_state.slow_disabled
             and not self._slow_frozen()
-            and bool(self._shademap_state.channels)
+            and any(self._shademap_state.channels.values())
         )
 
     def build_shade_profile(self) -> dict[str, Any]:
@@ -789,20 +850,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
 
     def _site_signature(self) -> str:
-        """Stable lat/lon + plane-name digest (mirrors backfill.site_signature).
+        """Semantic bootstrap digest shared with the pure backfill core.
 
-        Lets ForecastStore.import_bootstrap refuse a bootstrap built for a
-        different site (wrong coordinates / renamed planes), SPEC §12.5.
+        A single implementation prevents the import and emitter from drifting.
         """
-        import hashlib
-
-        parts = [
-            f"{round(self._site.latitude, 4)}",
-            f"{round(self._site.longitude, 4)}",
-            *[p.name for p in self._site.planes],
-        ]
-        raw = "|".join(parts).encode("utf-8")
-        return hashlib.sha256(raw).hexdigest()[:16]
+        return bootstrap_build_mod.site_signature(self._site)
 
     def _config_fingerprint(self) -> str:
         """Stable digest of the forecast-relevant site fields (A4/FOR-4).
@@ -810,7 +862,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         Covers exactly the config the day-ahead bias cells are conditioned on:
         the site LOCATION (lat/lon — they set the entire sun geometry every
         theta cell was learned against, so a location reconfigure must re-seed;
-        rounded to 4 decimals like the bootstrap site-signature, so float
+        rounded to 4 decimals, so float
         re-serialisation can never spuriously flip the hash),
         each plane's azimuth / tilt / wp / efficiency / ross_coeff / horizon
         profile (per row: elevation AND the transmittance fields tau / seasonal /
@@ -823,13 +875,16 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         both reshape the RAW curve the bias cells are conditioned on and MUST
         re-seed),
         the site albedo, the bifacial beam gain (T6 — the A1 1.0→1.25 rollout runs
-        through here and changes the direct-POA share site-wide), every inverter
-        group's AC limit, and the cloud-classification taxonomy version
+        through here and changes the direct-POA share site-wide), each plane's
+        shade-pool membership, every inverter group's member set / AC limit / configured
+        eta (the latter two set the served-DC clip point), and the
+        cloud-classification taxonomy version
         (CLASSIFIER_VERSION, A5) — a change to any of these makes the learned theta
         fit a now-stale geometry or class meaning, so a differing fingerprint
         triggers a bias re-seed. Fields that do NOT change the modeled curve
-        (entity ids, shade grouping, meter sign) are excluded so a benign edit
-        never resets learning. Rounded so float re-serialisation can never
+        (entity ids, shade-/inverter-group labels, meter sign) are excluded so a benign
+        edit never resets learning. Planes, groups and group members are sorted
+        into semantic order. Rounded so float re-serialisation can never
         spuriously flip the hash.
         """
         import hashlib
@@ -868,7 +923,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             ross = "-" if p.ross_coeff is None else f"{round(p.ross_coeff, 4)}"
             return (
                 f"{p.name}:az{round(p.azimuth_deg, 2)}:tl{round(p.tilt_deg, 2)}"
-                f":wp{round(p.wp, 2)}:ef{round(p.efficiency, 4)}:ro{ross}:hz[{hz}]"
+                f":wp{round(p.wp, 2)}:ef{round(p.efficiency, 4)}:ro{ross}"
+                f":hz[{hz}]"
             )
 
         albedo = "-" if self._site.albedo is None else f"{round(self._site.albedo, 4)}"
@@ -877,12 +933,27 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             if self._site.bifacial_beam_gain is None
             else f"{round(self._site.bifacial_beam_gain, 4)}"
         )
+        shade_members: dict[str, list[str]] = {}
+        for plane in self._site.planes:
+            if plane.shade_group:
+                shade_members.setdefault(plane.shade_group, []).append(
+                    plane.name
+                )
         parts = [
             f"loc={round(self._site.latitude, 4)},{round(self._site.longitude, 4)}",
-            *[_plane_sig(p) for p in self._site.planes],
+            *sorted(_plane_sig(p) for p in self._site.planes),
+            *sorted(
+                f"shade:{','.join(sorted(names))}"
+                for names in shade_members.values()
+                if len(names) > 1
+            ),
             f"albedo={albedo}",
             f"beam_gain={beam_gain}",
-            *[f"grp:{g.name}:ac{round(g.ac_limit_w, 2)}" for g in self._site.groups],
+            *sorted(
+                f"grp:{','.join(sorted(g.plane_names))}:ac{round(g.ac_limit_w, 2)}"
+                f":eta{round(g.inverter_efficiency, 4)}"
+                for g in self._site.groups
+            ),
             # Cloud-classification taxonomy version (A5): a change to the class
             # boundaries (layer-cover -> k_c) makes every learned theta cell fit a
             # now-stale class meaning, so bump == fingerprint change == re-seed.
@@ -927,6 +998,22 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._bias_state, n_cap=DAY_AHEAD_BIAS_RESEED_N
         )
         self._persist_bias_state()
+        # Quantile residuals are ratios against the old corrected feature
+        # geometry. Serving them on the new basis would preserve a stale error
+        # distribution precisely while theta is adapting to remove it.
+        self._quantile_state = QuantileState()
+        self._persist_quantile_state()
+        # Both drift legs were measured against the old physical/correction
+        # basis. Preserve disable flags, but discard loss evidence that no
+        # longer describes the reconfigured model.
+        self._drift_state = _replace_drift(
+            self._drift_state,
+            slow_loss_streak=0,
+            day_ahead_loss_streak=0,
+            fast_loss_streak=0,
+            version=2,
+        )
+        self._persist_drift_state()
         setter(current)
         _LOGGER.info(
             "Forecast-relevant config changed (fingerprint %s -> %s); re-seeded "
@@ -1085,8 +1172,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # FRESH/CACHED), so a restart landing in a stale-weather window defers the
         # re-arm to the first fresh tick instead of wasting it. Best-effort: no
         # recorder stats => degrade to the previous neutral behaviour.
-        fast_on = (self._learner_config.fast_enabled
-                   and not self._drift_state.fast_disabled)
+        fast_on = self._learner_config.fast_enabled
         if (not getattr(self, "_intraday_rearmed", False)
                 and self._last_result is not None
                 and fast_on
@@ -1147,20 +1233,19 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._learner_config.slow_enabled
             and not self._drift_state.slow_disabled     # honor drift flag
             and not frozen
-            and bool(self._shademap_state.channels)
+            and any(self._shademap_state.channels.values())
         )
-        # Day-ahead RLS is part of the fast/weather-error family (SPEC §9.5
-        # "Schneller Lerner ... optional später: 1 RLS-Bias-Skalar"), so it is
-        # gated by fast_disabled; collapse freeze also silences it.
+        # Day-ahead is persisted and therefore owns its own drift guard.
+        # Intraday is transient and independent of this switch.
         day_ahead_active = (
             self._learner_config.day_ahead_enabled
-            and not self._drift_state.fast_disabled
+            and not self._drift_state.day_ahead_disabled
+            and not self._drift_state.fast_disabled  # legacy v1 alias
             and not frozen
             and bool(self._bias_state.cells)
         )
         fast_active = (
             self._learner_config.fast_enabled
-            and not self._drift_state.fast_disabled
             and self._intraday_scalar != INTRADAY_NEUTRAL
         )
 
@@ -1260,7 +1345,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         solpos.hours_from_solar_noon(slot.start, self._site.longitude)
                     )
                     learned = quantiles_mod.bands_for_bin(
-                        self._quantile_state, cloud_class=cc, day_part=dp
+                        self._quantile_state,
+                        cloud_class=cc,
+                        day_part=dp,
+                        as_of_date=today.isoformat(),
                     )
                 else:
                     learned = QuantileBands.neutral()
@@ -1330,14 +1418,19 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         f *= bias_mod.intraday_factor_at(max(0.0, age_min), scalar)
                 return f
 
-        if beam_tau is not None and slot_factor is not None:
-            source = CORRECTION_SOURCE_BOTH
-        elif beam_tau is not None:
-            source = CORRECTION_SOURCE_SHADEMAP
-        elif slot_factor is not None:
-            source = CORRECTION_SOURCE_INTRADAY
-        else:
-            source = CORRECTION_SOURCE_NONE
+        source_by_layers = {
+            (False, False, False): CORRECTION_SOURCE_NONE,
+            (False, False, True): CORRECTION_SOURCE_INTRADAY,
+            (False, True, False): CORRECTION_SOURCE_DAY_AHEAD,
+            (False, True, True): CORRECTION_SOURCE_DAY_AHEAD_INTRADAY,
+            (True, False, False): CORRECTION_SOURCE_SHADEMAP,
+            (True, False, True): CORRECTION_SOURCE_BOTH,
+            (True, True, False): CORRECTION_SOURCE_SHADEMAP_DAY_AHEAD,
+            (True, True, True): CORRECTION_SOURCE_ALL,
+        }
+        source = source_by_layers[
+            (beam_tau is not None, bool(day_factor), fast_active)
+        ]
         # Site-level LEARNED inverter eta_inv (AC-side Phase 3): None until the
         # calibration is trusted (>= INVERTER_CAL_MIN_SAMPLES eligible hours), so
         # the engine falls back to the per-group config eta. Never load-bearing;
@@ -1662,8 +1755,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         rate-limited against the served one (SPEC §9.4:
         INTRADAY_MAX_STEP_PER_TICK per tick); the reload start value is
         INTRADAY_NEUTRAL."""
-        fast_on = (self._learner_config.fast_enabled
-                   and not self._drift_state.fast_disabled)
+        fast_on = self._learner_config.fast_enabled
         if not fast_on:
             self._intraday_scalar = INTRADAY_NEUTRAL
             return
@@ -1738,23 +1830,26 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """θ-referenced modeled site power at ``now`` restricted to the given
         plane names.
 
-        The RAW per-plane curve (``pr.raw_watts``) is scaled by the slot's
+        The SLOW-only per-plane curve (``pr.slow_watts``) is scaled by the slot's
         nightly-frozen day-ahead θ factor (``_day_factor``), so the modeled side
         equals the SERVED curve minus the transient intraday scalar (A2, IRC-2).
-        Sampling against pure raw let θ (the day-ahead bias, 1.36–1.49 on this
-        site's mornings) and the intraday scalar correct the SAME error twice —
-        served/actual reached ×1.9 at 07–09Z. θ is site-level (one factor per
+        Sampling against pure raw let the learned shademap and Intraday correct
+        the same shade loss twice; omitting θ let θ (1.36–1.49 on the observed
+        site's mornings) and Intraday correct the same residual twice —
+        served/actual reached ×1.9 at 07–09Z. Sampling slow-only × θ follows the
+        exact served layer order. θ is site-level (one factor per
         slot, applied to every plane equally) and frozen within a day, so it
         cannot drift with the scalar it references — no circularity. The intraday
         factor itself is deliberately NOT folded in here.
 
         Scaling the modeled side to exactly the planes that reported a usable
         measurement keeps the intraday ratio a pure weather error even under a
-        partial DTU dropout (SPEC §9.4). Falls back to the full-site RAW power
-        (still θ-scaled) when the per-plane breakdown is unavailable (empty
-        plane_results). When θ is inactive for the slot (day-ahead layer off /
-        starved cell) the factor is 1.0, so the served curve carries no θ and the
-        modeled side is pure raw — self-consistent.
+        partial DTU dropout (SPEC §9.4). A legacy result without per-plane
+        breakdown can only fall back to full-site RAW power (still θ-scaled;
+        no exact Slow-only site series exists there). On current results, when θ
+        is inactive (day-ahead layer off / starved cell), its factor is 1.0 and
+        the modeled side remains Slow-only; when Slow is inactive too,
+        Slow-only equals RAW.
         """
         idx = _slot_index_at(result.slot_starts, now)
         if idx is None:
@@ -1766,7 +1861,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return _raw_power_now(result, now) * theta
         total = 0.0
         for pr in planes:
-            series = pr.raw_watts or pr.watts
+            series = getattr(pr, "slow_watts", ()) or pr.raw_watts or pr.watts
             if idx < len(series):
                 total += series[idx]
         return total * theta
@@ -1860,8 +1955,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         result = self._last_result
         if result is None:
             return
-        if not (self._learner_config.fast_enabled
-                and not self._drift_state.fast_disabled):
+        if not self._learner_config.fast_enabled:
             return
         if self._intraday_samples:
             return
@@ -2166,7 +2260,6 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         scalar = self._intraday_scalar
         fast_active = (
             self._learner_config.fast_enabled
-            and not self._drift_state.fast_disabled
             and scalar != INTRADAY_NEUTRAL
         )
         if not fast_active:
@@ -2549,8 +2642,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         def _fast_status() -> str:
             if not cfg.fast_enabled:
                 return LEARNER_STATUS_OFF
-            if drift.fast_disabled:
-                return LEARNER_STATUS_DISABLED_BY_DRIFT
+            if (
+                not self._intraday_samples
+                and self._intraday_scalar == INTRADAY_NEUTRAL
+            ):
+                return LEARNER_STATUS_COLD_START
             return LEARNER_STATUS_ACTIVE
 
         def _slow_status() -> str:
@@ -2560,13 +2656,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 return LEARNER_STATUS_DISABLED_BY_DRIFT
             if frozen:
                 return LEARNER_STATUS_FROZEN
+            if not any(self._shademap_state.channels.values()):
+                return LEARNER_STATUS_COLD_START
             return LEARNER_STATUS_ACTIVE
 
         def _day_ahead_status() -> str:
-            # Day-ahead RLS shares the fast/weather-error disable flag (SPEC §9.5).
             if not cfg.day_ahead_enabled:
                 return LEARNER_STATUS_OFF
-            if drift.fast_disabled:
+            if drift.day_ahead_disabled or drift.fast_disabled:
                 return LEARNER_STATUS_DISABLED_BY_DRIFT
             if frozen:
                 return LEARNER_STATUS_FROZEN
@@ -2574,7 +2671,10 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # reset_day_ahead_bias): the correction hook is gated on
             # ``bool(cells)`` and applies nothing — reporting "active" would
             # claim a correction that does not exist (v0.19.2 status honesty).
-            if not self._bias_state.cells:
+            if not any(
+                cell.n >= RLS_MIN_SAMPLES
+                for cell in self._bias_state.cells.values()
+            ):
                 return LEARNER_STATUS_COLD_START
             return LEARNER_STATUS_ACTIVE
 
@@ -2585,25 +2685,47 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             LEARNER_LAYER_DAY_AHEAD: _day_ahead_status(),
             # Detailed flags (diagnostics + coordinator tests).
             "fast_enabled": cfg.fast_enabled,
-            "fast_disabled": drift.fast_disabled,
-            "fast_active": (cfg.fast_enabled and not drift.fast_disabled),
+            "fast_disabled": False,
+            "fast_active": _fast_status() == LEARNER_STATUS_ACTIVE,
             "slow_enabled": cfg.slow_enabled,
             "slow_disabled": drift.slow_disabled,
             "slow_frozen": frozen,
             "slow_active": (
-                cfg.slow_enabled and not drift.slow_disabled and not frozen
+                _slow_status() == LEARNER_STATUS_ACTIVE
             ),
             "day_ahead_enabled": cfg.day_ahead_enabled,
-            "fast_loss_streak": drift.fast_loss_streak,
+            "day_ahead_disabled": (
+                drift.day_ahead_disabled or drift.fast_disabled
+            ),
+            "day_ahead_loss_streak": drift.day_ahead_loss_streak,
+            # Legacy diagnostic keys retained for dashboard compatibility.
+            "fast_loss_streak": drift.day_ahead_loss_streak,
             "slow_loss_streak": drift.slow_loss_streak,
         }
 
     def _latest_drift_mae(self) -> dict[str, float]:
-        """Most-recent day's {raw, corrected, baseline} daylight MAE, if any."""
+        """Rolling-window MAE and signed bias exposed to diagnostics."""
         if not self._drift_state.daily_mae:
             return {}
-        latest = max(self._drift_state.daily_mae)
-        return dict(self._drift_state.daily_mae[latest])
+        out: dict[str, float] = {}
+        for key in ("raw", "corrected", "baseline", "slow"):
+            values = [
+                float(day[key])
+                for day in self._drift_state.daily_mae.values()
+                if key in day
+            ]
+            if values:
+                out[key] = round(sum(values) / len(values), 2)
+        bias_values = [
+            float(day["corrected_daily_bias"])
+            for day in self._drift_state.daily_mae.values()
+            if "corrected_daily_bias" in day
+        ]
+        if bias_values:
+            out["corrected_bias"] = round(
+                sum(bias_values) / len(bias_values), 2
+            )
+        return out
 
     def _bias_cells_summary(self) -> dict[str, Any]:
         """Current day-ahead RLS bias cells, for the diagnostic sensor (v0.19).
@@ -2914,7 +3036,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     def _site_measured_hourly(
         self, iso: str, hourly_actuals: dict[str, dict[str, float]] | None
     ) -> dict[str, float] | None:
-        """Sum per-channel hourly measured Wh into a site total per hour."""
+        """Sum complete measured-channel intersections into site hours."""
         return _nightly.site_measured_hourly(self, iso, hourly_actuals)
 
     def _day_ahead_samples(

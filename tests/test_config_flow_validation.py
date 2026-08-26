@@ -609,6 +609,22 @@ def test_group_no_planes() -> None:
     assert exc.value.code == "group_no_planes"
 
 
+@pytest.mark.parametrize("across_groups", [False, True])
+def test_group_plane_may_appear_only_once(across_groups: bool) -> None:
+    """A DC port cannot be double-counted under one or two clip ceilings."""
+    site = _site()
+    first = site[CONF_GROUPS][0][CONF_GROUP_PLANES][0]
+    if across_groups:
+        site[CONF_GROUPS][1][CONF_GROUP_PLANES].append(first)
+    else:
+        site[CONF_GROUPS][0][CONF_GROUP_PLANES].append(first)
+
+    with pytest.raises(SiteValidationError) as exc:
+        validate_site(site)
+
+    assert exc.value.code == "group_duplicate_plane"
+
+
 @pytest.mark.parametrize("limit", [0.0, -1.0])
 def test_group_bad_ac_limit(limit) -> None:
     site = _site()
@@ -780,6 +796,7 @@ _ALL_ERROR_CODES = {
     "group_dup_name",
     "group_no_planes",
     "group_unknown_plane",
+    "group_duplicate_plane",
     "bad_ac_limit",
     "shade_group_empty",
     "shade_group_collision",

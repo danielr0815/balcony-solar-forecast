@@ -10,7 +10,7 @@ Minuten wissen musst, wo etwas liegt. Physik-Details stehen in
 `03-lernschichten-und-korrekturen.md`, Entities/Services in
 `04-ha-integration-entities-services.md`.
 
-Stand: `main` @ **v0.23.0** (2026-07-25). Alle Aussagen unten sind am Code geprüft;
+Stand: `main` @ **v0.27.0** (2026-08-26). Alle Aussagen unten sind am Code geprüft;
 Belege werden als *Datei + Funktions-/Konstantenname* genannt (keine Zeilennummern,
 die veralten sofort).
 
@@ -27,7 +27,7 @@ Fakten aus `custom_components/balcony_solar_forecast/manifest.json`:
 | Feld | Wert | Bedeutung |
 |---|---|---|
 | `domain` | `balcony_solar_forecast` | Service-Namespace, Entity-Präfix |
-| `version` | `0.23.0` | HACS-Release |
+| `version` | `0.27.0` | HACS-Release |
 | `iot_class` | `cloud_polling` | holt aktiv von einer Cloud-API (Open-Meteo) |
 | `integration_type` | `service` | kein Hub / keine Hardware-Bridge, sondern ein Dienst. Trotzdem gruppiert die Integration **alle** Entities unter EINEM Geräte-Eintrag je Config-Entry (`DeviceInfo` in `sensor.BalconyForecastEntity`, `docs/SPEC.md` §15.1) |
 | `config_flow` | `true` | Einrichtung nur über die UI, kein YAML |
@@ -141,7 +141,8 @@ RAW — ein lernerfreier Build ist unverändert.
 schreibt einmal pro Kalendertag einen `IssuedSnapshot` (`core/types.py`) in den
 Issued-Ring des Stores. Er trägt beide Stundenkurven (`raw_hourly_wh`,
 `corrected_hourly_wh`), beide Tages-Rollups, die pro Ebene modellierten Komponenten
-(`per_plane`, Typ `PlaneHourlyModeled`: `beam_wh`, `diffuse_wh`, `kc` — das Feld `ghi`
+(`per_plane`, Typ `PlaneHourlyModeled`: `beam_wh`, `diffuse_wh`, `kc` sowie die
+exakten Ebenenkurven `raw_wh`, `slow_wh`, `corrected_wh` — das Feld `ghi`
 existiert im Datentyp, wird vom Coordinator aber **nie befüllt** (`_nightly.per_plane_modeled`
 setzt `ghi={}`) und deshalb von `PlaneHourlyModeled.to_dict` gar nicht erst serialisiert;
 wer im Issued-Ring nach GHI sucht, findet nichts), die Wolkenklasse je Stunde, optional die
@@ -171,13 +172,13 @@ Snapshot. Deshalb steht in `core/scoreboard.py` ausdrücklich: hier wird die Pro
 |---|---|---|
 | Felder | `total_watts`, `hourly_wh`, `daily_kwh`, `plane_watts` | `ac_watts`, `ac_hourly_wh`, `ac_daily_kwh` |
 | Clamp | `electrical.clamp_groups` (zweimal, s. u.) | `electrical.clamp_groups_ac` |
-| eta greift | **nirgends** — DC ist eta-frei | einmal, in `clamp_groups_ac`: `AC = min(eta_inv · Σ DC, ac_limit_w)`; DC-Clip bei `ac_limit_w / eta_inv` |
-| eta-Quelle | – | `LearnerHooks.inverter_efficiency` (gelernt, nur wenn vertrauenswürdig) überschreibt sonst `InverterGroup.inverter_efficiency`, sonst `const.DEFAULT_INVERTER_EFFICIENCY = 0.965` |
+| eta greift | konfiguriertes Gruppen-η bestimmt in `clamp_groups` den physischen DC-Clip `ac_limit_w / eta_inv` | in `clamp_groups_ac`: `AC = min(eta_inv · Σ DC, ac_limit_w)` |
+| eta-Quelle | `InverterGroup.inverter_efficiency` | `LearnerHooks.inverter_efficiency` (gelernt, nur wenn vertrauenswürdig) überschreibt sonst `InverterGroup.inverter_efficiency`, sonst `const.DEFAULT_INVERTER_EFFICIENCY = 0.965` |
 | Rolle | **Lern- und Scoreboard-Wahrheit** (Shademap, Bias, Drift) | **operatorseitiger Standard**: Haupt-Sensoren, Energie-Dashboard |
 
-Der DC-Pfad ist absichtlich byte-identisch zum Vor-AC-Stand geblieben; AC ist eine
-*zusätzliche*, physikalisch korrekte Kurve, gespeist aus dem korrigierten
-**unclamped** DC.
+DC- und AC-Pfad teilen denselben physischen Clip-Punkt: die servierte DC-Kurve
+endet bei `ac_limit/eta`, die zusätzliche AC-Kurve bei `ac_limit` und wird aus
+dem korrigierten **unclamped** DC gebildet.
 
 Achtung — `PlaneConfig.efficiency` (Modul-/DC-Wirkungsgrad) und
 `InverterGroup.inverter_efficiency` (DC→AC-Wandlung) sind zwei verschiedene Dinge.
@@ -194,7 +195,7 @@ clamp_groups(cor_factored)   -> cor_final            (2. Clamp / "Re-Clamp")
 ```
 
 Der Faktor sitzt **zwischen** den Clamps, damit eine Aufwärtskorrektur (Faktor > 1) die
-ausgelieferte Kurve nie über das AC-Limit heben kann. Ein Faktor ≤ 1 lässt die Werte
+ausgelieferte DC-Kurve nie über `ac_limit/eta` heben kann. Ein Faktor ≤ 1 lässt die Werte
 im Limit ⇒ der Re-Clamp ist ein mathematisches No-Op (bit-genau). Ebenen ohne
 Wechselrichtergruppe haben keine Decke und passieren beide Clamps unverändert.
 
@@ -212,15 +213,16 @@ gecachte Ergebnisse weiter funktionieren.
 | `hourly_wh` / `daily_kwh` | CORRECTED-Rollups (ISO-UTC-Stunde bzw. ISO-Datum in `tz`) |
 | `raw_hourly_wh` / `raw_daily_kwh` | RAW-Rollups |
 | `corrected_unclamped_watts` | Standortsumme **vor** dem 2. Clamp. `corrected_unclamped[i] − total_watts[i] > 0` ⇒ der Re-Clamp hat gegriffen |
-| `slot_ceilings` | physikalische DC-Clamp-Decke je Slot (Summe der Gruppenlimits + korrigierte Watt der gruppenlosen Ebenen) |
+| `slot_ceilings` | physikalische DC-Clamp-Decke je Slot (Summe `ac_limit/eta` der Gruppen + korrigierte Watt der gruppenlosen Ebenen) |
 | `ac_watts` / `ac_hourly_wh` / `ac_daily_kwh` | ausgelieferte AC-Kurve und ihre Rollups |
 | `ac_corrected_unclamped_watts` / `ac_slot_ceilings` | AC-Pendants zu den beiden Feldern oben |
 | `p10_watts` / `p50_watts` / `p90_watts` | Bandkurven je Slot, gleicher Rahmen wie `total_watts`. Leer ⇒ „kein Band" (Konsumenten lesen Band == corrected, **keine** erfundene Spreizung). `p50_watts` muss **nicht** `total_watts` entsprechen |
 | `p10_hourly_wh` / `p50_hourly_wh` / `p90_hourly_wh` | Stunden-Rollups der Bänder |
 | `ac_p10_watts`, `ac_p10_hourly_wh`, `ac_p90_hourly_wh` | AC-Bänder (P50 == `ac_watts`, deshalb kein eigenes AC-P50-Feld) |
-| `correction_source` | welche Lernschicht(en) die Kurve geformt haben (`const.CORRECTION_SOURCE_NONE/INTRADAY/SHADEMAP/BOTH`) — rein informativ |
+| `correction_source` | präzise Kombination der tatsächlich wirkenden Schichten (Shademap, Day-ahead, Intraday) — rein informativ |
 
-`PlaneResult` je Ebene: `name`, `watts` (CORRECTED), `raw_watts`, `beam_watts` /
+`PlaneResult` je Ebene: `name`, `watts` (CORRECTED), `raw_watts`, `slow_watts`
+(Shademap-only vor θ/Intraday), `beam_watts` /
 `diffuse_watts` (modellierte DC-Anteile, **nach** proportionaler Rückverteilung des
 Clamps), `kc` (Clear-Sky-Index als Gate) sowie `beam_ref_watts` / `diffuse_ref_watts`
 — die **ungegatete, unclamped, faktorfreie** Referenz, gegen die der Shademap trainiert
@@ -340,8 +342,9 @@ datumsschlüsselig (`store.is_day_trained` / `mark_day_trained`). Ablauf in
    nachholen kann.
 3. `train_and_guard(day)`: Rollback-Snapshot ziehen → **Collapse-Detektor** (alle Kanäle
    ≈ 0 bei hoher Prognose ⇒ Schnee/Totalausfall: beide geometrischen Lerner für den
-   **Folgetag** einfrieren, den Kollapstag selbst nicht trainieren) → Day-Ahead-RLS und
-   Shademap unter den Label-Gates trainieren → Quantil-Ring bestücken → **Drift-Monitor**
+   **Folgetag** einfrieren, den Kollapstag selbst aus Lernern, Quantilen, Drift und
+   Scoreboard quarantänisieren) → Day-Ahead-RLS und Shademap unter den Label-Gates
+   trainieren → Quantil-Ring bestücken → **Drift-Monitor**
    (rollierender MAE, Verlust-Streak, Auto-Disable einer Schicht).
 4. **Scoreboard** für den Tag (`_score_scoreboard_day`, leak-frei aus dem Issued-Ring).
 5. **Wechselrichter-Kalibrierung** (`_train_inverter_cal`), falls ein AC-Zähler

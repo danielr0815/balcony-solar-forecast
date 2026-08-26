@@ -172,8 +172,11 @@ without the bundled frontend resources.
 - **Today's forecast band** (entities) — P10 / P50 / P90 for today (SPEC §11.2).
 - **Learners, drift & degradation** (entities) — source status, degraded flag,
   weather-image age, each learner's status, the applied intraday scalar, and
-  the corrected-vs-physics drift MAE.
-- **Drift MAE trend** (history-graph).
+  both the corrected hourly drift MAE (magnitude) and corrected daily-energy
+  bias (direction; positive = overforecast, negative = underforecast).
+- **Correction error: magnitude & direction** (history-graph) — rolling 7-day
+  hourly MAE and signed daily bias; the different aggregation bases are named
+  explicitly despite their shared Wh unit.
 - **Shademap** (markdown) — how to pull the learned transmittance table via
   `dump_shademap` and eyeball it against your site's known obstructions; see
   below.

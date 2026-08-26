@@ -49,6 +49,9 @@
       "drift_mae_corrected": {
         "name": "Drift-MAE (korrigiert)"
       },
+      "drift_bias_corrected": {
+        "name": "Tages-Bias (korrigiert, 7 Tage)"
+      },
       "learner_status_fast": {
         "name": "Status schneller Lerner",
         "state": {
@@ -383,6 +386,7 @@
       "group_dup_name": "Gruppennamen müssen eindeutig sein.",
       "group_no_planes": "Jede Gruppe muss mindestens eine Ebene enthalten.",
       "group_unknown_plane": "Eine Gruppe verweist auf eine unbekannte Ebene.",
+      "group_duplicate_plane": "Jede Ebene darf genau einmal und nur in einer Wechselrichter-Gruppe vorkommen.",
       "bad_ac_limit": "Das AC-Limit muss größer als 0 sein.",
       "shade_group_empty": "Eine Verschattungsgruppe muss ein nicht-leerer Name sein.",
       "shade_group_collision": "Eine Verschattungsgruppe darf nicht dem Namen einer Ebene entsprechen, die nicht selbst zu dieser Gruppe gehört.",
@@ -438,6 +442,7 @@
       "group_dup_name": "Gruppennamen müssen eindeutig sein.",
       "group_no_planes": "Jede Gruppe muss mindestens eine Ebene enthalten.",
       "group_unknown_plane": "Eine Gruppe verweist auf eine unbekannte Ebene.",
+      "group_duplicate_plane": "Jede Ebene darf genau einmal und nur in einer Wechselrichter-Gruppe vorkommen.",
       "bad_ac_limit": "Das AC-Limit muss größer als 0 sein.",
       "shade_group_empty": "Eine Verschattungsgruppe muss ein nicht-leerer Name sein.",
       "shade_group_collision": "Eine Verschattungsgruppe darf nicht dem Namen einer Ebene entsprechen, die nicht selbst zu dieser Gruppe gehört.",

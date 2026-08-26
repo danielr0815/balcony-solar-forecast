@@ -33,6 +33,7 @@ from .const import (
     BINARY_SENSOR_DEGRADED,
     DATE_SHADE_PROFILE_DATE,
     SELECT_SHADE_PROFILE_MODULE,
+    SENSOR_DRIFT_BIAS_CORRECTED,
     SENSOR_DRIFT_MAE_CORRECTED,
     SENSOR_ENERGY_TODAY,
     SENSOR_ENERGY_TODAY_DC,
@@ -94,6 +95,7 @@ DASHBOARD_ENTITY_KEYS: tuple[str, ...] = (
     SENSOR_LEARNER_STATUS_DAY_AHEAD,
     SENSOR_INTRADAY_SCALAR,
     SENSOR_DRIFT_MAE_CORRECTED,
+    SENSOR_DRIFT_BIAS_CORRECTED,
     SENSOR_SHADE_PROFILE,
     SELECT_SHADE_PROFILE_MODULE,
     DATE_SHADE_PROFILE_DATE,
@@ -432,7 +434,8 @@ def _add_learners(
         (SENSOR_LEARNER_STATUS_SLOW, "Shademap (slow) learner"),
         (SENSOR_LEARNER_STATUS_DAY_AHEAD, "Day-ahead bias"),
         (SENSOR_INTRADAY_SCALAR, "Intraday scalar (applied)"),
-        (SENSOR_DRIFT_MAE_CORRECTED, "Drift MAE (corrected vs physics)"),
+        (SENSOR_DRIFT_MAE_CORRECTED, "Drift MAE (hourly error magnitude, 7d)"),
+        (SENSOR_DRIFT_BIAS_CORRECTED, "Corrected daily bias (+ over / − under, 7d)"),
     ):
         row = _row(entity_map, key, name)
         if row is not None:
@@ -455,16 +458,24 @@ def _add_learners(
 def _add_drift_trend(
     cards: list[dict[str, Any]], entity_map: dict[str, str]
 ) -> None:
-    """Drift MAE (corrected) trend history-graph (SPEC §9.8)."""
-    entity_id = entity_map.get(SENSOR_DRIFT_MAE_CORRECTED)
-    if entity_id is None:
+    """Rolling corrected MAE + signed bias trend (SPEC §9.8)."""
+    entities: list[dict[str, str]] = []
+    mae_id = entity_map.get(SENSOR_DRIFT_MAE_CORRECTED)
+    if mae_id is not None:
+        entities.append({"entity": mae_id, "name": "Hourly MAE · magnitude (Wh)"})
+    bias_id = entity_map.get(SENSOR_DRIFT_BIAS_CORRECTED)
+    if bias_id is not None:
+        entities.append(
+            {"entity": bias_id, "name": "Daily bias · +over / −under (Wh)"}
+        )
+    if not entities:
         return
     cards.append(
         {
             "type": "history-graph",
-            "title": "Drift MAE (corrected) trend",
+            "title": "Correction error: magnitude & direction (7d)",
             "hours_to_show": 168,
-            "entities": [{"entity": entity_id, "name": "Corrected MAE (Wh)"}],
+            "entities": entities,
         }
     )
 

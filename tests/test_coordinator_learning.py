@@ -50,6 +50,7 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     LEARNER_LAYER_SLOW,
     LEARNER_SNAPSHOT_RING,
     LEARNER_STATUS_ACTIVE,
+    LEARNER_STATUS_COLD_START,
     LEARNER_STATUS_FROZEN,
     RLS_INIT_COVARIANCE,
     RLS_MIN_SAMPLES,
@@ -81,6 +82,7 @@ from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     LearnerConfig,
     PlaneConfig,
     PlaneResult,
+    QuantileState,
     ShademapBin,
     ShademapState,
     SiteConfig,
@@ -461,10 +463,12 @@ def test_day_ahead_samples_restrict_modeled_to_metered_planes():
         raw_hourly_wh=raw_hourly,
         per_plane={
             "M1": PlaneHourlyModeled(
-                beam_wh={hkey: 80.0}, diffuse_wh={hkey: 20.0}
+                beam_wh={hkey: 80.0}, diffuse_wh={hkey: 20.0},
+                slow_wh={hkey: 100.0},
             ),
             "M2": PlaneHourlyModeled(
-                beam_wh={hkey: 80.0}, diffuse_wh={hkey: 20.0}
+                beam_wh={hkey: 80.0}, diffuse_wh={hkey: 20.0},
+                slow_wh={hkey: 100.0},
             ),
         },
     )
@@ -512,10 +516,12 @@ def test_train_quantiles_day_restricts_modeled_to_metered_planes():
         cloud_class_by_hour={hkey: CLOUD_CLASS_CLEAR},
         per_plane={
             "M1": PlaneHourlyModeled(
-                beam_wh={hkey: 80.0}, diffuse_wh={hkey: 20.0}
+                beam_wh={hkey: 80.0}, diffuse_wh={hkey: 20.0},
+                corrected_wh={hkey: 100.0},
             ),
             "M2": PlaneHourlyModeled(
-                beam_wh={hkey: 80.0}, diffuse_wh={hkey: 20.0}
+                beam_wh={hkey: 80.0}, diffuse_wh={hkey: 20.0},
+                corrected_wh={hkey: 100.0},
             ),
         },
     ).to_dict()
@@ -635,6 +641,14 @@ def test_config_fingerprint_change_reseeds_cells(monkeypatch):
     store.config_fingerprint = "stale000000000000"
     c = _make_coordinator(store)
     c._bias_state = _learned_bias_state()
+    c._quantile_state = QuantileState(
+        bins={"clear|midday": [["2026-06-01", 0.8]]}
+    )
+    c._drift_state = DriftState(
+        slow_loss_streak=4,
+        day_ahead_loss_streak=6,
+        fast_loss_streak=6,
+    )
     raised: list[str] = []
     monkeypatch.setattr(c, "_raise_repair_issue", lambda i: raised.append(i))
 
@@ -649,6 +663,9 @@ def test_config_fingerprint_change_reseeds_cells(monkeypatch):
     # New fingerprint persisted; matches the live config.
     assert store.config_fingerprint == c._config_fingerprint()
     assert ISSUE_CONFIG_CHANGED_BIAS_RESEED in raised
+    assert c._drift_state.slow_loss_streak == 0
+    assert c._drift_state.day_ahead_loss_streak == 0
+    assert c._quantile_state == QuantileState()
 
 
 def test_config_fingerprint_first_start_records_without_reseed(monkeypatch):
@@ -877,7 +894,18 @@ def test_config_fingerprint_tracks_relevant_fields_only():
     c._site = replace(c._site, bifacial_beam_gain=1.25)
     assert c._config_fingerprint() != base
 
-    # Benign edits (measured entity id, shade grouping) do NOT move it.
+    # A measured entity rename is benign; shade grouping changes the pooled
+    # slow-only curve and therefore MUST move the learner feature fingerprint.
+    c._site = _site()
+    c._site = replace(
+        c._site,
+        planes=(
+            replace(c._site.planes[0], actual_entity="sensor.renamed"),
+            c._site.planes[1],
+        ),
+    )
+    assert c._config_fingerprint() == base
+
     c._site = _site()
     c._site = replace(
         c._site,
@@ -887,7 +915,7 @@ def test_config_fingerprint_tracks_relevant_fields_only():
             replace(c._site.planes[1], shade_group="balcony"),
         ),
     )
-    assert c._config_fingerprint() == base
+    assert c._config_fingerprint() != base
 
 
 def _legacy_v021_site() -> SiteConfig:
@@ -943,15 +971,19 @@ def test_config_fingerprint_legacy_config_is_byte_stable():
     change on a DELIBERATE fingerprint-format bump (CLASSIFIER_VERSION or a
     documented schema change), never as a side effect of adding an optional field.
 
-    Bumped 48f218a3ca86ee54 -> 4639a8c404bf8df6 exactly once, deliberately: the
+    Bumped 48f218a3ca86ee54 -> 4639a8c404bf8df6 deliberately when the
     0.23.x review put lat/lon INTO the fingerprint (SPEC §7.7 — a location
     reconfigure must re-seed). That format bump re-seeds every existing install
     exactly once on upgrade — accepted and documented, the reseed keeps theta
-    and only re-opens covariance (bias.reseed_day_ahead_bias).
+    and only re-opens covariance (bias.reseed_day_ahead_bias). The correction
+    review then deliberately moved it to acca367d674ba314 when shade pooling,
+    inverter membership and eta became explicit feature dependencies, and to
+    fb486cb07f574334 when shade pools became canonical member sets (labels no
+    longer trigger false reseeds).
     """
     c = _make_coordinator()
     c._site = _legacy_v021_site()
-    assert c._config_fingerprint() == "4639a8c404bf8df6"
+    assert c._config_fingerprint() == "fb486cb07f574334"
 
 
 def test_config_fingerprint_legacy_bytes_ignore_v022_none_fields():
@@ -1269,18 +1301,20 @@ def test_toggle_off_on_clears_drift_disable(monkeypatch):
     deleted: list[str] = []
     monkeypatch.setattr(c, "_delete_repair_issue", lambda i: deleted.append(i))
     c._drift_state = DriftState(
-        fast_disabled=True, fast_loss_streak=5, fast_option_seen=True
+        day_ahead_disabled=True,
+        day_ahead_loss_streak=5,
+        day_ahead_option_seen=True,
     )
-    # Toggle OFF: flag persists, fast_option_seen -> False.
-    c.entry = _Entry(options={"fast_learner_enabled": False})
+    # Toggle OFF: flag persists, day_ahead_option_seen -> False.
+    c.entry = _Entry(options={"day_ahead_bias_enabled": False})
     c.rebuild_learner_config()
-    assert c._drift_state.fast_disabled is True
-    assert c._drift_state.fast_option_seen is False
+    assert c._drift_state.day_ahead_disabled is True
+    assert c._drift_state.day_ahead_option_seen is False
     # Toggle back ON: the OFF->ON transition clears the disable.
-    c.entry = _Entry(options={"fast_learner_enabled": True})
+    c.entry = _Entry(options={"day_ahead_bias_enabled": True})
     c.rebuild_learner_config()
-    assert c._drift_state.fast_disabled is False
-    assert c._drift_state.fast_loss_streak == 0
+    assert c._drift_state.day_ahead_disabled is False
+    assert c._drift_state.day_ahead_loss_streak == 0
     assert ISSUE_FAST_LEARNER_DISABLED in deleted
 
 
@@ -1294,6 +1328,24 @@ def test_legacy_drift_state_without_option_seen_keeps_disable():
     c.entry = _Entry()  # all default options (slow enabled by default)
     c.rebuild_learner_config()
     assert c._drift_state.slow_disabled is True  # not cleared
+
+
+def test_legacy_fast_option_transition_does_not_reenable_day_ahead():
+    """The old Intraday switch is not evidence of a Day-ahead OFF->ON toggle."""
+    ds = DriftState.from_dict({
+        "version": 1,
+        "fast_disabled": True,
+        "fast_option_seen": False,
+    })
+    assert ds.day_ahead_disabled is True
+    assert ds.day_ahead_option_seen is None
+    c = _make_coordinator()
+    c._drift_state = ds
+    c.entry = _Entry(options={"day_ahead_bias_enabled": True})
+
+    c.rebuild_learner_config()
+
+    assert c._drift_state.day_ahead_disabled is True
 
 
 # ---------------------------------------------------------------------------
@@ -2441,8 +2493,8 @@ def test_learner_status_layer_strings():
     """_learner_status returns the layer-keyed ENUM strings (coordinator:674)."""
     c = _make_coordinator()
     status = c._learner_status()
-    assert status[LEARNER_LAYER_FAST] == LEARNER_STATUS_ACTIVE
-    assert status[LEARNER_LAYER_SLOW] == LEARNER_STATUS_ACTIVE
+    assert status[LEARNER_LAYER_FAST] == LEARNER_STATUS_COLD_START
+    assert status[LEARNER_LAYER_SLOW] == LEARNER_STATUS_COLD_START
 
 
 def test_learner_status_day_ahead_cold_start_without_cells():
@@ -2844,10 +2896,12 @@ def test_day_is_measured_clear_compares_metered_subset():
         raw_hourly_wh={hkey: 1000.0},  # site total: M1 400 + M2 (unmetered) 600
         per_plane={
             "M1": PlaneHourlyModeled(
-                beam_wh={hkey: 320.0}, diffuse_wh={hkey: 80.0}
+                beam_wh={hkey: 320.0}, diffuse_wh={hkey: 80.0},
+                raw_wh={hkey: 400.0},
             ),
             "M2": PlaneHourlyModeled(
-                beam_wh={hkey: 480.0}, diffuse_wh={hkey: 120.0}
+                beam_wh={hkey: 480.0}, diffuse_wh={hkey: 120.0},
+                raw_wh={hkey: 600.0},
             ),
         },
     )
@@ -3228,6 +3282,14 @@ def _ac_meter_site(*, invert: bool = False) -> SiteConfig:
     )
 
 
+def _complete_dc_hours(hours: dict[str, float]) -> dict[str, dict[str, float]]:
+    """Split whole-site DC evenly over both metered planes."""
+    return {
+        "M1": {hkey: value / 2.0 for hkey, value in hours.items()},
+        "M2": {hkey: value / 2.0 for hkey, value in hours.items()},
+    }
+
+
 # --- coordinator hook binding ----------------------------------------------
 
 
@@ -3265,15 +3327,13 @@ async def test_nightly_inverter_cal_folds_eligible_hours():
     c._site = _ac_meter_site()
     iso = "2026-07-05"
     day = datetime(2026, 7, 5).date()
-    # Summed per-module DC hourly actuals (one channel carrying the site total).
-    c._store.hourly_actuals[iso] = {
-        "M1": {
-            "2026-07-05T10:00:00+00:00": 500.0,  # eligible
-            "2026-07-05T11:00:00+00:00": 520.0,  # eligible
-            "2026-07-05T12:00:00+00:00": 900.0,  # clipped (dc-derived AC > 720)
-            "2026-07-05T13:00:00+00:00": 50.0,   # below the 100 W min load
-        }
-    }
+    # Complete per-module DC denominator; values below are whole-site totals.
+    c._store.hourly_actuals[iso] = _complete_dc_hours({
+        "2026-07-05T10:00:00+00:00": 500.0,  # eligible
+        "2026-07-05T11:00:00+00:00": 520.0,  # eligible
+        "2026-07-05T12:00:00+00:00": 900.0,  # clipped (dc-derived AC > 720)
+        "2026-07-05T13:00:00+00:00": 50.0,   # below the 100 W min load
+    })
     ac_hourly = {
         "2026-07-05T10:00:00+00:00": 480.0,   # ratio 0.96
         "2026-07-05T11:00:00+00:00": 499.2,   # ratio 0.96
@@ -3316,12 +3376,10 @@ async def test_nightly_inverter_cal_noop_when_all_hours_ineligible():
     iso = "2026-07-05"
     day = datetime(2026, 7, 5).date()
     # Both hours below the min load -> no eligible ratio -> state unchanged.
-    c._store.hourly_actuals[iso] = {
-        "M1": {
-            "2026-07-05T10:00:00+00:00": 40.0,
-            "2026-07-05T11:00:00+00:00": 30.0,
-        }
-    }
+    c._store.hourly_actuals[iso] = _complete_dc_hours({
+        "2026-07-05T10:00:00+00:00": 40.0,
+        "2026-07-05T11:00:00+00:00": 30.0,
+    })
 
     async def _fake_read(_day):
         return {
@@ -3344,12 +3402,10 @@ async def test_nightly_inverter_cal_records_raw_ratio_when_out_of_band():
     c._site = _ac_meter_site()
     iso = "2026-07-05"
     day = datetime(2026, 7, 5).date()
-    c._store.hourly_actuals[iso] = {
-        "M1": {
-            "2026-07-05T10:00:00+00:00": 500.0,
-            "2026-07-05T11:00:00+00:00": 520.0,
-        }
-    }
+    c._store.hourly_actuals[iso] = _complete_dc_hours({
+        "2026-07-05T10:00:00+00:00": 500.0,
+        "2026-07-05T11:00:00+00:00": 520.0,
+    })
 
     async def _fake_read(_day):
         return {
@@ -3378,9 +3434,9 @@ async def test_nightly_inverter_cal_read_exception_is_contained():
     c._site = _ac_meter_site()
     iso = "2026-07-05"
     day = datetime(2026, 7, 5).date()
-    c._store.hourly_actuals[iso] = {
-        "M1": {"2026-07-05T10:00:00+00:00": 500.0}
-    }
+    c._store.hourly_actuals[iso] = _complete_dc_hours(
+        {"2026-07-05T10:00:00+00:00": 500.0}
+    )
     before = c._inverter_cal_state
 
     async def _boom(_day):
@@ -3407,12 +3463,10 @@ async def test_nightly_eta_out_of_band_streak_raises_then_clears_issue():
     c._delete_repair_issue = deleted.append
 
     async def _run_night(iso: str, ac10: float, ac11: float) -> None:
-        c._store.hourly_actuals[iso] = {
-            "M1": {
-                f"{iso}T10:00:00+00:00": 500.0,
-                f"{iso}T11:00:00+00:00": 520.0,
-            }
-        }
+        c._store.hourly_actuals[iso] = _complete_dc_hours({
+            f"{iso}T10:00:00+00:00": 500.0,
+            f"{iso}T11:00:00+00:00": 520.0,
+        })
         c._store.issued[iso] = {"status": "ok"}  # a day we RAN (streak guard)
         ac = {f"{iso}T10:00:00+00:00": ac10, f"{iso}T11:00:00+00:00": ac11}
 

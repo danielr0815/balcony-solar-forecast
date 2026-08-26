@@ -1,7 +1,7 @@
 # Lernschichten & Korrekturen
 
 Dieses Dokument beschreibt alle adaptiven Schichten von `balcony-solar-forecast`
-(Stand `main` @ v0.23.0): was jede Schicht lernt, **wogegen** sie trainiert, wo
+(Stand `main` @ v0.27.0): was jede Schicht lernt, **wogegen** sie trainiert, wo
 sie auf die servierte Kurve wirkt, welche Gates/Clamps/Konstanten sie begrenzen
 und wie man sie zurücksetzt. Du brauchst es, wenn die Prognose systematisch
 daneben liegt und du entscheiden musst, ob das Physik-, Lern- oder Reset-Arbeit
@@ -22,13 +22,13 @@ mit exponentiellem Vergessen.
 
 | Schicht | lernt | trainiert gegen | wirkt auf | persistiert | Reset |
 |---|---|---|---|---|---|
-| Intraday-Skalar (`core/bias`) | ein transienter Wetterfehler-Faktor | Live-Messung vs. **raw × θ** (k_c-Raum) | Slot-Faktor, ~6 h voraus | **nie** | Neustart / Ring leer ⇒ 1.0 |
+| Intraday-Skalar (`core/bias`) | ein transienter Wetterfehler-Faktor | Live-Messung vs. **slow_only × θ** (k_c-Raum) | Slot-Faktor, ~6 h voraus | **nie** | Neustart / Ring leer ⇒ 1.0 |
 | Day-ahead-Bias θ (`core/bias`) | ein θ je (Wolkenklasse × Tagesteil) | **slow_only** vs. gemessene Stundenenergie | Slot-Faktor, ganze Kurve | ja (`bias_state`) | `reset_day_ahead_bias`, Fingerprint-Reseed, Rollback |
 | Shademap (`core/shademap`) | absolute Beam-Transmittanz T je Bin | Messung vs. **ungegatete** Beam-/Diffus-Referenz | Beam-Gate im Motor (ersetzt statisches τ) | ja (`shademap_state`) | Rollback, Re-Bootstrap |
 | Quantile (`core/quantiles`) | empirische P10/P50/P90-Multiplikatoren | Messung vs. **issued-corrected** Stunde | P10/P50/P90-Bänder (nicht P50-Kurve!) | ja (`quantile_state`) | Rollback, Re-Bootstrap |
 | Inverter-η (`core/inverter_cal`) | ein Site-Skalar η_inv | AC-Zähler vs. Summe DC-Stunden | nur die AC-Kurve | ja (`inverter_cal_state`) | kein Service; nie tragend |
 | Scoreboard (`core/scoreboard`) | nichts — **bewertet** nur | issued vs. Messung | Diagnose | ja (`scoreboard_state`) | — |
-| Drift-Monitor (`_nightly`) | rollierende Tages-MAE + Streaks | corrected/slow_only vs. raw | schaltet Layer ab, rollt zurück | ja (`drift_state`) | Options-Toggle OFF→ON |
+| Drift-Monitor (`_nightly`) | rollierende Tageslicht-Stunden-MAE + Streaks | corrected/slow_only vs. raw | schaltet persistierte Layer ab, rollt zurück | ja (`drift_state`) | Options-Toggle OFF→ON |
 
 Scoreboard und Drift-Monitor sind bewusst **keine** Lerner: sie messen und
 schalten, korrigieren aber nichts.
@@ -40,7 +40,7 @@ schalten, korrigieren aber nichts.
 ändert die Rechnung nicht) und wendet sie so an: **`beam_tau`** ersetzt das
 statische Horizont-τ im Beam-Gate (Beam + Zirkumsolar; die isotrope
 Diffusstrahlung behält den statischen Sky-View-Factor) → `clamp_groups`
-(AC-Grenze je Gruppe) → **`slot_factor`** (Produkt aus θ und Intraday-Faktor,
+(DC-Clip `ac_limit/eta` je Gruppe) → **`slot_factor`** (Produkt aus θ und Intraday-Faktor,
 gebaut in `coordinator._build_learner_hooks`) → **erneutes** `clamp_groups`,
 damit ein Faktor > 1 die Kurve nie über die AC-Grenze hebt → **`band_by_slot`**
 multipliziert die Quantil-Bänder auf die servierte Slot-Leistung. Auf der
@@ -67,14 +67,19 @@ eine Zelle also nicht altern lassen.
 
 `_nightly.train_day_ahead` nimmt als Modell-Seite **`snap.slow_only_hourly_wh`**
 — die Shademap-korrigierte, aber bias-freie Kurve — mit Fallback auf `raw` und
-zuletzt `corrected`. Grund: θ wird *auf* die Shademap-Kurve angewandt; träfe man
+zuletzt `corrected`. Bei Teilmessung wird daraus nicht per Beam-Anteil geschätzt,
+sondern die exakte Summe der `per_plane[*].slow_wh`-Kurven der gemeterten Ebenen
+gebildet; fehlt sie in einem Alt-Snapshot, fällt der Tag aus. Grund: θ wird *auf* die Shademap-Kurve angewandt; träfe man
 gegen reines RAW, korrigierten Shademap und θ denselben Verschattungsfehler
 doppelt, sobald die Shademap lernt. `slow_only` ist `{}`, wenn die Slow-Schicht
 gerade inaktiv ist (dann gilt slow_only == raw), und entsteht pro Nacht in
 `coordinator._slow_only_hourly` in einem zusätzlichen Motorlauf. Die Mess-Seite
 ist bevorzugt die **echte Stundenenergie** je Zelle (`hourly_actuals_log`, Summe
-über alle Kanäle); ohne Stundenring wird die Tagessumme nach modelliertem
-Anteil auf die Zellen verteilt (grober Fallback).
+über alle konfigurierten Messkanäle). Dabei zählt nur die Stunden-Schnittmenge,
+in der jeder Messkanal einen Wert trägt; eine Recorder-Lücke eines Ports wird
+weder als partielle Site-Leistung noch als 0-Wh-Label trainiert. Ohne
+Stundenring wird die Tagessumme nach modelliertem Anteil auf die Zellen verteilt
+(grober Alt-Store-Fallback).
 
 ### Anwendung
 
@@ -112,7 +117,10 @@ nur noch Fallback ohne Längengrad-Info; historische Analysen mit dem
 * **Fingerprint-Reseed** (§10): behält θ, öffnet nur die Kovarianz und deckelt n.
 * **`rollback_learners`**: setzt Bias + Shademap + Quantile gemeinsam auf einen
   Ring-Snapshot zurück.
-* **Drift-Auto-Disable** rollt gezielt nur die Fast-Schicht zurück (§8).
+* **Drift-Auto-Disable** rollt gezielt nur die Day-ahead-Schicht zurück (§8)
+  und stoppt auch deren Training. Ein Wechsel der Slow-Basis öffnet die
+  RLS-Kovarianz erneut; Slow- oder Day-ahead-Wechsel leeren den auf der alten
+  korrigierten Basis gelernten Quantilring.
 
 ## 4. Wolken-Klassifikation — `bias.classify_cloud`
 
@@ -157,12 +165,12 @@ weil beide Seiten dieselbe Referenz benutzen.
 `coordinator._build_intraday_sample` liest alle `actual_entity`-Sensoren,
 merkt sich die Menge der **nutzbaren** Ebenen und normiert die Modellseite auf
 genau diese Teilmenge (Kanal-Dropout darf nicht als Produktionsdefizit
-erscheinen). Die Modellseite ist `pr.raw_watts` **× θ** des Slots
-(`_modeled_power_for_planes`) — also die servierte Kurve *ohne* den Intraday-
-Faktor. Vorher wurde gegen reines RAW gesampelt, wodurch θ (morgens 1.36–1.49)
-und der Skalar denselben Fehler zweimal korrigierten; das Verhältnis
-serviert/gemessen erreichte ×1.9 um 07–09Z. θ ist über den Tag eingefroren, es
-gibt also keine Rückkopplung.
+erscheinen). Die Modellseite ist die exakte `pr.slow_watts`-Ebenenkurve
+**× θ** des Slots (`_modeled_power_for_planes`) — also die servierte Kurve
+*ohne* den Intraday-Faktor. Ein Bezug auf RAW ließe Shademap und Intraday
+denselben Schattenverlust korrigieren; ein Bezug auf RAW ohne θ ließe zusätzlich
+θ und Intraday denselben Residualfehler korrigieren. Slow-only und θ sind für
+das Sample eingefroren, es gibt also keine Rückkopplung.
 
 **Gates und Konstanten:**
 
@@ -187,7 +195,7 @@ angewandt, die nicht vollständig vergangen sind (`age_min > −15.0`).
 persistiert werden, die *Samples* sind aber reproduzierbare Messwerte. Beim
 ersten Tick mit Vorgängerkurve und Wetterstatus `fresh`/`cached` rekonstruiert
 `_async_rearm_intraday_ring` den Ring aus den 5-Minuten-Statistiken des
-Site-Summen-DC-Sensors plus der θ-korrigierten Kurve; die Modellseite wird dabei
+Site-Summen-DC-Sensors plus der Slow-only- und θ-korrigierten Kurve; die Modellseite wird dabei
 auf die **bemessenen** Ebenen (mit `actual_entity`) eingeschränkt — sonst
 halbierte ein teilbemessener Standort den Skalar nach jedem Reload bis an den
 Clamp-Boden. Der One-Shot wird erst verbraucht, wenn ein echter Versuch möglich
@@ -224,7 +232,8 @@ statischem τ=0 hätte ~0 modellierten Beam — untrainierbar.
 
 * **Tages-Gate:** gemessene Site-Energie ≥ `SHADEMAP_MEASURED_CLEAR_MIN_FRAC`
   (0.8) der modellierten RAW-Tagessumme, sonst trainiert der Tag **nichts**.
-* **Collapse-Freeze** (§8) und Kill-Switch `slow_enabled`.
+* **Collapse-Freeze** (§8), Kill-Switch `slow_enabled` und persistiertes
+  Drift-Auto-Disable; eine abgeschaltete Shademap wird nicht weitertrainiert.
 * **Quasi-klar je Stunde** (`is_quasi_clear`): k_c innerhalb
   `[lo(el), SHADEMAP_KC_HI=1.35]`, wobei lo linear von
   `SHADEMAP_KC_LO_LOW_SUN` (0.65) bei 0° auf `SHADEMAP_KC_LO_HIGH_SUN` (0.85)
@@ -239,10 +248,14 @@ statischem τ=0 hätte ~0 modellierten Beam — untrainierbar.
   über `LABEL_FROZEN_MIN_REPEATS` = 4 Stunden, `_is_frozen_channel`), ein
   *fehlender* Kanal (konfiguriertes Modul ohne eine einzige brauchbare LTS-Zeile
   — toter DTU-Port) oder ein Modul unter `DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE`
-  (0.75) der Tageslichtstunden verwerfen jeweils den **ganzen Tag** für alle
+  (0.75) der **erwarteten geometrischen Tageslichtstunden** verwerfen jeweils
+  den **ganzen Tag** für alle
   Kanäle (`return {}, {}`) — eine Teil-Site-Messung darf nie Ground Truth gegen
-  die Voll-Site-Modellenergie werden, sie läse sich als Produktionsdefizit. Damit
-  fallen Shademap, Day-ahead-RLS, Quantil-Ring **und** Scoreboard für den Tag aus
+  die Voll-Site-Modellenergie werden, sie läse sich als Produktionsdefizit.
+  Nachtzeilen zählen dabei nicht als Abdeckung. Innerhalb eines angenommenen
+  Tages entstehen Site-Stunden zusätzlich nur aus der Schnittmenge aller
+  Messkanäle; eine einzelne Kanallücke ist kein Nullproduktions-Sample. Damit fallen Shademap,
+  Day-ahead-RLS, Quantil-Ring, Drift-Monitor **und** Scoreboard für den Tag aus
   (alle brauchen `actuals`); er wird nicht als trainiert markiert und von einem
   Catch-up erneut versucht.
 
@@ -275,8 +288,10 @@ QUANTILE_MIN_FORECAST_WH` (5.0). Trainiert wird gegen die **issued-corrected**
 Kurve — dieselbe, die das Scoreboard bewertet und auf die die Bänder später
 multipliziert werden (kein Leck, konsistenter Bezugsrahmen).
 
-**Ring-Fenster:** primär datumsbasiert (`QUANTILE_RING_DAYS` = 90 Tage relativ
-zum Trainingstag), als harter Backstop ein Count-Cap von
+**Ring-Fenster:** global datumsbasiert (`QUANTILE_RING_DAYS` = 90 Tage): jeder
+Trainingsschritt trimmt alle Bins relativ zum Trainingstag, auch unberührte;
+`bands_for_bin(..., as_of_date=...)` fenstert zusätzlich beim Servieren relativ
+zum lokalen Prognosedatum. Als harter Backstop dient ein Count-Cap von
 `QUANTILE_RING_DAYS × QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN` (90 × 8 = 720); bei
 Überlauf fliegen zuerst undatierte Legacy-Samples, dann die ältesten.
 
@@ -294,9 +309,10 @@ einem einzelnen geclampten Ausreißer dominiert wäre; ein Slot ohne Band läuft
 Motor unverändert durch. Perzentile per Typ-7-Interpolation
 (`empirical_percentile`), Monotonie p10 ≤ p50 ≤ p90 zusätzlich abgesichert.
 
-**Seeding aus dem Bootstrap (0.21/A6):** `core/bootstrap_build.py` bildet je
-Tageslichtstunde `corrected = clamp(θ_Zelle) × modelled_site` (θ *nach* dem
-RLS-Schritt desselben Tages) und füttert die Samples durch die **live**
+**Seeding aus dem Bootstrap:** `core/bootstrap_build.py` simuliert walk-forward
+und bildet je Tageslichtstunde `corrected = θ_vor_Tag × slow_only_vor_Tag`.
+Erst nach dem Residuum dürfen die Labels des Tages Shademap und θ verändern;
+dadurch leakt das Ziel nicht in seine eigene Prognose. Die Samples laufen durch die **live**
 `quantiles.train_quantiles` — identische Taxonomie, Clamps, Datumsfenster und
 Caps, plus ein Per-Bin-Per-Tag-Deckel von 8. Ohne dieses Seeding war am Tag 0
 nur die Overcast-Bin trainiert und jedes andere Band kollabierte wochenlang auf
@@ -310,37 +326,48 @@ verengend; Provenienz in `DATA_KEY_BAND_SOURCE` / `..._BY_DAY`.
 
 ## 8. Guards: Drift-Monitor, Collapse-Detektor, Rollback-Ring
 
-**Drift-Monitor** (`_nightly.update_drift`) zerlegt `corrected = slow ∘ fast`
+**Drift-Monitor** (`_nightly.update_drift`) zerlegt den persistierten Stapel
+`corrected = slow ∘ day-ahead`
 und schreibt die Schuld pro Schicht zu: SLOW verliert, wenn `MAE(slow_only)`
-gegen `MAE(raw)` verliert; FAST, wenn `MAE(corrected)` gegen `MAE(slow_only)`
+gegen `MAE(raw)` verliert; DAY-AHEAD, wenn `MAE(corrected)` gegen `MAE(slow_only)`
 verliert. „Verlieren" heißt: schlechter um mehr als `DRIFT_LOSS_MARGIN` (2 %, relativ)
 **und** mehr als `DRIFT_LOSS_MIN_ABS_WH` (50 Wh, absolut) — die absolute
 Schwelle verhindert, dass Rundungsrauschen an klaren Tagen sieben Münzwürfe
-hintereinander als Verlustserie zählt. Als MAE-Proxy dient der absolute
-**Tagesenergie-Fehler in Wh**: je Kurve (raw / slow_only / corrected) die auf den
-lokalen Trainingstag geschnittene Stundensumme minus der gemessenen Tagesenergie,
-als Betrag — dieselbe Einheit wie die Schwelle `DRIFT_LOSS_MIN_ABS_WH` und wie der
-Sensor `drift_mae_corrected` (Einheit Wh, `MEASUREMENT`, kein `device_class`, weil
-ein Fehlermaß keine Energiemenge ist). „Tages-kWh" meint im Code-Kommentar nur die
-*Metrik-Familie* (Tagesenergie statt Stunden-MAE, SPEC §15.1), nicht die Einheit; der
-Ring `daily_mae` speichert Wh, auf 2 Nachkommastellen gerundet. Das Fenster ist
-`DRIFT_WINDOW_DAYS` (7). Fehlt die
-slow_only-Kurve (Legacy-Snapshot oder Slow inaktiv), treibt das alte gemeinsame
-Signal corrected-vs-raw beide Streaks.
+hintereinander als Verlustserie zählt. Die Metrik ist der echte mittlere
+absolute **Stundenfehler in Wh** über die verfügbaren Tageslichtstunden. Damit
+können +50 Wh morgens und −50 Wh mittags nicht zu einem scheinbar perfekten Tag
+wegfallen; positive Ist-Produktion zählt auch dann, wenn beide Prognosekurven
+für diese Stunde 0 lieferten. Nur ein Legacy-Store ohne Stunden-Istwerte fällt auf den absoluten
+Tagesenergiefehler zurück; der Ring kennzeichnet die Basis mit `hourly_basis`
+und hält zusätzlich `*_daily_abs` sowie den signierten
+`corrected_daily_bias`. Der Sensor `drift_mae_corrected` zeigt den Mittelwert
+der Stunden-MAE im `DRIFT_WINDOW_DAYS`-Fenster (7); der getrennte Sensor
+`drift_bias_corrected` mittelt den signierten Tagesenergiefehler desselben
+Fensters (positiv = Überprognose, negativ = Unterprognose). Der Bias ersetzt den
+MAE nicht: Gegenläufige Fehler können sich im Bias aufheben. Beide zeigen also
+das Fenster, nicht bloß den letzten Tag. Bei
+Teilmessung stammen RAW/SLOW/CORRECTED aus den exakten Ebenenkurven des
+Issued-Snapshots; fehlt diese Aufschlüsselung, wird nicht geschätzt. Fehlt
+slow_only, kann nur Day-ahead gegen RAW beurteilt werden — kein erfundenes
+Slow-Signal. Intraday ist restart-neutral und nachts nicht im Snapshot; der
+Monitor beurteilt daher nur die beiden persistierten Schichten.
 
 `DRIFT_LOSS_STREAK_DAYS` (7) aufeinanderfolgende Verlusttage ⇒ Layer
 **auto-disable** + Repair-Issue + Rollback dieser einen Schicht auf den Snapshot
 von vor der Serie (`restore_layer_snapshot`, Index `len(ring) − 7`; der Ring
 `LEARNER_SNAPSHOT_RING` = 10 ist absichtlich länger als der Streak). Das Flag
-bleibt, bis der Betreiber die Option im Options-Flow **OFF→ON** schaltet
-(`rebuild_learner_config` erkennt genau diesen Übergang — ein bloßer Neustart
-löscht nichts).
+bleibt, bis der Betreiber die Option im Options-Flow **OFF→ON** schaltet. Der
+Basiswechsel leert den Quantilring; bei Slow-Auto-Disable wird außerdem die
+θ-Kovarianz wieder geöffnet, damit Day-ahead nicht auf der entfernten
+Slow-only-Basis festhängt. `rebuild_learner_config` erkennt genau diesen
+Übergang; ein bloßer Neustart löscht nichts.
 
 **Collapse-Detektor** (`is_collapse_day`): gemessene Tagesenergie <
 `COLLAPSE_MEASURED_MAX_FRAC` (5 %) der Prognose, und nur wenn die Prognose >
 `COLLAPSE_FORECAST_MIN_WH` (500 Wh) war. Das friert **beide geometrischen
-Schichten für den Folgetag** ein (Schnee liegt morgens noch) und überspringt das
-Training des Kollapstages. Nur der geclampte Intraday-Skalar reagiert dann noch.
+Schichten für den Folgetag** ein (Schnee liegt morgens noch) und quarantänisiert
+den Kollapstag aus Day-ahead-/Shademap-Training, Quantilen, Drift und
+Scoreboard. Nur der geclampte Intraday-Skalar reagiert dann noch.
 
 **Idempotenz:** `trained_days` (Ring 120) markiert verarbeitete Tage — RLS-Schritte
 und Streak-Zähler sind *nicht* selbst idempotent, ohne diese Marke würde jeder
@@ -355,6 +382,10 @@ die eigene Prognose **as issued** gegen die gemessene Tagesenergie.
 * **Leckfreiheit:** der Engine-Wert kommt aus dem issued-Ring (nie neu
   gerechnet). Ein Snapshot, der erst nach 06:00 lokal geschrieben wurde, wird
   gar nicht gewertet (Nowcast-Schutz).
+* **Vollständigkeit:** Bei aktuellem Stundenring wird ein Tages-kWh-Score nur
+  geschrieben, wenn alle im Issued-Snapshot enthaltenen geometrischen
+  Tageslichtstunden auf jedem Messkanal vorliegen. Teil-Tage bleiben ungewertet;
+  nur ein Legacy-Store ohne Stundenring nutzt die grobe Tagessumme.
 * **Fenster:** `DEFAULT_SCOREBOARD_WINDOW_DAYS` = 14, konfigurierbar.
 * **Strata:** dominante Wolkenklasse des Tages, **energiegewichtet** über die
   issued-Stunden (eine Nebelmorgen-Nacht kann den Tag nicht als „clear" wählen).
@@ -369,20 +400,20 @@ Drift-Monitor.
 
 ## 10. Config-Fingerprint — `coordinator._config_fingerprint`
 
-Ein SHA-256-Kurzhash (16 hex) über genau die Felder, auf die die θ-Zellen
-konditioniert sind: je Ebene Name, `azimuth_deg`, `tilt_deg`, `wp`,
-`efficiency`, `ross_coeff` und **jede Horizontzeile** (`azimuth_deg`,
-`elevation_deg`, `tau`, `seasonal`, `tau_leafed`, `tau_bare` sowie — 0.22,
-nur-wenn-gesetzt — `tau_points`, `tau_points_bare`, `diffuse_tau`); dazu
-`albedo`, `bifacial_beam_gain`, je Wechselrichtergruppe **Name und** `ac_limit_w`
-(Segment `grp:{name}:ac{limit}`) und `CLASSIFIER_VERSION`. Achtung: schon das
-Umbenennen einer Gruppe flippt den Fingerprint und löst einen Bias-Reseed samt
-Repair-Issue aus, obwohl es die modellierte Kurve nicht verändert. Alle Zahlen
-gerundet, damit eine Float-Reserialisierung
-den Hash nicht verschiebt; die 0.22-Felder erscheinen nur, wenn gesetzt — eine
+Ein SHA-256-Kurzhash (16 hex) über genau die Felder, auf deren RAW-/Slow-only-
+Basis die θ-Zellen konditioniert sind: Standort; je Ebene Name,
+`azimuth_deg`, `tilt_deg`, `wp`, `efficiency`, `ross_coeff`, die kanonische
+Shade-Pool-Mitgliedermenge und
+**jede Horizontzeile** (`azimuth_deg`, `elevation_deg`, `tau`, `seasonal`,
+`tau_leafed`, `tau_bare` sowie — nur-wenn-gesetzt — `tau_points`,
+`tau_points_bare`, `diffuse_tau`); dazu `albedo`, `bifacial_beam_gain`, je
+Wechselrichtergruppe Mitgliedschaft, `ac_limit_w` und `inverter_efficiency`
+sowie `CLASSIFIER_VERSION`. Der reine Gruppenname ist bewusst ausgeschlossen:
+Umbenennen verändert keine Kurve. Alle Zahlen gerundet, damit eine Float-Reserialisierung
+den Hash nicht verschiebt; die optionalen Felder erscheinen nur, wenn gesetzt — eine
 Legacy-Config behält nach dem Upgrade ihren Fingerprint und wird **nicht**
-re-seeded. Bewusst **draußen**: Entity-IDs, `shade_group`, Zählervorzeichen —
-alles, was die modellierte Kurve nicht verändert.
+re-seeded. Bewusst **draußen**: Entity-IDs, Zählervorzeichen und reine
+Bezeichnungsfelder — alles, was die modellierte Kurve nicht verändert.
 
 **Bei Änderung** (`_reconcile_config_fingerprint`, läuft bei jedem Setup und
 jedem Options-Reload): ist kein Fingerprint gespeichert (Erstinstallation), wird
@@ -392,11 +423,12 @@ der aktuelle nur **notiert** — kein Reseed. Unterscheidet er sich, läuft
 DAY_AHEAD_BIAS_RESEED_N)`. Die RLS-Verstärkung hängt an **P**, nicht an n — bei
 λ=0.98 und n≈100 bewegt sich θ sonst nur ~0.001/Tag, die Neuanpassung dauerte
 Monate. Anschließend wird der neue Fingerprint persistiert, ein INFO-Log
-geschrieben und das Repair-Issue `ISSUE_CONFIG_CHANGED_BIAS_RESEED` gesetzt.
+geschrieben und das Repair-Issue `ISSUE_CONFIG_CHANGED_BIAS_RESEED` gesetzt. Der
+Quantilring wird geleert, weil seine relativen Fehler gegen die alte korrigierte
+Kurvenbasis gelernt wurden.
 
-Nicht automatisch angefasst werden Shademap, Quantil-Ring und Scoreboard — deren
-Inhalt ist nach einer Geometrieänderung ebenfalls semantisch veraltet. Für
-Shademap und Quantile ist der Re-Bootstrap gedacht (`run_bootstrap`, `dry_run`
+Nicht automatisch angefasst werden Shademap und Scoreboard. Für eine neue
+Shademap ist der Re-Bootstrap gedacht (`run_bootstrap`, `dry_run`
 standardmäßig `true`; `store.import_bootstrap` schreibt genau `bias_state`,
 `shademap_state`, `quantile_state` — letzteres additiv, siehe §7). Der
 **Scoreboard-Ring ist von allen diesen Pfaden ausgenommen** (auch der
@@ -407,9 +439,13 @@ nur über sein Fenster aus. Siehe `05-anlage-und-betrieb-runbook.md`,
 ## 11. Nebenlerner: Inverter-Wirkungsgrad — `core/inverter_cal.py`
 
 Lernt **einen** Site-Skalar η_inv aus dem Gesamt-AC-Zähler (`ac_actual_entity`)
-gegen die Summe der DC-Stundenwerte. Nur Stunden mit DC ≥
+gegen die Summe der DC-Stundenwerte. Weil der AC-Zähler die ganze Anlage
+abbildet, müssen dafür **alle** Ebenen einen DC-Messkanal haben. Nur Stunden mit DC ≥
 `INVERTER_CAL_MIN_LOAD_W` (100 W) und ohne Clipping-Verdacht
-(`INVERTER_CAL_CLIP_HEADROOM_FRAC` 0.90 der Gruppen-AC-Decke) zählen; Ratios
+(`INVERTER_CAL_CLIP_HEADROOM_FRAC` 0.90, **je Gruppe** gegen deren eigene
+AC-Decke geprüft) zählen; freie Kapazität einer Schwestergruppe darf Clipping
+nicht verdecken. Eine gruppenlose Anlage hat keine modellierte Clip-Decke und
+kann lernen. Ratios
 außerhalb `[INVERTER_CAL_MIN, INVERTER_CAL_MAX]` = [0.90, 0.99] werden
 **verworfen** (nicht geclamped) und erhöhen n nicht. EMA mit adaptivem Warm-up
 wie bei der Shademap (`INVERTER_CAL_EMA_ALPHA` 0.10); `effective_eta` liefert
@@ -421,14 +457,24 @@ und n bleibt 0.
 
 ## 12. Wechselwirkungen und Fallen
 
-**RAW ist die Lern-Wahrheit.** Jede Schicht muss gegen genau die Kurve
+**Schichttreue ist die Lern-Wahrheit.** Jede Schicht muss gegen genau die Kurve
 trainieren, auf die sie *angewandt* wird — sonst korrigieren zwei Schichten
 denselben Fehler. Der Stapel ist deshalb sauber geschichtet: Shademap gegen die
 **ungegatete** Physik-Referenz, θ gegen **slow_only**, Intraday gegen
-**raw × θ**, Quantile gegen **issued-corrected**. Alle drei historischen
+**slow_only × θ**, Quantile gegen **issued-corrected**. Alle drei historischen
 Doppelkorrektur-Bugs (Shademap-Selbstreferenz „FIX-3", θ-gegen-raw „B2",
 Intraday-gegen-raw „A2") hatten dieselbe Signatur: ein Faktor, der einen bereits
 korrigierten Fehler noch einmal korrigiert, sichtbar als Übertreibung am Morgen.
+
+**Bootstrap heißt Walk-forward, nicht Rückwärts-Fit.** Pro historischem Tag
+werden Shademap und θ vor dessen Messwerten eingefroren, daraus die physisch
+geclampte Slow-only-Kurve gebildet und erst dann θ- sowie Quantilresiduen
+berechnet. Bei echten Stunden-Istwerten zählt auch hier nur die gemeinsame
+Stunden-Schnittmenge aller gemeterten Kanäle; ein fehlender Port wird nie als
+Site-Defizit gelernt. Der heutige Zielwert darf weder die heutige Shademap-Referenz noch
+das heutige Quantilband vorab verbessern. Die Import-Signatur hasht deshalb die
+vollständige semantische Feature-Geometrie (Horizonte, Shade-Pools,
+Wechselrichter-Mitgliedschaften/Grenzen/η), nicht nur Koordinaten und Namen.
 
 **Ein besserer Prior schlägt einen kompensierenden Lerner.** Alle Lerner sind
 geclamped: θ ∈ [0.5, 1.5], Shademap-τ ∈ [0.0, 1.1], Intraday ∈ [0.25, 2.5].
