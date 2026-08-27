@@ -319,6 +319,13 @@ def test_usable_power_accepts_fresh_zero():
     assert _usable_power(s, now) == 0.0
 
 
+@pytest.mark.parametrize("value", ["-1", "inf", "1000.1"])
+def test_usable_power_rejects_implausible_value(value):
+    now = datetime.now(UTC)
+    s = State("sensor.m1", value, last_updated=now)
+    assert _usable_power(s, now, max_w=1000.0) is None
+
+
 @pytest.mark.parametrize("bad", ["unknown", "unavailable", "", "none", "not-a-number"])
 def test_usable_power_rejects_unusable_states(bad):
     now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
@@ -361,6 +368,16 @@ def test_read_live_actuals_total_none_when_all_unusable():
     c.hass.states.set("sensor.m1", "unavailable", last_updated=now)
     c.hass.states.set("sensor.m2", "unknown", last_updated=now)
     assert c._read_live_actuals_total(now) is None
+
+
+def test_read_live_actuals_total_skips_one_impossible_channel():
+    c = _make_coordinator()
+    now = datetime.now(UTC)
+    c.hass.states.set("sensor.m1", 27_061_504.1, last_updated=now)
+    c.hass.states.set("sensor.m2", 210.0, last_updated=now)
+    total, planes = c._read_live_actuals_total(now)
+    assert total == pytest.approx(210.0)
+    assert planes == {"M2"}
 
 
 # ---------------------------------------------------------------------------
@@ -1419,18 +1436,19 @@ def test_intraday_sample_theta_referenced_no_double_correction():
 
 
 def test_intraday_sample_theta_referenced_keeps_real_weather_signal():
-    """A2: a REAL deviation on top of θ survives — measured == 1.4 × raw × θ makes
-    the ratio 1.4, so a genuine under-forecast (e.g. 21.07.) is still caught.
+    """A2: a REAL deviation on top of θ survives — measured == 1.3 × raw × θ makes
+    the ratio 1.3, so a genuine under-forecast (e.g. 21.07.) is still caught.
     """
     c = _make_coordinator()
     result, start = _forecast_at_noon(400.0, raw_watts=400.0)
     c._day_factor = {start: 1.4}
-    # measured = 1.4 × (raw 400 × θ 1.4) = 784 W.
-    c.hass.states.set("sensor.m1", 784.0, last_updated=start)
+    # measured = 1.3 × (raw 400 × θ 1.4) = 728 W; still below the separate
+    # instantaneous 2 × 370 Wp physical-input gate.
+    c.hass.states.set("sensor.m1", 728.0, last_updated=start)
     c.hass.states.set("sensor.m2", 0.0, last_updated=start)
     sample = c._build_intraday_sample(result, start)
     assert sample is not None
-    assert sample.measured_kc / sample.modeled_kc == pytest.approx(1.4, rel=1e-6)
+    assert sample.measured_kc / sample.modeled_kc == pytest.approx(1.3, rel=1e-6)
 
 
 def test_intraday_sample_scales_modeled_to_usable_planes():
@@ -1689,6 +1707,24 @@ def test_rearm_samples_from_seconds_epoch_rows_fill_ring_nonneutral():
         c._intraday_samples.append(s)
     scalar = compute_intraday_scalar(list(c._intraday_samples), now=now)
     assert scalar != INTRADAY_NEUTRAL
+    assert scalar == pytest.approx(1.5, rel=1e-6)
+
+
+def test_rearm_discards_single_impossible_five_minute_mean():
+    c = _make_coordinator()
+    now = datetime(2026, 7, 1, 11, 0, tzinfo=UTC)
+    result = _forecast_window(now, n_slots=17, raw_w_per_plane=400.0)
+    rows = _measured_power_rows(
+        _stat_rows_seconds_epoch(
+            now - timedelta(minutes=INTRADAY_TRAILING_WINDOW_MINUTES),
+            now,
+            1200.0,
+        )
+    )
+    poison_at = now - timedelta(minutes=30)
+    rows.append((poison_at, 27_061_504.1))
+    samples = c._rearm_samples_from_rows(result, rows, now)
+    scalar = compute_intraday_scalar(samples, now=now)
     assert scalar == pytest.approx(1.5, rel=1e-6)
 
 

@@ -464,9 +464,10 @@ class _StatesHass:
 
 
 class _MeasuredPlane:
-    def __init__(self, actual_entity, name=None):
+    def __init__(self, actual_entity, name=None, wp=400.0):
         self.actual_entity = actual_entity
         self.name = name
+        self.wp = wp
 
 
 class _MeasuredSite:
@@ -554,6 +555,27 @@ def test_measured_total_skips_unavailable_and_non_numeric():
     assert attrs["channels_total"] == 5
     assert attrs["channels_reporting"] == 2
     assert s.available is True
+
+
+def test_measured_total_rejects_one_impossible_source():
+    hass = _StatesHass({"sensor.a": "120.0", "sensor.b": "27061504.1"})
+    s = _bare(
+        MeasuredDcTotalSensor,
+        _FakeCoordinator(None),
+        hass=hass,
+        _source_ids=["sensor.a", "sensor.b"],
+        _source_names=["M1", "M2"],
+        _source_wps=[400.0, 370.0],
+        _value=None,
+        _reporting=0,
+        _rejected_sources=[],
+    )
+    s._recompute()
+    assert s.native_value == pytest.approx(120.0)
+    assert s.extra_state_attributes["channels_reporting"] == 1
+    assert s.extra_state_attributes["channels_rejected"] == 1
+    assert s.extra_state_attributes["rejected_sources"] == ["sensor.b"]
+    assert s.extra_state_attributes["source_limits_w"] == [500.0, 462.5]
 
 
 def test_measured_total_all_dead_is_unavailable():

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -82,6 +83,7 @@ from .const import (
     BAND_SOURCE_ENSEMBLE,
     BAND_SOURCE_ENVELOPE,
     BAND_SOURCE_LEARNED,
+    CHANNEL_INSTANT_PLAUSIBILITY_MAX_WP_FRAC,
     CLASSIFIER_VERSION,
     CONF_ENSEMBLE_ENABLED,
     CONF_FETCH_INTERVAL,
@@ -1893,7 +1895,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Sum every configured plane's live measured DC power (guarded).
 
         Each plane's ``actual_entity`` is read from the state machine; a state
-        that is unknown / unavailable / non-numeric, or one whose value is
+        that is unknown / unavailable / non-numeric / outside 0..2 x Wp, or one whose value is
         unchanged AND whose ``last_updated`` is older than
         LABEL_FROZEN_STALE_SECONDS (frozen sensor), is skipped. Returns
         ``(sum_over_usable_channels, {plane names that produced a reading})`` so
@@ -1908,7 +1910,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             if not entity_id:
                 continue
             state = self.hass.states.get(entity_id)
-            value = _usable_power(state, now)
+            value = _usable_power(
+                state,
+                now,
+                max_w=CHANNEL_INSTANT_PLAUSIBILITY_MAX_WP_FRAC * plane.wp,
+            )
             if value is None:
                 continue
             total += value
@@ -2036,14 +2042,22 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         cancel. The slot
         CONTAINING ``now`` is skipped so the reconstruction never collides with
         the live sample the caller adds for the current tick (no double-samples).
+        Physically impossible 5-min total means are discarded before grouping.
         Slots below INTRADAY_MIN_SUN_ELEVATION_DEG, below
         INTRADAY_MIN_MODELED_WH or with no clear-sky reference (sun
         down) are dropped, exactly as :meth:`_build_intraday_sample` gates them.
         """
         metered_planes = {p.name for p in self._site.planes if p.actual_entity}
+        measured_max_w = sum(
+            CHANNEL_INSTANT_PLAUSIBILITY_MAX_WP_FRAC * p.wp
+            for p in self._site.planes
+            if p.actual_entity
+        )
         now_idx = _slot_index_at(result.slot_starts, now)
         by_slot: dict[int, list[float]] = {}
         for ts, mean_w in rows:
+            if not math.isfinite(mean_w) or mean_w < 0.0 or mean_w > measured_max_w:
+                continue
             idx = _slot_index_at(result.slot_starts, ts)
             if idx is None or idx == now_idx:
                 continue

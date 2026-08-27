@@ -32,6 +32,7 @@ HA-free.
 from __future__ import annotations
 
 import logging
+import math
 from datetime import timedelta
 from typing import Any
 
@@ -77,6 +78,8 @@ from .const import (
     ATTR_WH_PERIOD_P10,
     ATTR_WH_PERIOD_P50,
     ATTR_WH_PERIOD_P90,
+    CHANNEL_INSTANT_PLAUSIBILITY_MAX_WP_FRAC,
+    CHANNEL_PLAUSIBILITY_MAX_WP_FRAC,
     DATA_KEY_BAND_SOURCE,
     DATA_KEY_BAND_SOURCE_BY_DAY,
     DATA_KEY_BIAS_CELLS,
@@ -259,8 +262,9 @@ async def async_setup_entry(
         entities.append(
             MeasuredDcTotalSensor(
                 coordinator,
-                [eid for eid, _name in measured],
-                [name for _eid, name in measured],
+                [eid for eid, _name, _wp in measured],
+                [name for _eid, name, _wp in measured],
+                [wp for _eid, _name, wp in measured],
             )
         )
 
@@ -605,8 +609,9 @@ class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
     without one skipped, de-duplicated, plane order preserved); the sensor is
     not created at all when that list is empty (nothing to sum). State is the
     sum of the sources' current numeric states; a source that is unknown /
-    unavailable / non-numeric is skipped, so a partial DTU dropout reads as the
-    reduced live total rather than going blank.
+    unavailable / non-numeric / non-finite / negative or above 2 x its plane's
+    Wp is skipped, so a partial DTU dropout or corrupt frame reads as the
+    reduced live total rather than poisoning the recorded site total.
 
     Two design points worth calling out:
       * ``available`` is DECOUPLED from the coordinator — True while AT LEAST ONE
@@ -635,6 +640,7 @@ class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
         coordinator: Any,
         source_ids: list[str],
         source_names: list[str] | None = None,
+        source_wps: list[float] | None = None,
     ) -> None:
         super().__init__(coordinator, SENSOR_MEASURED_DC_TOTAL)
         self._source_ids = list(source_ids)
@@ -646,8 +652,12 @@ class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
         self._source_names = (
             list(source_names) if source_names is not None else list(source_ids)
         )
+        self._source_wps = (
+            list(source_wps) if source_wps is not None else [math.inf] * len(source_ids)
+        )
         self._value: float | None = None
         self._reporting = 0
+        self._rejected_sources: list[str] = []
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -672,13 +682,19 @@ class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
         """Cache the summed value + reporting count from the current states."""
         total = 0.0
         reporting = 0
-        for entity_id in self._source_ids:
+        rejected: list[str] = []
+        source_wps = getattr(self, "_source_wps", [math.inf] * len(self._source_ids))
+        for entity_id, wp in zip(self._source_ids, source_wps, strict=False):
             value = _numeric_state(self.hass.states.get(entity_id))
             if value is None:
+                continue
+            if value < 0.0 or value > CHANNEL_INSTANT_PLAUSIBILITY_MAX_WP_FRAC * wp:
+                rejected.append(entity_id)
                 continue
             total += value
             reporting += 1
         self._reporting = reporting
+        self._rejected_sources = rejected
         self._value = round(total, 1) if reporting else None
 
     @property
@@ -694,7 +710,7 @@ class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {
+        attrs = {
             "channels_total": len(self._source_ids),
             "channels_reporting": self._reporting,
             "sources": list(self._source_ids),
@@ -704,6 +720,19 @@ class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
             # the module labels without re-reading the site config.
             "source_names": list(self._source_names),
         }
+        source_wps = getattr(self, "_source_wps", None)
+        if source_wps is not None:
+            attrs.update({
+                "channels_rejected": len(getattr(self, "_rejected_sources", [])),
+                "rejected_sources": list(getattr(self, "_rejected_sources", [])),
+                # The card integrates hourly means, so expose the stricter
+                # sustained-power limit rather than the wider live peak gate.
+                "source_limits_w": [
+                    round(CHANNEL_PLAUSIBILITY_MAX_WP_FRAC * wp, 3)
+                    for wp in source_wps
+                ],
+            })
+        return attrs
 
 
 class MeasuredAcPowerSensor(BalconyForecastEntity, SensorEntity):
@@ -1354,13 +1383,14 @@ def _numeric_state(state: Any) -> float | None:
     if raw is None or raw in (STATE_UNKNOWN, STATE_UNAVAILABLE):
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except (TypeError, ValueError):
         return None
+    return value if math.isfinite(value) else None
 
 
-def _measured_sources(coordinator: Any) -> list[tuple[str, str]]:
-    """Ordered, de-duplicated ``(measured entity id, plane name)`` from the site.
+def _measured_sources(coordinator: Any) -> list[tuple[str, str, float]]:
+    """Ordered ``(entity id, plane name, Wp)`` sources from the site.
 
     Each plane's ``actual_entity`` (the HA sensor of that module's measured DC
     power) paired with the plane's NAME (M1…M8); planes without an
@@ -1372,15 +1402,22 @@ def _measured_sources(coordinator: Any) -> list[tuple[str, str]]:
     site = getattr(coordinator, "_site", None)
     if site is None:
         return []
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, float]] = []
     seen: set[str] = set()
     for plane in getattr(site, "planes", ()):
         entity_id = getattr(plane, "actual_entity", None)
         if isinstance(entity_id, str) and entity_id and entity_id not in seen:
             seen.add(entity_id)
             name = getattr(plane, "name", None)
+            wp = getattr(plane, "wp", None)
+            if not isinstance(wp, (int, float)) or not math.isfinite(wp) or wp <= 0:
+                continue
             out.append(
-                (entity_id, name if isinstance(name, str) and name else entity_id)
+                (
+                    entity_id,
+                    name if isinstance(name, str) and name else entity_id,
+                    float(wp),
+                )
             )
     return out
 

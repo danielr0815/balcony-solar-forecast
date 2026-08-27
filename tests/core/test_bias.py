@@ -203,6 +203,22 @@ def test_intraday_clamp_high():
     assert compute_intraday_scalar(samples, now=now) == INTRADAY_SCALAR_MAX
 
 
+def test_intraday_single_extreme_outlier_cannot_dominate_healthy_window():
+    """One corrupt meter sample must not pin the fast learner at its ceiling."""
+    now = _now()
+    samples = _trailing_samples(now, ratio=1.0, n=10, step_min=15)
+    samples.append(
+        IntradaySample(
+            at=now,
+            measured_kc=100_000.0,
+            modeled_kc=1.0,
+            modeled_wh=100.0,
+        )
+    )
+    scalar = compute_intraday_scalar(samples, now=now)
+    assert 1.0 < scalar < 1.3
+
+
 def test_intraday_clamp_low():
     now = _now()
     samples = _trailing_samples(now, ratio=0.01, n=12, step_min=15)

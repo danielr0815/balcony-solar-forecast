@@ -357,11 +357,12 @@ def test_power_history_js_card_sanity():
     assert "mousemove" in text, "power-history card JS has no mousemove hover"
 
     # Day/Week navigation (part 2b): the ◀/▶ nav glyphs, the Day|Week toggle
-    # labels in both locales, and the week view's daily-statistics marker.
+    # labels in both locales; week and day intentionally use hourly statistics
+    # so one corrupt hour can be filtered before daily aggregation.
     assert "◀" in text and "▶" in text, "power-history card JS has no nav arrows"
     for label in ("Day", "Week", "Tag", "Woche"):
         assert f'"{label}"' in text, f"power-history card JS missing toggle label {label!r}"
-    assert 'period: "day"' in text, "power-history card JS has no week (daily) statistics query"
+    assert 'period: "hour"' in text, "power-history card JS has no hourly statistics query"
 
     # Past-day dashed line = the ISSUED archived forecast, read via the read-only
     # get_issued_forecast action (the stable low-level websocket variant).
