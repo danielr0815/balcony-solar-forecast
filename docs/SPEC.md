@@ -1,6 +1,6 @@
 # Spezifikation: Balcony Solar Forecast — Mehrebenen-PV-Prognose mit Selbstlernen
 
-> **Gilt für Version: 0.27.0** · Zuletzt aktualisiert: 2026-08-26
+> **Gilt für Version: 0.27.1** · Zuletzt aktualisiert: 2026-08-27
 >
 > Diese Spezifikation beschreibt **ausschließlich den Ist-Stand dieser Version**:
 > was die Integration `balcony_solar_forecast` heute tut und tun muss. Sie
@@ -858,6 +858,15 @@ Abend-Oszillation 0,39↔1,0, Ein-Tick-Sprung 1,0→0,38). Vier Regeln zügeln i
 - **Energiegewichtung:** das Sample-Gewicht ist `exp(−alter/τ) × modeled_wh`
   (Verhältnis von Summen bleibt). Hochproduktions-Slots dominieren,
   Morgen-/Abend-Slots fallen automatisch heraus.
+- **Begrenzter Einzel-Sample-Einfluss:** das Verhältnis jedes verwertbaren
+  Samples wird **vor** der gewichteten Aggregation nach oben auf
+  `INTRADAY_SCALAR_MAX` (2,5) begrenzt. Ein einzelner korrupter Messframe kann damit nur
+  sein gewöhnliches Energie-/Zeitgewicht beitragen und ein gesundes
+  Vierstundenfenster nicht mehr allein auf den End-Clamp ziehen; eine über das
+  Fenster konsistent hohe Abweichung erreicht die obere Bandkante weiterhin.
+  Die Unterseite bleibt bei `measured_kc ≥ 0` unverändert, damit echte
+  Nullproduktion nicht künstlich angehoben wird; der End-Clamp schützt den
+  resultierenden Fensterskalar weiter bei 0,25.
 - **Ratenbegrenzung:** pro Recompute-Tick ändert sich der servierte Skalar um
   höchstens `INTRADAY_MAX_STEP_PER_TICK` (0,15) gegenüber dem Vorgängerwert;
   Startwert nach Reload ist `INTRADAY_NEUTRAL`. Beim 15-min-Tick ist die volle
@@ -978,6 +987,15 @@ Rollback-Ring (selbst-gatend).
   für **beide** geometrischen Lerner. Eine teilgemessene oder falsch skaliert
   messende Anlage darf nie gegen das Vollmodell trainieren.
   Die Sichtbarkeit dieser Verwürfe regelt §10.
+- **Live-Plausibilitätsgate:** ein einzelner numerischer Kanalwert unter 0 W,
+  nicht endlich oder oberhalb
+  `CHANNEL_INSTANT_PLAUSIBILITY_MAX_WP_FRAC` (2,0) × Kanal-Wp wird vor der
+  Summenbildung als fehlender Kanal behandelt. Die bewusst weitere
+  Momentangrenze lässt kurze Cloud-Edge-Spitzen zu, blockiert aber physikalisch
+  unmögliche Geräteframes. Bei der einmaligen Intraday-Rekonstruktion gilt
+  dieselbe Grenze über die Summe der gemeterten Kanal-Wp für jede 5-min-Zeile;
+  verworfene Zeilen gelangen weder organisch noch nach einem Reload in den
+  schnellen Lerner.
 - **Drift-Monitor:** rollierende 7-Tage-**Stunden-MAE** über die verfügbaren
   vollständigen Tageslichtstunden, separat für RAW, Slow-only und korrigiert.
   Eine Stunde zählt, sobald Modell oder Messung positive Produktion trägt; ein
@@ -1510,7 +1528,10 @@ sagt das.
   **unabhängig vom Prognosezyklus**. Sie bleibt verfügbar, solange mindestens
   eine Quelle meldet (Grundwahrheit muss auch bei degradierter Prognose
   weiterlaufen), und wird **nur erzeugt, wenn** mindestens eine Ebene eine
-  `actual_entity` konfiguriert hat.
+  `actual_entity` konfiguriert hat. Nicht-endliche, negative oder oberhalb der
+  momentanen Kanalgrenze aus §9.8 liegende Quellen werden nicht summiert;
+  `channels_rejected` / `rejected_sources` machen den aktuellen Verwurf
+  sichtbar.
 - `measured_ac_power` (W, `MEASUREMENT`) ist die Live-Lesung des **einzelnen**
   Gesamt-AC-Zählers (`ac_actual_entity`, mit optionalem Vorzeichen-Invert) — das
   AC-Pendant zur DC-Summe und der zeittreue Partner der AC-Prognose; **nur
@@ -1519,6 +1540,9 @@ sagt das.
 
 Die Attribute `sources` / `source_names` von `measured_dc_power_total` sind die
 **Auto-Discovery-Quelle** der mitgelieferten Karten (§18.4).
+`source_limits_w` enthält indexgleich die Stunden-Plausibilitätsgrenze
+`1,25 × Wp`, damit die Karte bereits vorhandene korrupte Langzeitstatistiken
+ohne duplizierte Anlagenkonfiguration ausblenden kann.
 
 ### §14.4 Volle Kurve
 
@@ -1930,12 +1954,13 @@ Live-Ansicht**; eine Vergangenheits-Ansicht ist statisch.
 **Tages-/Wochennavigation** (karten-lokal, nicht persistiert): eine Kopfzeile
 `◀ [Label] ▶` blättert den gewählten Tag (▶ deaktiviert am heutigen Tag); ein
 **Tag|Woche**-Umschalter zeigt eine Wochenansicht mit sieben gestapelten
-Tagesbalken. Abgeschlossene Tage kommen aus `period: "day"`-Mittelwertstatistiken
-(Mittel-W × 24 h = Tages-Wh); **Ausnahme „heute":** der laufende Tag wird aus
-den **Stunden**statistiken summiert (Stundenmittel × 1 h, wie in der
-Tagesansicht) — das Tagesmittel eines unvollständigen Tages deckt nur die
-bereits vergangenen (sonnigen) Stunden, und die ×-24-h-Extrapolation
-überschätzte ihn massiv. Das Fenster endet am gewählten Tag und springt in
+Tagesbalken. Alle sieben Tage werden aus **Stunden**statistiken summiert
+(Stundenmittel × 1 h). Vor der Summation verwirft die Karte negative,
+nicht-endliche oder oberhalb des indexgleichen `source_limits_w` liegende
+Modulstunden. Die Stundenauflösung ist auch für abgeschlossene Tage verbindlich:
+ein einzelner Ausreißer darf nicht durch einen Tagesmittelwert verdünnt und
+dadurch unentdeckt in den Balken gelangen. Zugleich wird der laufende Tag nicht
+auf 24 Stunden extrapoliert. Das Fenster endet am gewählten Tag und springt in
 7-Tages-Schritten.
 
 **Vergangene Tage: as-issued statt Nachrechnen.** Im Tagesmodus zeigt die

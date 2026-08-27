@@ -38,10 +38,10 @@
  *
  * NAVIGATION (card-local state, never persisted): a header ◀ [label] ▶ steps the
  * selected day (or, in week mode, the 7-day window) and a Day|Week toggle switches
- * the view. Week mode charts daily Wh per module from `period: "day"` mean
- * statistics (mean W × 24 h) for COMPLETE days; today's still-running column is
- * summed from hourly means (× 1 h) so it is not overstated. ▶ is disabled once
- * the window ends at today.
+ * the view. Week mode also uses hourly means and groups them by local day. This
+ * both handles a running day exactly and lets the card reject a corrupt hour
+ * before it is diluted into a daily aggregate. ▶ is disabled once the window
+ * ends at today.
  *
  * It is self-contained and imports nothing from the sibling shade-profile card.
  */
@@ -64,6 +64,7 @@ const PALETTE = [
 // sensor.MeasuredDcTotalSensor.extra_state_attributes).
 const A_SOURCES = "sources";
 const A_SOURCE_NAMES = "source_names";
+const A_SOURCE_LIMITS = "source_limits_w";
 // Forecast sensor attribute (15-min Wh keyed by ISO-UTC slot start; must match
 // const.ATTR_WH_PERIOD).
 const A_WH_PERIOD = "wh_period";
@@ -613,9 +614,24 @@ class BalconyPowerHistoryCard extends HTMLElement {
   _sources(hass) {
     const ids = this._resolveIds(hass);
     const total = hass.states[ids.total_sensor];
-    return total && total.attributes && isArray(total.attributes[A_SOURCES])
-      ? total.attributes[A_SOURCES]
+    const attrs = total && total.attributes;
+    const sources = attrs && isArray(attrs[A_SOURCES]) ? attrs[A_SOURCES] : [];
+    const limits = attrs && isArray(attrs[A_SOURCE_LIMITS])
+      ? attrs[A_SOURCE_LIMITS]
       : [];
+    this._sourceLimits = {};
+    for (let i = 0; i < sources.length; i++) {
+      const limit = Number(limits[i]);
+      if (Number.isFinite(limit) && limit > 0) this._sourceLimits[sources[i]] = limit;
+    }
+    return sources;
+  }
+
+  /** True for a physical hourly mean; false for corrupt/mis-scaled statistics. */
+  _validMean(id, mean) {
+    if (!Number.isFinite(mean) || mean < 0) return false;
+    const limit = this._sourceLimits && this._sourceLimits[id];
+    return !Number.isFinite(limit) || mean <= limit;
   }
 
   /** Fetch the selected window (day or week) for the module sources, re-render. */
@@ -672,43 +688,24 @@ class BalconyPowerHistoryCard extends HTMLElement {
     this._render();
   }
 
-  /** Week view: daily means over the 7-day window → per-source daily Wh. */
+  /** Week view: hourly means over the 7-day window → per-source daily Wh. */
   async _fetchWeek(hass, sources, seq) {
     // The window ENDS at the selected day; step back 6 days for its start. The
     // seven local-midnight day starts drive both the query and the bucketing.
     const days = [];
     for (let i = 0; i < 7; i++) days.push(dayAt(this._offset - 6 + i));
     const start = days[0];
-    const live = this._offset === 0;
-    // `mean × 24 h` recovers a day's energy ONLY for a COMPLETE day (HA averages
-    // the daily mean over all 24 hours, night zeros included). A RUNNING day's
-    // daily mean covers just the hours elapsed so far — the sunlit ones — so
-    // × 24 extrapolates a whole day from them and massively overstates today
-    // (e.g. ~17.6 kWh at ~16:00 for a ~12 kWh day). So cap the daily query at
-    // last local midnight and sum today's partial column from HOURLY means.
-    const dailyEnd = (live ? dayAt(this._offset) : dayAt(this._offset + 1))
-      .toISOString();
+    const end = this._offset === 0 ? new Date() : dayAt(this._offset + 1);
     let result;
-    let todayHourly = null;
     try {
       result = await hass.callWS({
         type: "recorder/statistics_during_period",
         start_time: start.toISOString(),
-        end_time: dailyEnd,
+        end_time: end.toISOString(),
         statistic_ids: sources,
-        period: "day",
+        period: "hour",
         types: ["mean"],
       });
-      if (live) {
-        todayHourly = await hass.callWS({
-          type: "recorder/statistics_during_period",
-          start_time: dayAt(0).toISOString(),
-          end_time: new Date().toISOString(),
-          statistic_ids: sources,
-          period: "hour",
-          types: ["mean"],
-        });
-      }
     } catch (err) {
       if (seq !== this._fetchSeq) return;
       this._loadState = "error";
@@ -716,7 +713,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
       return;
     }
     if (seq !== this._fetchSeq) return;
-    this._ingestWeek(result, sources, days, todayHourly);
+    this._ingestWeek(result, sources, days);
     // Bars render straight away; the per-day forecast overlay follows once the
     // (cached / concurrent) issued lookups land.
     this._render();
@@ -887,7 +884,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
           const h = localHourOf(row && row.start);
           if (h < 0) continue;
           const mean = Number(row && row.mean);
-          if (!Number.isFinite(mean)) continue;
+          if (!this._validMean(id, mean)) continue;
           arr[h] += mean; // mean power (W) × 1 h = Wh
           any = true;
         }
@@ -900,17 +897,14 @@ class BalconyPowerHistoryCard extends HTMLElement {
 
   /**
    * {stat_id: [{start, mean}]} → per-source number[7] daily Wh.
-   * COMPLETE days: the daily-mean statistic is the day's AVERAGE power (W);
-   * integrating a constant mean over the 24 h day recovers the energy exactly
-   * (∫ mean dt = mean × 24 h). TODAY (when ``todayHourly`` is given) is still
-   * running, so its daily mean covers only the elapsed hours — its column is
-   * summed from HOURLY means (× 1 h) instead, exactly like the day view; the
-   * bar then shows production up to now rather than an overstated extrapolation.
+   * Every column is summed from hourly means (mean W × 1 h). Keeping the hourly
+   * resolution is intentional: a corrupt single hour must be checked against
+   * its module's sustained-power limit before aggregation; a daily mean could
+   * dilute that same outlier and hide it from the plausibility gate.
    */
-  _ingestWeek(result, sources, days, todayHourly) {
+  _ingestWeek(result, sources, days) {
     const index = {};
     for (let i = 0; i < 7; i++) index[isoDateOf(days[i])] = i;
-    const todayIdx = todayHourly ? index[localDayKey()] : undefined;
     const bars = {};
     let any = false;
     for (const id of sources) {
@@ -919,28 +913,11 @@ class BalconyPowerHistoryCard extends HTMLElement {
       if (isArray(rows)) {
         for (const row of rows) {
           const i = index[localDayKeyOf(row && row.start)];
-          if (i === undefined || i === todayIdx) continue; // today via hourly
+          if (i === undefined) continue;
           const mean = Number(row && row.mean);
-          if (!Number.isFinite(mean)) continue;
-          arr[i] += mean * HOURS; // mean power (W) × 24 h = daily Wh
+          if (!this._validMean(id, mean)) continue;
+          arr[i] += mean; // mean power (W) × 1 h = hourly Wh
           any = true;
-        }
-      }
-      if (todayIdx !== undefined) {
-        const hrows = todayHourly[id];
-        if (isArray(hrows)) {
-          let today = 0;
-          let seen = false;
-          for (const row of hrows) {
-            const mean = Number(row && row.mean);
-            if (!Number.isFinite(mean)) continue;
-            today += mean; // mean power (W) × 1 h per hourly bucket
-            seen = true;
-          }
-          if (seen) {
-            arr[todayIdx] = today;
-            any = true;
-          }
         }
       }
       bars[id] = arr;

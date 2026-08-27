@@ -38,19 +38,23 @@ signatures without updating this contract module.
 
 --- IMPLEMENTATION NOTES (bias owner) ------------------------------------
 
-Intraday k_c-space ratio, why ratio-of-sums (not a mean of per-sample
-ratios): each sample carries the site energy already normalised by the
+Intraday k_c-space ratio, why a winsorised ratio-of-sums (not a mean of
+unbounded per-sample ratios): each sample carries the site energy normalised by the
 Haurwitz clear-sky reference (``measured_kc`` / ``modeled_kc``). We form the
 scalar as
 
-    s = sum_i(w_i * measured_kc_i) / sum_i(w_i * modeled_kc_i),
+    r_i = min(measured_kc_i / modeled_kc_i, INTRADAY_SCALAR_MAX)
+    s = sum_i(w_i * modeled_kc_i * r_i) / sum_i(w_i * modeled_kc_i),
     w_i = exp(-age_i / tau) * modeled_wh_i.
 
-This ratio-of-sums is invariant to the plane mix (SPEC §9.4: "Geometrie/Saison
+Within the physical correction band this is the original ratio-of-sums and is
+invariant to the plane mix (SPEC §9.4: "Geometrie/Saison
 cancel"): scaling every plane's contribution by the same measured/modeled
 proportion leaves ``s`` unchanged regardless of how the total splits across
 planes, and low-elevation slots (tiny denominator, noisy per-sample ratio)
-cannot dominate because they contribute little to either sum. A plain mean of
+cannot dominate because they contribute little to either sum. Above the band,
+winsorising each ratio before aggregation prevents a single corrupt frame from
+pinning the whole window at the final clamp. A plain mean of
 ``measured_kc_i / modeled_kc_i`` would over-weight those noisy dawn/dusk slots
 and is deliberately avoided. The weight is the time decay times the slot's
 modeled energy (SPEC §9.4): high-production slots dominate and dawn/dusk slots
@@ -216,7 +220,8 @@ def compute_intraday_scalar(
 
     Over the trailing INTRADAY_TRAILING_WINDOW_MINUTES up to ``now``, weight
     each sample by exp(-age_minutes / INTRADAY_TAU_MINUTES) x ``modeled_wh``
-    and take the weighted ratio of measured k_c to modeled k_c, using only
+    and take the weighted ratio of measured k_c to modeled k_c (with every
+    sample's upper ratio capped at INTRADAY_SCALAR_MAX), using only
     samples with ``modeled_wh`` > INTRADAY_MIN_MODELED_WH whose measured AND
     modeled slot energy are not both below INTRADAY_NEUTRAL_FLOOR_WH. Requires
     at least INTRADAY_MIN_TRAILING_MINUTES of coverage; returns
@@ -228,7 +233,7 @@ def compute_intraday_scalar(
 
     Robustness: samples in the future or older than the trailing window are
     dropped; a clock jump that leaves every sample out-of-window collapses to
-    neutral rather than acting on stale data. The ratio is a ratio-of-sums of
+    neutral rather than acting on stale data. The ratio is a winsorised ratio-of-sums of
     the per-slot site k_c, each sample weighted by the exp(-age/tau) time
     decay TIMES its modeled slot energy — high-production slots dominate and
     noisy low-energy dawn/dusk slots fall out on their own (SPEC §9.4; the
@@ -291,7 +296,16 @@ def compute_intraday_scalar(
         # Weight: recency decay TIMES the modeled slot energy (SPEC §9.4) —
         # high-production slots dominate, dim dawn/dusk slots fall out.
         w = math.exp(-age_min / INTRADAY_TAU_MINUTES) * e_wh
-        weighted_measured += w * m_kc
+        # Bound every sample's ratio BEFORE aggregation. Final-result clamping
+        # alone lets one corrupt meter frame dominate an otherwise healthy
+        # four-hour window and pin the learner at 2.5. Per-sample winsorising
+        # retains legitimate sustained corrections at either band edge while
+        # limiting a single sample's leverage to its ordinary energy weight.
+        # The lower side is already physically bounded by m_kc >= 0, so keep
+        # genuine near-zero production intact; only the unbounded upper tail
+        # needs winsorising against a one-frame meter explosion.
+        ratio = min(m_kc / f_kc, INTRADAY_SCALAR_MAX)
+        weighted_measured += w * f_kc * ratio
         weighted_modeled += w * f_kc
         used += 1
         if oldest_age is None or age_min > oldest_age:

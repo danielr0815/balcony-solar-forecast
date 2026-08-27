@@ -11,7 +11,7 @@
 // such a runtime-only failure).
 //
 // Scenarios (each throws/exits 1 on failure; prints one OK line on success):
-//   1. WEEK: one daily-statistics query + CONCURRENT issued lookups for the
+//   1. WEEK: one hourly-statistics query + CONCURRENT issued lookups for the
 //      non-today days; per-day totals built with an honest GAP (null) for a
 //      day whose snapshot is unavailable; today's slot uses the LIVE
 //      wh_period sum; a repeat fetch is served from the per-window cache.
@@ -99,7 +99,11 @@ function makeCard(hass) {
 
 const STATES = {
   "sensor.t": {
-    attributes: { sources: ["sensor.m1"], source_names: ["M1"] },
+    attributes: {
+      sources: ["sensor.m1"],
+      source_names: ["M1"],
+      source_limits_w: [500],
+    },
   },
   "sensor.f": {
     // Live TODAY forecast: two 15-min slots, daily total 5000 Wh.
@@ -165,13 +169,12 @@ const STATES = {
   await card._fetch();
 
   assert(
-    statCalls.length === 2,
-    `expected 2 statistics calls (daily + today-hourly), got ${statCalls.length}`,
+    statCalls.length === 1,
+    `expected 1 hourly statistics call, got ${statCalls.length}`,
   );
-  assert(statCalls[0].period === "day", `week daily stats period is ${statCalls[0].period}`);
   assert(
-    statCalls[1].period === "hour",
-    `today's partial column must use hourly stats, got ${statCalls[1].period}`,
+    statCalls[0].period === "hour",
+    `week statistics period is ${statCalls[0].period}, want hour`,
   );
   assert(
     issuedDates.length === 6,
@@ -202,7 +205,27 @@ const STATES = {
     issuedDates.length === before,
     `cached week refetch refired ${issuedDates.length - before} issued lookups`,
   );
-  console.log("OK scenario 1: week = 1 stats call + 6 concurrent issued lookups, gap + live today, cache hit");
+  console.log("OK scenario 1: week = 1 hourly stats call + 6 concurrent issued lookups, gap + live today, cache hit");
+}
+
+// ============================================================================
+// Scenario 6 — an impossible hourly mean is omitted from measured bars.
+// ============================================================================
+{
+  const card = makeCard({ language: "de", states: STATES });
+  card._sources(card._hass); // also reads the aligned plausibility limits
+  card._ingestDay(
+    {
+      "sensor.m1": [
+        { start: `${isoAt(0)}T08:00:00+00:00`, mean: 180 },
+        { start: `${isoAt(0)}T09:00:00+00:00`, mean: 264482.587 },
+      ],
+    },
+    ["sensor.m1"],
+  );
+  const energy = card._dayBars["sensor.m1"].reduce((a, b) => a + b, 0);
+  assert(energy === 180, `implausible hourly mean leaked into bars: ${energy} Wh`);
+  console.log("OK scenario 6: impossible hourly module mean is omitted");
 }
 
 // ============================================================================
@@ -309,23 +332,15 @@ const STATES = {
     language: "de",
     states: STATES,
     callWS: async (msg) => {
-      if (msg.type === "recorder/statistics_during_period" && msg.period === "day") {
-        // 6 COMPLETE past days at 1000 W mean → 24000 Wh each; no today row
-        // (the daily query is capped at last local midnight).
-        return {
-          "sensor.m1": [-6, -5, -4, -3, -2, -1].map((o) => ({
-            start: dayMs(o),
-            mean: 1000,
-          })),
-        };
-      }
       if (msg.type === "recorder/statistics_during_period" && msg.period === "hour") {
-        // Today so far: 8 sunlit hours averaging 1500 W → 12000 Wh (partial).
+        // Six complete days at 24 × 400 Wh plus today's eight × 300 Wh.
         return {
-          "sensor.m1": Array.from({ length: 8 }, () => ({
-            start: dayMs(0),
-            mean: 1500,
-          })),
+          "sensor.m1": [
+            ...[-6, -5, -4, -3, -2, -1].flatMap((o) =>
+              Array.from({ length: 24 }, () => ({ start: dayMs(o), mean: 400 })),
+            ),
+            ...Array.from({ length: 8 }, () => ({ start: dayMs(0), mean: 300 })),
+          ],
         };
       }
       if (msg.type === "call_service") {
@@ -345,18 +360,18 @@ const STATES = {
   const bars = card._weekBars["sensor.m1"];
   assert(Array.isArray(bars) && bars.length === 7, "no 7-slot week bars built");
   assert(
-    bars[6] === 12000,
-    `today's bar is ${bars[6]} Wh, want summed hourly 12000 (not daily-mean × 24)`,
+    bars[6] === 2400,
+    `today's bar is ${bars[6]} Wh, want summed hourly 2400 (not daily-mean × 24)`,
   );
   assert(
-    bars[6] !== 1500 * 24,
-    `today used daily-mean × 24 (${1500 * 24}) — the overstatement bug`,
+    bars[6] !== 300 * 24,
+    `today used daily-mean × 24 (${300 * 24}) — the overstatement bug`,
   );
   for (const i of [0, 1, 2, 3, 4, 5]) {
-    assert(bars[i] === 24000, `complete-day slot ${i} is ${bars[i]}, want 24000`);
+    assert(bars[i] === 9600, `complete-day slot ${i} is ${bars[i]}, want 9600`);
   }
   console.log(
-    "OK scenario 4: week today = summed hourly energy; complete days = mean × 24",
+    "OK scenario 4: every week column is summed from plausibility-checked hours",
   );
 }
 

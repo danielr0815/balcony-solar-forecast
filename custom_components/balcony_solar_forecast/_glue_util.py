@@ -21,6 +21,7 @@ keep resolving.
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime, timedelta
 
 from homeassistant.core import State
@@ -40,11 +41,17 @@ def _replace_drift(state: DriftState, **changes) -> DriftState:
     return replace(state, **changes)
 
 
-def _usable_power(state: State | None, now: datetime) -> float | None:
+def _usable_power(
+    state: State | None,
+    now: datetime,
+    *,
+    max_w: float | None = None,
+) -> float | None:
     """Numeric live power from a state, or None if unusable / frozen.
 
     Guards (SPEC §9.8 label gates applied live): missing state, unknown /
-    unavailable / empty state, non-numeric value, or a stale reading whose
+    unavailable / empty state, non-numeric, non-finite or negative value, an
+    optional physical ``max_w`` breach, or a stale reading whose
     ``last_updated`` is older than LABEL_FROZEN_STALE_SECONDS (a frozen sensor
     holding an old value — treated as missing). A fresh zero is a legitimate
     night/shade reading and IS usable.
@@ -57,6 +64,10 @@ def _usable_power(state: State | None, now: datetime) -> float | None:
     try:
         value = float(state.state)
     except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value < 0.0:
+        return None
+    if max_w is not None and value > max_w:
         return None
     last_updated = getattr(state, "last_updated", None)
     if last_updated is not None:

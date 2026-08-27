@@ -16,7 +16,7 @@ from __future__ import annotations
 DOMAIN = "balcony_solar_forecast"
 
 INTEGRATION_NAME = "Balcony Solar Forecast"
-INTEGRATION_VERSION = "0.27.0"
+INTEGRATION_VERSION = "0.27.1"
 
 # --- Update behaviour (SPEC §2: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
@@ -675,6 +675,12 @@ DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE = 0.75
 # trainable. Applied in `_actuals._actuals_from_stats` (live) and in
 # `core.bootstrap_build._process_day_impl` (backfill parity).
 CHANNEL_PLAUSIBILITY_MAX_WP_FRAC = 1.25
+# Instantaneous live values need a separate, deliberately wider ceiling:
+# cloud-edge enhancement may briefly exceed the hourly 1.25 x Wp gate, but a
+# DC channel reporting above 2 x its nameplate power is not a usable physical
+# measurement. Applied before live aggregation and restart re-arm so one bad
+# device frame cannot enter recorder ground truth or the fast learner.
+CHANNEL_INSTANT_PLAUSIBILITY_MAX_WP_FRAC = 2.0
 
 # Drift monitor: rolling daylight MAE corrected vs pure physics.
 DRIFT_WINDOW_DAYS = 7

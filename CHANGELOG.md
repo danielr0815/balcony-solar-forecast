@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > table in [docs/HISTORIE.md](docs/HISTORIE.md) §H13. Historical entries are
 > deliberately left untouched.
 
+## [0.27.1] - 2026-08-27
+
+This patch release prevents one corrupt inverter frame from contaminating the
+live DC total, the fast intraday learner, or the bundled history charts. It
+also keeps the same protection active when the transient learner reconstructs
+its sample window from recorder statistics after a restart.
+
+### Fixed
+
+- Reject physically impossible one-off DC readings before live aggregation,
+  recorder-based intraday re-arm, and power-history rendering. The fast
+  intraday learner now bounds each sample's influence before aggregation, so
+  one corrupt device frame cannot pin an otherwise healthy forecast window at
+  the correction ceiling. Weekly module bars use hourly statistics throughout
+  so an anomalous hour cannot hide inside a diluted daily mean.
+
 ## [0.27.0] - 2026-08-26
 
 This release makes the complete correction stack layer-exact and leakage-free,
