@@ -1,0 +1,8 @@
+# Project-scoped so a fresh devcontainer also knows about the browser server.
+# One-time installation: bash scripts/playwright-mcp.sh install
+[mcp_servers.playwright]
+command = "bash"
+args = ["scripts/playwright-mcp.sh"]
+env_vars = ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120

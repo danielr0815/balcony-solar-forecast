@@ -24,6 +24,7 @@ tests/test_config_flow_user.py (no HA flow manager needed).
 from __future__ import annotations
 
 import copy
+import inspect
 
 import pytest
 
@@ -46,6 +47,7 @@ from balcony_solar_forecast.const import (  # noqa: E402
     RECOMPUTE_INTERVAL_SECONDS,
 )
 from balcony_solar_forecast.core.types import SiteConfig  # noqa: E402
+from homeassistant.config_entries import ConfigEntries  # noqa: E402
 
 # Submitted coordinates: DIFFERENT from both the entry's stored lat/lon AND the
 # site dict's own embedded lat/lon, so the merge is unambiguously observable.
@@ -65,9 +67,9 @@ class _FakeConfigEntries:
     def __init__(self, captured: dict):
         self._captured = captured
 
-    def async_update_entry(self, entry, **kwargs):
+    def async_update_entry(self, entry, *, data, options):
         self._captured.setdefault("update_calls", []).append(
-            {"entry": entry, "kwargs": kwargs}
+            {"entry": entry, "kwargs": {"data": data, "options": options}}
         )
         return True
 
@@ -167,7 +169,7 @@ async def test_reconfigure_merges_coordinates_and_strips_stale_options(monkeypat
     assert call["entry"] is entry
     kwargs = call["kwargs"]
 
-    updates = kwargs["data_updates"]
+    updates = kwargs["data"]
     # Top-level coordinates carry the SUBMITTED values...
     assert updates[CONF_LATITUDE] == pytest.approx(SUBMIT_LAT)
     assert updates[CONF_LONGITUDE] == pytest.approx(SUBMIT_LON)
@@ -206,7 +208,7 @@ async def test_reconfigure_ac_meter_merges_into_site_and_round_trips(monkeypatch
         )
     )
 
-    site_dict = captured["update_calls"][0]["kwargs"]["data_updates"][CONF_SITE]
+    site_dict = captured["update_calls"][0]["kwargs"]["data"][CONF_SITE]
     assert site_dict[CONF_AC_ACTUAL_ENTITY] == "sensor.house_ac_meter"
     assert site_dict[CONF_AC_ACTUAL_INVERT] is True
     # The persisted site dict reloads into a SiteConfig carrying both.
@@ -232,7 +234,7 @@ async def test_reconfigure_empty_ac_meter_stays_none(monkeypatch):
         _submit(**{CONF_SITE: stale_site, CONF_AC_ACTUAL_ENTITY: "  "})
     )
 
-    site_dict = captured["update_calls"][0]["kwargs"]["data_updates"][CONF_SITE]
+    site_dict = captured["update_calls"][0]["kwargs"]["data"][CONF_SITE]
     assert CONF_AC_ACTUAL_ENTITY not in site_dict
     assert CONF_AC_ACTUAL_INVERT not in site_dict
     site = SiteConfig.from_dict(site_dict)
@@ -297,3 +299,30 @@ async def test_reconfigure_first_render_shows_form(monkeypatch):
     assert captured["form"]["step_id"] == "reconfigure"
     assert captured["form"]["errors"] == {}
     assert "update_calls" not in captured
+
+
+async def test_reconfigure_uses_ha_data_api_and_preserves_existing_data(monkeypatch):
+    """HA rejected the tree correction with HTTP 500: data_updates is not
+    an async_update_entry keyword. Passing data must also retain unknown keys.
+    """
+    entry = _entry(options={"fast_learner_enabled": False})
+    entry.data["future_metadata"] = {"retain": [1, 2]}
+    original = copy.deepcopy(entry.data)
+    flow, _ = _flow(monkeypatch, entry)
+    calls = []
+
+    def capture(entry_arg, **kwargs):
+        calls.append((entry_arg, kwargs))
+        return True
+
+    monkeypatch.setattr(flow.hass.config_entries, "async_update_entry", capture)
+    await flow.async_step_reconfigure(_submit())
+    assert len(calls) == 1
+    entry_arg, kwargs = calls[0]
+    assert "data" in kwargs, "HA requires full data, not a data_updates patch"
+    inspect.signature(ConfigEntries.async_update_entry).bind(None, entry_arg, **kwargs)
+    assert kwargs["data"]["name"] == original["name"]
+    assert kwargs["data"]["future_metadata"] == original["future_metadata"]
+    assert kwargs["data"][CONF_LATITUDE] == SUBMIT_LAT
+    assert kwargs["options"] == {"fast_learner_enabled": False}
+    assert entry.data == original, "building the update must not mutate entry.data"

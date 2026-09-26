@@ -18,5 +18,6 @@ htmlcov/
 *.log
 scratchpad/
 .ha-dev/
+.playwright-mcp/
 # uv.lock is deliberately NOT ignored: it is the single source of truth for
 # the dev toolchain and is committed.

@@ -442,7 +442,10 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
                 # exactly that pattern as deprecated (breaks in 2026.12).
                 self.hass.config_entries.async_update_entry(
                     entry,
-                    data_updates=_structural_data(site, user_input),
+                    # async_update_entry accepts a full data mapping, unlike
+                    # the flow helper's data_updates patch (HA rejected it).
+                    # Merge explicitly to preserve the name and unknown keys.
+                    data={**entry.data, **_structural_data(site, user_input)},
                     options=stripped_options,
                 )
                 return self.async_abort(reason="reconfigure_successful")
