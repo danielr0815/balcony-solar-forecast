@@ -369,6 +369,8 @@ def _real_coordinator():
     store = ForecastStore(None, "e1", store=_FakeHAStore())  # type: ignore[arg-type]
 
     c = BalconySolarCoordinator.__new__(BalconySolarCoordinator)
+    from custom_components.balcony_solar_forecast._operations import LearnerOperations
+    c._operations = LearnerOperations()
     c._store = store
     c._site = SiteConfig(
         latitude=48.5, longitude=12.2,

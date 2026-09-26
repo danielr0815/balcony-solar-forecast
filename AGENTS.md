@@ -46,7 +46,7 @@ sind davon getrennt und benötigen keinen Software-Release.
 ## Setup (einmalig)
 
 ```bash
-uv sync --group dev        # erzeugt .venv aus uv.lock (einzige Wahrheit,
+uv sync --locked --group dev        # erzeugt .venv aus uv.lock (einzige Wahrheit,
                            # auch in CI); installiert Python 3.14 bei Bedarf
 ```
 
@@ -58,8 +58,8 @@ den JS-Harness), oder `scripts/setup-env.sh` / `scripts/setup-env.ps1`
 ## Tests
 
 ```bash
-uv run pytest tests -p no:homeassistant        # volle Suite (läuft überall)
-uv run pytest tests/core -p no:homeassistant   # nur der HA-freie Kern
+uv run --no-sync pytest tests -p no:homeassistant        # portable Suite
+uv run --no-sync pytest tests/core -p no:homeassistant   # nur der HA-freie Kern
 ```
 
 **`-p no:homeassistant` ist Pflicht**, überall (Makefile, CI, Devcontainer):
@@ -74,11 +74,17 @@ Der `tests`-Job der CI gatet Coverage bei **`--cov-fail-under=95`** und
 installiert Node 22 per `actions/setup-node`, damit der JS-Harness
 (`tests/harness/`) garantiert läuft statt still zu skippen.
 
+Die echte HA-Lifecycle-Suite läuft separat unter Linux ohne die Unit-Shims:
+
+```bash
+uv run --no-sync pytest --confcutdir=tests/integration tests/integration -p no:homeassistant
+```
+
 ## Lint, Typen (vor jedem Push)
 
 ```bash
-uv run ruff check .     # bzw. `uv run ruff check --fix .` zum Anwenden
-uv run mypy             # Baseline: prüft core/, siehe [tool.mypy]
+uv run --no-sync ruff check .     # bzw. `uv run --no-sync ruff check --fix .` zum Anwenden
+uv run --no-sync mypy             # Baseline: prüft core/, siehe [tool.mypy]
 ```
 
 - **`ruff format` ist VERBOTEN** — der Code ist absichtlich handformatiert
@@ -92,10 +98,11 @@ uv run mypy             # Baseline: prüft core/, siehe [tool.mypy]
   Voll-Pin: `pytest-homeassistant-custom-component`, weil es homeassistant
   selbst exakt pinnt und damit die HA-Kopplung führt (Begründung im
   pyproject-Kommentar).
-- mypy ist bewusst eine Baseline (nur `core/`; acht ältere Module mit
-  bekannten Fehlern sind im pyproject-Kommentar namentlich ausgenommen, die
-  übrigen neun — inkl. `engine.py` — müssen sauber bleiben). Scope erweitern,
-  bevor Regeln verschärft werden.
+- Reguläres mypy bewacht die sauberen Kernmodule. Zusätzlich prüft
+  `uv run --no-sync python scripts/check_mypy_baseline.py` den gesamten Kern
+  und kritische HA-Grenzen ohne Modulunterdrückung gegen explizite Altfehler.
+  Neue Fehler sowie erledigte, nicht entfernte Baseline-Einträge scheitern.
+  `scripts/check_core_imports.py` erzwingt die HA-/stdlib-Grenze.
 - Optional: `pre-commit install` — der Hook (`.pre-commit-config.yaml`,
   nur `ruff-check --fix`) spiegelt die im Lockfile fixierte ruff-Version.
 
@@ -107,7 +114,8 @@ Version steht an **drei Stellen**, die immer gleich sein müssen:
 - `pyproject.toml` → `[project] version`
 - `custom_components/balcony_solar_forecast/const.py` → `INTEGRATION_VERSION`
 
-Die CI bricht bei Drift, der Release-Guard prüft zusätzlich gegen den Git-Tag.
+Die CI bricht bei Drift. Der Release-Preflight prüft den exakten Main-Commit
+und seinen grünen Validate-Lauf, bevor Tag und Release entstehen.
 Version nur im Release-PR anfassen (HACS liefert den Zipball des Tags aus).
 
 **CI-Härtung:** alle Workflow-Actions sind per **Commit-SHA gepinnt** (der
@@ -129,5 +137,6 @@ advisory `spec-reminder`-CI-Job bei PRs.
   motiviert hat) — bitte so weiterführen. Belege mit Datei +
   Funktions-/Konstantenname, **nie mit Zeilennummern**.
 - Kleine, fokussierte Änderungen; jede Änderung mit Test, der sie beweist
-  (neue Tests müssen den alten Code durchfallen lassen — CLAUDE.md Regel 6).
+  (Bugfix: semantischer Parent-RED; Refactoring: Äquivalenz; Testnachrüstung:
+  Wirksamkeitsnachweis für vorhandenen Vertrag — CLAUDE.md Regel 6).
 - Voller Workflow: [CONTRIBUTING.md](CONTRIBUTING.md).

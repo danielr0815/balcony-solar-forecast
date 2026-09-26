@@ -138,6 +138,8 @@ from .core.types import (
     _safe_int,
 )
 
+_INVERTER_TRAINED_DAYS = "inverter_cal_trained_days"
+
 _LOGGER = logging.getLogger(__name__)
 
 # Ring sizes (SPEC §16.2: 90-day error buffer + as-issued log).
@@ -180,6 +182,7 @@ def _empty_learning_health() -> dict[str, Any]:
         "eta_oob_streak": 0,
         "eta_oob_last_day": None,
         "eta_oob_last_median": None,
+        "eta_last_checked_day": None,
     }
 
 
@@ -201,7 +204,7 @@ def _coerce_learning_health(raw: Any) -> dict[str, Any]:
     modules = raw.get("last_discard_modules")
     if isinstance(modules, list):
         out["last_discard_modules"] = [m for m in modules if isinstance(m, str)]
-    for key in ("last_discard_day", "last_accepted_day"):
+    for key in ("last_discard_day", "last_accepted_day", "eta_last_checked_day"):
         value = raw.get(key)
         out[key] = value if isinstance(value, str) else None
     out["eta_oob_streak"] = max(0, _safe_int(raw.get("eta_oob_streak"), 0))
@@ -318,6 +321,7 @@ def _empty_state() -> dict[str, Any]:
         # ADDITIVELY within the v3 schema (no version bump): the shared load path
         # default-reads a store lacking this key to the neutral state, so every
         # existing v2/v3 store stays byte-faithful.
+        _INVERTER_TRAINED_DAYS: [],
         STORE_KEY_INVERTER_CAL_STATE: InverterCalState().to_dict(),  # learned eta_inv
         # Config fingerprint the day-ahead bias cells were learned against (A4).
         # None on a fresh / pre-fingerprint store: the first reconcile just
@@ -541,6 +545,10 @@ def _validate_learner_sections(
     state[STORE_KEY_TRAINED_DAYS] = sorted(
         {d for d in trained if isinstance(d, str)}
     )[-TRAINED_DAYS_RING:] if isinstance(trained, list) else []
+    inverter_days = raw.get(_INVERTER_TRAINED_DAYS, [])
+    state[_INVERTER_TRAINED_DAYS] = sorted(
+        {d for d in inverter_days if isinstance(d, str)}
+    )[-TRAINED_DAYS_RING:] if isinstance(inverter_days, list) else []
     # Inverter-efficiency calibration (AC-side Phase 3), carried through the SAME
     # clamping round-trip: a store that PREDATES this key (any v2, or a v3 written
     # before Phase 3) has no entry, so ``from_dict({})`` yields the neutral state
@@ -938,6 +946,16 @@ class ForecastStore:
     # ------------------------------------------------------------------
     # Learner state: inverter DC->AC efficiency site calibration (Phase 3)
     # ------------------------------------------------------------------
+
+    def is_inverter_day_trained(self, iso_date: str) -> bool:
+        """Calibration has its own completion marker, independent of DC training."""
+        return iso_date in self._data.get(_INVERTER_TRAINED_DAYS, [])
+
+    def mark_inverter_day_trained(self, iso_date: str) -> None:
+        days = set(self._data.get(_INVERTER_TRAINED_DAYS, []))
+        days.add(iso_date)
+        self._data[_INVERTER_TRAINED_DAYS] = sorted(days)[-TRAINED_DAYS_RING:]
+        self._schedule_save()
 
     def get_inverter_cal_state(self) -> InverterCalState:
         """Return the persisted inverter calibration (neutral if absent/corrupt).

@@ -44,7 +44,7 @@ from custom_components.balcony_solar_forecast.coordinator import (  # noqa: E402
 from custom_components.balcony_solar_forecast.store import (  # noqa: E402
     ForecastStore,
 )
-from tests.test_store_v2 import FakeStore  # noqa: E402
+from tests.helpers.store import FakeStore  # noqa: E402
 
 _ENTRY_ID = "setup1"
 
@@ -314,6 +314,9 @@ async def test_component_setup_registers_services_and_frontend():
     assert urls == [
         "/balcony_solar_forecast/frontend/shade_profile_card.js",
         "/balcony_solar_forecast/frontend/power_history_card.js",
+        "/balcony_solar_forecast/frontend/card_data.js",
+        "/balcony_solar_forecast/frontend/site_calendar.js",
+        "/balcony_solar_forecast/frontend/card_ui.js",
     ]
     assert hass.data[f"{DOMAIN}_frontend_static_registered"] is True
 

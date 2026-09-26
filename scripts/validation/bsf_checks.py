@@ -41,7 +41,8 @@ DEFAULT_ETA = 0.9248
 BASELINE_MIDDAY_RAW_OVER_ACT = 0.897  # Median raw/Ist-DC 11-13Z
 BASELINE_M4M8_MORNING_WH = 2254.0  # M4+M8 DC 04-07Z, Wochensumme Wh
 
-ORDER = {"PASS": 0, "INFO": 1, "SKIP": 2, "WARN": 3, "FAIL": 4}
+ORDER = {"PASS": 0, "INFO": 1, "SKIP": 2, "WARN": 3, "FAIL": 4, "ERROR": 5}
+REQUIRED_CHECK_IDS = frozenset(f"C{i}" for i in range(1, 9))
 
 
 @dataclass
@@ -67,7 +68,7 @@ class CheckResult:
 
     def finalize(self) -> CheckResult:
         st = [m.status for m in self.metrics if m.status in ORDER]
-        rated = [s for s in st if s in ("PASS", "WARN", "FAIL")]
+        rated = [s for s in st if s in ("PASS", "WARN", "FAIL", "ERROR")]
         if rated:
             self.status = max(rated, key=lambda s: ORDER[s])
         elif st:
@@ -843,7 +844,39 @@ def run_all(b: Bundle, eta: float = DEFAULT_ETA) -> list[CheckResult]:
             out.append(fn(b, eta))
         except Exception as exc:  # noqa: BLE001 - ein Check darf nie alles reissen
             r = CheckResult(fn.__name__.replace("check_", "").upper(), fn.__doc__ or "")
-            r.status = "SKIP"
+            r.status = "ERROR"
             r.details.append(f"Check-Fehler: {exc!r}")
             out.append(r)
     return out
+
+
+def summarize(results: list[CheckResult]) -> dict:
+    """Separate evidence completeness from the verdict of evaluated checks.
+
+    A PASS in one subcheck cannot substitute for another missing subcheck.
+    INFO metrics are deliberately informational; an entirely INFO check still
+    lacks the evidence required to validate the deployment.
+    """
+    counts = {
+        "fail": sum(r.status == "FAIL" for r in results),
+        "warn": sum(r.status == "WARN" for r in results),
+        "pass": sum(r.status == "PASS" for r in results),
+        "skip": sum(r.status in ("SKIP", "INFO") for r in results),
+        "error": sum(r.status == "ERROR" for r in results),
+    }
+    missing = sorted(REQUIRED_CHECK_IDS - {r.cid for r in results})
+    incomplete = missing + [
+        r.cid for r in results
+        if r.status in ("SKIP", "INFO") or any(m.status == "SKIP" for m in r.metrics)
+    ]
+    if counts["error"]:
+        status = "ERROR"
+    elif counts["fail"]:
+        status = "FAIL"
+    elif incomplete:
+        status = "INCOMPLETE"
+    elif counts["warn"]:
+        status = "WARN"
+    else:
+        status = "PASS"
+    return {**counts, "status": status, "incomplete": sorted(set(incomplete))}

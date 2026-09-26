@@ -118,7 +118,7 @@ async def async_setup_entry(
     # shutdown creates an orphaned task whose exception is never retrieved
     # ("calls async_create_task from a thread other than the event loop").
     async def _async_flush_on_stop(_event: Event) -> None:
-        await store.async_flush()
+        await coordinator.async_stop()
 
     entry.async_on_unload(
         hass.bus.async_listen_once(
@@ -136,10 +136,7 @@ async def async_unload_entry(
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         coordinator: BalconySolarCoordinator = hass.data[DOMAIN][entry.entry_id]
-        coordinator.async_shutdown_extra()
-        # Flush pending delayed save: a reload does not fire the HA-stop
-        # event, so the last-good cache could otherwise be lost.
-        await coordinator._store.async_flush()  # noqa: SLF001 (owned wrapper)
+        await coordinator.async_stop()
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         if not hass.data.get(DOMAIN):
             hass.data.pop(DOMAIN, None)

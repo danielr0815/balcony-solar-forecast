@@ -58,6 +58,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from ._forecast_access import current_forecast
 from .const import (
     ATTR_SP_AXIS_AZ_MAX,
     ATTR_SP_AXIS_AZ_MIN,
@@ -298,7 +299,7 @@ def _build_forecast_response(
     for eid, coordinator in store.items():
         if entry_id is not None and eid != entry_id:
             continue
-        data = coordinator.data or {}
+        data = current_forecast(coordinator)
         if not data:
             entries[eid] = _empty_forecast_entry()
             continue

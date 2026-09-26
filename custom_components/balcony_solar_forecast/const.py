@@ -16,12 +16,14 @@ from __future__ import annotations
 DOMAIN = "balcony_solar_forecast"
 
 INTEGRATION_NAME = "Balcony Solar Forecast"
-INTEGRATION_VERSION = "0.27.2"
+INTEGRATION_VERSION = "0.28.0"
 
 # --- Update behaviour (SPEC §2: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
 RECOMPUTE_INTERVAL_SECONDS = 900  # engine re-run cadence (15-min slots)
 SLOT_MINUTES = 15  # forecast resolution
+SLOT_HOURS = SLOT_MINUTES / 60
+SLOT_SECONDS = SLOT_MINUTES * 60
 # Failure backoff (SPEC §3 „Retry"): after a FAILED fetch the provider is
 # retried at most this often — min(configured fetch interval, 15 min) — never
 # on every recompute tick; a down Open-Meteo would otherwise see a request per

@@ -1,77 +1,73 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version X.Y.Z (already committed on main)"
+        required: true
+        type: string
+      commit_sha:
+        description: "Full 40-character main commit SHA with a green Validate push run"
+        required: true
+        type: string
 
-# Least privilege by default.
 permissions:
   contents: read
 
-jobs:
-  validate:
-    runs-on: "ubuntu-latest"
-    name: Validate for release
-    # Job-local write (overrides the read-only top level): this workflow runs
-    # on `release: published`, and release-scoped jobs are the ones allowed to
-    # touch release contents (e.g. attaching assets later).
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" # v7
+concurrency:
+  group: release
+  cancel-in-progress: false
 
-      # HACS validation can only run against public repos: the action fetches
-      # hacs.json/manifest.json from raw.githubusercontent.com without auth,
-      # which 404s while the repo is private. Skip in that case; the check
-      # comes back automatically once the repo is public (same logic as
-      # validate.yml).
-      - name: Check repo visibility
-        id: visibility
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require dispatch from main
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: test "$WORKFLOW_REF" = refs/heads/main
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Check versions and complete CI on the exact commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "private=$(gh repo view --json isPrivate --jq .isPrivate)" >> "$GITHUB_OUTPUT"
-
-      - name: HACS validation
-        if: steps.visibility.outputs.private != 'true'
-        uses: "hacs/action@d556e736723344f83838d08488c983a15381059a" # 22.5.0
-        with:
-          category: "integration"
-          ignore: "brands"
-
-      # Pinned SHA (no usable tags upstream) — see validate.yml.
-      - name: Hassfest validation
-        uses: "home-assistant/actions/hassfest@e3fb68ebda13d88a0d695082f471ba2c83d025fb"
-
-      # HACS installs the TAG's zipball (zip_release: false), so the version
-      # strings must already be correct IN the tagged commit — bump manifest /
-      # pyproject / const.INTEGRATION_VERSION and CHANGELOG.md FIRST, then tag.
-      # A post-publish bump commit would only land on main, never in the
-      # release, silently shipping the previous version to every installer.
-      # This guard fails the release instead.
-      - name: Version guard (tag == manifest == pyproject == const)
+          RELEASE_SHA: ${{ inputs.commit_sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          python - <<'PY'
-          import json, os, re, pathlib, sys
-          tag = os.environ["GITHUB_REF"].removeprefix("refs/tags/").removeprefix("v")
-          mf = json.loads(pathlib.Path(
-              "custom_components/balcony_solar_forecast/manifest.json"
-          ).read_text())["version"]
-          pp = re.search(
-              r'^version\s*=\s*"([^"]+)"',
-              pathlib.Path("pyproject.toml").read_text(), re.M
-          ).group(1)
-          const = re.search(
-              r'^INTEGRATION_VERSION\s*=\s*"([^"]+)"',
-              pathlib.Path(
-                  "custom_components/balcony_solar_forecast/const.py"
-              ).read_text(), re.M
-          ).group(1)
-          if not (tag == mf == pp == const):
-              sys.exit(
-                  f"Release tag v{tag} does not match the tagged commit's "
-                  f"version strings (manifest {mf} / pyproject {pp} / const "
-                  f"{const}). Bump the versions + CHANGELOG first, then tag."
-              )
-          print("version OK:", tag)
-          PY
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/validate.yml/runs?head_sha=$RELEASE_SHA&event=push" > "$RUNNER_TEMP/runs.json"
+          python scripts/release_guard.py --version "$RELEASE_VERSION" --commit-sha "$RELEASE_SHA" --runs-json "$RUNNER_TEMP/runs.json" --notes-file "$RUNNER_TEMP/release-notes.md"
+
+  publish:
+    needs: preflight
+    runs-on: ubuntu-latest
+    # Only this job may publish; a rejected preflight never reaches it.
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout validated candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Recheck immediately before creating tag and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_SHA: ${{ inputs.commit_sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/validate.yml/runs?head_sha=$RELEASE_SHA&event=push" > "$RUNNER_TEMP/runs.json"
+          python scripts/release_guard.py --version "$RELEASE_VERSION" --commit-sha "$RELEASE_SHA" --runs-json "$RUNNER_TEMP/runs.json" --notes-file "$RUNNER_TEMP/release-notes.md"
+          # No force: an existing tag on another commit must reject the push.
+          git push origin "$RELEASE_SHA:refs/tags/v$RELEASE_VERSION"
+          gh release create "v$RELEASE_VERSION" --verify-tag --title "v$RELEASE_VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"

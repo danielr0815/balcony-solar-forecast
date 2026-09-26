@@ -173,6 +173,7 @@ def build_dashboard_config(
     entity_map: dict[str, str],
     measured_entities: list[tuple[str, str]],
     version: str,
+    entry_id: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the full Lovelace config, mirroring the shipped YAML.
 
@@ -192,7 +193,7 @@ def build_dashboard_config(
     _add_forecast_history(cards, entity_map)
     _add_dc_diagnostics(cards, entity_map)
     # No per-module LTS statistics-graph here: the bundled power-history card
-    # added just above already charts daily Wh per module from the SAME daily
+    # added just above already charts daily Wh per module from the SAME hourly
     # `mean` statistics of the SAME power sensors, stacked and with the forecast
     # overlay. The shipped built-ins-only YAML still carries the statistics-graph
     # (there the bundled card does not exist, so it is the only per-module view).
@@ -202,6 +203,11 @@ def build_dashboard_config(
     _add_drift_trend(cards, entity_map)
     _add_shademap_markdown(cards)
     _add_shade_profile_card(cards, entity_map)
+
+    if entry_id is not None:
+        for card in cards:
+            if card["type"] in (_SHADE_PROFILE_CARD, _POWER_HISTORY_CARD):
+                card["entry_id"] = entry_id
 
     view = {
         "title": "Forecast",
@@ -398,7 +404,7 @@ def _add_forecast_band(
     rows: list[dict[str, Any]] = []
     for key, name in (
         (SENSOR_ENERGY_TODAY_P10, "P10 (conservative)"),
-        (SENSOR_ENERGY_TODAY, "P50 (planning)"),
+        (SENSOR_ENERGY_TODAY, "Point forecast (planning)"),
         (SENSOR_ENERGY_TODAY_P90, "P90 (optimistic)"),
     ):
         row = _row(entity_map, key, name)

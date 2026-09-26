@@ -206,6 +206,14 @@ def _record_actuals_outcome(coord, day: date, *, accepted: bool) -> None:
     health = dict(store.get_learning_health())
     iso = day.isoformat()
 
+    # Catch-up can fill an older hole after a newer outcome was recorded.
+    # Health is a current chronological verdict, not the order of IO completion.
+    latest = max((value for value in (
+        health.get("last_discard_day"), health.get("last_accepted_day")
+    ) if isinstance(value, str)), default="")
+    if iso < latest:
+        return
+
     if accepted:
         if health.get("discard_streak") or health.get("last_discard_reason"):
             _LOGGER.info(
@@ -354,6 +362,11 @@ def _record_eta_calibration_outcome(
     store = coord._store
     health = dict(store.get_learning_health())
     iso = day.isoformat()
+
+    last_checked = health.get("eta_last_checked_day") or health.get("eta_oob_last_day")
+    if isinstance(last_checked, str) and iso < last_checked:
+        return
+    health["eta_last_checked_day"] = iso
 
     in_band = INVERTER_CAL_MIN <= median_ratio <= INVERTER_CAL_MAX
     if in_band:

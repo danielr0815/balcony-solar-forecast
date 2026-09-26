@@ -31,7 +31,6 @@ with a clear ServiceValidationError.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from datetime import UTC, date, datetime, timedelta
@@ -66,21 +65,6 @@ ATTR_DRY_RUN = "dry_run"
 _PROGRESS_EVERY_DAYS = 50
 
 
-def _bootstrap_lock(coordinator) -> asyncio.Lock:
-    """Return (creating once) the coordinator's shared bootstrap/nightly lock.
-
-    The lock is created in ``BalconySolarCoordinator.__init__``; a test double
-    built via ``__new__`` (or a fake coordinator) has none, so create it lazily
-    and stash it back so the nightly wrapper and a second ``run_bootstrap`` see
-    the SAME instance.
-    """
-    lock = getattr(coordinator, "_bootstrap_lock", None)
-    if lock is None:
-        lock = asyncio.Lock()
-        coordinator._bootstrap_lock = lock
-    return lock
-
-
 async def async_run_bootstrap(
     hass: HomeAssistant, call: ServiceCall
 ) -> ServiceResponse:
@@ -100,13 +84,7 @@ async def async_run_bootstrap(
     )
     dry_run = bool(call.data.get(ATTR_DRY_RUN, True))
 
-    lock = _bootstrap_lock(coordinator)
-    if lock.locked():
-        raise ServiceValidationError(
-            "A re-bootstrap or the nightly training job is already running; "
-            "wait for it to finish before starting another run_bootstrap."
-        )
-    async with lock:
+    async with coordinator._operations.work(mutate=True, reject_busy=True):
         return await _run_locked(hass, coordinator, importer, start, end, dry_run)
 
 

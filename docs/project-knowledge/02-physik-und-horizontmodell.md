@@ -1,7 +1,7 @@
 # Physik & Horizontmodell
 
 **Worum es geht:** Dieses Dokument beschreibt die reine, HA-freie Prognosephysik von
-`balcony-solar-forecast` (Stand `main` @ v0.27.0) exakt so, wie sie im Code steht:
+`balcony-solar-forecast` (Arbeitsstand auf v0.27.2) exakt so, wie sie im Code steht:
 Sonnenstand, Clear-Sky, Hay-Davies-Transposition, Zelltemperatur/DC-Modell, der
 zweistufige AC-Clamp und — am ausführlichsten — das Horizontmodell inklusive der
 0.22-Erweiterungen `tau_points` und `diffuse_tau`.

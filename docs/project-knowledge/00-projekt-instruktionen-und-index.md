@@ -1,6 +1,6 @@
 # Projekt-Instruktionen & Index
 
-**Stand: `main` @ v0.27.0 (2026-08-26).** Diese Datei ist der Einstieg in die
+**Stand: `Arbeitsstand` auf v0.27.2 (2026-09-26).** Diese Datei ist der Einstieg in die
 Wissensbasis zum Repository **`danielr0815/balcony-solar-forecast`**
 (<https://github.com/danielr0815/balcony-solar-forecast>). Sie erklärt, was das
 Projekt ist, welches der sieben Wissensdokumente wofür zuständig ist, über welchen
@@ -30,7 +30,7 @@ Technische Eckdaten (alle am Code geprüft):
 
 | Punkt | Wert |
 |---|---|
-| Aktueller Stand | `main` @ **v0.27.0**, `manifest.json` / `pyproject.toml` / `const.INTEGRATION_VERSION` synchron |
+| Aktueller Stand | **v0.27.2**, `manifest.json` / `pyproject.toml` / `const.INTEGRATION_VERSION` synchron |
 | Laufzeit-Abhängigkeiten | **keine** (`manifest.json` → `requirements: []`) — reine stdlib, kein numpy/pandas/pvlib |
 | Architekturgrenze | `custom_components/balcony_solar_forecast/core/` importiert **nichts** aus `homeassistant`; genau eine dokumentierte Netz-Ausnahme (`core/openmeteo_backfill.py`, lazy `aiohttp`, injizierte Session) |
 | Vertrag | `docs/SPEC.md` (deutsch, Ist-Stand), Herleitung/Historie in `docs/HISTORIE.md`, Designentscheide in `docs/adr/`, Release-Chronik in `CHANGELOG.md` |
@@ -41,7 +41,7 @@ Technische Eckdaten (alle am Code geprüft):
 Menschen) ohne Vorwissen und ohne Chatverlauf in die Lage versetzen, am Projekt
 zu arbeiten: Code ändern, ein Prognoseproblem diagnostizieren, die Anlage
 umkonfigurieren, ein Release bauen. Sie ist **destillierte Analyse**, kein Ersatz
-für den Code: Jede Verhaltensaussage ist gegen `main` @ v0.27.0 geprüft, aber
+für den Code: Jede Verhaltensaussage ist gegen den Arbeitsstand auf v0.27.2 geprüft, aber
 Code altert schneller als Prosa. Im Zweifel gilt der Code.
 
 ---
@@ -293,7 +293,7 @@ heutigen Zustand.
 
 ## 5. Aktualität & Pflege
 
-**Stand dieser Wissensbasis:** `main` @ **v0.27.0**, geprüft am **2026-08-26**.
+**Stand dieser Wissensbasis:** **v0.27.2**, geprüft am **2026-08-26**.
 Alle Code-Aussagen sind gegen diesen Stand geprüft; Betriebs- und Messzahlen
 stammen aus Live-Abzügen vom 16.–25.07.2026 und sind **Momentaufnahmen**.
 

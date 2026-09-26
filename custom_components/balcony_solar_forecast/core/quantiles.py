@@ -43,6 +43,10 @@ from collections.abc import Iterable, Sequence
 from datetime import date, datetime, timedelta
 
 from ..const import (
+    CLOUD_CLASSES,
+    DAY_PART_AFTERNOON,
+    DAY_PART_MIDDAY,
+    DAY_PART_MORNING,
     QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN,
     QUANTILE_MIN_DAYS,
     QUANTILE_MIN_FORECAST_WH,
@@ -415,12 +419,16 @@ def train_quantiles(
         bins = {}
         version = 1
 
+    counts_today = {
+        key: sum(entry[0] == training_date for entry in ring)
+        for key, ring in bins.items()
+    } if training_date else {}
     for s in samples or ():
         cloud_class = getattr(s, "cloud_class", None)
         day_part = getattr(s, "day_part", None)
-        if not isinstance(cloud_class, str) or not cloud_class:
+        if cloud_class not in CLOUD_CLASSES:
             continue
-        if not isinstance(day_part, str) or not day_part:
+        if day_part not in (DAY_PART_MORNING, DAY_PART_MIDDAY, DAY_PART_AFTERNOON):
             continue
         corrected = _finite(getattr(s, "corrected_wh", None))
         measured = _finite(getattr(s, "measured_wh", None))
@@ -439,11 +447,14 @@ def train_quantiles(
             relerr = QUANTILE_REL_ERR_MAX
 
         key = QuantileState.bin_key(cloud_class, day_part)
+        if training_date and counts_today.get(key, 0) >= QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN:
+            continue
         ring = bins.get(key)
         if ring is None:
             ring = []
             bins[key] = ring
         ring.append([training_date, relerr])
+        counts_today[key] = counts_today.get(key, 0) + 1
 
     # The window is global, not conditional on a bin being hit today. Sparse
     # weather classes must age out on the same wall clock as busy ones.

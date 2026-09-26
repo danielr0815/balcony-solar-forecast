@@ -29,6 +29,7 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from ._forecast_access import current_forecast
 from .const import (
     CONF_LATITUDE,
     CONF_LONGITUDE,
@@ -68,19 +69,20 @@ async def async_get_config_entry_diagnostics(
         diagnostics["state"] = {"available": False, "reason": "coordinator_missing"}
         return diagnostics
 
-    data: dict[str, Any] = coordinator.data or {}
-    age_s = data.get("weather_age_seconds")
+    data: dict[str, Any] = current_forecast(coordinator)
+    provenance = getattr(coordinator, "forecast_provenance", {})
+    age_s = provenance.get("weather_age_seconds", data.get("weather_age_seconds"))
     diagnostics["state"] = {
         "last_update_success": bool(
             getattr(coordinator, "last_update_success", False)
         ),
-        "source_status": data.get("status"),
-        "degraded": data.get("degraded"),
+        "source_status": provenance.get("source_status", data.get("status")),
+        "degraded": provenance.get("degraded", data.get("degraded")),
         "weather_age_seconds": age_s,
         "last_fetch_age_min": (
             None if age_s is None else round(float(age_s) / 60.0, 1)
         ),
-        "last_error": data.get("last_error"),
+        "last_error": provenance.get("last_error", data.get("last_error")),
         "computed_at": data.get("computed_at"),
     }
     diagnostics["forecast"] = _forecast_summary(data)

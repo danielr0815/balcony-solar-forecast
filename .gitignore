@@ -6,7 +6,9 @@ __pycache__/
 .venv/
 venv/
 .coverage
+.coverage.branch
 coverage.xml
+coverage-branches.xml
 htmlcov/
 .idea/
 # (`.vscode/*` statt `.vscode/`: git kann keine Dateien unterhalb eines

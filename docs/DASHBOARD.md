@@ -1,8 +1,8 @@
 # Observability dashboard
 
-A ready-to-paste Lovelace dashboard for Balcony Solar Forecast, using **only
-built-in Home Assistant cards** — it needs zero custom cards and zero HACS
-frontend resources. It surfaces the v0.4 skill scoreboard, the
+A Lovelace dashboard for Balcony Solar Forecast. The recommended installer
+uses built-in cards and the two cards bundled with this integration, without a
+separate HACS frontend installation. The manual YAML uses only built-in cards. It surfaces the v0.4 skill scoreboard, the
 P10/P50/P90 uncertainty band, the learner/drift/degradation status, and a
 best-effort shademap view (SPEC §15/§18.1).
 
@@ -160,7 +160,7 @@ without the bundled frontend resources.
   history-graph. On a partial install where the measured-total sensor is absent it
   falls back to that per-module `history-graph` so a measured view still renders.
   > The generated dashboard has **no** per-module `statistics-graph`. The card
-  > above already charts daily Wh per module from the same daily `mean`
+  > above already charts daily Wh per module from the same hourly `mean`
   > statistics of the same power sensors — stacked, with the forecast overlay
   > and a day/week toggle — so a second grouped-bar view of the identical data
   > was redundant. The copy-paste YAML in §1b keeps a `statistics-graph`
@@ -289,8 +289,8 @@ read-only action, `balcony_solar_forecast.get_shade_profile`, which returns the
 diagram's curve arrays for any module/date without touching the live selection.
 
 The card auto-discovers the three shade-profile entities above, so the default
-YAML is simply `type: custom:balcony-shade-profile-card`. It has four optional
-keys — `sensor`, `module_select`, `date_entity`, `title` — set them only to pin
+YAML is simply `type: custom:balcony-shade-profile-card`. Optional
+keys are `entry_id`, `sensor`, `module_select`, `date_entity`, `title` — set them only to pin
 a specific device's entities (e.g. multiple installs). It changes no state
 except through the module/date controls.
 
@@ -340,7 +340,7 @@ each module's Wh for that hour, the **Total** (bold), and the **Forecast** Wh �
 so you can read the exact per-module contribution and the site total at a glance.
 
 It reads two integration-owned entities (device **Balcony Solar Forecast**),
-auto-discovered from `hass.states` when not configured:
+auto-discovered from the entry-scoped entity registry when not configured:
 
 | Entity | Purpose |
 |---|---|
@@ -350,7 +350,7 @@ auto-discovered from `hass.states` when not configured:
 The bars come from the recorder's **hourly long-term statistics** (the mean DC
 power of each module sensor over the hour × 1 h = Wh), pulled directly via the
 `recorder/statistics_during_period` websocket command over the selected day's
-`[00:00, +24h)` local window — refetched on load, every 5 minutes, and when the
+`[site midnight, next site midnight)` window in HA’s configured timezone — refetched on load, every 5 minutes, and when the
 local day rolls over (only while you are viewing **today**; a past day is static
 and never re-fetched). Modules therefore need `state_class` for LTS to exist
 (they do — LTS since 2024-07); until the recorder has written hourly statistics
@@ -361,8 +361,8 @@ attribute the bars still render, just without the dashed line.
 **Day / week navigation.** A header `◀ [label] ▶` steps the selected day (label:
 *Today* / *Yesterday* / the local date), and ▶ is disabled once you are back at
 today. A **Day | Week** toggle switches to a **week view**: seven stacked
-day-bars of daily production per module (from `period: "day"` mean statistics,
-mean W × 24 h = daily Wh), the window ending at the selected day and stepping by
+day-bars of daily production per module (summed from plausibility-checked hourly
+mean statistics, mean W × 1 h per hour), the window ending at the selected day and stepping by
 seven days. The selection lives in the card only — it is never persisted.
 
 **Forecast line on past days.** For *today* the dashed line is the live `wh_period`
@@ -385,8 +385,9 @@ segment** at that day's forecast total: past days show the **issued** daily sum
 from the ring, today shows the live `wh_period` sum, and a day with no archived
 snapshot simply has a **gap** (no segment — honest, nothing fabricated). The
 hover panel gains a **Forecast** row (the day's total, or "—" on a gap day). The
-per-day lookups run concurrently and are cached per window, so paging back to an
-already-viewed week refires no service calls.
+per-day lookups run concurrently. Confirmed snapshots and missing days are
+cached per window; failed requests show an error note and retry on the next
+refresh or visit.
 
 If you installed the dashboard via the one-click `install_dashboard` action
 (§1a), this card is **already embedded** (wired to your two entity ids). To add
@@ -398,7 +399,7 @@ and (storage-mode Lovelace) auto-registers it, so it appears in the card picker:
    then add it. A live preview renders straight away.
 
 The default YAML is simply `type: custom:balcony-power-history-card` (both
-entities auto-discovered). Optional keys — `total_sensor`, `forecast_sensor`,
+entities auto-discovered). Optional keys — `entry_id`, `total_sensor`, `forecast_sensor`,
 `title`, and `hours_forecast` (set `false` to hide the dashed forecast line) —
 set them only to pin a specific device's entities (e.g. multiple installs) or
 tweak the look. It changes no state.
@@ -422,7 +423,7 @@ tweak the look. It changes no state.
 
 ## 5. Notes
 
-- Every card here is a **built-in** Lovelace card (`markdown`, `entities`,
+- Every card in the **manual YAML alternative** is a built-in Lovelace card (`markdown`, `entities`,
   `history-graph`, `statistics-graph`, `gauge`). No HACS frontend resources are
   required. A pure test
   ([`tests/core/test_dashboard_yaml.py`](../tests/core/test_dashboard_yaml.py))
@@ -433,3 +434,26 @@ tweak the look. It changes no state.
   2024-07) for the statistics graph to have data.
 - The dashboard is read-only observability; it changes no state and touches no
   consumer (no consumer is touched).
+
+
+## 6. Site selection, time and accessible values
+
+For multiple sites, set `entry_id` or an explicit integration sensor from which
+its entry can be inferred. All discovered controls and read-service requests
+use that same entry. Ambiguous defaults show a setup hint. Generated dashboards
+already pass the correct entry ID. Discovery survives state pushes and detached
+cards; failed lookups can retry after reconnect.
+
+The Power History calendar uses HA's configured timezone even if the browser
+is abroad. Spring/autumn clock changes produce 23/25 distinct hourly buckets.
+Repeated autumn hours carry their UTC offset in the hover and detail table.
+Recorder failures have a separate error message; retained data shows its last
+successful update time. Navigating to another period clears previous bars.
+
+Both cards offer **Values as a table** below the chart, using native keyboard-
+accessible disclosure and table markup. Controls have associated labels and
+selected toggle states are exposed to assistive technology.
+
+Shared local modules own discovery/services, site calendar arithmetic and
+accessible controls. Cards propagate their resource URL's version query to all
+module imports. These files need no additional Lovelace resource entries.

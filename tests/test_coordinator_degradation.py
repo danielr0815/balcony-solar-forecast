@@ -18,13 +18,12 @@ Covers the previously untested fault-tolerance core of the coordinator:
     the intraday in-progress-slot boundary (age_min > -15), the
     correction-source labels, and the quantile band map presence/omission.
 
-Reuses the fake-coordinator infrastructure from tests/test_coordinator_learning
-and the Open-Meteo payload shape from tests/test_fetcher_shapes.
+Shared coordinator and weather fakes live in tests/helpers/.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 import pytest
 
@@ -60,97 +59,29 @@ from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
 from custom_components.balcony_solar_forecast.fetcher import (  # noqa: E402
     FetchError,
 )
-from tests.test_coordinator_learning import (  # noqa: E402
-    _FakeStore,
-    _make_coordinator,
+from tests.helpers.weather import (
+    FETCH_INTERVAL as FETCH_INTERVAL,
 )
 
-NOW = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
-FETCH_INTERVAL = timedelta(seconds=1800)
-
-
-# ---------------------------------------------------------------------------
-# Payload / fetcher fakes
-# ---------------------------------------------------------------------------
-
-
-def _om_payload(n_quarters: int = 8, start_iso: str = "2026-07-05T10:15") -> dict:
-    """A minimal valid Open-Meteo payload (mirrors tests/test_fetcher_shapes)."""
-    base = datetime.fromisoformat(start_iso)
-    times = [
-        (base + timedelta(minutes=15 * i)).strftime("%Y-%m-%dT%H:%M")
-        for i in range(n_quarters)
-    ]
-    hours = max(1, n_quarters // 4 + 1)
-    hbase = base.replace(minute=0)
-    htimes = [
-        (hbase + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M")
-        for i in range(hours)
-    ]
-    return {
-        "minutely_15": {
-            "time": times,
-            "shortwave_radiation": [500.0] * n_quarters,
-            "direct_normal_irradiance": [600.0] * n_quarters,
-            "diffuse_radiation": [150.0] * n_quarters,
-            "temperature_2m": [22.0] * n_quarters,
-        },
-        "hourly": {
-            "time": htimes,
-            "cloud_cover_low": [10.0] * hours,
-            "cloud_cover_mid": [0.0] * hours,
-            "cloud_cover_high": [0.0] * hours,
-            "visibility": [30000.0] * hours,
-            "snowfall": [0.0] * hours,
-            "snow_depth": [0.0] * hours,
-        },
-    }
-
-
-def _sparse_payload(**kw) -> dict:
-    """A payload with LESS radiation coverage (nulled radiation samples)."""
-    p = _om_payload(**kw)
-    n = len(p["minutely_15"]["time"])
-    p["minutely_15"]["shortwave_radiation"] = [None] * n
-    p["minutely_15"]["direct_normal_irradiance"] = [None] * n
-    p["minutely_15"]["diffuse_radiation"] = [None] * n
-    return p
-
-
-class _PayloadStore(_FakeStore):
-    """FakeStore that actually holds a last-good payload."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.last_payload: dict | None = None
-
-    def get_last_payload(self):
-        return self.last_payload
-
-    def set_last_payload(self, payload, fetched_at_iso):
-        self.last_payload = {"payload": payload, "fetched_at": fetched_at_iso}
-
-
-class _FakeFetcher:
-    """Scripted fetcher: pops the next behaviour per call."""
-
-    def __init__(self, script: list) -> None:
-        self.script = list(script)
-        self.calls = 0
-
-    async def async_fetch_raw(self, _lat, _lon, _days):
-        self.calls += 1
-        item = self.script.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-
-def _coord(store: _PayloadStore | None = None):
-    c = _make_coordinator(store or _PayloadStore())
-    c._fetch_interval = FETCH_INTERVAL
-    return c
-
+# Compatibility exports for external regression probes; new tests import helpers.
+from tests.helpers.weather import (
+    NOW as NOW,
+)
+from tests.helpers.weather import (
+    _coord as _coord,
+)
+from tests.helpers.weather import (
+    _FakeFetcher as _FakeFetcher,
+)
+from tests.helpers.weather import (
+    _om_payload as _om_payload,
+)
+from tests.helpers.weather import (
+    _PayloadStore as _PayloadStore,
+)
+from tests.helpers.weather import (
+    _sparse_payload as _sparse_payload,
+)
 
 # ---------------------------------------------------------------------------
 # _status_for_age: every rung boundary
@@ -238,7 +169,7 @@ async def test_try_fetch_failure_keeps_cache_and_records_error():
 async def test_try_fetch_success_persists_and_advances_both_anchors():
     store = _PayloadStore()
     c = _coord(store)
-    fresh = _om_payload()
+    fresh = _om_payload(start_iso="2026-07-05T12:15")
     c._fetcher = _FakeFetcher([fresh])
 
     await c._async_try_fetch(NOW)
@@ -282,12 +213,12 @@ async def test_try_fetch_coverage_refusal_keeps_payload_age():
     the served weather as fresh — the payload anchor stays, only the scheduler
     anchor advances, so the age keeps climbing through the ladder."""
     store = _PayloadStore()
-    rich = _om_payload()
+    rich = _om_payload(start_iso="2026-07-05T12:15")
     store.set_last_payload(rich, "2026-07-05T06:00:00+00:00")
     c = _coord(store)
     payload_age_anchor = NOW - timedelta(hours=6)
     c._last_fetched_at = payload_age_anchor
-    c._fetcher = _FakeFetcher([_sparse_payload()])
+    c._fetcher = _FakeFetcher([_om_payload(n_quarters=4, start_iso="2026-07-05T12:15")])
 
     await c._async_try_fetch(NOW)
 

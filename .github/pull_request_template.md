@@ -14,10 +14,10 @@
 - [ ] **Versionsstempel** im SPEC-Kopf („Gilt für Version") gezogen, falls
       dies ein Release-PR ist — der Wächter vergleicht ihn mit
       `const.INTEGRATION_VERSION`.
-- [ ] **Tests fallen auf dem Parent-Commit durch** — neue Tests gegen den
-      Stand vor dieser Änderung laufen lassen; sie müssen *semantisch*
-      fehlschlagen. Bei verhaltensneutralen Refactorings stattdessen:
-      Bit-Identität gegen die eingefrorene alte Funktion gezeigt.
+- [ ] **Wirksame Tests nachgewiesen** — Bugfix-Tests scheitern auf dem
+      Parent-Commit semantisch; Refactorings zeigen Gleichheit mit dem alten
+      Verhalten. Ergänzende Vertragstests nutzen unabhängige Erwartungen oder
+      erkennen eine gezielte semantische Mutation (CLAUDE.md Regel 6).
 - [ ] **`ruff check .` sauber und volle Suite grün**
       (`pytest tests -p no:homeassistant`, kein zusätzliches `-q`;
       kein `ruff format`).

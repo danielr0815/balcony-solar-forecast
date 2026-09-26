@@ -125,9 +125,9 @@ async def test_static_path_registered_points_at_existing_file():
     await _frontend.async_register_frontend(hass)
 
     # Both bundled cards are served in one call, each under the shared prefix.
-    assert len(hass.http.registered) == len(_frontend._CARDS)
+    assert len(hass.http.registered) == len(_frontend._ASSETS)
     by_url = {cfg.url_path: cfg for cfg in hass.http.registered}
-    for url, path in _frontend._CARDS:
+    for url, path in _frontend._ASSETS:
         cfg = by_url[url]
         assert isinstance(cfg, StaticPathConfig)
         assert cfg.path == str(path)
@@ -144,7 +144,7 @@ async def test_static_path_registered_only_once():
     hass = _FakeHass()
     await _frontend.async_register_frontend(hass)
     await _frontend.async_register_frontend(hass)
-    assert len(hass.http.registered) == len(_frontend._CARDS)
+    assert len(hass.http.registered) == len(_frontend._ASSETS)
 
 
 # ---------------------------------------------------------------------------
@@ -214,13 +214,13 @@ async def test_yaml_mode_does_not_touch_resources():
     assert res.created == []
     assert res.updated == []
     # Static paths are still served in yaml mode.
-    assert len(hass.http.registered) == len(_frontend._CARDS)
+    assert len(hass.http.registered) == len(_frontend._ASSETS)
 
 
 async def test_lovelace_absent_does_not_raise():
     hass = _FakeHass(lovelace=None)
     await _frontend.async_register_frontend(hass)  # must not raise
-    assert len(hass.http.registered) == len(_frontend._CARDS)
+    assert len(hass.http.registered) == len(_frontend._ASSETS)
 
 
 # ---------------------------------------------------------------------------
@@ -232,13 +232,13 @@ async def test_raising_resources_items_is_swallowed():
     hass, res = _storage_hass(items=[], raise_on="items")
     await _frontend.async_register_frontend(hass)  # must not raise
     assert res.created == []
-    assert len(hass.http.registered) == len(_frontend._CARDS)
+    assert len(hass.http.registered) == len(_frontend._ASSETS)
 
 
 async def test_raising_resources_create_is_swallowed():
     hass, res = _storage_hass(items=[], raise_on="create")
     await _frontend.async_register_frontend(hass)  # must not raise
-    assert len(hass.http.registered) == len(_frontend._CARDS)
+    assert len(hass.http.registered) == len(_frontend._ASSETS)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +251,7 @@ async def test_registration_deferred_until_started():
     await _frontend.async_register_frontend(hass)
 
     # Static paths are registered immediately; the resources are NOT yet created.
-    assert len(hass.http.registered) == len(_frontend._CARDS)
+    assert len(hass.http.registered) == len(_frontend._ASSETS)
     assert res.created == []
     assert EVENT_HOMEASSISTANT_STARTED in hass.bus.listeners
 
@@ -288,128 +288,22 @@ def test_async_setup_wires_in_frontend_registration():
 # ---------------------------------------------------------------------------
 
 
-def test_js_card_file_sanity():
-    text = _frontend._FRONTEND_FILE.read_text(encoding="utf-8")
-    assert text.strip(), "card JS is empty"
+def test_js_card_assets_are_local_and_reference_sensor_contract():
+    """Only static delivery/schema contracts belong in source-level checks.
 
-    assert 'customElements.define("balcony-shade-profile-card"' in text
-    assert "window.customCards" in text
-
-    # Every ATTR_SP_* array name from const must be referenced by the card
-    # (no hardcoded duplicate list — iterate const).
+    Controls, discovery, colour boundaries, services and rendered states are
+    exercised by tests/harness/cards_regression_harness.mjs on real instances.
+    """
+    for _url, path in _frontend._ASSETS:
+        text = path.read_text(encoding="utf-8")
+        assert text.strip(), f"empty frontend asset: {path.name}"
+        assert re.search(r'from\s+["\']https?:', text) is None
+        assert re.search(r'import\s*\(["\']https?:', text) is None
+    shade = _frontend._FRONTEND_FILE.read_text(encoding="utf-8")
     attr_names = [v for k, v in vars(const).items() if k.startswith("ATTR_SP_")]
-    assert attr_names, "no ATTR_SP_* names found in const"
+    assert attr_names
     for name in attr_names:
-        assert f'"{name}"' in text, f"card JS does not reference attribute {name!r}"
-
-    # The three τ threshold colours (identical to the ApexCharts snippet).
-    for color in ("#2ecc71", "#e67e22", "#c0392b"):
-        assert color in text, f"missing τ colour {color}"
-
-    # The group/single τ-view toggle labels (SPEC §9.2 read-time pooling), both
-    # locales — the operator compares each module's individual map vs the pool.
-    for label in ("Gruppe", "Einzeln", "Group", "Single"):
-        assert f'"{label}"' in text, f"card JS is missing toggle label {label!r}"
-
-    # The hover crosshair wires a mousemove handler over the plot overlay.
-    assert "mousemove" in text, "card JS has no hover crosshair (mousemove)"
-
-    # Card-LOCAL comparison date (SPEC §18.3): a second sun path overlaid from the
-    # read-only get_shade_profile service. Assert the compare-date input marker,
-    # the two-locale "Compare" label, and the reliable service-call-with-response
-    # variant (the low-level websocket call_service with return_response).
-    assert "compare-input" in text, "card JS has no comparison date input"
-    for label in ("Compare", "Vergleich"):
-        assert f'"{label}"' in text, f"card JS is missing compare label {label!r}"
-    assert "get_shade_profile" in text, "card JS does not call get_shade_profile"
-    assert "return_response" in text, "card JS does not request a service response"
-    assert "call_service" in text, "card JS does not use the WS call_service command"
-
-    # i18n-proof entity discovery: the entity registry's unique_id suffix match
-    # (language-stable) with the entity_id regex only as fallback — a German
-    # install's translated object slugs must not hide the card's entities.
-    assert "config/entity_registry/list" in text
-    assert "unique_id" in text
-
-    # No external-URL ES imports (self-contained module).
-    assert re.search(r'from\s+["\']https?:', text) is None
-
-
-def test_power_history_js_card_sanity():
-    # The power-history card is card 1 in the _CARDS list.
-    power_file = _frontend._CARDS[1][1]
-    assert power_file.name == "power_history_card.js"
-    text = power_file.read_text(encoding="utf-8")
-    assert text.strip(), "power-history card JS is empty"
-
-    # Registers the custom element + advertises itself to the picker.
-    assert 'customElements.define("balcony-power-history-card"' in text
-    assert "window.customCards" in text
-
-    # Reads hourly LTS via the recorder websocket command, the forecast curve
-    # attribute, and the module-name attribute the Python contract now exposes.
-    assert "recorder/statistics_during_period" in text
-    assert "statistics_during_period" in text
-    assert "wh_period" in text
-    assert "source_names" in text
-
-    # The hover crosshair wires a mousemove handler over the plot overlay.
-    assert "mousemove" in text, "power-history card JS has no mousemove hover"
-
-    # Day/Week navigation (part 2b): the ◀/▶ nav glyphs, the Day|Week toggle
-    # labels in both locales; week and day intentionally use hourly statistics
-    # so one corrupt hour can be filtered before daily aggregation.
-    assert "◀" in text and "▶" in text, "power-history card JS has no nav arrows"
-    for label in ("Day", "Week", "Tag", "Woche"):
-        assert f'"{label}"' in text, f"power-history card JS missing toggle label {label!r}"
-    assert 'period: "hour"' in text, "power-history card JS has no hourly statistics query"
-
-    # Past-day dashed line = the ISSUED archived forecast, read via the read-only
-    # get_issued_forecast action (the stable low-level websocket variant).
-    assert "get_issued_forecast" in text, "power-history card JS does not call get_issued_forecast"
-    assert "call_service" in text, "power-history card JS does not use the WS call_service command"
-    assert "return_response" in text, "power-history card JS does not request a service response"
-
-    # Week forecast overlay: per-day issued totals fetched CONCURRENTLY, kept
-    # under a dedicated name so the day/week forecast states never mix.
-    assert "_weekForecast" in text, "power-history card JS has no week forecast state"
-    assert "Promise.all" in text, "week issued lookups are not concurrent (no Promise.all)"
-
-    # Day-view provenance captions + explicit emptiness/error notes, both
-    # locales, and the service's oldest_available field wired into the note —
-    # the operator must be able to tell live vs issued vs missing vs failed.
-    for marker in (
-        "Stand 01:30",
-        "as issued",
-        "Prognose-Abruf fehlgeschlagen",
-        "Forecast lookup failed",
-        "oldest_available",
-    ):
-        assert marker in text, f"power-history card JS missing marker {marker!r}"
-
-    # SPEC §18.4 caption contract: the provenance caption names the line's
-    # ORIGIN ("live" vs the frozen ~01:30 issue) in both locales — never an
-    # "AC" basis, because bars AND dashed line are both DC (wh_period is the
-    # DC model curve; the issued ring's hourly_wh is explicitly DC).
-    for label in (
-        'forecastLive: "Forecast (live)"',
-        'forecastIssued: "Forecast (as issued 01:30)"',
-        'forecastLive: "Prognose (live)"',
-        'forecastIssued: "Prognose (Stand 01:30)"',
-    ):
-        assert label in text, f"power-history card JS missing label {label!r}"
-    assert "Forecast AC" not in text, "caption claims an AC basis the DC line does not have"
-    assert "Prognose AC" not in text, "caption claims an AC basis the DC line does not have"
-
-    # i18n-proof entity discovery (entity-registry unique_id suffix, regex only
-    # as fallback) — same contract as the shade-profile card.
-    assert "config/entity_registry/list" in text
-    assert "unique_id" in text
-
-    # Self-contained module: no external-URL ES imports, and it must NOT pull in
-    # the sibling shade-profile card (each card stays independent).
-    assert re.search(r'from\s+["\']https?:', text) is None
-    assert "shade_profile_card" not in text
+        assert f'"{name}"' in shade, f"card does not reference sensor field {name}"
 
 
 def test_js_cards_no_property_shadows_method():

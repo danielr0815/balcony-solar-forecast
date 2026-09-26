@@ -20,6 +20,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from balcony_solar_forecast.const import (
+    DAY_PART_MIDDAY,
     QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN,
     QUANTILE_MIN_DAYS,
     QUANTILE_MIN_FORECAST_WH,
@@ -109,8 +110,8 @@ class TestBinKey:
 
     def test_matches_biasstate_and_quantilestate(self):
         # One taxonomy across bias / quantiles / scoreboard.
-        assert quantile_bin_key("fog", "afternoon") == BiasState.cell_key(
-            "fog", "afternoon"
+        assert quantile_bin_key("fog", "aftermidday") == BiasState.cell_key(
+            "fog", "aftermidday"
         )
         assert quantile_bin_key("overcast", "evening") == QuantileState.bin_key(
             "overcast", "evening"
@@ -138,7 +139,7 @@ def _ring(value: float, count: int) -> list[list]:
 
 class TestBandsForBin:
     def test_empty_state_is_neutral(self):
-        b = bands_for_bin(QuantileState(), cloud_class="clear", day_part="noon")
+        b = bands_for_bin(QuantileState(), cloud_class="clear", day_part=DAY_PART_MIDDAY)
         assert (b.p10, b.p50, b.p90) == (
             QUANTILE_NEUTRAL_MULT,
             QUANTILE_NEUTRAL_MULT,
@@ -148,7 +149,7 @@ class TestBandsForBin:
         assert b.collapsed
 
     def test_missing_bin_is_neutral(self):
-        st = QuantileState(bins={"clear|noon": _ring(0.9, 40)})
+        st = QuantileState(bins={"clear|midday": _ring(0.9, 40)})
         b = bands_for_bin(st, cloud_class="fog", day_part="morning")
         assert b.collapsed
         assert b.p50 == QUANTILE_NEUTRAL_MULT
@@ -160,8 +161,8 @@ class TestBandsForBin:
         # scale off the served curve with no statistical backing).
         n = QUANTILE_MIN_SAMPLES - 1
         ring = [0.5 + 0.02 * i for i in range(n)]  # a genuinely spread sample
-        st = QuantileState(bins={"mixed|afternoon": ring})
-        b = bands_for_bin(st, cloud_class="mixed", day_part="afternoon")
+        st = QuantileState(bins={"mixed|aftermidday": ring})
+        b = bands_for_bin(st, cloud_class="mixed", day_part="aftermidday")
         assert b.collapsed
         assert b.p10 == b.p50 == b.p90 == QUANTILE_NEUTRAL_MULT
 
@@ -174,28 +175,28 @@ class TestBandsForBin:
             [(base + timedelta(days=i)).date().isoformat(), 0.5 + (i / (n - 1))]
             for i in range(n)
         ]  # 0.5 .. 1.5 spread across n distinct days
-        st = QuantileState(bins={"clear|noon": ring})
-        b = bands_for_bin(st, cloud_class="clear", day_part="noon")
+        st = QuantileState(bins={"clear|midday": ring})
+        b = bands_for_bin(st, cloud_class="clear", day_part=DAY_PART_MIDDAY)
         assert b.n == n
         assert not b.collapsed
         assert b.p10 < b.p50 < b.p90
 
     def test_bands_monotonic(self):
         ring = [0.3, 0.9, 1.5] * 20  # 60 samples, wide spread
-        st = QuantileState(bins={"clear|noon": ring})
-        b = bands_for_bin(st, cloud_class="clear", day_part="noon")
+        st = QuantileState(bins={"clear|midday": ring})
+        b = bands_for_bin(st, cloud_class="clear", day_part=DAY_PART_MIDDAY)
         assert b.p10 <= b.p50 <= b.p90
 
     def test_weather_class_conditioning_selects_bin(self):
         # Two different bins with clearly different medians; the class selects.
         st = QuantileState(
             bins={
-                "clear|noon": _ring(1.2, 40),   # engine under-forecasts on clear
-                "overcast|noon": _ring(0.6, 40),  # over-forecasts on overcast
+                "clear|midday": _ring(1.2, 40),   # engine under-forecasts on clear
+                "overcast|midday": _ring(0.6, 40),  # over-forecasts on overcast
             }
         )
-        clear = bands_for_bin(st, cloud_class="clear", day_part="noon")
-        overcast = bands_for_bin(st, cloud_class="overcast", day_part="noon")
+        clear = bands_for_bin(st, cloud_class="clear", day_part=DAY_PART_MIDDAY)
+        overcast = bands_for_bin(st, cloud_class="overcast", day_part=DAY_PART_MIDDAY)
         assert clear.p50 == pytest.approx(1.2)
         assert overcast.p50 == pytest.approx(0.6)
 
@@ -213,13 +214,13 @@ class TestBandsForBin:
 
     def test_corrupt_ring_degrades_to_neutral(self):
         # Non-numeric junk in a directly-constructed state must not raise.
-        st = QuantileState(bins={"clear|noon": ["oops", None, float("nan")]})  # type: ignore[list-item]
-        b = bands_for_bin(st, cloud_class="clear", day_part="noon")
+        st = QuantileState(bins={"clear|midday": ["oops", None, float("nan")]})  # type: ignore[list-item]
+        b = bands_for_bin(st, cloud_class="clear", day_part=DAY_PART_MIDDAY)
         assert b.collapsed
         assert b.p50 == QUANTILE_NEUTRAL_MULT
 
     def test_none_state_is_neutral(self):
-        b = bands_for_bin(None, cloud_class="clear", day_part="noon")  # type: ignore[arg-type]
+        b = bands_for_bin(None, cloud_class="clear", day_part=DAY_PART_MIDDAY)  # type: ignore[arg-type]
         assert b.collapsed
 
 
@@ -231,42 +232,42 @@ class TestBandsForBin:
 class TestTrainQuantiles:
     def test_folds_one_sample_into_correct_bin(self):
         st = QuantileState()
-        s = QuantileSample("clear", "noon", measured_wh=90.0, corrected_wh=100.0)
+        s = QuantileSample("clear", DAY_PART_MIDDAY, measured_wh=90.0, corrected_wh=100.0)
         out = train_quantiles(st, [s], training_date="2026-07-10")
         # Stored as a [iso_date, relerr] pair.
-        assert out.bins == {"clear|noon": [["2026-07-10", pytest.approx(0.9)]]}
+        assert out.bins == {"clear|midday": [["2026-07-10", pytest.approx(0.9)]]}
 
     def test_undated_call_stores_empty_date(self):
         # No training_date -> the sample is stored un-dated ("").
         st = QuantileState()
-        s = QuantileSample("clear", "noon", 90.0, 100.0)
+        s = QuantileSample("clear", DAY_PART_MIDDAY, 90.0, 100.0)
         out = train_quantiles(st, [s])
-        assert out.bins == {"clear|noon": [["", pytest.approx(0.9)]]}
+        assert out.bins == {"clear|midday": [["", pytest.approx(0.9)]]}
 
     def test_input_state_untouched(self):
         # Legacy bare-float input ring: input stays bare/untouched, output is a
         # fresh ring normalised to the pair shape (legacy -> ["", v]).
-        st = QuantileState(bins={"clear|noon": [1.0]})
-        s = QuantileSample("clear", "noon", 50.0, 100.0)
+        st = QuantileState(bins={"clear|midday": [1.0]})
+        s = QuantileSample("clear", DAY_PART_MIDDAY, 50.0, 100.0)
         out = train_quantiles(st, [s], training_date="2026-07-10")
-        assert st.bins["clear|noon"] == [1.0]
-        assert out.bins["clear|noon"] == [
+        assert st.bins["clear|midday"] == [1.0]
+        assert out.bins["clear|midday"] == [
             ["", pytest.approx(1.0)],
             ["2026-07-10", pytest.approx(0.5)],
         ]
-        assert out.bins["clear|noon"] is not st.bins["clear|noon"]
+        assert out.bins["clear|midday"] is not st.bins["clear|midday"]
 
     def test_relerr_computed_and_clamped_high(self):
         st = QuantileState()
         # measured 5000, corrected 100 -> relerr 50, clamp to REL_ERR_MAX.
-        s = QuantileSample("clear", "noon", 5000.0, 100.0)
+        s = QuantileSample("clear", DAY_PART_MIDDAY, 5000.0, 100.0)
         out = train_quantiles(st, [s], training_date="2026-07-10")
-        assert out.bins["clear|noon"] == [["2026-07-10", QUANTILE_REL_ERR_MAX]]
+        assert out.bins["clear|midday"] == [["2026-07-10", QUANTILE_REL_ERR_MAX]]
 
     def test_below_threshold_forecast_skipped(self):
         st = QuantileState()
         s = QuantileSample(
-            "clear", "noon", measured_wh=10.0,
+            "clear", DAY_PART_MIDDAY, measured_wh=10.0,
             corrected_wh=QUANTILE_MIN_FORECAST_WH,  # not strictly greater
         )
         out = train_quantiles(st, [s])
@@ -274,32 +275,32 @@ class TestTrainQuantiles:
 
     def test_just_above_threshold_kept(self):
         st = QuantileState()
-        s = QuantileSample("clear", "noon", 10.0, QUANTILE_MIN_FORECAST_WH + 0.001)
+        s = QuantileSample("clear", DAY_PART_MIDDAY, 10.0, QUANTILE_MIN_FORECAST_WH + 0.001)
         out = train_quantiles(st, [s])
-        assert "clear|noon" in out.bins
+        assert "clear|midday" in out.bins
 
     def test_junk_samples_skipped(self):
         st = QuantileState()
         bad = [
-            QuantileSample("", "noon", 10.0, 100.0),          # empty class
+            QuantileSample("", DAY_PART_MIDDAY, 10.0, 100.0),          # empty class
             QuantileSample("clear", "", 10.0, 100.0),         # empty part
-            QuantileSample("clear", "noon", float("nan"), 100.0),  # NaN measured
-            QuantileSample("clear", "noon", 10.0, float("inf")),   # inf corrected
-            QuantileSample("clear", "noon", 10.0, 0.0),       # zero corrected (<= thr)
+            QuantileSample("clear", DAY_PART_MIDDAY, float("nan"), 100.0),  # NaN measured
+            QuantileSample("clear", DAY_PART_MIDDAY, 10.0, float("inf")),   # inf corrected
+            QuantileSample("clear", DAY_PART_MIDDAY, 10.0, 0.0),       # zero corrected (<= thr)
         ]
-        good = QuantileSample("clear", "noon", 80.0, 100.0)
+        good = QuantileSample("clear", DAY_PART_MIDDAY, 80.0, 100.0)
         out = train_quantiles(st, bad + [good], training_date="2026-07-10")
-        assert out.bins == {"clear|noon": [["2026-07-10", pytest.approx(0.8)]]}
+        assert out.bins == {"clear|midday": [["2026-07-10", pytest.approx(0.8)]]}
 
     def test_multiple_bins_and_multiple_samples(self):
         st = QuantileState()
         samples = [
-            QuantileSample("clear", "noon", 100.0, 100.0),
-            QuantileSample("clear", "noon", 80.0, 100.0),
+            QuantileSample("clear", DAY_PART_MIDDAY, 100.0, 100.0),
+            QuantileSample("clear", DAY_PART_MIDDAY, 80.0, 100.0),
             QuantileSample("fog", "morning", 50.0, 100.0),
         ]
         out = train_quantiles(st, samples, training_date="2026-07-10")
-        assert out.bins["clear|noon"] == [
+        assert out.bins["clear|midday"] == [
             ["2026-07-10", pytest.approx(1.0)],
             ["2026-07-10", pytest.approx(0.8)],
         ]
@@ -309,32 +310,32 @@ class TestTrainQuantiles:
         from balcony_solar_forecast.core.quantiles import _BIN_RING_CAP
 
         # Legacy un-dated ring at the cap; feed a few undated more so we exceed it.
-        st = QuantileState(bins={"clear|noon": [float(i) for i in range(_BIN_RING_CAP)]})
+        st = QuantileState(bins={"clear|midday": [float(i) for i in range(_BIN_RING_CAP)]})
         extra = [
-            QuantileSample("clear", "noon", 10.0, 100.0) for _ in range(3)
+            QuantileSample("clear", DAY_PART_MIDDAY, 10.0, 100.0) for _ in range(3)
         ]
         out = train_quantiles(st, extra)  # undated call: no date trim, count cap only
-        assert len(out.bins["clear|noon"]) == _BIN_RING_CAP
+        assert len(out.bins["clear|midday"]) == _BIN_RING_CAP
         # Oldest three (0,1,2) dropped (all un-dated -> plain FIFO); newest kept.
-        assert out.bins["clear|noon"][0][1] == pytest.approx(3.0)
+        assert out.bins["clear|midday"][0][1] == pytest.approx(3.0)
 
     def test_empty_samples_returns_equivalent_state(self):
         # A legacy bare-float ring is normalised to the pair shape on copy, but no
         # bin is touched so nothing is trimmed and the relerr values are preserved.
-        st = QuantileState(bins={"clear|noon": [0.9, 1.1]})
+        st = QuantileState(bins={"clear|midday": [0.9, 1.1]})
         out = train_quantiles(st, [])
-        assert out.bins == {"clear|noon": [["", 0.9], ["", 1.1]]}
+        assert out.bins == {"clear|midday": [["", 0.9], ["", 1.1]]}
         assert out.version == st.version
 
     def test_none_state_starts_empty(self):
-        s = QuantileSample("clear", "noon", 90.0, 100.0)
+        s = QuantileSample("clear", DAY_PART_MIDDAY, 90.0, 100.0)
         out = train_quantiles(None, [s], training_date="2026-07-10")  # type: ignore[arg-type]
-        assert out.bins == {"clear|noon": [["2026-07-10", pytest.approx(0.9)]]}
+        assert out.bins == {"clear|midday": [["2026-07-10", pytest.approx(0.9)]]}
 
     def test_roundtrip_through_store_dict(self):
         st = QuantileState()
         out = train_quantiles(
-            st, [QuantileSample("clear", "noon", 90.0, 100.0)],
+            st, [QuantileSample("clear", DAY_PART_MIDDAY, 90.0, 100.0)],
             training_date="2026-07-10",
         )
         restored = QuantileState.from_dict(out.to_dict())
@@ -350,10 +351,10 @@ class TestQuantileStateFromDict:
     def test_legacy_bare_floats_become_undated_pairs_clamped(self):
         # Pre-fix blob: a bin is a plain list of numbers. Each normalises to an
         # undated ["", relerr] pair, clamped to the sane band.
-        blob = {"version": 1, "bins": {"clear|noon": [0.8, 99.0, -5.0, 1.1]}}
+        blob = {"version": 1, "bins": {"clear|midday": [0.8, 99.0, -5.0, 1.1]}}
         qs = QuantileState.from_dict(blob)
         assert qs.bins == {
-            "clear|noon": [
+            "clear|midday": [
                 ["", 0.8],
                 ["", QUANTILE_REL_ERR_MAX],  # 99 clamped
                 ["", QUANTILE_REL_ERR_MIN],  # -5 clamped
@@ -367,12 +368,12 @@ class TestQuantileStateFromDict:
         blob = {
             "version": 1,
             "bins": {
-                "clear|noon": [0.9, ["2026-07-10", 1.2], ("2026-07-11", 0.7)],
+                "clear|midday": [0.9, ["2026-07-10", 1.2], ("2026-07-11", 0.7)],
             },
         }
         qs = QuantileState.from_dict(blob)
         assert qs.bins == {
-            "clear|noon": [
+            "clear|midday": [
                 ["", 0.9],
                 ["2026-07-10", 1.2],
                 ["2026-07-11", 0.7],
@@ -383,7 +384,7 @@ class TestQuantileStateFromDict:
         blob = {
             "version": 1,
             "bins": {
-                "clear|noon": [
+                "clear|midday": [
                     "junk",                     # non-numeric bare
                     ["2026-07-10"],             # wrong-length pair
                     ["2026-07-10", "x"],        # non-numeric relerr
@@ -394,12 +395,12 @@ class TestQuantileStateFromDict:
             },
         }
         qs = QuantileState.from_dict(blob)
-        assert qs.bins == {"clear|noon": [["2026-07-10", 1.3]]}
+        assert qs.bins == {"clear|midday": [["2026-07-10", 1.3]]}
 
     def test_non_str_date_coerced_to_undated(self):
-        blob = {"version": 1, "bins": {"clear|noon": [[123, 1.1]]}}
+        blob = {"version": 1, "bins": {"clear|midday": [[123, 1.1]]}}
         qs = QuantileState.from_dict(blob)
-        assert qs.bins == {"clear|noon": [["", 1.1]]}
+        assert qs.bins == {"clear|midday": [["", 1.1]]}
 
 
 # ---------------------------------------------------------------------------
@@ -413,8 +414,8 @@ class TestDayGate:
         # are strongly correlated hours of one sky -> still collapsed to neutral.
         n = QUANTILE_MIN_SAMPLES + 10
         ring = [["2026-07-10", 0.5 + 0.03 * i] for i in range(n)]
-        st = QuantileState(bins={"clear|noon": ring})
-        b = bands_for_bin(st, cloud_class="clear", day_part="noon")
+        st = QuantileState(bins={"clear|midday": ring})
+        b = bands_for_bin(st, cloud_class="clear", day_part=DAY_PART_MIDDAY)
         assert b.collapsed
         assert b.p10 == b.p50 == b.p90 == QUANTILE_NEUTRAL_MULT
 
@@ -427,8 +428,8 @@ class TestDayGate:
             iso = (base + timedelta(days=d)).date().isoformat()
             ring += [[iso, 0.5 + 0.05 * (d * 4 + h)] for h in range(4)]
         assert len(ring) == QUANTILE_MIN_SAMPLES  # 5 days x 4 = 20
-        st = QuantileState(bins={"clear|noon": ring})
-        b = bands_for_bin(st, cloud_class="clear", day_part="noon")
+        st = QuantileState(bins={"clear|midday": ring})
+        b = bands_for_bin(st, cloud_class="clear", day_part=DAY_PART_MIDDAY)
         assert not b.collapsed
         assert b.p10 < b.p50 < b.p90
 
@@ -441,8 +442,8 @@ class TestDayGate:
             iso = (base + timedelta(days=d)).date().isoformat()
             ring += [[iso, 0.5 + 0.03 * (d * 6 + h)] for h in range(6)]
         assert len(ring) >= QUANTILE_MIN_SAMPLES
-        st = QuantileState(bins={"clear|noon": ring})
-        b = bands_for_bin(st, cloud_class="clear", day_part="noon")
+        st = QuantileState(bins={"clear|midday": ring})
+        b = bands_for_bin(st, cloud_class="clear", day_part=DAY_PART_MIDDAY)
         assert b.collapsed
 
     def test_grandfather_undated_lower_bound_passes(self):
@@ -452,8 +453,8 @@ class TestDayGate:
         assert QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN == 8  # anchors the arithmetic
         n = 5 * QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN  # 40
         ring = [0.5 + 0.02 * i for i in range(n)]  # legacy bare floats, spread
-        st = QuantileState(bins={"clear|noon": ring})
-        b = bands_for_bin(st, cloud_class="clear", day_part="noon")
+        st = QuantileState(bins={"clear|midday": ring})
+        b = bands_for_bin(st, cloud_class="clear", day_part=DAY_PART_MIDDAY)
         assert not b.collapsed
         assert b.p10 < b.p50 < b.p90
 
@@ -463,8 +464,8 @@ class TestDayGate:
         n = (QUANTILE_MIN_DAYS - 1) * QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN  # 32
         ring = [0.5 + 0.02 * i for i in range(n)]
         assert n >= QUANTILE_MIN_SAMPLES  # sample-count gate would otherwise pass
-        st = QuantileState(bins={"clear|noon": ring})
-        b = bands_for_bin(st, cloud_class="clear", day_part="noon")
+        st = QuantileState(bins={"clear|midday": ring})
+        b = bands_for_bin(st, cloud_class="clear", day_part=DAY_PART_MIDDAY)
         assert b.collapsed
 
 
@@ -481,7 +482,7 @@ class TestDateWindowTrim:
         stale = (train_day - timedelta(days=QUANTILE_RING_DAYS + 1)).isoformat()
         st = QuantileState(
             bins={
-                "clear|noon": [
+                "clear|midday": [
                     [stale, 0.2],     # older than the window -> evicted
                     [on_edge, 0.3],   # exactly RING_DAYS old -> kept (not < cutoff)
                     [inside, 0.4],    # inside the window -> kept
@@ -490,10 +491,10 @@ class TestDateWindowTrim:
         )
         # Touch the bin with today's sample so it is trimmed.
         out = train_quantiles(
-            st, [QuantileSample("clear", "noon", 90.0, 100.0)],
+            st, [QuantileSample("clear", DAY_PART_MIDDAY, 90.0, 100.0)],
             training_date=train_day.isoformat(),
         )
-        dates = [e[0] for e in out.bins["clear|noon"]]
+        dates = [e[0] for e in out.bins["clear|midday"]]
         assert stale not in dates
         assert on_edge in dates
         assert inside in dates
@@ -503,17 +504,17 @@ class TestDateWindowTrim:
         train_day = date(2026, 7, 10)
         st = QuantileState(
             bins={
-                "clear|noon": [
+                "clear|midday": [
                     0.2,  # legacy un-dated: unknown age, NOT date-trimmed
                     [(train_day - timedelta(days=QUANTILE_RING_DAYS + 5)).isoformat(), 0.9],
                 ]
             }
         )
         out = train_quantiles(
-            st, [QuantileSample("clear", "noon", 80.0, 100.0)],
+            st, [QuantileSample("clear", DAY_PART_MIDDAY, 80.0, 100.0)],
             training_date=train_day.isoformat(),
         )
-        ring = out.bins["clear|noon"]
+        ring = out.bins["clear|midday"]
         # The stale DATED sample is gone; the un-dated one survives.
         assert ["", 0.2] in ring
         assert all(e[0] != "" for e in ring if e != ["", 0.2])
@@ -527,12 +528,12 @@ class TestDateWindowTrim:
         # a few un-dated legacy samples so we are over the cap by that many.
         dated = [[recent, 1.0] for _ in range(_BIN_RING_CAP)]
         undated = [0.1, 0.2, 0.3]  # 3 legacy bare floats
-        st = QuantileState(bins={"clear|noon": undated + dated})
+        st = QuantileState(bins={"clear|midday": undated + dated})
         out = train_quantiles(
-            st, [QuantileSample("clear", "noon", 90.0, 100.0)],
+            st, [QuantileSample("clear", DAY_PART_MIDDAY, 90.0, 100.0)],
             training_date=train_day.isoformat(),
         )
-        ring = out.bins["clear|noon"]
+        ring = out.bins["clear|midday"]
         assert len(ring) == _BIN_RING_CAP
         # All three un-dated samples evicted first (least trustworthy).
         assert all(e[0] != "" for e in ring)
@@ -633,10 +634,10 @@ class TestEndToEnd:
         for d in range(6):  # 6 distinct days x 5 hourly samples = 30 samples
             iso = (base + timedelta(days=d)).date().isoformat()
             samples = [
-                QuantileSample("clear", "noon", 90.0 + i, 100.0) for i in range(5)
+                QuantileSample("clear", DAY_PART_MIDDAY, 90.0 + i, 100.0) for i in range(5)
             ]
             st = train_quantiles(st, samples, training_date=iso)
-        b = bands_for_bin(st, cloud_class="clear", day_part="noon")
+        b = bands_for_bin(st, cloud_class="clear", day_part=DAY_PART_MIDDAY)
         assert not b.collapsed
         assert b.p10 <= b.p50 <= b.p90
         # Median relerr is around 0.9x .. > 1.0x given the ramp; sane band.
@@ -652,10 +653,10 @@ class TestEndToEnd:
         for d in range(QUANTILE_MIN_DAYS):
             iso = (base + timedelta(days=d)).date().isoformat()
             st = train_quantiles(
-                st, [QuantileSample("clear", "noon", 120.0, 100.0)] * per_day,
+                st, [QuantileSample("clear", DAY_PART_MIDDAY, 120.0, 100.0)] * per_day,
                 training_date=iso,
             )
-        b = bands_for_bin(st, cloud_class="clear", day_part="noon")
+        b = bands_for_bin(st, cloud_class="clear", day_part=DAY_PART_MIDDAY)
         # All samples identical -> no spread, but the data-backed median 1.2.
         assert b.p10 == b.p50 == b.p90 == pytest.approx(1.2)
         p10, p50, p90 = apply_bands({"h": 100.0}, {"h": b})

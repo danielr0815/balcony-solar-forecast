@@ -1,6 +1,6 @@
 # Spezifikation: Balcony Solar Forecast — Mehrebenen-PV-Prognose mit Selbstlernen
 
-> **Gilt für Version: 0.27.2** · Zuletzt aktualisiert: 2026-09-26
+> **Gilt für Version: 0.28.0** · Zuletzt aktualisiert: 2026-09-26
 >
 > Diese Spezifikation beschreibt **ausschließlich den Ist-Stand dieser Version**:
 > was die Integration `balcony_solar_forecast` heute tut und tun muss. Sie
@@ -175,12 +175,19 @@ Drei-Tage-Horizont immer ab.
 HTTP-200-mit-Nulls-Falle: Open-Meteo antwortet unter Umständen mit 200 und
 durchgehend `null`-Werten; ein solcher Payload wird verworfen wie ein
 Fehlschlag, damit die Degradationsleiter (§13) greift statt still eine
-Nullkurve auszuliefern.
+Nullkurve auszuliefern. Vor der Übernahme wird die **gesamte Antwort geparst**:
+beide Zeitachsen müssen parsebar, streng aufsteigend, lückenlos und auf ihrem
+15-Minuten- bzw. Stundenraster liegen. Ein Parse-/Zeitachsenfehler verändert
+weder den gespeicherten Last-Good-Payload noch seinen Altersanker.
 
 **Last-Good-Cache im Store.** Der zuletzt gültige Payload liegt im `Store`
 (§16.2) und **übersteht einen Neustart**. Sein Alter wird ehrlich fortgeschrieben
 (§13) und nie auf ~0 zurückgesetzt, auch nicht, wenn ein ärmerer neuer Payload
-zugunsten des reicheren alten verworfen wird.
+zugunsten des reicheren alten verworfen wird. „Reicher“ zählt ausschließlich
+nutzbare Strahlungsintervalle mit Temperatur, deren Ende noch in der Zukunft
+liegt. Ohne einen solchen zukünftigen Slot ist die neue Antwort ein
+Fehlversuch. Ein alter Payload darf einen Ersatz nur bis `MAX_PAYLOAD_AGE_HOURS`
+zurückhalten; abgelaufene historische Abdeckung blockiert die Erholung nicht.
 
 **Retry.** Begrenzte Versuche (`MAX_TRIES`) mit **Backoff und Jitter**. Ein
 Serverhinweis `Retry-After` über `_RETRY_AFTER_MAX_INLINE_SECONDS` wird **nicht**
@@ -494,7 +501,7 @@ läuft davon getrennt über die innere `schema_version` (§16.1).
 | `name` | Ebenenname, eindeutig; zugleich Default-Shademap-Kanal | `plane_no_name`, `plane_dup_name` | **ja** |
 | `azimuth_deg` | Ebenenazimut, **0 = Nord im Uhrzeigersinn** (§20.1) | 0…360, `bad_azimuth` | **ja** |
 | `tilt_deg` | Neigung gegen die Horizontale, 90 = senkrecht (§20.2) | 0…90, `bad_tilt` | **ja** |
-| `wp` | STC-Peakleistung des Moduls (W) | > 0, `bad_wp` | **ja** |
+| `wp` | STC-Peakleistung des Moduls (W) | endlich und > 0, `bad_wp` | **ja** |
 | `efficiency` | DC-seitiger Systemwirkungsgrad (§6.2) | 0…1, Default `DEFAULT_EFFICIENCY`, `bad_efficiency` | **ja** |
 | `horizon` | Horizontzeilen dieser Ebene (§5, §7.4) | stabil nach Azimut sortiert | **ja** (zeilenweise) |
 | `actual_entity` | Entity-ID der gemessenen **DC**-Leistung dieses Kanals | optional | nein |
@@ -516,7 +523,7 @@ Recompute-Tick allozieren kann.
 | `tau` | 0…1, `bad_tau` (statisch bzw. belaubter Default) |
 | `seasonal` | Bool; wenn gesetzt, sind `tau_leafed` **und** `tau_bare` Pflicht (`seasonal_missing_tau`) |
 | `tau_leafed`, `tau_bare` | 0…1, `bad_tau` |
-| `tau_points` | optional 1…12 Paare `[el, τ]`, `el` streng steigend und ≤ `elevation_deg` (`bad_tau_points`, `tau_points_above_edge`); keine Monotonie in τ erzwungen |
+| `tau_points` | optional 1…12 Paare `[el, τ]`, `el` endlich, streng steigend und ≤ `elevation_deg` (`bad_tau_points`, `tau_points_above_edge`); keine Monotonie in τ erzwungen |
 | `tau_points_bare` | optional, nur mit `seasonal` **und** `tau_points`, gleiche Länge und identisches el-Raster (`seasonal_points_mismatch`) |
 | `diffuse_tau` | optional 0…`HZ_DIFFUSE_TAU_MAX`, `bad_diffuse_tau` — Effektivradianz, **keine** Transmission |
 
@@ -845,6 +852,17 @@ Die gemessene Seite ist gegen partiellen Kanalausfall abgesichert: fällt ein
 Teil der Messkanäle aus, wird die modellierte Seite auf dieselbe Teilmenge
 skaliert, statt das Verhältnis in Richtung Ausfallanteil zu drücken.
 
+**Clipping ist eine zensierte Messung.** Erreicht eine vollständig gemeterte
+Gruppe 95 % ihrer DC-Grenze (`ac_limit_w / konfigurierte Gruppen-eta`), liefert der Live-Sampler kein
+Verhältnis für diesen Slot. Fehlen Gruppenkanäle, wird ein laut Modell
+geclippter Slot ebenfalls ausgelassen. Historische Gesamt-DC-Zeilen sind nur
+bei genau einer vollständig gemeterten Gruppe eindeutig zuordenbar; bei
+potenziellem Clipping gemischter/teilgemeterter Anlagen werden sie konservativ
+verworfen. Echte Messdefizite unterhalb der Grenze bleiben bei eindeutigem
+Gruppenbezug lernbar: die Referenz ist weiterhin **Slow-only × θ vor dem
+letzten Clamp**, damit die gelernte Skalierung den Messwert reproduziert.
+Die gemeinsame Policy liegt in `core.intraday.censored_sample`.
+
 **Robustheitsregeln am Sonnenrand.** Der Skalar arbeitet mittags korrekt,
 sprang aber morgens/abends unkontrolliert (Live-Befund 2026-08:
 Sonnenaufgangs-Transient mit +2,4 kWh Tagesprognose-Überschuss,
@@ -954,21 +972,16 @@ Rollback-Ring (selbst-gatend).
   Nachtzeilen können eine Tageslichtlücke nicht auffüllen.
 - **Idempotent, datums-gekeyt:** ein Tag wird nie doppelt trainiert; der Job ist
   gefahrlos mehrfach ausführbar.
-- **Nachholfenster:** es **endet gestern** und **beginnt am Tag nach dem
-  neuesten bereits erfassten Ist-Tag**, gedeckelt auf
-  `NIGHTLY_CATCHUP_MAX_DAYS` (`_nightly.catchup_days`) — also kein fixer Block
-  „N Tage zurück ab gestern", sondern genau die Lücke seit dem letzten erfassten
-  Tag, höchstens N Tage breit. Auf einer frischen Installation ohne erfasste
-  Tage ist das volle N-Tage-Fenster die Obergrenze; es reicht dann zwangsläufig
-  in Zeiträume **vor** der Installation zurück (siehe Anlaufphase-Regel §10).
-  Jeder nachgeholte Tag durchläuft dieselben Gates und denselben
-  Idempotenzmarker.
-- **Ausfall jenseits des Fensters bleibt dauerhaft ungelernt.** Dauert eine
-  Unterbrechung (HA aus, Kanal tot, Recorder-Lücke) länger als
-  `NIGHTLY_CATCHUP_MAX_DAYS` (3 Tage), schiebt das Fenster beim Wiederanlauf
-  an den neuesten erfassten Tag heran und deckelt auf N Tage — die älteren
-  fehlenden Tage werden **nie** nachgeholt. Der einzige Weg, eine solche Lücke
-  nachträglich zu füllen, ist der Bootstrap (§12).
+- **Nachholfenster:** alle `NIGHTLY_CATCHUP_MAX_DAYS` (3) abgeschlossenen
+  lokalen Tage bis einschließlich gestern, ältester zuerst. Auch ältere
+  Lücken vor einem neueren erfassten Tag werden erneut geprüft. Actuals,
+  DC-Training und Inverterkalibrierung haben unabhängige Datumsmarker; eine
+  erfolgreiche Teilstufe bedeutet nicht, dass alle anderen erledigt sind.
+  Die Gesundheitsdiagnostik bleibt chronologisch: nachgelieferte ältere
+  Ist-Werte überschreiben keinen bereits gespeicherten neueren Befund.
+- **Ausfall jenseits des Fensters bleibt ungelernt.** Für ältere fehlende
+  Tage ist ein Bootstrap (§12) erforderlich. Auf frischen Installationen
+  kann das feste Fenster vor den Installationsbeginn reichen (§10).
 - **Zeitstempel-Semantik der Ist-Werte (kritisch):** numerische `start`-Werte
   einer Statistikzeile werden **nach Größenordnung** disambiguiert
   (`_actuals._EPOCH_MS_THRESHOLD`: darüber Millisekunden = WebSocket-Format,
@@ -1199,7 +1212,11 @@ P10/P50/P90-**Multiplikatoren** des Bins (`QUANTILE_P_LOW` / `QUANTILE_P_HIGH`).
   scheinbar trainiertes Band ausgeben. Ein zusätzlicher Zähl-Cap ist nur
   Backstop.
 - **Per-Tag-Cap** `QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN`, weil die Stunden eines
-  Tages stark korreliert sind.
+  Tages stark korreliert sind. Undatierte Legacy-Aufrufe behalten den FIFO-Vertrag;
+  bestehende Daten werden nicht nachträglich gekürzt oder künstlich datiert.
+  Der gemeinsame Trainer berücksichtigt bereits
+  gespeicherte Samples desselben Tages auch über mehrere Aufrufe hinweg;
+  unbekannte Wetterklassen/Tagesabschnitte werden verworfen.
 - **Servier-Gate:** ein Band spreizt nur, wenn der Bin **beides** erfüllt —
   `n ≥ QUANTILE_MIN_SAMPLES` **und** Evidenz aus `days ≥ QUANTILE_MIN_DAYS`
   **verschiedenen Tagen**. Beides kommt aus demselben `ring_evidence`-Gate, das
@@ -1236,11 +1253,17 @@ angewandt. Die DC-Bänder werden an der physischen DC-Obergrenze gedeckelt
 ceiling-freien Ebenen), die AC-Bänder separat an der AC-Obergrenze (Summe der
 Gruppen-`ac_limit_w` plus AC der ceiling-freien Ebenen, §6.4).
 
+**Punktprognose und Median sind verschieden.** `ac_watts` ist die zentrale
+AC-Punktprognose, kein empirisches P50. Sie kann außerhalb des empirischen
+P10/P90-Intervalls liegen. Für AC wird kein eigenes P50 ausgegeben; das
+öffentliche DC-P50 in `get_forecast` bleibt der empirische Median. Band und
+Punktprognose werden nicht künstlich ineinander geklemmt.
+
 **Asymmetrische Intraday-Behandlung.** Die servierte Band-Kurve behält den
 Intraday-Skalar, aber das **Tages-P10-Aggregat** darf durch einen Hoch-Skalar
 nicht steigen: je Slot werden die servierten AC-P10-Band-Watt mit
 `min(1, skalarfrei / serviert)` skaliert — *serviert* und *skalarfrei* kommen
-dabei aus der **zentralen (P50) AC-Kurve** desselben Slots
+dabei aus der **zentralen AC-Punktprognose** desselben Slots
 (`coordinator._dayahead_slot_strips`), nicht aus dem Band selbst. Ein
 Intraday-Faktor > 1 dividiert sich damit heraus (das Tages-P10 fällt auf seinen
 Day-ahead-Wert zurück), ein Faktor ≤ 1 behält das bereits herunterkorrigierte
@@ -1343,13 +1366,15 @@ Historical-Forecast-Fallback, gechunkt in `BOOTSTRAP_WEATHER_CHUNK_DAYS`-Fenster
 Zeilen-`start` sind hier Epoch-**Sekunden**; der Reduce nutzt deshalb dasselbe
 `_actuals._stat_row_hour_key`-Muster mit dem Größentest aus §9.7.
 
-**Ausführung und Lock.** Der reine Rekonstruktions-Kern (`accumulate_days`) läuft
-im Executor (CPU-Job) mit INFO-Fortschrittslogs. Ein **einziger** `asyncio.Lock`
-je Coordinator (`_bootstrap_lock`) serialisiert den Lauf gegen den nächtlichen
-Trainingsjob: der Nightly-Wrapper hält denselben Lock und **wartet** auf einen
-laufenden Bootstrap, statt zu überspringen — keine Trainingsnacht geht verloren.
-Ein zweiter gleichzeitiger `run_bootstrap` sieht `locked()` und wird sofort mit
-einem klaren `ServiceValidationError` abgewiesen.
+**Ausführung und Lock.** Der reine Rekonstruktions-Kern (`accumulate_days`)
+läuft im Executor mit INFO-Fortschrittslogs. `LearnerOperations` serialisiert
+Nightly, Bootstrap, direkten Import, Reset und Rollback je Entry. Wartende
+Operationen laufen danach weiter; ein zweiter `run_bootstrap` wird bei belegtem
+Lock sofort mit `ServiceValidationError` abgewiesen. Der Import innerhalb
+desselben Bootstrap-Tasks ist gezielt reentrant. Beim Unload/HA-Stop werden
+laufende und wartende Operationen abgebrochen und abgewartet, bevor der Store
+abschließend geschrieben wird. Ein noch auslaufender reiner Executor-Job kann
+danach keinen Learnerzustand importieren; neue Operationen werden abgelehnt.
 
 **Sicherheit: `dry_run` Default TRUE.** Der erste Aufruf holt, rekonstruiert und
 liefert nur die Summary, **ohne** den Store zu berühren. Erst ein expliziter
@@ -1419,7 +1444,10 @@ Die Rekonstruktion ist eine **Walk-forward-Simulation**. Für jeden historischen
 Tag werden Shademap und θ **vor** dessen Labels eingefroren; daraus entsteht
 zuerst die physisch gruppengeclampte Slow-only-Kurve. Gegen diese vorab
 ausgegebene Kurve trainiert θ, und die Quantilresiduen verwenden dieselbe
-Slow-only-Kurve plus das **vor dem Tag** bekannte θ. Erst danach dürfen die
+Slow-only-Kurve plus das **vor dem Tag** bekannte θ und den anschließenden
+zweiten Gruppen-Clamp. Die thermische Umrechnung verwendet die tatsächliche
+Slow-only-POA, keine Skalierung der bereits temperaturkorrigierten Rohleistung.
+`core.plane_physics` ist die gemeinsame Physik von Live und Bootstrap. Erst danach dürfen die
 Labels des Tages den Zustand für den Folgetag verändern. Damit korrigiert θ
 keinen bereits von der Shademap erklärten Verlust doppelt und das Quantilziel
 fließt nicht in seine eigene Prognose ein. Der Bootstrap-RLS-Schritt delegiert
@@ -1451,7 +1479,7 @@ Tagesabschnitts-Energie-Gate.
 
 Der Quantilspeicher wird über **denselben** `quantiles.train_quantiles` befüllt
 wie live: pro Stunde `relerr = gemessen / korrigiert` mit
-`korrigiert = θ_vor_Tag · Slow-only_vor_Tag` in die Bins der Taxonomie aus §8,
+`korrigiert = Gruppen-Clamp(θ_vor_Tag · Slow-only_vor_Tag)` in die Bins der Taxonomie aus §8,
 also genau gegen die Prognose, die vor Kenntnis dieses Tages ausgegeben worden
 wäre. Das Training ist datumsgefenstert auf
 `QUANTILE_RING_DAYS` relativ zum **letzten Backfill-Tag**, mit denselben Ring-
@@ -1475,7 +1503,10 @@ erfindet keine Werte.
 
 **Jede Stufe ist sichtbar:** das `status`-Feld der Coordinator-Daten, der
 `source_status`-Sensor, der `binary_sensor` „degraded" und — wo angebracht — ein
-Repair-Issue. Die Prognose-Entitäten gehen ehrlich auf `unavailable`, statt
+Repair-Issue. `get_forecast` liefert bei fehlgeschlagenem Coordinator-Update leere Kurven,
+der Energy-Hook liefert `None`. Diagnostics meldet das aktuelle Alter und den
+aktuellen Fehler ohne den alten Forecast als verfügbar auszuweisen.
+Die Prognose-Entitäten gehen ehrlich auf `unavailable`, statt
 stille Altwerte zu halten; Diagnose-Entitäten bleiben **immer** verfügbar, damit
 „wir sind degradiert" auch dann lesbar ist, wenn die Prognose selbst fehlt.
 
@@ -1767,7 +1798,12 @@ statt geraten.
   `rollback_learners` alle drei konsistent zurücksetzt. Ein Alt-Snapshot ohne
   Quantilfeld lädt mit leerem Quantilzustand (das Vor-Quantil-Verhalten). Der neueste Eintrag steht hinten; der älteste fällt
   beim Überlauf heraus.
-- **`learning_health`** (§10).
+- **`inverter_cal_trained_days`**: eigener, auf `TRAINED_DAYS_RING` begrenzter
+  Tagesring für erfolgreich gefaltete Inverterkalibrierungen. Additiv im
+  bestehenden Schema; auf Altbeständen leer. Verhindert Doppeltraining beim
+  Catch-up unabhängig vom DC-Lernmarker.
+- **`learning_health`** (§10), einschließlich `eta_last_checked_day`, damit
+  ein verspäteter alter Kalibrierungsbefund keinen neueren Zustand überschreibt.
 
 ### §16.3 Schreibsemantik
 
@@ -1776,7 +1812,8 @@ Payload-Writes sind zusätzlich **zeitgetaktet**
 (`PAYLOAD_MIN_SAVE_INTERVAL_SECONDS` = 6 h), sodass eine Wetteränderung
 höchstens alle sechs Stunden auf die Platte geht. Budget: **≤ 4 gebündelte
 Writes/Tag** (eMMC-Schonung). Der nächtliche Job und der Flush bei HA-Stop bzw.
-beim Unload garantieren eventuelle Persistenz.
+beim Unload garantieren eventuelle Persistenz. Vor dem finalen Flush endet
+alle vom Entry erfasste Arbeit; neue Schreiber werden nicht mehr zugelassen.
 
 Nach einem **harten Crash** dürfen Last-Good-Cache und As-issued-Log bis zu
 einige Stunden verlieren — akzeptiert, weil die Degradationsleiter (§13) greift.
@@ -1785,7 +1822,8 @@ einige Stunden verlieren — akzeptiert, weil die Degradationsleiter (§13) grei
 
 **Validate-and-clamp je Sektion:** jede Sektion läuft durch ihre klemmende
 Dataclass. Ein korrupter, falsch geformter oder unbekannter Blob ergibt eine
-**neutrale** Sektion, **nie** einen Setup-Crash, und lässt alle übrigen Sektionen
+**neutrale** Sektion, **nie** einen Setup-Crash (auch bei nichtendlichen oder
+überlaufenden Zählern), und lässt alle übrigen Sektionen
 byte-treu. Auf sauberen Daten ist der Round-Trip die Identität.
 
 ### §16.5 Deinstallation und Cleanup
@@ -1922,6 +1960,17 @@ weggelassenen `missing_entities`.
 
 ### §18.3 Verschattungsprofil-Karte
 
+**Gemeinsame Kartenverträge.** Registry-Auflösung und Servicezugriff liegen in
+`frontend/card_data.js`, der HA-Kalender in `site_calendar.js`, zugängliche
+UI-Bausteine in `card_ui.js`. Der Registry-Cache gehört zur Websocket-Verbindung,
+nicht zum kurzlebigen `hass`-Stateobjekt; fehlgeschlagene Erkennung ist erneut
+versuchbar. Optionales `entry_id` wählt die Anlage explizit, alternativ wird sie
+aus einem expliziten Integrationssensor abgeleitet. Bei mehreren Anlagen ohne
+eindeutige Auswahl erscheint ein Hinweis. Der Dashboard-Generator trägt die
+Entry-ID ein; alle Profil- und Archivaufrufe bleiben an diese Anlage gebunden.
+Beide Diagramme bieten beschriftete Controls, Zustandsangaben (`aria-pressed`),
+Diagrammbeschreibungen und eine per Tastatur zugängliche ausklappbare Wertetabelle.
+
 `custom:balcony-shade-profile-card` (`frontend/shade_profile_card.js`) ist
 **abhängigkeitsfrei**: vanilla `HTMLElement` plus programmatisch erzeugtes SVG,
 keine HACS-Frontend-Installation nötig. Sie zeichnet die Sonnenbahn aus den
@@ -1994,6 +2043,15 @@ per-Gruppen-Overrides werden nicht abgebildet). `cloud_class_by_hour`
 (`hourly_wh / raw_hourly_wh`, Stunden mit raw ≈ 0 ausgelassen) machen die
 angewandte Korrektur sichtbar. Ein Fehltreffer ist **kein Fehler**.
 
+**Kalender und Fehler.** Tagesgrenzen, Archivdatum und Buckets richten sich
+nach `hass.config.time_zone`. Sommerzeitwechsel ergeben 23 bzw. 25 tatsächliche
+Stunden; doppelte Herbststunden sind mit UTC-Offset unterscheidbar. Der
+Wochen-Cache speichert nur bestätigte vorhandene/fehlende Snapshots, keine
+Transportfehler. Fehler bleiben sichtbar und werden bei der nächsten
+Aktualisierung bzw. beim nächsten Besuch erneut versucht. Recorderfehler sind
+von einer erfolgreichen leeren Antwort unterscheidbar. Bleiben alte Daten
+sichtbar, zeigt die Karte deren letzte erfolgreiche Aktualisierung.
+
 ### §18.5 Auslieferung und Registrierung
 
 Beide Karten werden unter dem gemeinsamen statischen Prefix
@@ -2001,7 +2059,9 @@ Beide Karten werden unter dem gemeinsamen statischen Prefix
 geführt. Im **Lovelace-Storage-Modus** werden sie beim Start automatisch je als
 Dashboard-Ressource (Modul-Typ) registriert, sodass sie direkt im Kartenwähler
 erscheinen; jede Ressourcen-URL ist per `?v=<INTEGRATION_VERSION>`
-cache-gebustet (der einzige Cache-Busting-Mechanismus). Im **YAML-Modus** wird
+cache-gebustet. Die drei lokalen Shared-Module übernehmen denselben
+Versionsparameter und werden statisch mitgeliefert, aber nicht als eigene
+Lovelace-Ressourcen registriert. Im **YAML-Modus** wird
 statt der Registrierung ein INFO-Hinweis mit den manuell einzutragenden
 Ressourcenzeilen geloggt.
 
@@ -2110,8 +2170,9 @@ einem klaren Tag prüfen:
 
 **Golden-Tests gegen pvlib-Referenzvektoren** über alle Ebenen — inklusive
 Tiefstand 2–10° und der Konventionsgrenzen — sind **Merge-Blocker**. Die
-Vektoren werden **außerhalb** dieses Repos in einem Wegwerf-venv mit
-pvlib/pandas erzeugt und als `tests/core/reference_vectors.json` eingecheckt;
+Vektoren werden über das eingecheckte Referenzskript in einer getrennten,
+gepinnten Entwicklungsumgebung erzeugt und als
+`tests/core/reference_vectors.json` eingecheckt;
 pvlib und pandas sind **niemals** Laufzeitabhängigkeiten (§2).
 
 **Sonnenstands-Anker:** gegen PVGIS verifizierte Referenzwerte mit dem
@@ -2125,9 +2186,13 @@ die Konventionsanker Mittagsazimut ≈ 180° und Juni-Sonnenaufgangsazimut im
 NO-Quadranten (0 = Nord, §20.1). Die Toleranz ist absichtlich weiter als das
 Genauigkeitsziel, weil die Anker durch Abtasten der Tageskurve bestimmt werden.
 
-**HA-Freiheit des Kerns:** `tests/core/` importiert die Kernmodule direkt aus
-ihren Dateien und läuft mit bare pytest ohne HA — die Invariante aus §2 ist damit
-testbar formuliert, nicht nur behauptet.
+**HA-Freiheit des Kerns:** `tests/core/` importiert die Kernmodule ohne HA.
+Ein AST-Importwächter prüft zusätzlich `core/` und `const.py` gegen HA- und
+Drittabhängigkeiten, einschließlich der einzigen lazy-aiohttp-Ausnahme (§2).
+Branch-Coverage wird separat berichtet; gezielte Mutationen prüfen fachliche
+Gates. Eine höhere Ausführungsquote ersetzt keine Regression mit beobachtbarer
+Verhaltensaussage. Die portable Suite deaktiviert das PHACC-Plugin; der echte
+HA-Lebenszyklus wird getrennt unter Linux geprüft.
 
 **Byte-Identitäts-Regressionen:**
 

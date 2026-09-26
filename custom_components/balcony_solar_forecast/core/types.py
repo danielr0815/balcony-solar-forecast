@@ -1,8 +1,11 @@
-"""Immutable data contracts for the pure forecast core.
+"""Owned data contracts for the pure forecast core.
 
 This module imports NOTHING from Home Assistant. Everything here is a plain,
 frozen dataclass over plain Python data so the physics core is testable with
-bare pytest (SPEC §2).
+bare pytest (SPEC §2). ``frozen`` protects attributes, not nested containers.
+A producer owns its mappings/lists; consumers treat them as read-only. State
+updates copy every container they change. Persisted/rollback snapshots cross
+an ownership boundary through ``to_dict``/``from_dict`` and own their copies.
 
 Conventions (all internal):
   - Azimuth 0 = North, clockwise (90 = East, 180 = South).
@@ -16,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from ..const import (
@@ -68,6 +71,7 @@ from ..const import (
     SITE_ALBEDO_MIN,
     SITE_BEAM_GAIN_MAX,
     SITE_BEAM_GAIN_MIN,
+    SLOT_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -376,7 +380,7 @@ class SiteConfig:
     Clamped to [SITE_BEAM_GAIN_MIN, SITE_BEAM_GAIN_MAX] on load. It lifts the
     honestly under-modeled direct beam on clear mornings into the RAW physics
     (the reference site validated ~1.23), so the learned transmittance and
-    day-ahead-bias cells — both clamped and unable to express a >1 correction —
+    day-ahead-bias cells — both bounded by their configured limits —
     stop absorbing the deficit.
     """
 
@@ -497,7 +501,7 @@ class WeatherSlot:
         """Slot midpoint (used for sun position)."""
         from datetime import timedelta
 
-        return self.start + timedelta(minutes=7, seconds=30)
+        return self.start + timedelta(seconds=SLOT_SECONDS / 2.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -567,8 +571,8 @@ class ForecastResult:
     ``async_get_solar_forecast`` hook).
 
     AC curve (Phase 1, additive): ``ac_watts`` / ``ac_hourly_wh`` /
-    ``ac_daily_kwh`` are the served DC curve passed through each inverter
-    group's DC->AC efficiency and AC clamp
+    ``ac_daily_kwh`` are the corrected, unclamped plane DC passed through each
+    inverter group's DC->AC efficiency and AC clamp
     (``electrical.clamp_groups_ac``) — the physically-correct AC the site
     delivers. The DC fields above are UNCHANGED by this phase and remain the
     self-learning / scoreboard / kill-gate truth. All AC fields default empty
@@ -581,7 +585,7 @@ class ForecastResult:
     hourly_wh: dict[str, float]  # {iso_utc_hour: Wh} site total
     daily_kwh: dict[str, float] = field(default_factory=dict)  # {iso_date: kWh}
     # --- AC-side served curve (Phase 1, SPEC AC-side forecast) ---
-    # The served DC curve run through each inverter group's eta_inv + AC clamp
+    # Corrected unclamped plane DC run through each group's eta_inv + AC clamp
     # (electrical.clamp_groups_ac). Additive: default empty so a DC-only build
     # (and every direct constructor / cached result) round-trips unchanged. The
     # DC ``total_watts`` / ``hourly_wh`` / ``daily_kwh`` above stay the learner
@@ -660,7 +664,8 @@ class ForecastResult:
     ac_p10_watts: tuple[float, ...] = ()
     # Per-slot AC P90 band watts — the P90 sibling of ``ac_p10_watts`` (same
     # per-slot ceiling cap). Backs the served 15-min ``wh_period_ac_p90`` curve
-    # attribute (SPEC §14.4); P50 == ac_watts, so no AC p50 field is carried.
+    # attribute (SPEC §14.4). The central point forecast is ac_watts; this
+    # contract carries no empirical AC median.
     # Empty when no bands were issued this cycle.
     ac_p90_watts: tuple[float, ...] = ()
     # Hourly Wh roll-ups of the AC P10 / P90 band curves (keyed by ISO-8601 UTC
@@ -668,15 +673,10 @@ class ForecastResult:
     # ``p10_hourly_wh`` / ``p90_hourly_wh``: per slot ac_band_watts =
     # min(ac_watts * band_factor, ac_ceiling), ac_ceiling = sum of group AC limits
     # (+ any ungrouped-plane AC). Filled only when the DC bands are present
-    # (band_by_slot active); empty otherwise. P50 == ac_watts, so no separate AC
-    # p50 field is carried.
+    # (band_by_slot active); empty otherwise. The central point forecast is not
+    # necessarily the empirical median and may lie outside the P10/P90 interval.
     ac_p10_hourly_wh: dict[str, float] = field(default_factory=dict)
     ac_p90_hourly_wh: dict[str, float] = field(default_factory=dict)
-
-    def with_total(self, total_watts: tuple[float, ...]) -> ForecastResult:
-        """Return a copy with a replaced total (e.g. after a learner clamp)."""
-        return replace(self, total_watts=total_watts)
-
 
 def default_albedo() -> float:
     """Convenience re-export of the default ground albedo."""
@@ -698,7 +698,7 @@ def _clamp(v: float, lo: float, hi: float) -> float:
     """Clamp ``v`` into [lo, hi]; NaN/inf-safe (returns lo on non-finite)."""
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return lo
     if f != f or f in (float("inf"), float("-inf")):  # NaN / inf guard
         return lo
@@ -716,7 +716,7 @@ def _safe_int(v: object, default: int = 0, *, minimum: int | None = None) -> int
     """
     try:
         i = int(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         i = default
     if i != i:  # pragma: no cover - int() never returns NaN, defensive only
         i = default
@@ -734,7 +734,7 @@ def _safe_float(v: object, default: float = 0.0, *, minimum: float | None = None
     """
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     if f != f or f in (float("inf"), float("-inf")):
         return default

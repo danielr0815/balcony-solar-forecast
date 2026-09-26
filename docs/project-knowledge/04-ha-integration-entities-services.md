@@ -1,6 +1,6 @@
 # HA-Integration: Entities, Services, Diagnostics
 
-Dies ist die **Außenschnittstelle** von `balcony_solar_forecast` (Stand `main` @ v0.27.0): welche Home-Assistant-Entitäten
+Dies ist die **Außenschnittstelle** von `balcony_solar_forecast` (Arbeitsstand auf v0.27.2): welche Home-Assistant-Entitäten
 die Integration anlegt, welche Attribute die Prognosekurven tragen, welche Aktionen (Services) es gibt und was der
 Diagnostics-Download enthält. Du brauchst dieses Dokument, wenn du eine Automation/Karte an die Integration anbindest,
 einen Entity-State interpretierst, eine Aktion aufrufst oder einen Bugreport-Dump liest.

@@ -63,6 +63,11 @@ class _FakeHass:
 class _FakeCoordinator:
     def __init__(self, site=None):
         self._site = site if site is not None else SiteConfig.from_dict(DEFAULT_SITE)
+        from custom_components.balcony_solar_forecast._operations import (
+            LearnerOperations,
+        )
+        self._operations = LearnerOperations()
+        self._bootstrap_lock = self._operations.lock
         self.imported = None
 
     async def async_import_bootstrap(self, data):
@@ -187,7 +192,7 @@ async def test_second_run_while_locked_is_rejected(monkeypatch):
     _patch_pipeline(monkeypatch)
     coord = _FakeCoordinator()
     hass = _FakeHass({"e1": coord})
-    lock = bs._bootstrap_lock(coord)
+    lock = coord._operations.lock
     await lock.acquire()
     try:
         with pytest.raises(ServiceValidationError, match="already running"):
@@ -402,7 +407,9 @@ async def test_nightly_job_waits_for_held_bootstrap_lock(monkeypatch):
     )
 
     coord = BalconySolarCoordinator.__new__(BalconySolarCoordinator)
-    coord._bootstrap_lock = asyncio.Lock()
+    from custom_components.balcony_solar_forecast._operations import LearnerOperations
+    coord._operations = LearnerOperations()
+    coord._bootstrap_lock = coord._operations.lock
 
     ran: list = []
 
@@ -429,7 +436,9 @@ async def test_run_bootstrap_rejected_while_nightly_holds_lock(monkeypatch):
     )
 
     coord = BalconySolarCoordinator.__new__(BalconySolarCoordinator)
-    coord._bootstrap_lock = asyncio.Lock()
+    from custom_components.balcony_solar_forecast._operations import LearnerOperations
+    coord._operations = LearnerOperations()
+    coord._bootstrap_lock = coord._operations.lock
     coord._site = SiteConfig.from_dict(DEFAULT_SITE)
 
     gate = asyncio.Event()

@@ -14,7 +14,7 @@
  *     EXACTLY the ApexCharts thresholds and colours, SHADE_PROFILE_TAU_*);
  *   - the learned shade horizon (filled) and the static config horizon (dashed).
  *
- * ZERO dependencies: plain `HTMLElement` + shadow DOM + programmatic SVG via
+ * No external dependencies: plain `HTMLElement` + shadow DOM + programmatic SVG via
  * `document.createElementNS`. No lit, no CDN imports, no build step, no
  * minification. Cache-busting is handled entirely by the versioned resource URL
  * (`?v=<integration version>`), so this file carries no version string.
@@ -27,6 +27,11 @@
  * The only state it writes is via the two control entities (select_option /
  * date.set_value) when the user changes the module or the date.
  */
+
+// Propagate the resource cache-buster to every local dependency (SPEC §18.5).
+const dependency = (name) => new URL(`./${name}${new URL(import.meta.url).search}`, import.meta.url);
+const { ensureRegistry, resolveEntities, callEntryService } = await import(dependency("card_data.js"));
+const { labelControl, pressed, describeChart, dataTable } = await import(dependency("card_ui.js"));
 
 const CARD_TAG = "balcony-shade-profile-card";
 
@@ -91,42 +96,11 @@ const RE_SENSOR = /^sensor\..*shade_profile$/;
 const RE_SELECT = /^select\..*shade_profile_module$/;
 const RE_DATE = /^date\..*shade_profile_date$/;
 
-// One entity-registry fetch per hass connection, shared by all card instances
-// (a WeakMap so a torn-down connection can be garbage-collected).
-const _registryCache = new WeakMap(); // hass -> Promise<list|null>
-
-/** Fetch the entity registry once; null when unreadable (regex fallback). */
-function entityRegistry(hass) {
-  if (!hass || typeof hass.callWS !== "function") return Promise.resolve(null);
-  let p = _registryCache.get(hass);
-  if (!p) {
-    p = hass
-      .callWS({ type: "config/entity_registry/list" })
-      .then((list) => (isArray(list) ? list : null))
-      .catch(() => null);
-    _registryCache.set(hass, p);
-  }
-  return p;
-}
-
-/** entity_id of OUR entity whose unique_id ends with `_{key}`, or undefined. */
-function byUniqueId(list, key) {
-  if (!list) return undefined;
-  const suffix = `_${key}`;
-  for (const e of list) {
-    // Platform-gated: a foreign integration's look-alike unique_id suffix must
-    // never be claimed as ours.
-    if (!e || e.platform !== "balcony_solar_forecast") continue;
-    if (typeof e.unique_id === "string" && e.unique_id.endsWith(suffix)) {
-      return e.entity_id;
-    }
-  }
-  return undefined;
-}
-
 // Tiny i18n dict keyed off the two-letter `hass.language`; English fallback.
 const I18N = {
   en: {
+    table: "Values as a table", time: "Time",
+    chartDescription: "Sun path and shade horizons. Detailed values follow in a table.",
     module: "Module",
     date: "Date",
     view: "View",
@@ -148,6 +122,8 @@ const I18N = {
     compass: ["N", "NE", "E", "SE", "S", "SW", "W", "NW"],
   },
   de: {
+    table: "Werte als Tabelle", time: "Zeit",
+    chartDescription: "Sonnenbahn und Schattenhorizonte. Detailwerte stehen in der folgenden Tabelle.",
     module: "Modul",
     date: "Datum",
     view: "Ansicht",
@@ -246,6 +222,7 @@ class BalconyShadeProfileCard extends HTMLElement {
     this._compareModule = null;
     this._compareError = false;
     this._compareLoading = false;
+    this._compareSeq = 0;
     // Live "now" sun-position marker: the last plot's hover ctx (so a timer can
     // re-place the marker without a full re-render), a ~minute refresh interval
     // id (only while connected), and whether the pointer is currently over the
@@ -254,9 +231,10 @@ class BalconyShadeProfileCard extends HTMLElement {
     this._nowTimer = null;
     this._hovering = false;
     // Entity-registry discovery state (i18n-proof unique_id match): the fetched
-    // registry list plus the one-shot guard for its fetch.
+    // registry list plus the per-connection in-flight request guard.
     this._registryList = null;
-    this._registryRequested = false;
+    this._registryRequest = null;
+    this._registryConnection = null;
   }
 
   // Refresh the live "now" marker roughly once a minute while the card is on
@@ -265,11 +243,14 @@ class BalconyShadeProfileCard extends HTMLElement {
   // work happens unless there is a plotted sun path; the interval is torn down
   // when the element leaves the DOM, so there is no leak.
   connectedCallback() {
+    if (this._hass) this.hass = this._hass;
     this._stopNowTimer();
     this._nowTimer = setInterval(() => this._refreshNow(), 60000);
   }
 
   disconnectedCallback() {
+    this._compareSeq += 1;
+    this._compareLoading = false;
     this._stopNowTimer();
   }
 
@@ -285,6 +266,10 @@ class BalconyShadeProfileCard extends HTMLElement {
   setConfig(config) {
     // All keys optional; auto-discovery fills the rest at render time.
     this._config = config || {};
+    this._compareSeq += 1;
+    this._compareData = null;
+    this._compareModule = null;
+    this._compareLoading = false;
     this._rendered = false; // force a rebuild on the next hass push
     this._lastSensor = this._lastSelect = this._lastDate = undefined;
   }
@@ -296,23 +281,14 @@ class BalconyShadeProfileCard extends HTMLElement {
   /** Picker preview: return discovered ids so the preview renders live data.
    * Static and sync, so it can only use the entity_id regex fallback — the
    * registry (unique_id) discovery runs once the card itself is mounted. */
-  static getStubConfig(hass) {
-    const find = (re) => {
-      if (!hass || !hass.states) return undefined;
-      for (const id of Object.keys(hass.states)) if (re.test(id)) return id;
-      return undefined;
-    };
-    return {
-      sensor: find(RE_SENSOR),
-      module_select: find(RE_SELECT),
-      date_entity: find(RE_DATE),
-    };
+  static getStubConfig() {
+    return {};
   }
 
   set hass(hass) {
     this._hass = hass;
     if (!this._config) return;
-    // Kick the one-shot registry discovery (unique_id match; regex until then).
+    // Start connection-scoped registry discovery; failed attempts may retry.
     this._ensureRegistry(hass);
     const ids = this._resolveIds(hass);
     const s = hass.states[ids.sensor];
@@ -344,47 +320,15 @@ class BalconyShadeProfileCard extends HTMLElement {
   }
 
   _resolveIds(hass) {
-    const c = this._config;
-    // Registry unique_id match FIRST (language-stable), entity_id regex only
-    // as the fallback while the registry fetch is still in flight (or
-    // unavailable). An explicitly configured id always wins.
-    const find = (key, re) => {
-      const hit = byUniqueId(this._registryList, key);
-      if (hit) return hit;
-      if (!hass || !hass.states) return undefined;
-      for (const id of Object.keys(hass.states)) if (re.test(id)) return id;
-      return undefined;
-    };
-    return {
-      sensor: c.sensor || find(KEY_SENSOR, RE_SENSOR),
-      module_select: c.module_select || find(KEY_SELECT, RE_SELECT),
-      date_entity: c.date_entity || find(KEY_DATE, RE_DATE),
-    };
+    return resolveEntities(this._config, this._registryList, hass, [
+      ["sensor", KEY_SENSOR, RE_SENSOR],
+      ["module_select", KEY_SELECT, RE_SELECT],
+      ["date_entity", KEY_DATE, RE_DATE],
+    ]);
   }
 
-  /**
-   * Kick the ONE entity-registry fetch discovery needs (the i18n-proof
-   * unique_id match). Sync hass pushes run on the regex fallback until the
-   * promise lands; when the registry then changes a resolved id, the whole
-   * setter path is re-run so the render picks up the corrected entities.
-   */
   _ensureRegistry(hass) {
-    if (this._registryRequested) return;
-    this._registryRequested = true;
-    const before = this._resolveIds(hass);
-    entityRegistry(hass).then((list) => {
-      if (!list || this._hass !== hass || !this.isConnected) return;
-      this._registryList = list;
-      const after = this._resolveIds(hass);
-      if (
-        before.sensor === after.sensor &&
-        before.module_select === after.module_select &&
-        before.date_entity === after.date_entity
-      ) {
-        return;
-      }
-      this.hass = hass; // guarded: _registryRequested is already spent
-    });
+    return ensureRegistry(this, hass);
   }
 
   // --- rendering ----------------------------------------------------------
@@ -442,6 +386,7 @@ class BalconyShadeProfileCard extends HTMLElement {
     this._readoutEl = this._statusLine(t);
     body.appendChild(this._readoutEl);
     body.appendChild(this._plot(s, t));
+    body.appendChild(this._table(s, t));
     // A card-local comparison date follows the primary module: (re)fetch it when
     // it is set but missing / stale for the module now on screen.
     this._maybeRefetchCompare(hass, s);
@@ -506,6 +451,7 @@ class BalconyShadeProfileCard extends HTMLElement {
 
   /** The × button: drop the comparison entirely and re-render. */
   _clearCompare() {
+    this._compareSeq += 1;
     this._compareDate = "";
     this._compareData = null;
     this._compareModule = null;
@@ -530,21 +476,22 @@ class BalconyShadeProfileCard extends HTMLElement {
     if (!hass || !this._compareDate) return;
     this._compareLoading = true;
     const iso = this._compareDate;
+    const seq = ++this._compareSeq;
     try {
       const profile = await this._fetchCompare(hass, module, iso);
-      if (iso !== this._compareDate) return; // date changed mid-flight
+      if (seq !== this._compareSeq || iso !== this._compareDate) return; // date changed mid-flight
       this._compareData = profile;
       this._compareModule = module;
       this._compareError = !profile;
     } catch (_e) {
-      if (iso !== this._compareDate) return;
+      if (seq !== this._compareSeq || iso !== this._compareDate) return;
       this._compareData = null;
       this._compareModule = module;
       this._compareError = true;
     } finally {
-      this._compareLoading = false;
+      if (seq === this._compareSeq) this._compareLoading = false;
     }
-    this._rerender();
+    if (this.isConnected) this._rerender();
   }
 
   /** Call the read-only get_shade_profile service and return the profile dict. */
@@ -554,17 +501,7 @@ class BalconyShadeProfileCard extends HTMLElement {
     // `call_service` command with `return_response: true`.
     const serviceData = { date: iso };
     if (module) serviceData.module = module;
-    const res = await hass.callWS({
-      type: "call_service",
-      domain: "balcony_solar_forecast",
-      service: "get_shade_profile",
-      service_data: serviceData,
-      return_response: true,
-    });
-    // The command resolves to { context, response }; the service wraps its
-    // payload as { result: <profile> }.
-    const resp = res && res.response;
-    const profile = resp && resp.result;
+    const profile = await callEntryService(this, hass, "get_shade_profile", serviceData);
     return profile && typeof profile === "object" ? profile : null;
   }
 
@@ -691,6 +628,7 @@ class BalconyShadeProfileCard extends HTMLElement {
           option: ev.target.value,
         });
       });
+      labelControl(label, select, "shade-module");
       field.appendChild(label);
       field.appendChild(select);
       wrap.appendChild(field);
@@ -713,6 +651,7 @@ class BalconyShadeProfileCard extends HTMLElement {
           date: ev.target.value,
         });
       });
+      labelControl(label, input, "shade-date");
       field.appendChild(label);
       field.appendChild(input);
       wrap.appendChild(field);
@@ -744,6 +683,7 @@ class BalconyShadeProfileCard extends HTMLElement {
       clear.title = t.clearCompare;
       clear.setAttribute("aria-label", t.clearCompare);
       clear.addEventListener("click", () => this._clearCompare());
+      labelControl(label, input, "shade-compare");
       row.appendChild(input);
       row.appendChild(clear);
       field.appendChild(label);
@@ -770,6 +710,7 @@ class BalconyShadeProfileCard extends HTMLElement {
         btn.type = "button";
         btn.textContent = text;
         btn.className = "toggle-btn" + (this._view === key ? " active" : "");
+        pressed(btn, this._view === key);
         btn.addEventListener("click", () => {
           if (this._view === key) return;
           this._view = key;
@@ -792,6 +733,17 @@ class BalconyShadeProfileCard extends HTMLElement {
     wrap.appendChild(badge);
 
     return wrap;
+  }
+
+  _table(s, t) {
+    const a = s.attributes || {};
+    const tau = this._view === "single" && a[A_TRANSMITTANCE_INDIVIDUAL]?.length
+      ? a[A_TRANSMITTANCE_INDIVIDUAL] : a[A_TRANSMITTANCE];
+    const rows = (a[A_TIME] || []).map((time, i) => [time,
+      `${Number(a[A_AZIMUTH]?.[i]).toFixed(1)}°`,
+      `${Number(a[A_SUN_ELEVATION]?.[i]).toFixed(1)}°`,
+      `${Math.round((1 - Number(tau?.[i])) * 100)}%`, a[A_SAMPLE_N]?.[i] ?? "—"]);
+    return dataTable(t.table, [t.time, "Az", t.hoverElevation, t.hoverShading, "n"], rows);
   }
 
   _plot(s, t) {
@@ -927,6 +879,8 @@ class BalconyShadeProfileCard extends HTMLElement {
       preserveAspectRatio: "xMidYMid meet",
       role: "img",
     });
+
+    describeChart(el, `${t.chartDescription} ${a[A_DATE] || ""}`);
 
     // Grid + axes.
     el.appendChild(this._axes(X, Y, xMin, xMax, yMax, m, plotW, plotH, W, H));

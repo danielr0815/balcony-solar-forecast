@@ -87,7 +87,7 @@ committed `uv.lock` (the single source of truth for every tool version — CI
 uses the same lockfile):
 
 ```bash
-uv sync --group dev      # or: make install
+uv sync --locked --group dev      # or: make install
 ```
 
 uv installs Python 3.14 itself if needed (pinned in `.python-version`;
@@ -103,9 +103,10 @@ same `uv sync`:
 .\scripts\setup-env.ps1
 ```
 
-Both wrappers call [`scripts/setup_env.py`](scripts/setup_env.py) (pure
-stdlib). Alternatively there is a **devcontainer** (`.devcontainer/`) whose
-`postCreateCommand` runs the same `uv sync --group dev`; it also carries a
+The bootstrap uses [`scripts/setup_env.py`](scripts/setup_env.py) (pure
+stdlib, Python 3.10+). On Windows an existing `uv` is used directly; otherwise
+`py -3` or `python` bootstraps uv, which installs the required Python 3.14. Alternatively there is a **devcontainer** (`.devcontainer/`) whose
+`postCreateCommand` runs the same `uv sync --locked --group dev`; it also carries a
 Node feature so the JS card harness (`tests/harness/`) runs instead of
 skipping.
 
@@ -129,30 +130,65 @@ The code is split into two layers:
 - `custom_components/balcony_solar_forecast/` (the rest) — the **Home Assistant
   glue**: coordinator, config flow, entities, services.
 
-The whole suite is **unit-style** and runs with the PHACC plugin disabled:
+Portable unit tests use fakes; reusable coordinators, stores and weather inputs
+live in `tests/helpers/`. Test modules do not import other test modules.
+The separate Linux suite starts real Home Assistant, its event bus, flow manager,
+entity platforms and storage. It uses `--confcutdir` to exclude the portable
+suite's package shims:
 
 ```bash
-make test        # == uv run pytest tests -p no:homeassistant   (full suite)
-make test-core   # == uv run pytest tests/core -p no:homeassistant
-make lint        # == uv run ruff check .
-make format      # == uv run ruff check --fix .   (lint autofix — NOT ruff format)
-make clean       # remove ./.venv
+uv run pytest tests --ignore=tests/integration -p no:homeassistant
+uv run pytest tests/core -p no:homeassistant
+uv run pytest --confcutdir=tests/integration tests/integration -p no:homeassistant
+uv run ruff check .
+uv run mypy
+uv run python scripts/check_mypy_baseline.py
+uv run python scripts/check_core_imports.py
 ```
 
-**Why `-p no:homeassistant`?** Every HA-layer test runs against
-fakes/monkeypatch and needs only `import homeassistant`, never a real HA
-instance — the suite never uses PHACC's fixtures. But
-`pytest-homeassistant-custom-component`'s **autouse** fixtures call
-`asyncio.get_event_loop()` at setup (which raises on Python 3.12+ for the sync
-tests) and importing the plugin pulls the POSIX-only `fcntl` (unimportable on
-Windows). So the plugin only ever breaks a suite that never uses it. Disabling
-it runs the **full** meaningful suite identically on Linux, macOS, WSL and
-Windows (`pytest-asyncio`, installed via PHACC, still drives the async tests).
-This is what `make test` and the CI `tests` job do — CI runs the same
-`uv run pytest tests -p no:homeassistant`, plus `--cov` flags for a
-report-only coverage summary. Do **not** add a `-q`: `pyproject.toml` already
-sets `addopts = "-q"`, and a second one escalates to `-qq`, which drops the
-`N passed, M skipped` line.
+PHACC is disabled in both suites: its autouse fixtures are unused, can conflict
+with synchronous tests' event-loop setup, and import POSIX-only `fcntl` on
+Windows. `pytest-asyncio` still runs async tests. Do not add `-q`: `pyproject.toml`
+already sets it; a second occurrence hides pytest's result summary.
+
+The normal CI unit job enforces **95% statement coverage**. A separate job
+reports branch coverage without a percentage gate; uncovered decisions guide
+review, not tests written just to increase a number. `scripts/mutation_smoke.py`
+checks three deliberate semantic defects in a temporary copy: disabled group
+clamping, acceptance of stale power labels, and lost nightly catchup gaps. The
+baseline test must pass and each mutant must cause an assertion failure;
+collection errors do not count as detection.
+
+Test intent determines the evidence (see CLAUDE rule 6): bugfix tests fail
+semantically on the previous implementation; feature tests check the new
+contract; refactor tests compare old and new behavior. Characterization and
+regression tests may already pass if they secure an independent contract or
+reference. Avoid expectations calculated by the production function itself.
+
+Golden vectors are committed and required; a missing file fails collection.
+Reproduce them with the separately locked, optional pvlib environment:
+
+```bash
+uv run --script --locked scripts/generate_reference_vectors.py --check
+# Only after reviewing reference-input/model changes:
+uv run --script --locked scripts/generate_reference_vectors.py --write
+```
+
+The generator uses pvlib 0.15.2, explicit model parameters and
+`scripts/reference_inputs.json`; pvlib is not a runtime or normal test dependency.
+
+`mypy` preserves the clean-core gate. `scripts/check_mypy_baseline.py` also checks
+all previously suppressed core modules and the critical HA boundaries listed
+in `HA_BOUNDARIES`. Its committed diagnostic baseline names files and symbols,
+rejects new errors, and requires removing fixed entries. Inspect every diagnostic
+before using `--write-baseline`; never refresh it just to turn CI green. Reduce
+legacy errors without blanket `Any`, casts or module suppressions.
+
+`make` remains an optional wrapper around uv (`make test`, `make test-core`,
+`make lint`). `make format` means `ruff check --fix`, never `ruff format`.
+CI installs with `uv sync --locked --group dev` and then uses `uv run --no-sync`:
+a stale lockfile fails instead of being silently rewritten. Update dependencies
+explicitly with `uv lock --upgrade` and review both metadata and lockfile.
 
 ## 5. Versioning & releases
 
@@ -162,24 +198,31 @@ The project's version is written in **three** places and they must stay equal:
 - `pyproject.toml` → `[project] version`
 - `custom_components/balcony_solar_forecast/const.py` → `INTEGRATION_VERSION`
 
-CI enforces this: the `validate` workflow fails on version drift between the
-three, and the `release` workflow's version guard fails a **tag** that does not
-match all three. HACS installs the tag's zipball, so the strings must already be
-correct **in the tagged commit**. Order of operations for a release:
+CI enforces equality. HACS installs the tag's zipball, so all metadata must be
+correct in the exact commit being released:
 
-1. Bump all three version strings (keep them identical).
-2. Move the `[Unreleased]` entry to `[x.y.z]` in
-   [CHANGELOG.md](CHANGELOG.md) (Keep a Changelog + SemVer).
-3. *Then* create the tag.
+1. Prepare a release PR: bump the three strings and the SPEC version stamp;
+   move `[Unreleased]` into a dated `## [x.y.z] - YYYY-MM-DD` changelog section.
+2. Merge after review and green checks. Wait for the **push** run of
+   `validate.yml` on the resulting main commit to finish successfully.
+3. Dispatch **Release** (`.github/workflows/release.yml`) from `main`, supplying
+   the version without `v` and the full 40-character commit SHA.
 
-Bumping the versions or the CHANGELOG after tagging is too late — the guard will
-have already failed, or worse, shipped the wrong version.
+The read-only preflight verifies main ancestry, exact checkout, version equality,
+SPEC stamp, dated changelog and the latest Validate push run for that exact SHA.
+An older green run cannot override a newer failed or unfinished run. Only the
+publish job has write permission; it repeats these checks immediately before
+creating the tag and release. It never force-moves a tag. Release notes come
+from that version's changelog section. Do not create tags or published releases
+manually before validation: the workflow is the prepublication gate.
 
 ## 6. The `hacs.json` Home Assistant floor
 
-`hacs.json` pins `"homeassistant": "2026.1.0"`. That is the **floor the
+`hacs.json` pins `"homeassistant": "2026.3.0"`. That is the **floor the
 config-flow selector APIs and entity conventions were validated against** — the
 minimum HA version this integration is known to load and configure cleanly on.
+CI reads this exact version from `hacs.json` and tests both the portable suite
+and real HA lifecycle against it; a wildcard would not verify the declared floor.
 Raise it **consciously** (when you adopt an API that needs a newer HA, and after
 testing on it); **never lower it** without validating the selectors and entity
 setup on the older version first.

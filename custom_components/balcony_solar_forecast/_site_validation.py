@@ -57,7 +57,7 @@ def validate_site(raw: Any) -> SiteConfig:
     # Structural parse first (missing keys / wrong types -> generic error).
     try:
         site = SiteConfig.from_dict(raw)
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         raise SiteValidationError("site_malformed") from None
 
     if not site.planes:
@@ -106,7 +106,7 @@ def validate_site(raw: Any) -> SiteConfig:
             raise SiteValidationError("bad_azimuth")
         if not 0.0 <= plane.tilt_deg <= 90.0:
             raise SiteValidationError("bad_tilt")
-        if not plane.wp > 0.0:
+        if not (math.isfinite(plane.wp) and plane.wp > 0.0):
             raise SiteValidationError("bad_wp")
         if not 0.0 <= plane.efficiency <= 1.0:
             raise SiteValidationError("bad_efficiency")
@@ -203,7 +203,7 @@ def _validate_tau_points(row) -> None:
         if not row.seasonal or len(bare) != len(pts):
             raise SiteValidationError("seasonal_points_mismatch")
         for (el, _t), (bel, btau) in zip(pts, bare, strict=False):
-            if abs(el - bel) > 1e-9:
+            if not math.isfinite(bel) or abs(el - bel) > 1e-9:
                 raise SiteValidationError("seasonal_points_mismatch")
             if not 0.0 <= btau <= 1.0:
                 raise SiteValidationError("bad_tau")

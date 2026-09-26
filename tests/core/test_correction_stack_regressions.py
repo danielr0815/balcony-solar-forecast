@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 import pytest
 from balcony_solar_forecast.core import bootstrap_build, electrical, quantiles
+from balcony_solar_forecast.core.plane_physics import PlanePoaComponents
 from balcony_solar_forecast.core.shademap import shademap_bin_key
 from balcony_solar_forecast.core.types import (
     BiasCell,
@@ -95,6 +96,9 @@ def test_bootstrap_is_walk_forward_across_shademap_bias_and_quantiles(
     the quantile residual against 58.33 Wh.  Training either against RAW or
     using the same day's newly fitted theta would yield 0.5 or 1.0 instead.
     """
+    monkeypatch.setattr(
+        electrical, "dc_power", lambda poa, wp, *_args, **_kwargs: poa * wp / 1000.0,
+    )
     site = _site()
     start = datetime(2026, 6, 21, 11, 0, tzinfo=UTC)
     wx = bootstrap_build.HourlyWeather(
@@ -115,6 +119,7 @@ def test_bootstrap_is_walk_forward_across_shademap_bias_and_quantiles(
             sun_az=180.0,
             sun_el=45.0,
             beam_share=0.25,
+            poa=PlanePoaComponents(250.0, 0.0, 0.0, 250.0, 1.0),
         )
 
     monkeypatch.setattr(
@@ -147,6 +152,9 @@ def test_bootstrap_quantile_uses_served_not_immature_theta(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An n=2 theta is persisted but still neutral in the issued forecast."""
+    monkeypatch.setattr(
+        electrical, "dc_power", lambda poa, wp, *_args, **_kwargs: poa * wp / 1000.0,
+    )
     site = _site()
     start = datetime(2026, 6, 21, 11, 0, tzinfo=UTC)
     wx = bootstrap_build.HourlyWeather(
@@ -169,6 +177,7 @@ def test_bootstrap_quantile_uses_served_not_immature_theta(
             sun_az=180.0,
             sun_el=45.0,
             beam_share=0.25,
+            poa=PlanePoaComponents(250.0, 0.0, 0.0, 250.0, 1.0),
         ),
     )
     cloud = bootstrap_build._classify_cloud(wx, UTC, elevation_deg=45.0)
@@ -195,6 +204,9 @@ def test_bootstrap_omits_hours_missing_one_metered_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A historical port gap is not a low whole-site production sample."""
+    monkeypatch.setattr(
+        electrical, "dc_power", lambda poa, wp, *_args, **_kwargs: poa * wp / 1000.0,
+    )
     p1 = _site().planes[0]
     p2 = replace(p1, name="P2", actual_entity="sensor.p2_dc")
     site = replace(_site(), planes=(p1, p2))
@@ -224,6 +236,7 @@ def test_bootstrap_omits_hours_missing_one_metered_channel(
             sun_az=180.0,
             sun_el=45.0,
             beam_share=0.25,
+            poa=PlanePoaComponents(250.0, 0.0, 0.0, 250.0, 1.0),
         ),
     )
     h10, h11 = (start.isoformat() for start in starts)

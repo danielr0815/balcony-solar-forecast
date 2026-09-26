@@ -27,7 +27,7 @@ import json
 import os
 import sys
 
-from bsf_checks import DEFAULT_ETA, run_all
+from bsf_checks import DEFAULT_ETA, run_all, summarize
 from bsf_data import LOC, load_bundle
 
 EXIT_OK, EXIT_WARN, EXIT_FAIL = 0, 1, 2
@@ -124,19 +124,22 @@ def render(results, bundle, mode: str) -> str:
     w("GESAMTUEBERSICHT")
     for r in results:
         w(f"  {r.cid}  {r.status:<5}  {r.title}")
-    n_fail = sum(1 for r in results if r.status == "FAIL")
-    n_warn = sum(1 for r in results if r.status == "WARN")
+    summary = summarize(results)
+    status = summary["status"]
     w("")
-    if n_fail:
-        w(
-            f"ERGEBNIS: {n_fail} FAIL, {n_warn} WARN - Fixes greifen (noch) nicht "
-            "vollstaendig. Nachjustierung siehe README (Abschnitt 'Wenn ein Check "
-            "rot bleibt')."
-        )
-    elif n_warn:
-        w(f"ERGEBNIS: 0 FAIL, {n_warn} WARN - weitgehend gruen, WARNs beobachten.")
+    if status == "ERROR":
+        w("ERGEBNIS: ERROR - Pruefkatalog fehlerhaft; Deployment nicht validiert.")
+    elif status == "FAIL":
+        w(f"ERGEBNIS: {summary['fail']} FAIL, {summary['warn']} WARN - "
+          "Pruefkriterien verletzt. Nachjustierung siehe README.")
+    elif status == "INCOMPLETE":
+        w("ERGEBNIS: INCOMPLETE - Nachweise fehlen fuer "
+          + ", ".join(summary["incomplete"]) + "; Deployment nicht validiert.")
+    elif status == "WARN":
+        w(f"ERGEBNIS: {summary['warn']} WARN - Warnungen pruefen; "
+          "Deployment nicht vollstaendig validiert.")
     else:
-        w("ERGEBNIS: alle Checks gruen - Deployment validiert.")
+        w("ERGEBNIS: alle erforderlichen Checks gruen - Deployment validiert.")
     w("-" * 78)
     return "\n".join(lines)
 
@@ -172,12 +175,7 @@ def to_json(results, bundle, mode: str) -> dict:
             }
             for r in results
         ],
-        "summary": {
-            "fail": sum(1 for r in results if r.status == "FAIL"),
-            "warn": sum(1 for r in results if r.status == "WARN"),
-            "pass": sum(1 for r in results if r.status == "PASS"),
-            "skip": sum(1 for r in results if r.status in ("SKIP", "INFO")),
-        },
+        "summary": summarize(results),
     }
 
 
@@ -225,9 +223,10 @@ def main(argv: list[str] | None = None) -> int:
             json.dump(to_json(results, bundle, mode), fh, ensure_ascii=False, indent=1)
         print(f"JSON-Report: {a.json_out}")
 
-    if any(r.status == "FAIL" for r in results):
+    status = summarize(results)["status"]
+    if status in ("ERROR", "FAIL"):
         return EXIT_FAIL
-    if any(r.status == "WARN" for r in results):
+    if status in ("WARN", "INCOMPLETE"):
         return EXIT_WARN
     return EXIT_OK
 

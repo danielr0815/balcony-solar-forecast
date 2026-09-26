@@ -1,7 +1,7 @@
 # Lernschichten & Korrekturen
 
 Dieses Dokument beschreibt alle adaptiven Schichten von `balcony-solar-forecast`
-(Stand `main` @ v0.27.0): was jede Schicht lernt, **wogegen** sie trainiert, wo
+(Arbeitsstand auf v0.27.2): was jede Schicht lernt, **wogegen** sie trainiert, wo
 sie auf die servierte Kurve wirkt, welche Gates/Clamps/Konstanten sie begrenzen
 und wie man sie zurücksetzt. Du brauchst es, wenn die Prognose systematisch
 daneben liegt und du entscheiden musst, ob das Physik-, Lern- oder Reset-Arbeit
@@ -25,7 +25,7 @@ mit exponentiellem Vergessen.
 | Intraday-Skalar (`core/bias`) | ein transienter Wetterfehler-Faktor | Live-Messung vs. **slow_only × θ** (k_c-Raum) | Slot-Faktor, ~6 h voraus | **nie** | Neustart / Ring leer ⇒ 1.0 |
 | Day-ahead-Bias θ (`core/bias`) | ein θ je (Wolkenklasse × Tagesteil) | **slow_only** vs. gemessene Stundenenergie | Slot-Faktor, ganze Kurve | ja (`bias_state`) | `reset_day_ahead_bias`, Fingerprint-Reseed, Rollback |
 | Shademap (`core/shademap`) | absolute Beam-Transmittanz T je Bin | Messung vs. **ungegatete** Beam-/Diffus-Referenz | Beam-Gate im Motor (ersetzt statisches τ) | ja (`shademap_state`) | Rollback, Re-Bootstrap |
-| Quantile (`core/quantiles`) | empirische P10/P50/P90-Multiplikatoren | Messung vs. **issued-corrected** Stunde | P10/P50/P90-Bänder (nicht P50-Kurve!) | ja (`quantile_state`) | Rollback, Re-Bootstrap |
+| Quantile (`core/quantiles`) | empirische P10/P50/P90-Multiplikatoren | Messung vs. **issued-corrected** Stunde | DC-P10/P50/P90 und AC-P10/P90 (Punktprognose bleibt unabhängig) | ja (`quantile_state`) | Rollback, Re-Bootstrap |
 | Inverter-η (`core/inverter_cal`) | ein Site-Skalar η_inv | AC-Zähler vs. Summe DC-Stunden | nur die AC-Kurve | ja (`inverter_cal_state`) | kein Service; nie tragend |
 | Scoreboard (`core/scoreboard`) | nichts — **bewertet** nur | issued vs. Messung | Diagnose | ja (`scoreboard_state`) | — |
 | Drift-Monitor (`_nightly`) | rollierende Tageslicht-Stunden-MAE + Streaks | corrected/slow_only vs. raw | schaltet persistierte Layer ab, rollt zurück | ja (`drift_state`) | Options-Toggle OFF→ON |
@@ -166,8 +166,8 @@ weil beide Seiten dieselbe Referenz benutzen.
 merkt sich die Menge der **nutzbaren** Ebenen und normiert die Modellseite auf
 genau diese Teilmenge (Kanal-Dropout darf nicht als Produktionsdefizit
 erscheinen). Die Modellseite ist die exakte `pr.slow_watts`-Ebenenkurve
-**× θ** des Slots (`_modeled_power_for_planes`) — also die servierte Kurve
-*ohne* den Intraday-Faktor. Ein Bezug auf RAW ließe Shademap und Intraday
+**× θ** des Slots (`_modeled_power_for_planes`) — vor dem letzten Clamp und ohne Intraday-Faktor. Gesättigte
+Messungen werden als zensierte Labels verworfen (`core.intraday`, SPEC §9.4). Ein Bezug auf RAW ließe Shademap und Intraday
 denselben Schattenverlust korrigieren; ein Bezug auf RAW ohne θ ließe zusätzlich
 θ und Intraday denselben Residualfehler korrigieren. Slow-only und θ sind für
 das Sample eingefroren, es gibt also keine Rückkopplung.

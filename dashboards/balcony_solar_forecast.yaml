@@ -157,7 +157,7 @@ views:
           - entity: sensor.balcony_solar_forecast_energy_production_today_p10
             name: P10 (conservative)
           - entity: sensor.balcony_solar_forecast_energy_production_today
-            name: P50 (planning)
+            name: Point forecast (planning)
           - entity: sensor.balcony_solar_forecast_energy_production_today_p90
             name: P90 (optimistic)
 

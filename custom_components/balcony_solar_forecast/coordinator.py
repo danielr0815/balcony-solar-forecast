@@ -28,10 +28,10 @@ degradation is never silent (SPEC §9 Schutzmechanismen).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import math
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -75,6 +75,8 @@ from ._glue_util import (
     _usable_power,
 )
 from ._nightly import _NIGHTLY_HOUR, _NIGHTLY_MINUTE
+from ._operations import LearnerOperations, owned_operation
+from ._weather_cache import WeatherCache
 from .const import (
     BAND_SLOT_BIN,
     BAND_SLOT_ENSEMBLE,
@@ -126,7 +128,6 @@ from .const import (
     ENSEMBLE_FETCH_INTERVAL_S,
     ENSEMBLE_MIN_DET_GHI,
     ENSEMBLE_MIN_MEMBERS,
-    FAILED_FETCH_MIN_INTERVAL_SECONDS,
     FETCH_INTERVAL_SECONDS,
     FORECAST_DAYS,
     FORECAST_RESP_KEY_P10,
@@ -149,14 +150,13 @@ from .const import (
     LEARNER_STATUS_DISABLED_BY_DRIFT,
     LEARNER_STATUS_FROZEN,
     LEARNER_STATUS_OFF,
-    MAX_PAYLOAD_AGE_HOURS,
-    MAX_PHYSICS_FALLBACK_AGE_HOURS,
     RECOMPUTE_INTERVAL_SECONDS,
     RLS_MIN_SAMPLES,
     SENSOR_MEASURED_DC_TOTAL,
+    SLOT_HOURS,
+    SLOT_MINUTES,
     STATUS_CACHED,
     STATUS_FRESH,
-    STATUS_PHYSICS_FALLBACK,
     STATUS_UNAVAILABLE,
 )
 from .core import (
@@ -195,12 +195,11 @@ from .core import (
 from .core import (
     shadeprofile as shadeprofile_mod,
 )
+from .core.intraday import censored_sample, reference_power
 from .fetcher import (
     FetchError,
     OpenMeteoFetcher,
     parse_ensemble,
-    parse_weather,
-    radiation_coverage,
 )
 from .store import ForecastStore, _empty_curve_audit
 
@@ -280,9 +279,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.entry = entry
         self._fetcher = fetcher
         self._store = store
-        self._fetch_interval = timedelta(
+        self._weather = WeatherCache(fetch_interval=timedelta(
             seconds=int(cfg.get(CONF_FETCH_INTERVAL, FETCH_INTERVAL_SECONDS))
-        )
+        ))
         self._site = SiteConfig.from_dict(cfg[CONF_SITE])
         # Shade pooling is READ-TIME (SPEC §9.2): every plane's learning is stored
         # under its OWN channel forever; grouped planes are pooled only when the
@@ -323,7 +322,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._ensemble_raw: dict | None = None
         self._ensemble_fetched_at: datetime | None = None
         # Parsed ensemble cache keyed by payload OBJECT IDENTITY (mirrors
-        # _weather_cache): parsing is pure, so a stable payload is parsed once.
+        # WeatherCache.weather): parsing is pure, so a stable payload is parsed once.
         self._ensemble_cache: tuple[dict, dict[str, list[float]]] | None = None
         # Per-hour (f10, f90) relative-spread factors, recomputed every cycle
         # against the CURRENT deterministic weather; None when unavailable.
@@ -341,37 +340,15 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._curve_audit: dict[str, Any] | None = None
         self._curve_audit_baseline: dict[str, dict[int, float]] = {}
 
-        # Cached weather image + provenance for the degradation ladder.
-        # _last_fetched_at is the PAYLOAD's age anchor: it advances ONLY when the
-        # stored payload is actually replaced (it mirrors the store's
-        # fetched_at), and every age/status consumer keys on it. _last_attempt_at
-        # is the fetch SCHEDULER's anchor: it advances on every successful HTTP
-        # round-trip — including the keep-richer branch that retains the old
-        # payload — so a sustained partial Open-Meteo degradation is not
-        # re-fetched every tick yet still ages the served payload honestly
-        # through the cached/physics_fallback/unavailable ladder (SPEC §13:
-        # never degrade silently).
-        self._last_fetched_at: datetime | None = None
-        self._last_attempt_at: datetime | None = None
-        self._last_fetch_ok: bool = False
-        self._last_error: str | None = None
-        # Parsed-weather cache: the raw Open-Meteo payload is re-read every 15-min
-        # recompute (and by the nightly snapshot), but parsing it into an
-        # immutable WeatherSeries is pure and identical between fetches. Cache the
-        # parsed series keyed by the payload OBJECT IDENTITY (a new fetch replaces
-        # the stored dict wholesale, so ``is`` misses and we re-parse); holding a
-        # strong reference means the id can never be reused for another object.
-        # WeatherSeries is frozen, so sharing it across cycles is safe (audit #31).
-        self._weather_cache: tuple[dict, WeatherSeries] | None = None
-
-        self._unsub_nightly = None
+        self._unsub_nightly: Callable[[], None] | None = None
 
         # Serialises the nightly training job against the in-process
         # ``run_bootstrap`` action (SPEC §12.2): both mutate the persisted learner
         # state, so the nightly wrapper and the bootstrap handler acquire this
         # ONE lock. A second concurrent ``run_bootstrap`` sees ``locked()`` and
         # is rejected with a clear ServiceValidationError (see _bootstrap.py).
-        self._bootstrap_lock = asyncio.Lock()
+        self._operations = LearnerOperations()
+        self._bootstrap_lock = self._operations.lock
 
         # --- FAST learner: transient intraday state (NEVER persisted) -------
         # Re-init to 1.0 on construction => on every HA restart / reload the
@@ -443,6 +420,48 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # rebuilt only when one of those changes — not on every 15-min tick.
         self._shade_profile_cache: tuple[tuple, dict[str, Any]] | None = None
 
+    # Compatibility views for existing adapters/tests. WeatherCache is the
+    # sole state owner; these properties never cache or lazily create state.
+    @property
+    def _fetch_interval(self) -> timedelta:
+        return self._weather.fetch_interval
+
+    @_fetch_interval.setter
+    def _fetch_interval(self, value: timedelta) -> None:
+        self._weather.fetch_interval = value
+
+    @property
+    def _last_fetched_at(self) -> datetime | None:
+        return self._weather.fetched_at
+
+    @_last_fetched_at.setter
+    def _last_fetched_at(self, value: datetime | None) -> None:
+        self._weather.fetched_at = value
+
+    @property
+    def _last_attempt_at(self) -> datetime | None:
+        return self._weather.attempted_at
+
+    @_last_attempt_at.setter
+    def _last_attempt_at(self, value: datetime | None) -> None:
+        self._weather.attempted_at = value
+
+    @property
+    def _last_fetch_ok(self) -> bool:
+        return self._weather.fetch_ok
+
+    @_last_fetch_ok.setter
+    def _last_fetch_ok(self, value: bool) -> None:
+        self._weather.fetch_ok = value
+
+    @property
+    def _last_error(self) -> str | None:
+        return self._weather.last_error
+
+    @_last_error.setter
+    def _last_error(self, value: str | None) -> None:
+        self._weather.last_error = value
+
     # ------------------------------------------------------------------
     # Live provenance (independent of the last update's success)
     # ------------------------------------------------------------------
@@ -450,10 +469,24 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     @property
     def weather_age_seconds_live(self) -> float | None:
         """Age of the last-good weather image right now, in seconds."""
-        if self._last_fetched_at is None:
-            return None
-        age = (dt_util.utcnow() - self._last_fetched_at).total_seconds()
-        return age if age > 0.0 else 0.0
+        return self._weather.age_seconds(dt_util.utcnow())
+
+    @property
+    def forecast_provenance(self) -> dict[str, Any]:
+        """Live availability and weather age, including failed refreshes."""
+        available = self.last_update_success and bool(self.data)
+        age = self.weather_age_seconds_live
+        status = (self._status_for_age(timedelta(seconds=age))
+                  if available and age is not None else STATUS_UNAVAILABLE)
+        error = self._last_error
+        if not self.last_update_success and error is None:
+            exception = getattr(self, "last_exception", None)
+            error = str(exception) if exception is not None else None
+        return {
+            "available": available, "source_status": status,
+            "degraded": status != STATUS_FRESH,
+            "weather_age_seconds": age, "last_error": error,
+        }
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -479,16 +512,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # (both re-enter this method); a first start just records the fingerprint.
         self._reconcile_config_fingerprint()
 
-        last = self._store.get_last_payload()
-        if not last:
-            return
-        fetched_at = dt_util.parse_datetime(last.get("fetched_at", ""))
-        if fetched_at is None:
-            return
-        self._last_fetched_at = dt_util.as_utc(fetched_at)
-        _LOGGER.debug(
-            "Primed forecast from stored payload fetched at %s", fetched_at
-        )
+        self._weather.restore(self._store.get_last_payload())
+        if self._weather.fetched_at is not None:
+            _LOGGER.debug(
+                "Primed forecast from stored payload fetched at %s", self._weather.fetched_at,
+            )
 
     def _load_learner_states(self) -> None:
         """Load BiasState / ShademapState / DriftState from the store (once).
@@ -638,6 +666,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._drift_state = _replace_drift(self._drift_state, version=2)
             self._persist_drift_state()
 
+    @owned_operation(mutate=True)
     async def async_import_bootstrap(self, data: dict) -> dict:
         """Ingest an offline backfill bootstrap (SPEC §12.5).
 
@@ -1131,10 +1160,17 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._intraday_scalar = INTRADAY_NEUTRAL
         self._intraday_samples.clear()
 
+    async def async_stop(self) -> None:
+        """Join entry work before the final write; no task may outlive its store."""
+        self.async_shutdown_extra()
+        await self._operations.close()
+        await self._store.async_flush()
+
     # ------------------------------------------------------------------
     # Update cycle (recompute every tick; fetch on the slower timer)
     # ------------------------------------------------------------------
 
+    @owned_operation()
     async def _async_update_data(self) -> dict[str, Any] | None:
         now = dt_util.utcnow()
         self._load_learner_states()
@@ -1515,68 +1551,17 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return {}
 
     def _due_for_fetch(self, now: datetime) -> bool:
-        # Scheduling keys on the last ATTEMPT, not the payload age: the
-        # keep-richer branch retains the old payload but must still count as a
-        # completed round-trip, else a degraded provider would be hammered every
-        # recompute tick. The same hammering guard applies to FAILURES (SPEC §3
-        # „Retry"): a down provider is retried on a backoff — min(configured
-        # fetch interval, FAILED_FETCH_MIN_INTERVAL_SECONDS), so a faster
-        # configured cadence is never stretched — not on every recompute tick.
-        if self._last_attempt_at is None:
-            return True
-        if not self._last_fetch_ok:
-            return now - self._last_attempt_at >= min(
-                self._fetch_interval,
-                timedelta(seconds=FAILED_FETCH_MIN_INTERVAL_SECONDS),
-            )
-        return now - self._last_attempt_at >= self._fetch_interval
+        return self._weather.due(now)
 
     async def _async_try_fetch(self, now: datetime) -> None:
-        """Fetch once; on success cache + persist, on failure degrade quietly."""
-        try:
-            payload = await self._fetcher.async_fetch_raw(
-                self._site.latitude,
-                self._site.longitude,
-                FORECAST_DAYS,
-            )
-        except FetchError as err:
-            self._last_fetch_ok = False
-            # The attempt anchor advances on failure too — it IS an attempt.
-            # Without the stamp the _due_for_fetch backoff never engages and a
-            # down provider would be hammered every recompute tick; the PAYLOAD
-            # age anchor (_last_fetched_at) stays untouched so the served
-            # weather keeps aging honestly through the ladder (SPEC §13).
-            self._last_attempt_at = now
-            self._last_error = str(err)
-            _LOGGER.warning("Open-Meteo fetch failed: %s", err)
-            return
-        prior = self._store.get_last_payload()
-        if (
-            prior is not None
-            and isinstance(prior.get("payload"), dict)
-            and radiation_coverage(payload) < radiation_coverage(prior["payload"])
-        ):
-            # Keep the richer stored payload. The round-trip succeeded, so the
-            # SCHEDULER anchor advances — but the PAYLOAD age anchor must NOT:
-            # the served weather is still the old image and has to keep aging
-            # through cached/physics_fallback/unavailable. Stamping it "fresh"
-            # here would let a sustained partial-degradation serve arbitrarily
-            # old weather at age ~0 forever (SPEC §13: never degrade silently).
-            self._last_attempt_at = now
-            self._last_fetch_ok = True
-            self._last_error = None
-            _LOGGER.warning(
-                "Keeping richer last-good payload; new fetch has less "
-                "radiation coverage (%d < %d)",
-                radiation_coverage(payload),
-                radiation_coverage(prior["payload"]),
-            )
-            return
-        self._last_fetched_at = now
-        self._last_attempt_at = now
-        self._last_fetch_ok = True
-        self._last_error = None
-        self._store.set_last_payload(payload, now.isoformat())
+        """Supply transport/storage ports; WeatherCache owns every transition."""
+        await self._weather.async_refresh(
+            now,
+            fetch=lambda: self._fetcher.async_fetch_raw(
+                self._site.latitude, self._site.longitude, FORECAST_DAYS,
+            ),
+            persist=self._store.set_last_payload,
+        )
 
     # ------------------------------------------------------------------
     # Ensemble-weather uncertainty (v0.16, SPEC §11.3) — NEVER load-bearing
@@ -1704,37 +1689,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "band_source": getattr(self, "_band_source", BAND_SOURCE_LEARNED),
         }
 
-    def _cached_weather(self):
-        last = self._store.get_last_payload()
-        if not last:
-            return None
-        payload = last["payload"]
-        # Reuse the parsed series while the SAME payload is served: parsing is
-        # pure and the payload object is only replaced when a new fetch lands, so
-        # the 15-min recompute cadence (and the nightly snapshot) share one parse
-        # instead of re-parsing the identical body every cycle (audit #31).
-        # ``getattr`` default keeps a bare (__new__-built) coordinator working.
-        cache = getattr(self, "_weather_cache", None)
-        if cache is not None and cache[0] is payload:
-            return cache[1]
-        try:
-            weather = parse_weather(payload)
-        except FetchError as err:
-            _LOGGER.error("Stored payload no longer parses: %s", err)
-            return None
-        self._weather_cache = (payload, weather)
-        return weather
+    def _cached_weather(self) -> WeatherSeries | None:
+        return self._weather.weather()
 
     def _status_for_age(self, age: timedelta) -> str:
-        if age < timedelta(0):
-            age = timedelta(0)
-        if self._last_fetch_ok and age < self._fetch_interval:
-            return STATUS_FRESH
-        if age <= timedelta(hours=MAX_PAYLOAD_AGE_HOURS):
-            return STATUS_CACHED
-        if age <= timedelta(hours=MAX_PHYSICS_FALLBACK_AGE_HOURS):
-            return STATUS_PHYSICS_FALLBACK
-        return STATUS_UNAVAILABLE
+        return self._weather.status_for_age(age)
 
     # ------------------------------------------------------------------
     # FAST learner: live actual reads + intraday clear-sky-index scalar
@@ -1761,9 +1720,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if not fast_on:
             self._intraday_scalar = INTRADAY_NEUTRAL
             return
-        prev = self._last_result
-        if prev is not None:
-            sample = self._build_intraday_sample(prev, now)
+        previous_result = self._last_result
+        if previous_result is not None:
+            sample = self._build_intraday_sample(previous_result, now)
             if sample is not None:
                 self._intraday_samples.append(sample)
                 self._trim_intraday_ring(now)
@@ -1805,16 +1764,18 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """
         if self._sun_elevation_deg(now) < INTRADAY_MIN_SUN_ELEVATION_DEG:
             return None
-        read = self._read_live_actuals_total(now)
-        if read is None:
+        measured = self._read_live_actuals(now)
+        if not measured:
             return None
-        measured_w, usable_planes = read
+        measured_w, usable_planes = sum(measured.values()), set(measured)
+        if self._intraday_sample_censored(result, now, measured_w, usable_planes, measured):
+            return None
 
         modeled_w = self._modeled_power_for_planes(result, now, usable_planes)
-        modeled_wh = modeled_w * 0.25
+        modeled_wh = modeled_w * SLOT_HOURS
         if modeled_wh < INTRADAY_MIN_MODELED_WH:
             return None
-        measured_wh = measured_w * 0.25
+        measured_wh = measured_w * SLOT_HOURS
 
         cs_ref_wh = self._clear_sky_ref_wh(now)
         if cs_ref_wh <= 0.0:
@@ -1853,20 +1814,25 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         the modeled side remains Slow-only; when Slow is inactive too,
         Slow-only equals RAW.
         """
+        reference = self._intraday_reference(result, now)
+        if not reference:
+            idx = _slot_index_at(result.slot_starts, now)
+            theta = self._day_factor.get(result.slot_starts[idx], 1.0) if idx is not None else 1.0
+            return _raw_power_now(result, now) * theta
+        return sum(watts for name, watts in reference.items() if name in plane_names)
+
+    def _intraday_reference(self, result: ForecastResult, now: datetime) -> dict[str, float]:
         idx = _slot_index_at(result.slot_starts, now)
         if idx is None:
-            return 0.0
+            return {}
         theta = getattr(self, "_day_factor", {}).get(result.slot_starts[idx], 1.0)
-        planes = [pr for pr in result.plane_results if pr.name in plane_names]
-        if not planes:
-            # No per-plane breakdown to restrict to: use the raw site total.
-            return _raw_power_now(result, now) * theta
-        total = 0.0
-        for pr in planes:
-            series = getattr(pr, "slow_watts", ()) or pr.raw_watts or pr.watts
-            if idx < len(series):
-                total += series[idx]
-        return total * theta
+        return reference_power(result, idx, theta)
+
+    def _intraday_sample_censored(self, result, now, measured_w, names, measured=None) -> bool:
+        return censored_sample(
+            self._intraday_reference(result, now), self._site.groups,
+            measured_w, names, measured=measured,
+        )
 
     def _sun_elevation_deg(self, at: datetime) -> float:
         """Sun elevation (deg) at the midpoint of the 15-min slot starting ``at``.
@@ -1875,7 +1841,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         the clear-sky reference must judge the SAME instant, or a slot could
         pass the gate with a reference computed at a different sun height.
         """
-        midpoint = at + timedelta(minutes=7, seconds=30)
+        midpoint = at + timedelta(minutes=SLOT_MINUTES / 2)
         _az, el = solpos.sun_position(midpoint, self._site.latitude, self._site.longitude)
         return el
 
@@ -1887,7 +1853,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         (SPEC §9.4: condition in k_c space). Returns 0 when the sun is down.
         """
         ghi = clearsky.haurwitz_ghi(self._sun_elevation_deg(now))
-        return ghi * 0.25  # W/m^2 over a 15-min slot -> Wh/m^2
+        return ghi * SLOT_HOURS  # W/m^2 over a 15-min slot -> Wh/m^2
 
     def _read_live_actuals_total(
         self, now: datetime
@@ -1903,25 +1869,22 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         dropout guard, SPEC §9.4), or None when NO channel produced a usable
         reading (nothing to learn from this tick).
         """
-        usable_planes: set[str] = set()
-        total = 0.0
+        measured = self._read_live_actuals(now)
+        return (sum(measured.values()), set(measured)) if measured else None
+
+    def _read_live_actuals(self, now: datetime) -> dict[str, float]:
+        """Keep channel identity until both dropout and saturation gates ran."""
+        measured: dict[str, float] = {}
         for plane in self._site.planes:
-            entity_id = plane.actual_entity
-            if not entity_id:
+            if not plane.actual_entity:
                 continue
-            state = self.hass.states.get(entity_id)
             value = _usable_power(
-                state,
-                now,
+                self.hass.states.get(plane.actual_entity), now,
                 max_w=CHANNEL_INSTANT_PLAUSIBILITY_MAX_WP_FRAC * plane.wp,
             )
-            if value is None:
-                continue
-            total += value
-            usable_planes.add(plane.name)
-        if not usable_planes:
-            return None
-        return total, usable_planes
+            if value is not None:
+                measured[plane.name] = value
+        return measured
 
     def _trim_intraday_ring(self, now: datetime) -> None:
         """Drop samples older than the trailing window (bounded memory)."""
@@ -2072,16 +2035,18 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 continue
             means = by_slot[idx]
             measured_w = sum(means) / len(means)
+            if self._intraday_sample_censored(result, slot_start, measured_w, metered_planes):
+                continue
 
             modeled_w = self._modeled_power_for_planes(
                 result, slot_start, metered_planes)
-            modeled_wh = modeled_w * 0.25
+            modeled_wh = modeled_w * SLOT_HOURS
             if modeled_wh < INTRADAY_MIN_MODELED_WH:
                 continue
             cs_ref_wh = self._clear_sky_ref_wh(slot_start)
             if cs_ref_wh <= 0.0:
                 continue
-            measured_wh = measured_w * 0.25
+            measured_wh = measured_w * SLOT_HOURS
             samples.append(_IntradaySample(
                 at=slot_start,
                 measured_kc=measured_wh / cs_ref_wh,
@@ -2225,7 +2190,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             now, slot_starts, watts_series, prereclamp, ceilings
         ):
             seen = True
-            total_wh += scalar_free * 0.25
+            total_wh += scalar_free * SLOT_HOURS
         return round(total_wh / 1000.0, 3) if seen else None
 
     def _dayahead_today_kwh_ac_p10(
@@ -2256,7 +2221,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 continue
             seen = True
             ratio = scalar_free / served if served > 1e-9 else 1.0
-            total_wh += p10w[i] * min(1.0, ratio) * 0.25
+            total_wh += p10w[i] * min(1.0, ratio) * SLOT_HOURS
         return round(total_wh / 1000.0, 3) if seen else None
 
     def _intraday_factor_for_slot(
@@ -2308,7 +2273,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             for start, w in zip(result.slot_starts, result.total_watts, strict=False)
         }
         wh_period = {
-            _iso(start): round(w * 0.25, 2)
+            _iso(start): round(w * SLOT_HOURS, 2)
             for start, w in zip(result.slot_starts, result.total_watts, strict=False)
         }
         # AC-side 15-min curves, mirroring ``watts`` / ``wh_period`` on ac_watts.
@@ -2317,7 +2282,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             for start, w in zip(result.slot_starts, result.ac_watts, strict=False)
         }
         wh_period_ac = {
-            _iso(start): round(w * 0.25, 2)
+            _iso(start): round(w * SLOT_HOURS, 2)
             for start, w in zip(result.slot_starts, result.ac_watts, strict=False)
         }
 
@@ -2409,14 +2374,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # off / cold start), mirroring DATA_KEY_QUANTILE_CURVES above.
         if result.ac_p10_watts:
             data["wh_period_ac_p10"] = {
-                _iso(start): round(w * 0.25, 2)
+                _iso(start): round(w * SLOT_HOURS, 2)
                 for start, w in zip(
                     result.slot_starts, result.ac_p10_watts, strict=False
                 )
             }
         if result.ac_p90_watts:
             data["wh_period_ac_p90"] = {
-                _iso(start): round(w * 0.25, 2)
+                _iso(start): round(w * SLOT_HOURS, 2)
                 for start, w in zip(
                     result.slot_starts, result.ac_p90_watts, strict=False
                 )
@@ -2449,7 +2414,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         The engine populates ``p10_watts`` / ``p50_watts`` / ``p90_watts`` only
         when band_by_slot was applied (non-empty); each is aligned to
         ``result.slot_starts``. Convert instantaneous watts to per-slot Wh
-        (w * 0.25). Returns an empty dict when no bands were issued (quantiles
+        (w * SLOT_HOURS). Returns an empty dict when no bands were issued (quantiles
         off / cold start), so the caller omits DATA_KEY_QUANTILE_CURVES.
         """
         p10w = result.p10_watts
@@ -2461,7 +2426,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         def _curve(watts) -> dict[str, float]:
             return {
-                _iso(start): round(w * 0.25, 2)
+                _iso(start): round(w * SLOT_HOURS, 2)
                 for start, w in zip(starts, watts, strict=False)
             }
 
@@ -2476,7 +2441,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         The engine populates ``ac_p10_hourly_wh`` / ``ac_p90_hourly_wh`` (HOURLY
         Wh, keyed by ISO-UTC hour, capped at the per-slot AC ceiling) only when
-        AC bands were issued this cycle. P50 == ``ac_watts`` so it is not carried.
+        AC bands were issued this cycle. ``ac_watts`` is the point forecast,
+        not the empirical median; no separate AC-P50 curve is exposed.
         Returns an empty dict when no AC bands were issued (quantiles off / cold
         start), so the caller omits ``DATA_KEY_QUANTILE_CURVES_AC``.
         """
@@ -2583,7 +2549,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 changed = True
             baseline.setdefault(date_iso, {})[offset] = float(new)
         if changed:
-            self._call_store_setter("set_curve_audit", audit)
+            self._store.set_curve_audit(audit)
 
     def _curve_audit_summary(
         self, data: dict[str, Any], now: datetime
@@ -2783,6 +2749,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     # Nightly job (idempotent, date-keyed) — SPEC §2/§9.7
     # ------------------------------------------------------------------
 
+    @owned_operation(mutate=True)
     async def _async_nightly_job(self, now: datetime | None = None) -> None:
         """Snapshot today's issued forecast, log actuals, train + guard.
 
@@ -2792,14 +2759,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         skipping, so no night's training is lost (SPEC §12.2). Tests call
         ``_nightly.async_nightly_job`` directly and so bypass the lock.
         """
-        # __init__ sets the lock; a __new__-built test double may not, so ensure
-        # it lazily (the same attribute the run_bootstrap handler acquires).
-        lock = getattr(self, "_bootstrap_lock", None)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._bootstrap_lock = lock
-        async with lock:
-            return await _nightly.async_nightly_job(self, now)
+        return await _nightly.async_nightly_job(self, now)
 
     def _catchup_days(self, latest: date) -> list[date]:
         """Closed local days to (re)process, oldest first, bounded/idempotent."""
@@ -2851,17 +2811,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return _scoreboard_glue.dominant_weather_class(self, snap, iso)
 
     def _persist_scoreboard_state(self) -> None:
-        self._call_store_setter(
-            "set_scoreboard_state", self._scoreboard_state
-        )
+        self._store.set_scoreboard_state(self._scoreboard_state)
 
     def _persist_quantile_state(self) -> None:
-        self._call_store_setter("set_quantile_state", self._quantile_state)
+        self._store.set_quantile_state(self._quantile_state)
 
     def _persist_inverter_cal_state(self) -> None:
-        self._call_store_setter(
-            "set_inverter_cal_state", self._inverter_cal_state
-        )
+        self._store.set_inverter_cal_state(self._inverter_cal_state)
 
     async def _train_inverter_cal(self, day: date) -> None:
         """Calibrate the site inverter DC->AC efficiency for a closed ``day``."""
@@ -3120,6 +3076,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Roll the auto-disabled layer back to its pre-streak state (SPEC §9.8)."""
         return _nightly.restore_layer_snapshot(self, layer)
 
+    @owned_operation(mutate=True)
     async def async_rollback_learners(
         self, snapshots_back: int = 1
     ) -> dict[str, Any]:
@@ -3153,6 +3110,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "ring_size": len(snaps),
         }
 
+    @owned_operation(mutate=True)
     async def async_reset_day_ahead_bias(self) -> dict[str, Any]:
         """Clear the day-ahead RLS bias state (service backend, v0.19).
 
@@ -3222,25 +3180,13 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     # ------------------------------------------------------------------
 
     def _persist_bias_state(self) -> None:
-        self._call_store_setter("set_bias_state", self._bias_state)
+        self._store.set_bias_state(self._bias_state)
 
     def _persist_shademap_state(self) -> None:
-        self._call_store_setter("set_shademap_state", self._shademap_state)
+        self._store.set_shademap_state(self._shademap_state)
 
     def _persist_drift_state(self) -> None:
-        self._call_store_setter("set_drift_state", self._drift_state)
-
-    def _call_store_setter(self, name: str, payload: Any) -> None:
-        setter = getattr(self._store, name, None)
-        if setter is None:
-            return
-        try:
-            setter(payload)
-        except Exception:
-            _LOGGER.warning(
-                "Store setter %s failed; learner state NOT persisted "
-                "(will be lost on restart)", name, exc_info=True
-            )
+        self._store.set_drift_state(self._drift_state)
 
     # ------------------------------------------------------------------
     # Recorder actuals (per-module daily energy) — SPEC §9.7

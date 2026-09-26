@@ -9,7 +9,7 @@
 
 [project]
 name = "balcony-solar-forecast"
-version = "0.27.2"
+version = "0.28.0"
 description = "Self-learning multi-plane PV forecast for Home Assistant: raw-irradiance transposition, per-channel shade learning, quantile bands and a skill scoreboard."
 readme = "README.md"
 # Floor matches homeassistant's own requirement (HA >= 2026.3 needs 3.14.2+).
@@ -105,11 +105,11 @@ exclude_also = [
     "raise NotImplementedError",
 ]
 
-# Type checking is a BASELINE, not a gate: errors are only reported for the
-# pure physics/learning core (no Home Assistant imports). `follow_imports =
-# "silent"` still analyses the HA layer for types (core imports from const.py)
-# but suppresses its errors; widen the scope before tightening any rule.
-# Run: `mypy` (via `uv run mypy`).
+# The regular mypy command keeps the clean-core gate below. CI additionally
+# runs scripts/check_mypy_baseline.py WITHOUT these module suppressions. Its
+# explicit path+symbol+diagnostic baseline rejects new errors and stale (fixed)
+# entries, so legacy modules cannot accumulate invisible debt. No line numbers
+# or blanket Any/casts are used to hide errors.
 [tool.mypy]
 python_version = "3.14"
 files = ["custom_components/balcony_solar_forecast/core"]
@@ -120,14 +120,10 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 warn_unreachable = true
 
-# HONEST BASELINE (2026-07-30, mypy 2.3.0): the eight modules below carry
-# together 45 known type errors (dominated by [unreachable] from runtime
-# validation mypy cannot narrow, plus arg-type/assignment in the dataclass
-# builders). They are EXCLUDED from reporting instead of being churned with
-# `type: ignore` comments — remove a module from this list as it is brought
-# clean. The remaining nine core modules (engine, clearsky, horizon,
-# transpose, solpos, electrical, inverter_cal, shademap, __init__) are checked
-# with all warn flags above and must STAY clean — that is the gate.
+# Legacy modules for the regular command. Every diagnostic is ALSO checked by
+# the full-core/critical-HA ratchet against scripts/mypy_baseline.json (47
+# legacy core errors plus 4 HA-boundary diagnostics). Remove a core override
+# as soon as that module has no remaining baseline entries.
 [[tool.mypy.overrides]]
 module = [
     "balcony_solar_forecast.core.types",

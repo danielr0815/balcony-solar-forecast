@@ -30,7 +30,6 @@
 // CI:   tests/test_frontend_harness.py wraps this via subprocess (skips when
 //       node is not on PATH).
 
-import { readFile } from "node:fs/promises";
 
 // --- browser stubs ---------------------------------------------------------
 globalThis.window = { customCards: [] };
@@ -43,14 +42,10 @@ globalThis.customElements = {
 };
 globalThis.HTMLElement = class {};
 
-const src = await readFile(
-  new URL(
-    "../../custom_components/balcony_solar_forecast/frontend/power_history_card.js",
-    import.meta.url,
-  ),
-  "utf8",
-);
-new Function(src)(); // the card is a plain script: no imports/exports
+await import(new URL(
+  "../../custom_components/balcony_solar_forecast/frontend/power_history_card.js",
+  import.meta.url,
+));
 if (!CardClass) throw new Error("card class was not registered");
 
 // --- helpers ----------------------------------------------------------------

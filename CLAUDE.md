@@ -40,26 +40,35 @@ numpy/pandas/pvlib.
    `pyproject.toml` (`[project] version`),
    `custom_components/balcony_solar_forecast/const.py` (`INTEGRATION_VERSION`).
    CI prüft die drei gegeneinander, der Release-Guard zusätzlich gegen den
-   Git-Tag. HACS liefert den Zipball des Tags aus — ein Bump nach dem Tag wirkt
+   angeforderten Versionswert, SPEC-Stempel, Changelog und grünen Main-Commit.
+   Erst danach erzeugt der Release-Workflow Tag und Release. HACS liefert den Zipball des Tags aus — ein Bump nach dem Tag wirkt
    nicht. Version nur im Release-PR anfassen.
 5. **Tests und Lint:**
    ```
-   uv run pytest tests -p no:homeassistant     # überall (Windows/POSIX), via make: `make test`
+   uv run pytest tests --ignore=tests/integration -p no:homeassistant     # überall (Windows/POSIX), via make: `make test`
    uv run ruff check .                         # via make: `make lint`
    ```
-   Setup: `uv sync --group dev` (bzw. `make install`; uv installiert Python
+   Setup: `uv sync --locked --group dev` (bzw. `make install`; uv installiert Python
    3.14 selbst, exakte Tool-Versionen stehen im `uv.lock`).
    `-p no:homeassistant` ist Pflicht: das PHACC-Plugin zieht POSIX-only `fcntl`
-   und autouse-Fixtures, die unter Python ≥ 3.12 werfen — kein Test benutzt es.
+   und autouse-Fixtures, die unter Python ≥ 3.12 werfen. Die separate echte
+   HA-Lifecycle-Suite läuft ebenfalls ohne PHACC: `uv run pytest
+   --confcutdir=tests/integration tests/integration -p no:homeassistant`.
    `pyproject.toml` setzt bereits `addopts = "-q"`; **kein zweites `-q`** auf der
    Kommandozeile, sonst verschluckt pytest die Ergebniszeile. `ruff format` ist
    verboten (der Code ist absichtlich handformatiert, `E501` ist aus).
-6. **Neue Tests müssen den alten Code durchfallen lassen** — und das wird
-   bewiesen, nicht behauptet: Worktree auf den Parent-Commit, nur die neuen
-   Testdateien hineinkopieren, Suite laufen lassen. Ein *semantischer*
-   Fehlschlag zählt mehr als ein `TypeError` auf eine neue Signatur. Umgekehrt
-   bei verhaltensneutralen Refactorings: Bit-Identität gegen eine eingefrorene
-   Kopie der alten Funktion über viele geseedete Zufallseingaben zeigen.
+6. **Tests brauchen einen benannten Zweck und eine unabhängige Erwartung.**
+   Bugfix-Tests müssen den alten Fehler semantisch nachweisen: auf einem
+   Parent-Worktree nur die neuen Tests ausführen und den RED-Beleg festhalten;
+   ein Importfehler oder eine neue Signatur genügt nicht. Feature-Tests prüfen
+   den neuen Vertrag samt ungültigen Eingaben und relevanten Grenzen.
+   Charakterisierungs- und zusätzliche Regressionstests dürfen bereits vorher
+   bestehen: Ihr Mehrwert ist ein bisher ungesicherter Vertrag, eine unabhängige
+   Referenz oder eine nachweisbar erkannte semantische Mutation. Bei
+   verhaltensneutralen Refactorings Gleichheit mit der alten Implementierung
+   über repräsentative und geseedete Eingaben zeigen. Keine Tests nur für eine
+   Coverage-Zahl und keine Erwartung durch denselben Produktionsalgorithmus
+   berechnen. Gemeinsame Fakes gehören nach `tests/helpers/`.
 7. **Optionale Config-Felder nur-wenn-gesetzt serialisieren.** Ein neues
    optionales Feld erscheint in `to_dict()` nur, wenn es gesetzt ist — eine
    Alt-Config muss nach dem Upgrade **byte-identisch** dasselbe Dict ergeben,
@@ -75,7 +84,7 @@ numpy/pandas/pvlib.
 8. **RAW ist die Lern-Wahrheit.** Jede Lernschicht trainiert gegen genau die
    Kurve, auf die sie angewandt wird: Shademap gegen die ungegatete, unclamped
    Physik-Referenz (`beam_poa_ungated`), Day-Ahead-Bias gegen slow_only
-   (Shademap ohne Bias), Intraday-Skalar gegen raw × θ, Quantile gegen die
+   (Shademap ohne Bias), Intraday-Skalar gegen slow_only × θ, Quantile gegen die
    issued-corrected Kurve. Wer die Schichtung bricht, baut eine
    Doppelkorrektur — die häufigste Fehlerklasse dieses Projekts, sichtbar als
    Übertreibung am Morgen. Ein besserer statischer Prior schlägt immer einen

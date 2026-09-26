@@ -38,7 +38,7 @@ from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     ShademapBin,
     ShademapState,
 )
-from tests.test_coordinator_learning import (  # noqa: E402
+from tests.helpers.coordinator import (  # noqa: E402
     _FakeStore,
     _make_coordinator,
 )
