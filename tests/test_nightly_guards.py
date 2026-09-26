@@ -52,7 +52,7 @@ from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
 from custom_components.balcony_solar_forecast.fetcher import (  # noqa: E402
     parse_weather,
 )
-from tests.test_coordinator_learning import (  # noqa: E402
+from tests.helpers.coordinator import (  # noqa: E402
     _FakeStore,
     _make_coordinator,
 )

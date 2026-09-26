@@ -50,6 +50,13 @@ _CARDS: tuple[tuple[str, Path], ...] = (
     ),
 )
 
+# Shared modules are served but are not Lovelace resources of their own.
+# Cards import them with their resource URL's version query to bust all caches.
+_ASSETS = _CARDS + tuple(
+    (f"/balcony_solar_forecast/frontend/{name}", _FRONTEND_DIR / name)
+    for name in ("card_data.js", "site_calendar.js", "card_ui.js")
+)
+
 # Backwards-compatible single-card aliases (the shade-profile card is card 0);
 # kept so existing callers/tests importing these names keep working.
 FRONTEND_URL = _CARDS[0][0]
@@ -100,7 +107,7 @@ async def _async_register_static_paths(hass: HomeAssistant) -> None:
         await hass.http.async_register_static_paths(
             [
                 StaticPathConfig(url, str(path), cache_headers=True)
-                for url, path in _CARDS
+                for url, path in _ASSETS
             ]
         )
     except Exception:  # noqa: BLE001 -- the cards are an enhancement, never a blocker

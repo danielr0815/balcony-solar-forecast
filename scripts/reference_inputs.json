@@ -1,0 +1,72 @@
+{
+  "generator": "pvlib",
+  "pvlib_version": "0.15.2",
+  "lat": 48.547853,
+  "lon": 12.187272,
+  "albedo": 0.2,
+  "azimuth_convention": "0=N clockwise (internal); pvlib solpos and surface_azimuth both 0=N in pvlib>=0.11 -> no remap",
+  "transposition_model": "haydavies",
+  "cases": {
+    "nominal": {
+      "ghi": 600.0,
+      "dni": 700.0,
+      "dhi": 120.0
+    },
+    "low_sun": {
+      "ghi": 50.0,
+      "dni": 100.0,
+      "dhi": 30.0
+    }
+  },
+  "planes": [
+    {
+      "az": 25.0,
+      "tilt": 70.0
+    },
+    {
+      "az": 115.0,
+      "tilt": 70.0
+    },
+    {
+      "az": 205.0,
+      "tilt": 70.0
+    },
+    {
+      "az": 25.0,
+      "tilt": 80.0
+    },
+    {
+      "az": 115.0,
+      "tilt": 80.0
+    },
+    {
+      "az": 205.0,
+      "tilt": 80.0
+    }
+  ],
+  "dates": [
+    "2025-03-20",
+    "2025-06-21",
+    "2025-09-22",
+    "2025-12-21"
+  ],
+  "hours_utc": [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20
+  ],
+  "note": "POA components use fixed synthetic GHI/DNI/DHI to isolate transposition. Compare poa_global (our beam+circumsolar+isotropic+ground sum) with tol max(2 W/m2, 0.5%). Sun el<=3 deg cases: no-explosion only, not equality (our Rb cap deviates)."
+}

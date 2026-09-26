@@ -5,7 +5,7 @@ Balkonkraftwerke mit mehreren Modulausrichtungen, starker
 Standortverschattung (Gelände, Bäume, Gebäude) und Mikrowechselrichtern
 mit Port-genauen Messwerten.
 
-**Status: v0.27.0** — selbstlernende PV-Prognose im Betrieb: Physik-Motor mit
+**Version: v0.27.2** — selbstlernende PV-Prognose im Betrieb: Physik-Motor mit
 lokaler Transposition und elevationsabhängigen Horizont-τ-Profilen, Lernschichten
 (Shademap, Intraday-Skalar, Day-ahead-Bias, η-Kalibrierung), Drift-Überwachung,
 P10/P50/P90-Quantilbändern, optionalem Ensemble-Band und einem Skill-Scoreboard.
@@ -84,9 +84,9 @@ Ergänzende Anleitungen:
 
 - **[docs/DASHBOARD.md](docs/DASHBOARD.md)** — fertiges Observability-Dashboard
   aus Bordmitteln, inklusive Verschattungsprofil-Diagramm.
-- **[docs/BACKFILL.md](docs/BACKFILL.md)** — optionaler Bootstrap der beiden
-  Lernschichten aus ~2 Jahren historischer Daten (einmaliger Dev-Job, läuft
-  nicht auf Home Assistant).
+- **[docs/BACKFILL.md](docs/BACKFILL.md)** — Bootstrap von Day-ahead-Bias,
+  Shademap und Quantilen aus historischen Daten. Standardweg ist die Aktion
+  `run_bootstrap` direkt in Home Assistant; zusätzlich gibt es eine Offline-CLI.
 
 ## Kernidee
 

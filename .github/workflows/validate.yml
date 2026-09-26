@@ -100,22 +100,28 @@ jobs:
       # uv reads .python-version (3.14) and installs the interpreter itself;
       # uv.lock is the single source of truth for every tool version.
       - name: Install dev dependencies
-        run: uv sync --group dev
+        run: uv sync --locked --group dev
 
       # Lint only (deliberately NO `ruff format --check`): the code is
       # intentionally hand-formatted (aligned call args, deliberate line
       # breaks, E501 off), so the project lints but never formats.
       - name: Ruff check
-        run: uv run ruff check .
+        run: uv run --no-sync ruff check .
 
-      # Baseline only: errors are reported for the pure physics/learning
-      # core ([tool.mypy] in pyproject.toml explains the scope).
+      # Clean-core gate, followed by explicit diagnostics for legacy core
+      # and critical HA boundary modules (see scripts/mypy_baseline.json).
       - name: Type check (mypy)
-        run: uv run mypy
+        run: uv run --no-sync mypy
+
+      - name: Core import boundary
+        run: uv run --no-sync python scripts/check_core_imports.py
+
+      - name: Type-error ratchet (including baseline modules)
+        run: uv run --no-sync python scripts/check_mypy_baseline.py
 
       - name: Version consistency (manifest == pyproject == const)
         run: |
-          uv run python - <<'PY'
+          uv run --no-sync python - <<'PY'
           import json, re, pathlib
           mf = json.loads(pathlib.Path(
               "custom_components/balcony_solar_forecast/manifest.json"
@@ -156,15 +162,15 @@ jobs:
           node-version: 22
 
       - name: Install dev dependencies
-        run: uv sync --group dev
+        run: uv sync --locked --group dev
 
       # Disable the pytest-homeassistant-custom-component plugin (`-p
-      # no:homeassistant`). The suite is unit-style: every HA-layer test runs
+      # no:homeassistant`). This portable unit suite runs HA-layer tests
       # against fakes/monkeypatch and needs only `import homeassistant`, not a
       # real HA instance. PHACC's autouse fixtures (enable_event_loop_debug /
       # verify_cleanup) call asyncio.get_event_loop() at setup, which raises on
       # Python 3.12+ for the sync tests -- so the plugin only breaks a suite that
-      # never uses its fixtures. Disabling it runs the full meaningful suite
+      # never uses its fixtures. Real HA lifecycle tests run separately;
       # (pytest-asyncio, installed via PHACC, still drives the async tests).
       # Coverage source comes from [tool.coverage.run] in pyproject.toml.
       # Coverage is GATED at 95 % of the integration's statements
@@ -180,7 +186,7 @@ jobs:
       # line from the log — the one line a CI run exists to show.
       - name: Run test suite
         run: >-
-          uv run pytest tests -p no:homeassistant
+          uv run --no-sync pytest tests --ignore=tests/integration -p no:homeassistant
           --cov --cov-fail-under=95 --cov-report=term-missing:skip-covered
           --cov-report=xml
 
@@ -196,7 +202,7 @@ jobs:
   # only real if it is tested.
   tests-ha-min:
     runs-on: "ubuntu-latest"
-    name: Tests against minimum HA (2026.3)
+    name: Tests against declared minimum HA
     steps:
       - name: Checkout
         uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" # v7
@@ -207,7 +213,7 @@ jobs:
           enable-cache: true
 
       - name: Install dev dependencies
-        run: uv sync --group dev
+        run: uv sync --locked --group dev
 
       # Downgrade HA to the floor IN PLACE (no lock re-resolve):
       # pytest-homeassistant-custom-component pins homeassistant exactly (it
@@ -218,10 +224,16 @@ jobs:
       # only its pytest-asyncio is used. `uv run --no-sync` then runs pytest
       # WITHOUT re-syncing the venv back to the lockfile's HA.
       - name: Downgrade homeassistant to the supported floor
-        run: uv pip install "homeassistant==2026.3.*"
+        run: |
+          floor="$(uv run --no-sync python -c 'import json; print(json.load(open("hacs.json"))["homeassistant"])')"
+          uv pip install "homeassistant==$floor"
+          uv run --no-sync python -c 'from importlib.metadata import version; print("Testing Home Assistant", version("homeassistant"))'
 
       - name: Run test suite (minimum HA)
-        run: uv run --no-sync pytest tests -p no:homeassistant
+        run: uv run --no-sync pytest tests --ignore=tests/integration -p no:homeassistant
+
+      - name: Run real HA lifecycle (minimum HA)
+        run: uv run --no-sync pytest --confcutdir=tests/integration tests/integration -p no:homeassistant
 
   devcontainer:
     runs-on: "ubuntu-latest"
@@ -240,6 +252,63 @@ jobs:
         uses: "devcontainers/ci@513af61f4de4f75d37e4438f184ba4358f0fc1ca" # v0.3.1900000450
         with:
           runCmd: >-
-            uv run pytest tests -p no:homeassistant
-            && uv run ruff check .
-            && uv run mypy
+            uv run --no-sync pytest tests --ignore=tests/integration -p no:homeassistant
+            && uv run --no-sync ruff check .
+            && uv run --no-sync mypy
+
+  branch-coverage:
+    runs-on: ubuntu-latest
+    name: Branch coverage (report only)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - run: uv sync --locked --group dev
+      - name: Report decisions independently of the statement gate
+        env:
+          COVERAGE_FILE: .coverage.branch
+        run: >-
+          uv run --no-sync pytest tests --ignore=tests/integration -p no:homeassistant --cov --cov-branch
+          --cov-fail-under=0 --cov-report=term-missing:skip-covered
+          --cov-report=xml:coverage-branches.xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage-branches
+          path: coverage-branches.xml
+      - name: Targeted semantic mutation checks
+        run: uv run --no-sync python scripts/mutation_smoke.py
+
+  windows-bootstrap:
+    runs-on: windows-latest
+    name: Windows bootstrap without target Python
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Existing Python and existing uv smoke (no installation)
+        shell: pwsh
+        run: ./scripts/tests/test_setup_env.ps1
+
+  golden-reproduction:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    name: Independent pvlib reference reproduction
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv run --script --locked scripts/generate_reference_vectors.py --check
+
+  ha-lifecycle:
+    runs-on: ubuntu-latest
+    name: Real Home Assistant lifecycle
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked --group dev
+      - run: uv run --no-sync pytest --confcutdir=tests/integration tests/integration -p no:homeassistant

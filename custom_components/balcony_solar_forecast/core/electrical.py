@@ -11,6 +11,7 @@ Owner: engine. Pure, HA-free. Implements SPEC §6:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 from ..const import (
     DEFAULT_INVERTER_EFFICIENCY,
@@ -22,7 +23,7 @@ from ..const import (
 )
 from .types import InverterGroup
 
-__all__ = ["dc_power", "clamp_groups", "clamp_groups_ac"]
+__all__ = ["dc_power", "clamp_groups", "clamp_groups_ac", "correct_groups", "GroupCorrection"]
 
 
 def dc_power(
@@ -247,3 +248,27 @@ def clamp_groups_ac(
             ac_out[name] = base * scale_ac
 
     return dc_out, ac_out
+
+
+@dataclass(frozen=True, slots=True)
+class GroupCorrection:
+    """One DC correction stage, before and after the physical group limits.
+
+    Both mappings are newly owned by the result and read-only by convention.
+    Consumers needing the metered subset select it from ``served`` only after
+    clipping the complete group, since unmetered siblings share its ceiling.
+    """
+
+    before_clamp: dict[str, float]
+    served: dict[str, float]
+
+
+def correct_groups(
+    plane_watts: Mapping[str, float],
+    groups: Sequence[InverterGroup],
+    *,
+    factor: float,
+) -> GroupCorrection:
+    """Apply a slot correction, then the group limits (SPEC §6.4)."""
+    factored = {name: watts * factor for name, watts in plane_watts.items()}
+    return GroupCorrection(factored, clamp_groups(factored, groups))

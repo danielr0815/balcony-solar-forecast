@@ -25,7 +25,7 @@ pytest.importorskip("homeassistant")
 from custom_components.balcony_solar_forecast.const import (  # noqa: E402
     NIGHTLY_CATCHUP_MAX_DAYS,
 )
-from tests.test_coordinator_learning import (  # noqa: E402
+from tests.helpers.coordinator import (  # noqa: E402
     _FakeStore,
     _make_coordinator,
 )
@@ -45,25 +45,24 @@ def test_catchup_days_empty_store_is_full_window_oldest_first():
     assert days == sorted(days)
 
 
-def test_catchup_days_resumes_the_day_after_newest_recorded():
+def test_catchup_days_includes_recorded_but_untrained_day():
     store = _FakeStore()
     # Newest recorded actuals sit INSIDE the window (not at either edge).
     store.record_actuals("2026-03-10", {"M1": 1.0})
     c = _make_coordinator(store)
     latest = date(2026, 3, 12)
     days = c._catchup_days(latest)
-    # Sweep starts the day AFTER 2026-03-10, i.e. 03-11, up to latest.
-    assert days == [date(2026, 3, 11), date(2026, 3, 12)]
+    # Recording actuals does not prove every training step completed.
+    assert days == [date(2026, 3, 10), date(2026, 3, 11), date(2026, 3, 12)]
 
 
-def test_catchup_days_newest_equals_latest_clamps_to_single_day():
+def test_catchup_days_newest_equals_latest_still_revisits_older_gaps():
     store = _FakeStore()
     store.record_actuals("2026-03-11", {"M1": 1.0})
     c = _make_coordinator(store)
     latest = date(2026, 3, 11)
     days = c._catchup_days(latest)
-    # candidate (day after newest) overshoots latest -> start clamped to latest.
-    assert days == [date(2026, 3, 11)]
+    assert days == [date(2026, 3, 9), date(2026, 3, 10), date(2026, 3, 11)]
 
 
 def test_catchup_days_crosses_month_and_year_boundary():

@@ -15,6 +15,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
+from ._forecast_access import current_forecast
 from .const import DOMAIN
 
 
@@ -30,7 +31,7 @@ async def async_get_solar_forecast(
     coordinator = hass.data.get(DOMAIN, {}).get(config_entry_id)
     if coordinator is None:
         return None
-    data: dict[str, Any] = coordinator.data or {}
+    data: dict[str, Any] = current_forecast(coordinator)
     # Served-AC hourly curve (Phase 2): the energy produced into the home. Already
     # keyed by ISO-8601 UTC hour start (coordinator). Empty/absent (no forecast
     # yet, or a v0.1 cached result) => no overlay rather than a stale curve.

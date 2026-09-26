@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timedelta
 from homeassistant.core import State
 from homeassistant.util import dt as dt_util
 
-from .const import LABEL_FROZEN_STALE_SECONDS
+from .const import LABEL_FROZEN_STALE_SECONDS, SLOT_HOURS, SLOT_MINUTES
 from .core.types import DriftState, ForecastResult
 
 # Live-actual state guards: states we never treat as a measurement.
@@ -100,7 +100,7 @@ def _round3(value: float | None) -> float | None:
 def _power_at(slot_starts, watts, now: datetime) -> float:
     """Instantaneous power at the 15-min slot containing ``now`` (shared walk)."""
     now_utc = dt_util.as_utc(now)
-    slot = timedelta(minutes=15)
+    slot = timedelta(minutes=SLOT_MINUTES)
     for start, w in zip(slot_starts, watts, strict=False):
         start_utc = dt_util.as_utc(start)
         if start_utc <= now_utc < start_utc + slot:
@@ -113,7 +113,7 @@ def _power_at(slot_starts, watts, now: datetime) -> float:
 def _slot_index_at(slot_starts, now: datetime) -> int | None:
     """Index of the 15-min slot containing ``now``, or None if out of range."""
     now_utc = dt_util.as_utc(now)
-    slot = timedelta(minutes=15)
+    slot = timedelta(minutes=SLOT_MINUTES)
     for i, start in enumerate(slot_starts):
         start_utc = dt_util.as_utc(start)
         if start_utc <= now_utc < start_utc + slot:
@@ -148,7 +148,7 @@ def _local_daily_kwh(result: ForecastResult) -> dict[str, float]:
     daily: dict[str, float] = {}
     for start, watts in zip(result.slot_starts, result.total_watts, strict=False):
         local_day = dt_util.as_local(dt_util.as_utc(start)).date().isoformat()
-        daily[local_day] = daily.get(local_day, 0.0) + watts * 0.25 / 1000.0
+        daily[local_day] = daily.get(local_day, 0.0) + watts * SLOT_HOURS / 1000.0
     return {k: round(v, 3) for k, v in daily.items()}
 
 
@@ -161,7 +161,7 @@ def _local_daily_kwh_ac(result: ForecastResult) -> dict[str, float]:
     daily: dict[str, float] = {}
     for start, watts in zip(result.slot_starts, result.ac_watts, strict=False):
         local_day = dt_util.as_local(dt_util.as_utc(start)).date().isoformat()
-        daily[local_day] = daily.get(local_day, 0.0) + watts * 0.25 / 1000.0
+        daily[local_day] = daily.get(local_day, 0.0) + watts * SLOT_HOURS / 1000.0
     return {k: round(v, 3) for k, v in daily.items()}
 
 

@@ -10,7 +10,7 @@ Minuten wissen musst, wo etwas liegt. Physik-Details stehen in
 `03-lernschichten-und-korrekturen.md`, Entities/Services in
 `04-ha-integration-entities-services.md`.
 
-Stand: `main` @ **v0.27.0** (2026-08-26). Alle Aussagen unten sind am Code geprüft;
+Stand: **v0.27.2** (2026-08-26). Alle Aussagen unten sind am Code geprüft;
 Belege werden als *Datei + Funktions-/Konstantenname* genannt (keine Zeilennummern,
 die veralten sofort).
 
@@ -27,7 +27,7 @@ Fakten aus `custom_components/balcony_solar_forecast/manifest.json`:
 | Feld | Wert | Bedeutung |
 |---|---|---|
 | `domain` | `balcony_solar_forecast` | Service-Namespace, Entity-Präfix |
-| `version` | `0.27.0` | HACS-Release |
+| `version` | `0.27.2` | HACS-Release |
 | `iot_class` | `cloud_polling` | holt aktiv von einer Cloud-API (Open-Meteo) |
 | `integration_type` | `service` | kein Hub / keine Hardware-Bridge, sondern ein Dienst. Trotzdem gruppiert die Integration **alle** Entities unter EINEM Geräte-Eintrag je Config-Entry (`DeviceInfo` in `sensor.BalconyForecastEntity`, `docs/SPEC.md` §15.1) |
 | `config_flow` | `true` | Einrichtung nur über die UI, kein YAML |
@@ -51,6 +51,14 @@ dokumentierte Ausnahme: `core/openmeteo_backfill.py` macht Netzwerk-IO (siehe un
 ## 2. Modul-Landkarte
 
 ### 2.1 HA-Glue: `custom_components/balcony_solar_forecast/`
+
+Die neuen fachlichen Grenzen reduzieren den Coordinator auf Orchestrierung:
+`_weather_cache.WeatherCache` besitzt Wetterbild, Parsercache, Abruf-/Altersanker
+und Fehlerstatus. `_operations.LearnerOperations` besitzt Task-Lebensdauer und
+den gemeinsamen Mutations-Lock. `_forecast_access.current_forecast` ist die
+Verfügbarkeitsgrenze für Aktionen und Energy. Der Coordinator delegiert an diese
+Komponenten; Kompatibilitäts-Properties sind Sichten auf denselben Zustand,
+keine zweite Kopie.
 
 | Modul | Verantwortung | Wichtigste Einstiegsfunktion |
 |---|---|---|
@@ -81,7 +89,7 @@ dokumentierte Ausnahme: `core/openmeteo_backfill.py` macht Netzwerk-IO (siehe un
 
 | Modul | Verantwortung | Wichtigste Einstiegsfunktion |
 |---|---|---|
-| `types.py` | Alle unveränderlichen Datenverträge (frozen dataclasses): `SiteConfig`, `PlaneConfig`, `InverterGroup`, `HorizonRow`, `WeatherSlot`/`WeatherSeries`, `PlaneResult`, `ForecastResult`, sowie die Lern-/Scoreboard-/Quantil-Zustände. Jeder `from_dict` ist validate-and-clamp. | `ForecastResult`, `SiteConfig.from_dict` |
+| `types.py` | Datenverträge mit frozen Attributen und Copy-on-write-Eigentum für eingebettete Maps: `SiteConfig`, `PlaneConfig`, `InverterGroup`, `HorizonRow`, `WeatherSlot`/`WeatherSeries`, `PlaneResult`, `ForecastResult`, sowie die Lern-/Scoreboard-/Quantil-Zustände. Jeder `from_dict` ist validate-and-clamp. | `ForecastResult`, `SiteConfig.from_dict` |
 | `engine.py` | Die Pipeline: solpos → transpose → horizon → electrical über jeden Slot und jede Ebene, danach Gruppen-Clamp und Rollups. Rechnet **beide** Kurven (RAW und CORRECTED) pro Zyklus. | `compute_forecast`, `LearnerHooks` |
 | `solpos.py` | Sonnenstand (NOAA-Closed-Form nach Meeus, nur `math`), inkl. Refraktionskorrektur; Genauigkeitsziel < 0,3°. | `sun_position`, `hours_from_solar_noon` |
 | `transpose.py` | Hay-Davies-Transposition auf die Ebene (Beam + Zirkumsolar + isotroper Rest + Bodenreflex). Liefert die *rohen* geometrischen Komponenten; Skalierung/Maskierung macht die Engine. | `hay_davies_poa` |
@@ -134,6 +142,22 @@ Die Engine rechnet **jeden Zyklus beide Kurven** (`core/engine.py`, Docstring vo
 
 Ohne Hooks (`hooks=None` oder alle Callables `None`) ist CORRECTED **bit-genau** gleich
 RAW — ein lernerfreier Build ist unverändert.
+
+### Gemeinsame Kerntransformationen und Datenbesitz
+
+`core.plane_physics` hält Transposition, IAM, statischen Horizontprior,
+Beam-Gate und temperaturabhängige DC-Umrechnung für Engine und Bootstrap.
+`electrical.GroupCorrection` verbindet Leistung vor und nach dem Gruppen-Clamp;
+`core.curves.EnergyTotals` bündelt Stunden- und Tagesaggregation.
+`core.intraday` entscheidet anhand der Gruppe, wann eine Messung wegen
+Clipping kein identifizierbares Wetterverhältnis liefert.
+
+Frozen Dataclasses schützen ihre Attribute, nicht automatisch die eingebetteten
+Maps. Konsumenten lesen diese nur; der zuständige Lerner erzeugt Änderungen
+per Copy-on-write. Store-Snapshots sowie Import-/Export-Dicts sind eigenständige
+Kopien. `ForecastResult` behält seinen öffentlichen Feldvertrag; der ungenutzte,
+inkonsistente `with_total`-Kopierhelfer wurde entfernt. Der Äquivalenztest
+vergleicht sämtliche aktuellen Ergebnisfelder einschließlich AC und Slow-only.
 
 ### 3.2 issued / as-issued-Snapshot
 
@@ -218,7 +242,7 @@ gecachte Ergebnisse weiter funktionieren.
 | `ac_corrected_unclamped_watts` / `ac_slot_ceilings` | AC-Pendants zu den beiden Feldern oben |
 | `p10_watts` / `p50_watts` / `p90_watts` | Bandkurven je Slot, gleicher Rahmen wie `total_watts`. Leer ⇒ „kein Band" (Konsumenten lesen Band == corrected, **keine** erfundene Spreizung). `p50_watts` muss **nicht** `total_watts` entsprechen |
 | `p10_hourly_wh` / `p50_hourly_wh` / `p90_hourly_wh` | Stunden-Rollups der Bänder |
-| `ac_p10_watts`, `ac_p10_hourly_wh`, `ac_p90_hourly_wh` | AC-Bänder (P50 == `ac_watts`, deshalb kein eigenes AC-P50-Feld) |
+| `ac_p10_watts`, `ac_p10_hourly_wh`, `ac_p90_hourly_wh` | AC-P10/P90-Bänder; `ac_watts` ist die Punktprognose, kein empirisches P50 |
 | `correction_source` | präzise Kombination der tatsächlich wirkenden Schichten (Shademap, Day-ahead, Intraday) — rein informativ |
 
 `PlaneResult` je Ebene: `name`, `watts` (CORRECTED), `raw_watts`, `slow_watts`

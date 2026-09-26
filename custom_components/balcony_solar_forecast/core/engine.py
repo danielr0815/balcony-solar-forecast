@@ -100,10 +100,18 @@ from ..const import (
     BEAM_GAIN_DEFAULT,
     CORRECTION_SOURCE_NONE,
     DEFAULT_INVERTER_EFFICIENCY,
-    SLOT_MINUTES,
+    SLOT_HOURS,
     SNOW_DEPTH_THRESHOLD_M,
 )
-from . import clearsky, electrical, horizon, quantiles, solpos, transpose
+from . import clearsky, electrical, horizon, plane_physics, quantiles, solpos
+from . import transpose as transpose  # compatibility for independent reference tests
+from .curves import EnergyTotals
+from .plane_physics import PlanePoaComponents as _PlanePoaComponents
+from .plane_physics import (
+    PlanePoaSplit as _PlanePoaSplit,  # noqa: F401 - reference-test compatibility
+)
+from .plane_physics import dc_split as _dc_split
+from .plane_physics import gate_split as _gate_split
 from .types import (
     ForecastResult,
     PlaneConfig,
@@ -118,7 +126,7 @@ __all__ = ["compute_forecast", "LearnerHooks"]
 
 # One 15-min slot as a fraction of an hour, for the Wh integration of an
 # interval-mean power value (SPEC: slot values are backward-averaged means).
-_SLOT_HOURS = SLOT_MINUTES / 60.0
+_SLOT_HOURS = SLOT_HOURS
 
 
 # ---------------------------------------------------------------------------
@@ -220,45 +228,6 @@ def _slot_is_usable(slot: WeatherSlot) -> bool:
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _PlanePoaSplit:
-    """POA components split into beam-driven vs. diffuse-driven (W/m^2).
-
-    ``beam_poa`` = gated beam + gated circumsolar (the direct share the
-    shademap references); ``diffuse_poa`` = gated isotropic + ground (the shade
-    floor). Their sum is the plane POA fed to the DC model.
-    ``beam_poa_ungated`` is beam + circumsolar with tau := 1 (clear horizon) —
-    the SLOW learner's beam reference (SPEC §9.1, FIX-3): the learned tau REPLACES
-    the static tau, so the training reference must be the un-attenuated beam.
-    """
-
-    beam_poa: float
-    diffuse_poa: float
-    beam_poa_ungated: float
-
-
-@dataclass(frozen=True, slots=True)
-class _PlanePoaComponents:
-    """Tau-independent POA decomposition for one plane in one slot (W/m^2).
-
-    The RAW and CORRECTED curves differ ONLY in which transmittance gates the
-    beam+circumsolar (static horizon tau vs a learned tau), so everything that
-    does NOT depend on tau is computed ONCE per plane/slot and shared between
-    them (audit #9): the IAM-corrected ``beam`` / ``circ`` (pre-gate), the
-    ``diffuse_poa`` floor (isotropic*SVF + ground, never touched by the beam
-    gate), the ``beam_poa_ungated`` reference (tau := 1) and the plane's
-    ``static_tau`` at this sun position (the shademap's ``static_prior``). The
-    per-tau gate :func:`_gate_split` then derives each curve's
-    :class:`_PlanePoaSplit` from this shared result.
-    """
-
-    beam: float              # beam after IAM, before the horizon gate
-    circ: float              # circumsolar after IAM, before the horizon gate
-    diffuse_poa: float       # isotropic*SVF + ground, clamped >=0 (gate-independent)
-    beam_poa_ungated: float  # max(beam + circ, 0): the shademap's beam reference
-    static_tau: float        # static horizon tau at this sun position (static_prior)
-
-
 def _plane_poa_components(
     plane: PlaneConfig,
     svf: float,
@@ -269,155 +238,12 @@ def _plane_poa_components(
     doy: int,
     beam_gain: float = BEAM_GAIN_DEFAULT,
 ) -> _PlanePoaComponents:
-    """Tau-independent Hay-Davies POA decomposition (W/m^2) for one plane/slot.
-
-    Runs the transposition, the ASHRAE IAM on beam+circumsolar, the horizon
-    interpolation (yielding the STATIC transmittance at this sun position) and
-    the SVF-scaled diffuse floor exactly ONCE. The RAW and CORRECTED splits are
-    then a cheap gate-arithmetic step over this shared result
-    (:func:`_gate_split`) — the only thing that differs between the two curves is
-    which tau attenuates the beam (SPEC §9.1 slow learner). The isotropic diffuse
-    is always scaled by the plane's static sky-view factor and the ground
-    reflection is never touched by the beam gate, so a fully occluding wall bin
-    (tau=0) kills the beam but keeps the diffuse floor.
-
-    ``beam_gain`` (forensik T6) multiplies the beam+circumsolar POA (the direct
-    share only) BEFORE the ungated-reference capture and the tau gate — 1.0 is
-    the identity default. The diffuse/ground floor is deliberately excluded.
-    """
-    comps = transpose.hay_davies_poa(
-        ghi=slot.ghi,
-        dni=slot.dni,
-        dhi=slot.dhi,
-        sun_az=sun_az,
-        sun_el=sun_el,
-        plane_az=plane.azimuth_deg,
-        plane_tilt=plane.tilt_deg,
-        albedo=albedo,
-        doy=doy,
+    """Slot adapter to the shared plane physics; no independent math here."""
+    return plane_physics.poa_components(
+        plane, svf, ghi=slot.ghi, dni=slot.dni, dhi=slot.dhi,
+        sun_az=sun_az, sun_el=sun_el, albedo=albedo, doy=doy,
+        beam_gain=beam_gain,
     )
-
-    beam = comps.get("beam", 0.0)
-    circ = comps.get("circumsolar", 0.0)
-    iso = comps.get("isotropic", 0.0)
-    ground = comps.get("ground", 0.0)
-
-    # Incidence-angle modifier (ASHRAE, const IAM_B0): glass reflection cuts
-    # the DIRECT share at high AOI — 5-15% on the steep facade planes. Applied
-    # HERE (pvlib-style, after the pure transposition) so the golden vectors
-    # stay pvlib-comparable, and BEFORE the ungated-reference capture below so
-    # the shademap trains against the optics-corrected beam instead of
-    # absorbing the deficit as AOI-shaped phantom shading (SPEC §4.4). A
-    # transposition stand-in without the cos_theta key (analytic test fakes)
-    # skips the modifier.
-    cos_theta = comps.get("cos_theta")
-    if cos_theta is not None:
-        f_iam = transpose.ashrae_iam(cos_theta)
-        beam *= f_iam
-        circ *= f_iam
-
-    # Site bifacial beam gain (forensik T6 / A1): lift the honestly under-modeled
-    # DIRECT share (beam+circumsolar only) by the configured factor BEFORE the
-    # ungated-reference capture and the tau gate, so it feeds BOTH the RAW and the
-    # CORRECTED curve identically and both the SLOW-learner beam reference and the
-    # day-ahead-bias cells (clamped, unable to express a >1 correction) get the
-    # honest physics instead of absorbing the deficit. Default 1.0 => no-op. The
-    # isotropic-diffuse and ground-reflected shares are deliberately untouched.
-    if beam_gain != 1.0:
-        beam *= beam_gain
-        circ *= beam_gain
-
-    # Static horizon beam prior: only when the sun is actually behind the horizon
-    # line for this azimuth does the static tau attenuate the direct components.
-    # Above the line the static tau is irrelevant (full transmission, 1.0), but
-    # a learned bin can still darken the beam (near-field trees / building edge
-    # the static table missed), so the CORRECTED gate consults its hook there too
-    # — with static_prior = 1.0 above the line, a shrinkage blend leans on the
-    # learned tau exactly as intended.
-    horizon_elev = horizon.interp_elevation(plane, sun_az)
-    if sun_el <= horizon_elev:
-        # Pass sun_el so an inline tau_points elevation profile resolves at the
-        # true sun elevation (v0.22); rows without a profile ignore it and the
-        # result is the pre-0.22 scalar tau.
-        static_tau = horizon.transmittance_at(plane, sun_az, doy, sun_el=sun_el)
-    else:
-        static_tau = 1.0
-
-    # UNGATED beam+circumsolar (tau := 1): the shademap's beam reference. Capture
-    # it BEFORE any tau multiply (linear in tau, so ungated == gated / tau).
-    beam_poa_ungated = beam + circ
-    if beam_poa_ungated < 0.0:
-        beam_poa_ungated = 0.0
-
-    # Diffuse sky-view gate: static per-plane reduction of the isotropic sky
-    # dome (fixes E4 — diffuse was never reduced by obstructions). Never gated
-    # by the beam transmittance, so it is identical for the raw and corrected
-    # curves.
-    iso *= svf
-    diffuse_poa = iso + ground
-    if diffuse_poa < 0.0:
-        diffuse_poa = 0.0
-
-    return _PlanePoaComponents(
-        beam=beam,
-        circ=circ,
-        diffuse_poa=diffuse_poa,
-        beam_poa_ungated=beam_poa_ungated,
-        static_tau=static_tau,
-    )
-
-
-def _gate_split(comps: _PlanePoaComponents, tau: float) -> _PlanePoaSplit:
-    """Gate the shared components with a beam transmittance ``tau`` -> POA split.
-
-    ``tau`` gates beam+circumsolar (the static horizon tau for the RAW curve, the
-    learned/blended tau for the CORRECTED curve); the diffuse floor and the
-    ungated beam reference are carried straight through from ``comps``. The
-    ``tau != 1.0`` guard skips the multiply when the beam is fully transmitted —
-    bit-identical to multiplying (``x * 1.0 == x``), and byte-for-byte the same
-    arithmetic the single-pass predecessor ran.
-    """
-    beam = comps.beam
-    circ = comps.circ
-    if tau != 1.0:
-        beam *= tau
-        circ *= tau
-
-    beam_poa = beam + circ
-    if beam_poa < 0.0:
-        beam_poa = 0.0
-
-    return _PlanePoaSplit(
-        beam_poa=beam_poa,
-        diffuse_poa=comps.diffuse_poa,
-        beam_poa_ungated=comps.beam_poa_ungated,
-    )
-
-
-def _dc_split(
-    split: _PlanePoaSplit,
-    plane: PlaneConfig,
-    temp_c: float,
-) -> tuple[float, float]:
-    """DC power attributable to the beam vs. diffuse POA for one plane (W).
-
-    The Ross temperature derate is a function of the TOTAL POA (cell heating is
-    driven by the whole irradiance), so both shares are computed at the total
-    cell temperature and split by their POA fraction. This keeps
-    ``beam_dc + diffuse_dc == dc_power(total_poa, ...)`` exactly, so the split
-    is a faithful decomposition of the plane's unclamped DC power.
-    """
-    total_poa = split.beam_poa + split.diffuse_poa
-    total_dc = electrical.dc_power(
-        total_poa, plane.wp, temp_c, plane.efficiency,
-        ross_coeff=plane.ross_coeff,
-    )
-    if total_poa <= 0.0 or total_dc <= 0.0:
-        return 0.0, 0.0
-    beam_frac = split.beam_poa / total_poa
-    beam_dc = total_dc * beam_frac
-    diffuse_dc = total_dc - beam_dc
-    return beam_dc, diffuse_dc
 
 
 def _split_clamp(
@@ -601,15 +427,12 @@ def compute_forecast(
     # exceed what the inverters can deliver).
     slot_ceilings: list[float] = []
 
-    raw_hourly_wh: dict[str, float] = {}
-    raw_daily_kwh: dict[str, float] = {}
-    hourly_wh: dict[str, float] = {}
-    daily_kwh: dict[str, float] = {}
-    # AC-side served curve (Phase 1): the served DC run through each group's
-    # eta_inv + AC clamp. Additive to the DC path, aligned to slot_starts.
+    raw_energy = EnergyTotals(tz=cal_tz)
+    corrected_energy = EnergyTotals(tz=cal_tz)
+    # AC point forecast: corrected unclamped DC through each group's eta and
+    # AC limit. Separate from the DC learning curve, aligned to slot_starts.
     ac_watts: list[float] = []
-    ac_hourly_wh: dict[str, float] = {}
-    ac_daily_kwh: dict[str, float] = {}
+    ac_energy = EnergyTotals(tz=cal_tz)
     # AC-side PRE-clamp total per slot (Phase 2): the AC analogue of
     # ``corrected_unclamped_watts`` — Sum_planes eta(group) * (cor_unclamped *
     # factor) BEFORE the inverter AC clamp, aligned to slot_starts.
@@ -759,10 +582,9 @@ def compute_forecast(
         # values are already within limits and this is a mathematical no-op, so
         # the common path stays bit-exact. Ungrouped planes have no configured
         # ceiling and pass through both clamps (see electrical.clamp_groups).
-        cor_factored = {
-            name: watts * factor for name, watts in cor_clamped.items()
-        }
-        cor_final = electrical.clamp_groups(cor_factored, groups)
+        correction = electrical.correct_groups(cor_clamped, groups, factor=factor)
+        cor_factored = correction.before_clamp
+        cor_final = correction.served
         # Redistribute the SECOND clamp onto the beam/diffuse shares (same helper
         # as the first clamp) so the reported attribution still sums to each
         # plane's final watts: scale the first-clamp shares by the factor, then
@@ -816,20 +638,9 @@ def compute_forecast(
         )
         slot_ceilings.append(total_group_dc_limit + ungrouped_cor)
 
-        # --- energy roll-ups (interval-mean power * slot hours) ---
-        hour_start = start.astimezone(UTC).replace(
-            minute=0, second=0, microsecond=0
-        )
-        hkey = hour_start.isoformat()
-        day_key = start.astimezone(cal_tz).date().isoformat()
-
-        raw_wh = raw_slot_total * _SLOT_HOURS
-        raw_hourly_wh[hkey] = raw_hourly_wh.get(hkey, 0.0) + raw_wh
-        raw_daily_kwh[day_key] = raw_daily_kwh.get(day_key, 0.0) + raw_wh / 1000.0
-
-        cor_wh = cor_slot_total * _SLOT_HOURS
-        hourly_wh[hkey] = hourly_wh.get(hkey, 0.0) + cor_wh
-        daily_kwh[day_key] = daily_kwh.get(day_key, 0.0) + cor_wh / 1000.0
+        # Energy views share one UTC-hour/local-day aggregation contract.
+        raw_energy.add(start, raw_slot_total)
+        corrected_energy.add(start, cor_slot_total)
 
         # --- AC-side served curve (Phase 1) ---------------------------------
         # Physical DC->AC transform: per group AC = min(eta_inv * factor *
@@ -847,9 +658,7 @@ def compute_forecast(
         )
         ac_slot_total = sum(ac_by_plane.values())
         ac_watts.append(ac_slot_total)
-        ac_wh = ac_slot_total * _SLOT_HOURS
-        ac_hourly_wh[hkey] = ac_hourly_wh.get(hkey, 0.0) + ac_wh
-        ac_daily_kwh[day_key] = ac_daily_kwh.get(day_key, 0.0) + ac_wh / 1000.0
+        ac_energy.add(start, ac_slot_total)
         # Pre-AC-clamp AC total (AC analogue of corrected_unclamped_watts): the
         # eta-weighted factored DC per plane summed BEFORE the inverter AC clamp.
         # On a clipped slot this exceeds ``ac_slot_total`` (the served, clamped AC);
@@ -898,7 +707,8 @@ def compute_forecast(
     p50_hourly_wh: dict[str, float] = {}
     p90_hourly_wh: dict[str, float] = {}
     # AC-side P10 / P90 hourly band roll-ups (Phase 2): the AC analogue of the DC
-    # p10/p90 hourly curves, capped at the per-slot AC ceiling. P50 == ac_watts.
+    # p10/p90 hourly curves, capped at the per-slot AC ceiling. The central AC
+    # point forecast is ac_watts, not necessarily the empirical median.
     ac_p10_hourly_wh: dict[str, float] = {}
     ac_p90_hourly_wh: dict[str, float] = {}
     # Per-slot AC P10 / P90 band watts (capped at the AC ceiling): the P10 side
@@ -939,7 +749,7 @@ def compute_forecast(
             # dark twilight / missing weather) never created a corrected hour
             # bucket, and their band watts are zero anyway, so they must not
             # introduce spurious empty band hours either.
-            if hkey not in hourly_wh:
+            if hkey not in corrected_energy.hourly_wh:
                 continue
             p10_hourly_wh[hkey] = p10_hourly_wh.get(hkey, 0.0) + p10_watts[i] * _SLOT_HOURS
             p50_hourly_wh[hkey] = p50_hourly_wh.get(hkey, 0.0) + p50_watts[i] * _SLOT_HOURS
@@ -948,9 +758,9 @@ def compute_forecast(
         # AC-side band curves (Phase 2): the SAME band factors applied to the
         # served AC curve, capped at the per-slot AC ceiling, rolled up to hourly
         # on the SAME hour keys as ``ac_hourly_wh``. Structurally identical to the
-        # DC roll-up above — just on the AC curve / ceiling. P50 == ac_watts, so
-        # only P10 / P90 are carried.
-        ac_p10_w, _ac_p50_w, ac_p90_w = quantiles.band_curve_from_corrected(
+        # DC roll-up above, on the AC curve / ceiling. Only the empirical edges
+        # are exposed; ac_watts remains the unchanged central point forecast.
+        ac_p10_w, _empirical_ac_median, ac_p90_w = quantiles.band_curve_from_corrected(
             ac_watts, slot_starts, band_by_slot,
         )
         ac_p10_w = tuple(
@@ -967,7 +777,7 @@ def compute_forecast(
                 .replace(minute=0, second=0, microsecond=0)
                 .isoformat()
             )
-            if hkey not in ac_hourly_wh:
+            if hkey not in ac_energy.hourly_wh:
                 continue
             ac_p10_hourly_wh[hkey] = ac_p10_hourly_wh.get(hkey, 0.0) + ac_p10_w[i] * _SLOT_HOURS
             ac_p90_hourly_wh[hkey] = ac_p90_hourly_wh.get(hkey, 0.0) + ac_p90_w[i] * _SLOT_HOURS
@@ -976,17 +786,17 @@ def compute_forecast(
         slot_starts=tuple(slot_starts),
         total_watts=tuple(total_watts),
         plane_results=plane_results,
-        hourly_wh=hourly_wh,
-        daily_kwh=daily_kwh,
+        hourly_wh=corrected_energy.hourly_wh,
+        daily_kwh=corrected_energy.daily_kwh,
         ac_watts=tuple(ac_watts),
-        ac_hourly_wh=ac_hourly_wh,
-        ac_daily_kwh=ac_daily_kwh,
+        ac_hourly_wh=ac_energy.hourly_wh,
+        ac_daily_kwh=ac_energy.daily_kwh,
         ac_corrected_unclamped_watts=tuple(ac_corrected_unclamped_watts),
         ac_p10_hourly_wh=ac_p10_hourly_wh,
         ac_p90_hourly_wh=ac_p90_hourly_wh,
         raw_total_watts=tuple(raw_total_watts),
-        raw_hourly_wh=raw_hourly_wh,
-        raw_daily_kwh=raw_daily_kwh,
+        raw_hourly_wh=raw_energy.hourly_wh,
+        raw_daily_kwh=raw_energy.daily_kwh,
         corrected_unclamped_watts=tuple(corrected_unclamped_watts),
         slot_ceilings=tuple(slot_ceilings),
         ac_slot_ceilings=tuple(ac_slot_ceilings),

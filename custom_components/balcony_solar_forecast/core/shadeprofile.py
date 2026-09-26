@@ -62,6 +62,7 @@ from ..const import (
 from . import horizon as horizon_mod
 from . import shademap as shademap_mod
 from . import solpos
+from .plane_physics import static_beam_tau
 from .types import PlaneConfig, ShademapState
 
 __all__ = [
@@ -126,19 +127,7 @@ def effective_tau_at(
     applies for a grouped plane. ``pool`` None or equal to ``(channel,)`` reads
     the single channel, bit-identical to the pre-pooling behaviour.
     """
-    horizon_elev = horizon_mod.interp_elevation(plane, sun_az)
-    if sun_el <= horizon_elev:
-        # Pass sun_el so an inline tau_points elevation profile resolves at the
-        # true sun elevation (v0.22): the profile makes the static prior vary
-        # DOWN each azimuth column (a low-sun crown gap is transmissive, its
-        # canopy opaque), so the drawn sun-path transmittance is now correct per
-        # (az, el) sample instead of constant per az. A legacy row without a
-        # profile ignores sun_el -> bit-identical to the pre-0.22 diagram.
-        static_prior = horizon_mod.transmittance_at(
-            plane, sun_az, doy, sun_el=sun_el
-        )
-    else:
-        static_prior = 1.0
+    static_prior = static_beam_tau(plane, sun_az, sun_el, doy)
     if pool is not None and tuple(pool) != (channel,):
         return shademap_mod.effective_tau_pooled(
             state,
@@ -194,14 +183,9 @@ def shade_horizon_at(
     shade_top = 0.0
     el = 0.0
     while el <= _EL_SCAN_MAX_DEG + 1e-9:
-        if el <= horizon_elev:
-            # el-dependent tau_points resolve at this scan elevation (v0.22);
-            # a legacy scalar row is unchanged.
-            static_prior = horizon_mod.transmittance_at(
-                plane, sun_az, doy, sun_el=el
-            )
-        else:
-            static_prior = 1.0
+        static_prior = static_beam_tau(
+            plane, sun_az, el, doy, horizon_elevation=horizon_elev,
+        )
         if pooled:
             tau = shademap_mod.effective_tau_pooled(
                 state,

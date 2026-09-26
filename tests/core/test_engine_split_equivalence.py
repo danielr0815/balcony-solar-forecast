@@ -187,30 +187,11 @@ def _ref_gate_split(comps: _RefComps, tau: float):
 
 
 def _assert_result_bit_equal(a, b) -> None:
-    assert a.slot_starts == b.slot_starts
-    assert a.total_watts == b.total_watts
-    assert a.raw_total_watts == b.raw_total_watts
-    assert a.hourly_wh == b.hourly_wh
-    assert a.raw_hourly_wh == b.raw_hourly_wh
-    assert a.daily_kwh == b.daily_kwh
-    assert a.raw_daily_kwh == b.raw_daily_kwh
-    assert a.correction_source == b.correction_source
-    assert a.p10_watts == b.p10_watts
-    assert a.p50_watts == b.p50_watts
-    assert a.p90_watts == b.p90_watts
-    assert a.p10_hourly_wh == b.p10_hourly_wh
-    assert a.p50_hourly_wh == b.p50_hourly_wh
-    assert a.p90_hourly_wh == b.p90_hourly_wh
-    assert len(a.plane_results) == len(b.plane_results)
-    for pa, pb in zip(a.plane_results, b.plane_results, strict=True):
-        assert pa.name == pb.name
-        assert pa.watts == pb.watts
-        assert pa.raw_watts == pb.raw_watts
-        assert pa.beam_watts == pb.beam_watts
-        assert pa.diffuse_watts == pb.diffuse_watts
-        assert pa.kc == pb.kc
-        assert pa.beam_ref_watts == pb.beam_ref_watts
-        assert pa.diffuse_ref_watts == pb.diffuse_ref_watts
+    # Both runs use the CURRENT engine/result schema; only the plane-physics
+    # primitives are replaced by the frozen reference. Dataclass equality
+    # recursively includes every field, so AC/slow/diagnostic additions cannot
+    # silently fall outside this whole-result equivalence proof.
+    assert a == b
 
 
 # ===========================================================================

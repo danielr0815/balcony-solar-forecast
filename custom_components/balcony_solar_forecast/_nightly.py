@@ -53,6 +53,8 @@ from .const import (
     LEARNER_LAYER_SLOW,
     NIGHTLY_CATCHUP_MAX_DAYS,
     SHADEMAP_MEASURED_CLEAR_MIN_FRAC,
+    SLOT_HOURS,
+    SLOT_MINUTES,
 )
 from .core import (
     IssuedSnapshot,
@@ -174,32 +176,13 @@ async def async_nightly_job(coord, now: datetime | None = None) -> None:
 
 
 def catchup_days(coord, latest: date) -> list[date]:
-    """Closed local days to (re)process, oldest first, bounded and idempotent.
+    """Revisit the bounded window, including holes before newer recorded days.
 
-    Sweeps from the day after the newest already-recorded actuals up to
-    ``latest`` (yesterday), capped at NIGHTLY_CATCHUP_MAX_DAYS so a long
-    outage does not fan out unboundedly. Every step keyed by ISO date is
-    idempotent, so re-processing an already-trained day is safe (the
-    date-keyed store guards make it a no-op where state already reflects it).
+    Actuals, training, scoring and inverter calibration have independent
+    date guards: a successful newer step must never hide an older failed one.
     """
-    try:
-        recorded = coord._store.actuals_dates()
-    except Exception:  # pragma: no cover - defensive
-        recorded = []
-    start = latest - timedelta(days=NIGHTLY_CATCHUP_MAX_DAYS - 1)
-    if recorded:
-        newest = date.fromisoformat(recorded[-1])
-        candidate = newest + timedelta(days=1)
-        if candidate > start:
-            start = candidate
-    if start > latest:
-        start = latest
-    days: list[date] = []
-    d = start
-    while d <= latest:
-        days.append(d)
-        d += timedelta(days=1)
-    return days
+    return [latest - timedelta(days=offset)
+            for offset in reversed(range(NIGHTLY_CATCHUP_MAX_DAYS))]
 
 
 async def snapshot_issued(coord, today: date) -> None:
@@ -304,7 +287,7 @@ def per_plane_modeled(coord, iso: str) -> dict[str, PlaneHourlyModeled]:
         start_utc = dt_util.as_utc(start)
         if dt_util.as_local(start_utc).date().isoformat() != iso:
             continue
-        mid = start_utc + timedelta(minutes=7, seconds=30)
+        mid = start_utc + timedelta(minutes=SLOT_MINUTES / 2)
         _az, el = solpos.sun_position(
             mid, coord._site.latitude, coord._site.longitude
         )
@@ -331,16 +314,16 @@ def per_plane_modeled(coord, iso: str) -> dict[str, PlaneHourlyModeled]:
                 continue
             hkey = _hour_key(start)
             if i < len(pr.beam_ref_watts):
-                beam_wh[hkey] = beam_wh.get(hkey, 0.0) + pr.beam_ref_watts[i] * 0.25
+                beam_wh[hkey] = beam_wh.get(hkey, 0.0) + pr.beam_ref_watts[i] * SLOT_HOURS
             if i < len(pr.diffuse_ref_watts):
-                diffuse_wh[hkey] = diffuse_wh.get(hkey, 0.0) + pr.diffuse_ref_watts[i] * 0.25
+                diffuse_wh[hkey] = diffuse_wh.get(hkey, 0.0) + pr.diffuse_ref_watts[i] * SLOT_HOURS
             if i < len(raw_series):
-                raw_wh[hkey] = raw_wh.get(hkey, 0.0) + raw_series[i] * 0.25
+                raw_wh[hkey] = raw_wh.get(hkey, 0.0) + raw_series[i] * SLOT_HOURS
             if i < len(slow_series):
-                slow_wh[hkey] = slow_wh.get(hkey, 0.0) + slow_series[i] * 0.25
+                slow_wh[hkey] = slow_wh.get(hkey, 0.0) + slow_series[i] * SLOT_HOURS
             if i < len(corrected_series):
                 corrected_wh[hkey] = (
-                    corrected_wh.get(hkey, 0.0) + corrected_series[i] * 0.25
+                    corrected_wh.get(hkey, 0.0) + corrected_series[i] * SLOT_HOURS
                 )
         # Store trim: the issued ring keeps 90 days of these — drop NIGHT
         # hours (all-zero, nothing to train on: the trainer skips beam<=0
@@ -544,6 +527,8 @@ async def train_inverter_cal(coord, day: date) -> None:
     if not ac_entity:
         return  # no whole-site AC meter -> calibration is a pure no-op
     iso = day.isoformat()
+    if coord._store.is_inverter_day_trained(iso):
+        return
     # Summed per-module DC hourly actuals (already read + stored for the DC
     # learners earlier in the sweep): {iso_hour: wh}. Absent -> nothing to
     # calibrate against (a later catch-up re-runs the day once LTS is complete).
@@ -643,6 +628,7 @@ async def train_inverter_cal(coord, day: date) -> None:
         return  # every ratio was out of band -> nothing folded, state unchanged
     coord._inverter_cal_state = new_state
     coord._persist_inverter_cal_state()
+    coord._store.mark_inverter_day_trained(iso)
 
 
 def train_day_ahead(

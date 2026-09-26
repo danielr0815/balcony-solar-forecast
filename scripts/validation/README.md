@@ -68,18 +68,34 @@ python validate.py --offline --data-dir bsf_pull_20260801_0900
 | `--eta 0.9248` | DC→AC-Fallback-Wirkungsgrad (nur relevant, solange `get_issued_forecast` kein `hourly_wh_ac` liefert) |
 | `--entry-id ID` | nur nötig bei mehreren konfigurierten Sites |
 
-Exit-Code: `0` = alles grün, `1` = nur WARN, `2` = mindestens ein FAIL
-(automatisierbar, z. B. wöchentlicher Task).
+Gesamtstatus und Exit-Code: `0` = vollständig `PASS`, `1` = `WARN` oder
+`INCOMPLETE`, `2` = `FAIL` oder `ERROR` (auch Fetch-/Datenfehler).
+Fehlende Dateien, Checks oder erforderliche Teilbelege ergeben `INCOMPLETE`.
+Eine interne Check-Ausnahme ist `ERROR`; die übrigen Checks laufen weiter.
+`Deployment validiert` erscheint nur, wenn alle acht Prüfbereiche vollständig
+und erfolgreich auswertbar sind. Der JSON-Report enthält `summary.status`
+und die IDs unvollständiger Prüfbereiche in `summary.incomplete`.
 
-### Offline-Selbsttest (Kalibrierungsnachweis)
+### Offline-Wiederholung und synthetischer Softwaretest
 
 ```powershell
 python validate.py --offline --data-dir ..\hadata
 ```
 
-Erwartung auf der VOR-Fix-Woche: **C1–C7 FAIL, C8 PASS** (Exit 2). Damit ist
-belegt, dass die Checks die bekannten Defekte tatsächlich erkennen und die
-Regressionswachen nicht fälschlich anschlagen.
+Erwartung auf dem ursprünglichen privaten Paket der VOR-Fix-Woche:
+**C1–C7 FAIL, C8 PASS** (Exit 2). Dieses Paket ist nicht im Repository; seine
+historische Kalibrierung lässt sich aus dem Checkout allein nicht nachweisen.
+
+Reproduzierbare Softwaretests liegen in `tests/test_review_tooling_validation.py`.
+`tests/helpers/validation_bundle.py` erzeugt synthetische, versionierte
+Zwei-Tage-Pakete ohne private Daten: vollständig PASS, gezielte Überprognose
+FAIL, fehlende Belege INCOMPLETE und eine Check-Ausnahme ERROR. Diese Tests
+prüfen die Berechnung und den CLI-Status, nicht die historische Eignung der
+anlagenspezifischen Juli-Schwellen:
+
+```bash
+uv run pytest tests/test_review_tooling_validation.py -p no:homeassistant
+```
 
 ---
 

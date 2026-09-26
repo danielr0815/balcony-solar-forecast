@@ -9,8 +9,9 @@ We synthesise a lightweight ``balcony_solar_forecast`` package whose
 ``__init__`` is empty, mapped at the real source directory, then let the
 real submodules (``const``, ``core``, ``core.types``, ``fetcher``) load
 under it via normal import machinery. ``store.py`` / ``coordinator.py`` /
-the root ``__init__`` are NOT imported here (they need HA); their syntax is
-covered by ``python -m compileall`` in CI.
+the root ``__init__`` are NOT imported here (they need HA). Portable tests load
+them with explicit boundary fakes; tests/integration runs them separately against
+real HA with --confcutdir=tests/integration, keeping these shims out of that run.
 """
 
 from __future__ import annotations
@@ -19,6 +20,9 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType
+
+# The real HA suite must run in a separate process without this bootstrap.
+collect_ignore = ["integration"]
 
 _PKG = "balcony_solar_forecast"
 _SRC = Path(__file__).resolve().parents[1] / "custom_components" / _PKG

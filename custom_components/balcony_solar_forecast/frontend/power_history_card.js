@@ -11,7 +11,7 @@
  * hour (a coloured segment per module M1…M8) plus a dashed FORECAST line, with a
  * hover crosshair that lists every module's value AND the total for that hour.
  *
- * ZERO dependencies: plain `HTMLElement` + shadow DOM + programmatic SVG via
+ * No external dependencies: plain `HTMLElement` + shadow DOM + programmatic SVG via
  * `document.createElementNS`. No lit, no CDN imports, no build step. Cache-
  * busting is handled entirely by the versioned resource URL (`?v=<version>`),
  * so this file carries no version string.
@@ -21,7 +21,7 @@
  *                         and `source_names` (plane names M1…M8) attributes.
  *   2. Measured bars    — `recorder/statistics_during_period` (period "hour",
  *                         types ["mean"]) for the sources, over the selected day's
- *                         [00:00, +24h) local window; hourly Wh per module =
+ *                         [local midnight, next local midnight) HA-time-zone window; hourly Wh per module =
  *                         mean W × 1 h. Refetched on connect, every 5 minutes, and
  *                         when the local day rolls — but ONLY while viewing today /
  *                         the current week (a past view is static).
@@ -45,6 +45,12 @@
  *
  * It is self-contained and imports nothing from the sibling shade-profile card.
  */
+
+// Propagate the resource cache-buster to every local dependency (SPEC §18.5).
+const dependency = (name) => new URL(`./${name}${new URL(import.meta.url).search}`, import.meta.url);
+const { ensureRegistry, resolveEntities, callEntryService } = await import(dependency("card_data.js"));
+const { pressed, describeChart, dataTable } = await import(dependency("card_ui.js"));
+const { SiteCalendar } = await import(dependency("site_calendar.js"));
 
 const CARD_TAG = "balcony-power-history-card";
 
@@ -83,39 +89,6 @@ const KEY_FORECAST = "energy_production_today";
 const RE_TOTAL = /^sensor\..*measured_dc_power_total$/;
 const RE_FORECAST = /^sensor\..*energy_production_today$/;
 
-// One entity-registry fetch per hass connection, shared by all card instances
-// (a WeakMap so a torn-down connection can be garbage-collected).
-const _registryCache = new WeakMap(); // hass -> Promise<list|null>
-
-/** Fetch the entity registry once; null when unreadable (regex fallback). */
-function entityRegistry(hass) {
-  if (!hass || typeof hass.callWS !== "function") return Promise.resolve(null);
-  let p = _registryCache.get(hass);
-  if (!p) {
-    p = hass
-      .callWS({ type: "config/entity_registry/list" })
-      .then((list) => (isArray(list) ? list : null))
-      .catch(() => null);
-    _registryCache.set(hass, p);
-  }
-  return p;
-}
-
-/** entity_id of OUR entity whose unique_id ends with `_{key}`, or undefined. */
-function byUniqueId(list, key) {
-  if (!list) return undefined;
-  const suffix = `_${key}`;
-  for (const e of list) {
-    // Platform-gated: a foreign integration's look-alike unique_id suffix must
-    // never be claimed as ours.
-    if (!e || e.platform !== "balcony_solar_forecast") continue;
-    if (typeof e.unique_id === "string" && e.unique_id.endsWith(suffix)) {
-      return e.entity_id;
-    }
-  }
-  return undefined;
-}
-
 // Measured-statistics refetch cadence (ms) — the recorder writes hourly LTS on
 // its own schedule, so 5 min is ample and cheap.
 const REFETCH_MS = 5 * 60 * 1000;
@@ -123,6 +96,9 @@ const REFETCH_MS = 5 * 60 * 1000;
 // Tiny i18n dict keyed off the two-letter `hass.language`; English fallback.
 const I18N = {
   en: {
+    table: "Values as a table", time: "Time",
+    chartDescription: "Measured DC energy per module and DC forecast. Detailed values follow in a table.",
+    statisticsError: "Statistics lookup failed.", lastSuccess: "Last successful update:",
     title: "Hourly production per module",
     total: "Total",
     forecast: "Forecast",
@@ -151,6 +127,9 @@ const I18N = {
     weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
   },
   de: {
+    table: "Werte als Tabelle", time: "Zeit",
+    chartDescription: "Gemessene DC-Energie je Modul und DC-Prognose. Detailwerte stehen in der folgenden Tabelle.",
+    statisticsError: "Statistik-Abruf fehlgeschlagen.", lastSuccess: "Letzte erfolgreiche Aktualisierung:",
     title: "Stündliche Produktion je Modul",
     total: "Gesamt",
     forecast: "Prognose",
@@ -182,7 +161,6 @@ const I18N = {
 };
 
 const SVGNS = "http://www.w3.org/2000/svg";
-const HOURS = 24;
 
 /** Create an SVG element with attributes (skips undefined/null) + children. */
 function svg(tag, attrs, children) {
@@ -199,89 +177,6 @@ function svg(tag, attrs, children) {
 
 function isArray(x) {
   return Array.isArray(x);
-}
-
-/** Two-digit zero-padded hour ("0" → "00"). */
-function pad2(n) {
-  return n < 10 ? `0${n}` : `${n}`;
-}
-
-/**
- * Coerce a statistics `start`/`end` (ms-epoch NUMBER per the HA serializer, but
- * tolerate an ISO string) or an ISO slot key into a Date, or null.
- */
-function toDate(v) {
-  if (typeof v === "number" && Number.isFinite(v)) return new Date(v);
-  if (typeof v === "string" && v.trim() !== "") {
-    // A bare numeric string is an epoch; anything with date punctuation is ISO.
-    if (/^-?\d+$/.test(v.trim())) return new Date(Number(v));
-    const d = new Date(v);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
-  return null;
-}
-
-/** Local hour [0..23] of a statistics start / ISO key, or -1 if unparseable. */
-function localHourOf(v) {
-  const d = toDate(v);
-  return d ? d.getHours() : -1;
-}
-
-/** ISO instant of the current LOCAL midnight (as a UTC-anchored string). */
-function localMidnightISO() {
-  const now = new Date();
-  return new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
-    0,
-    0,
-    0,
-    0,
-  ).toISOString();
-}
-
-/** Stable key for the current local calendar day (day-roll detection). */
-function localDayKey() {
-  const now = new Date();
-  return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(
-    now.getDate(),
-  )}`;
-}
-
-/** Local midnight Date of TODAY + `offset` days (offset ≤ 0 = today/past). */
-function dayAt(offset) {
-  const now = new Date();
-  return new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate() + offset,
-    0,
-    0,
-    0,
-    0,
-  );
-}
-
-/** Local ISO calendar date ("YYYY-MM-DD") of a Date — the service's date key. */
-function isoDateOf(d) {
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-}
-
-/** Stable "YYYY-MM-DD" key of a statistics start / ISO slot key, or "" if bad. */
-function localDayKeyOf(v) {
-  const d = toDate(v);
-  return d ? isoDateOf(d) : "";
-}
-
-/** "d.M." (no year) — week-axis + short date label. */
-function shortDate(d) {
-  return `${d.getDate()}.${d.getMonth() + 1}.`;
-}
-
-/** "d.M.Y" — the week label's trailing (window-end) date. */
-function shortDateYear(d) {
-  return `${d.getDate()}.${d.getMonth() + 1}.${d.getFullYear()}`;
 }
 
 /** "d.M.Y" of an ISO "YYYY-MM-DD" date key (falls back to the raw string). */
@@ -343,9 +238,9 @@ class BalconyPowerHistoryCard extends HTMLElement {
     this._moduleSig = "";
     // Derived render inputs.
     this._modules = []; // [{ id, name, color }]
-    this._dayBars = {}; // stat_id -> number[24] hourly Wh (day mode)
+    this._dayBars = {}; // stat_id -> number[23/24/25] hourly Wh (day mode)
     this._weekBars = {}; // stat_id -> number[7] daily Wh (week mode)
-    this._dayForecast = null; // number[24] hourly Wh, or null (no line)
+    this._dayForecast = null; // number[23/24/25] hourly Wh, or null (no line)
     this._weekForecast = null; // (number|null)[7] daily forecast Wh; null = gap
     // Per-window issued-total cache {windowKey: {isoDate: wh|null}} so navigating
     // back to an already-fetched week never refires its per-day service calls.
@@ -361,6 +256,8 @@ class BalconyPowerHistoryCard extends HTMLElement {
     this._loadState = "loading"; // "loading" | "ok" | "empty" | "error"
     // Fetch bookkeeping.
     this._timer = null;
+    this._lastSuccess = null;
+    this._weekForecastError = false;
     // localDayKey of the last kicked live fetch. Deliberately NOT named after
     // the `_fetchDay(...)` METHOD: assigning an instance property with a
     // method's name shadows that method, which turned the first fetch into a
@@ -368,9 +265,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
     this._liveDayKey = undefined;
     this._fetchSeq = 0; // generation token — a stale async fetch is ignored
     // Entity-registry discovery state (i18n-proof unique_id match): the fetched
-    // registry list plus the one-shot guard for its fetch.
+    // registry list plus the per-connection in-flight request guard.
     this._registryList = null;
-    this._registryRequested = false;
+    this._registryRequest = null;
+    this._registryConnection = null;
   }
 
   // --- Lovelace card API --------------------------------------------------
@@ -381,6 +279,9 @@ class BalconyPowerHistoryCard extends HTMLElement {
     this._rendered = false;
     this._lastForecast = undefined;
     this._moduleSig = "";
+    this._liveDayKey = undefined;
+    this._fetchSeq += 1;
+    this._weekForecastCache = {};
   }
 
   getCardSize() {
@@ -390,19 +291,12 @@ class BalconyPowerHistoryCard extends HTMLElement {
   /** Picker preview: return discovered ids so the preview renders live data.
    * Static and sync, so it can only use the entity_id regex fallback — the
    * registry (unique_id) discovery runs once the card itself is mounted. */
-  static getStubConfig(hass) {
-    const find = (re) => {
-      if (!hass || !hass.states) return undefined;
-      for (const id of Object.keys(hass.states)) if (re.test(id)) return id;
-      return undefined;
-    };
-    return {
-      total_sensor: find(RE_TOTAL),
-      forecast_sensor: find(RE_FORECAST),
-    };
+  static getStubConfig() {
+    return {};
   }
 
   connectedCallback() {
+    if (this._hass) this.hass = this._hass;
     if (!this._timer) {
       // The 5-min auto-refresh only fires while viewing the live window (today /
       // current week); a past view is static, so it is never refetched on a tick.
@@ -415,6 +309,8 @@ class BalconyPowerHistoryCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this._fetchSeq += 1;
+    this._liveDayKey = undefined;
     if (this._timer) {
       clearInterval(this._timer);
       this._timer = null;
@@ -426,7 +322,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     if (!this._config) return;
     // Kick the first (or, while live, a new-day) statistics fetch as hass arrives.
     this._ensureFetch();
-    // Kick the one-shot registry discovery (unique_id match; regex until then).
+    // Start connection-scoped registry discovery; failed attempts may retry.
     this._ensureRegistry(hass);
 
     const ids = this._resolveIds(hass);
@@ -484,6 +380,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
 
   /** A nav/toggle click refetches the new window and fully re-renders. */
   _reload() {
+    this._dayBars = {};
+    this._weekBars = {};
+    this._lastSuccess = null;
+    this._weekForecastError = false;
     this._loadState = "loading";
     // Loading-neutral forecast state BEFORE the render: the previous selection's
     // line (or missing/error note) must not linger while the new window loads —
@@ -505,48 +405,36 @@ class BalconyPowerHistoryCard extends HTMLElement {
     return I18N[lang] || I18N.en;
   }
 
-  _resolveIds(hass) {
-    const c = this._config;
-    // Registry unique_id match FIRST (language-stable), entity_id regex only
-    // as the fallback while the registry fetch is still in flight (or
-    // unavailable). An explicitly configured id always wins.
-    const find = (key, re) => {
-      const hit = byUniqueId(this._registryList, key);
-      if (hit) return hit;
-      if (!hass || !hass.states) return undefined;
-      for (const id of Object.keys(hass.states)) if (re.test(id)) return id;
-      return undefined;
-    };
-    return {
-      total_sensor: c.total_sensor || find(KEY_TOTAL, RE_TOTAL),
-      forecast_sensor: c.forecast_sensor || find(KEY_FORECAST, RE_FORECAST),
-    };
+  _calendar() {
+    const tz = this._hass?.config?.time_zone;
+    if (!this._siteCalendar || this._calendarZone !== tz) {
+      this._siteCalendar = new SiteCalendar(tz);
+      this._calendarZone = tz;
+    }
+    return this._siteCalendar;
   }
 
-  /**
-   * Kick the ONE entity-registry fetch discovery needs (the i18n-proof
-   * unique_id match). Sync hass pushes run on the regex fallback until the
-   * promise lands; when the registry then changes a resolved id, the whole
-   * setter path is re-run so module list, statistics fetch and render all pick
-   * up the corrected ids (the fetch's day-key guard is reset for that).
-   */
+  _dayHours() {
+    const calendar = this._calendar();
+    const start = calendar.dayAt(this._offset);
+    const key = `${calendar.timeZone}/${start.toISOString()}`;
+    if (this._dayHoursKey !== key) {
+      this._dayHoursKey = key;
+      this._dayHoursCache = calendar.hours(start);
+    }
+    return this._dayHoursCache;
+  }
+  _hourIndex(value) { return this._calendar().hourIndex(value, this._calendar().dayAt(this._offset)); }
+
+  _resolveIds(hass) {
+    return resolveEntities(this._config, this._registryList, hass, [
+      ["total_sensor", KEY_TOTAL, RE_TOTAL],
+      ["forecast_sensor", KEY_FORECAST, RE_FORECAST],
+    ]);
+  }
+
   _ensureRegistry(hass) {
-    if (this._registryRequested) return;
-    this._registryRequested = true;
-    const before = this._resolveIds(hass);
-    entityRegistry(hass).then((list) => {
-      if (!list || this._hass !== hass || !this.isConnected) return;
-      this._registryList = list;
-      const after = this._resolveIds(hass);
-      if (
-        before.total_sensor === after.total_sensor &&
-        before.forecast_sensor === after.forecast_sensor
-      ) {
-        return;
-      }
-      this._liveDayKey = undefined; // re-arm the first-fetch kick
-      this.hass = hass; // guarded: _registryRequested is already spent
-    });
+    return ensureRegistry(this, hass);
   }
 
   /** Module list [{id, name, color}] from the total sensor's attributes. */
@@ -561,7 +449,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     }));
   }
 
-  /** Forecast sensor's 15-min `wh_period` → the live TODAY line (number[24]). */
+  /** Forecast sensor's 15-min `wh_period` → the live TODAY line (number[23/24/25]). */
   _recomputeForecast(forecast) {
     if (this._config.hours_forecast === false) {
       this._dayForecast = null;
@@ -576,10 +464,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
       this._forecastState = "none";
       return;
     }
-    const arr = new Array(HOURS).fill(0);
+    const arr = new Array(this._dayHours().length).fill(0);
     let any = false;
     for (const iso in wh) {
-      const h = localHourOf(iso);
+      const h = this._hourIndex(iso);
       if (h < 0) continue;
       const v = Number(wh[iso]);
       if (!Number.isFinite(v)) continue;
@@ -596,13 +484,13 @@ class BalconyPowerHistoryCard extends HTMLElement {
   _ensureFetch() {
     if (!this._hass || !this.isConnected) return;
     if (this._liveDayKey === undefined) {
-      this._liveDayKey = localDayKey();
+      this._liveDayKey = this._calendar().key();
       this._fetch();
       return;
     }
     // Day-roll handling applies ONLY to the live window; a past view is static.
     if (this._isLive()) {
-      const day = localDayKey();
+      const day = this._calendar().key();
       if (this._liveDayKey !== day) {
         this._liveDayKey = day;
         this._fetch();
@@ -640,7 +528,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     if (!hass || typeof hass.callWS !== "function") return;
     const sources = this._sources(hass);
     if (!sources.length) return;
-    if (this._isLive()) this._liveDayKey = localDayKey();
+    if (this._isLive()) this._liveDayKey = this._calendar().key();
     const seq = ++this._fetchSeq; // any newer fetch/selection supersedes this one
     if (this._view === "week") {
       await this._fetchWeek(hass, sources, seq);
@@ -651,8 +539,8 @@ class BalconyPowerHistoryCard extends HTMLElement {
 
   /** Day view: hourly means over [selected 00:00, next 00:00) → Wh, +line. */
   async _fetchDay(hass, sources, seq) {
-    const start = dayAt(this._offset);
-    const end = dayAt(this._offset + 1); // next LOCAL midnight (DST-exact)
+    const start = this._calendar().dayAt(this._offset);
+    const end = this._calendar().dayAt(this._offset + 1); // next LOCAL midnight (DST-exact)
     const now = new Date();
     // Today stops at "now" (matches the original live behaviour); a past day
     // spans the whole local day.
@@ -683,7 +571,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
       this._render();
       return;
     }
-    await this._fetchIssued(hass, isoDateOf(start), seq);
+    await this._fetchIssued(hass, this._calendar().key(start), seq);
     if (seq !== this._fetchSeq) return;
     this._render();
   }
@@ -693,9 +581,9 @@ class BalconyPowerHistoryCard extends HTMLElement {
     // The window ENDS at the selected day; step back 6 days for its start. The
     // seven local-midnight day starts drive both the query and the bucketing.
     const days = [];
-    for (let i = 0; i < 7; i++) days.push(dayAt(this._offset - 6 + i));
+    for (let i = 0; i < 7; i++) days.push(this._calendar().dayAt(this._offset - 6 + i));
     const start = days[0];
-    const end = this._offset === 0 ? new Date() : dayAt(this._offset + 1);
+    const end = this._offset === 0 ? new Date() : this._calendar().dayAt(this._offset + 1);
     let result;
     try {
       result = await hass.callWS({
@@ -736,25 +624,28 @@ class BalconyPowerHistoryCard extends HTMLElement {
       this._weekForecast = null;
       return;
     }
-    const todayIso = isoDateOf(new Date());
-    const key = `${isoDateOf(days[0])}_${isoDateOf(days[6])}`;
+    const todayIso = this._calendar().key(new Date());
+    const key = `${this._calendar().key(days[0])}_${this._calendar().key(days[6])}`;
     const cached = this._weekForecastCache[key] || {};
     const lookups = [];
+    let failed = false;
     for (const d of days) {
-      const iso = isoDateOf(d);
+      const iso = this._calendar().key(d);
       if (iso === todayIso || iso in cached) continue;
       lookups.push(
-        this._issuedTotal(hass, iso).then((wh) => {
-          cached[iso] = wh;
+        this._issuedTotal(hass, iso).then((result) => {
+          if (result.status === "error") failed = true;
+          else cached[iso] = result.value;
         }),
       );
     }
     if (lookups.length) await Promise.all(lookups);
     if (seq !== this._fetchSeq) return;
     this._weekForecastCache[key] = cached;
+    this._weekForecastError = failed;
     const totals = new Array(7).fill(null);
     for (let i = 0; i < 7; i++) {
-      const iso = isoDateOf(days[i]);
+      const iso = this._calendar().key(days[i]);
       if (iso === todayIso) {
         // Live value — recomputed on every (5-min) refresh, never cached.
         totals[i] = this._liveForecastTotal(hass);
@@ -765,33 +656,19 @@ class BalconyPowerHistoryCard extends HTMLElement {
     this._weekForecast = totals;
   }
 
-  /** One issued lookup → that day's total Wh, or null (no snapshot / failed). */
+  /** Only confirmed archive results are cached; a transport error is retryable. */
   async _issuedTotal(hass, iso) {
     try {
-      const res = await hass.callWS({
-        type: "call_service",
-        domain: "balcony_solar_forecast",
-        service: "get_issued_forecast",
-        service_data: { date: iso },
-        return_response: true,
-      });
-      const resp = res && res.response;
-      const result = resp && resp.result;
-      if (!result || typeof result !== "object" || result.available === false) {
-        return null;
-      }
+      const result = await callEntryService(this, hass, "get_issued_forecast", { date: iso });
+      if (!result || typeof result !== "object") throw new Error("Invalid forecast response");
+      if (result.available === false) return { status: "missing", value: null };
       let total = 0;
-      const wh = result.hourly_wh;
-      if (wh && typeof wh === "object") {
-        for (const k in wh) {
-          const v = Number(wh[k]);
-          if (Number.isFinite(v)) total += v;
-        }
+      for (const value of Object.values(result.hourly_wh || {})) {
+        if (Number.isFinite(Number(value))) total += Number(value);
       }
-      return total;
-    } catch (_e) {
-      // A failed week-day lookup degrades to a gap (never breaks the view).
-      return null;
+      return { status: "available", value: total };
+    } catch (_error) {
+      return { status: "error" };
     }
   }
 
@@ -825,15 +702,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
       // The frontend `callService` wrapper's return-response argument order has
       // churned across HA releases, so use the stable low-level websocket
       // `call_service` command with `return_response: true` (as the shade card).
-      const res = await hass.callWS({
-        type: "call_service",
-        domain: "balcony_solar_forecast",
-        service: "get_issued_forecast",
-        service_data: { date: iso },
-        return_response: true,
-      });
-      const resp = res && res.response;
-      result = resp && resp.result;
+      result = await callEntryService(this, hass, "get_issued_forecast", { date: iso });
     } catch (err) {
       if (seq !== this._fetchSeq) return;
       // The LOOKUP failed (websocket/service error) — NOT the same thing as
@@ -858,10 +727,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
       return;
     }
     const wh = result.hourly_wh;
-    const arr = new Array(HOURS).fill(0);
+    const arr = new Array(this._dayHours().length).fill(0);
     if (wh && typeof wh === "object") {
       for (const key in wh) {
-        const h = localHourOf(key);
+        const h = this._hourIndex(key);
         if (h < 0) continue;
         const v = Number(wh[key]);
         if (!Number.isFinite(v)) continue;
@@ -872,18 +741,19 @@ class BalconyPowerHistoryCard extends HTMLElement {
     this._forecastState = "issued";
   }
 
-  /** {stat_id: [{start, mean}]} → per-source number[24] hourly Wh (mean W×1h). */
+  /** {stat_id: [{start, mean}]} → per-source number[23/24/25] hourly Wh (mean W×1h). */
   _ingestDay(result, sources) {
     const bars = {};
     let any = false;
     for (const id of sources) {
       const rows = result && result[id];
-      const arr = new Array(HOURS).fill(0);
+      const arr = new Array(this._dayHours().length).fill(0);
       if (isArray(rows)) {
         for (const row of rows) {
-          const h = localHourOf(row && row.start);
+          const h = this._hourIndex(row && row.start);
           if (h < 0) continue;
-          const mean = Number(row && row.mean);
+          if (row?.mean === null || row?.mean === undefined) continue;
+          const mean = Number(row.mean);
           if (!this._validMean(id, mean)) continue;
           arr[h] += mean; // mean power (W) × 1 h = Wh
           any = true;
@@ -893,6 +763,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     }
     this._dayBars = bars;
     this._loadState = any ? "ok" : "empty";
+    this._lastSuccess = new Date();
   }
 
   /**
@@ -904,7 +775,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
    */
   _ingestWeek(result, sources, days) {
     const index = {};
-    for (let i = 0; i < 7; i++) index[isoDateOf(days[i])] = i;
+    for (let i = 0; i < 7; i++) index[this._calendar().key(days[i])] = i;
     const bars = {};
     let any = false;
     for (const id of sources) {
@@ -912,9 +783,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
       const arr = new Array(7).fill(0);
       if (isArray(rows)) {
         for (const row of rows) {
-          const i = index[localDayKeyOf(row && row.start)];
+          const i = index[this._calendar().key(row && row.start)];
           if (i === undefined) continue;
-          const mean = Number(row && row.mean);
+          if (row?.mean === null || row?.mean === undefined) continue;
+          const mean = Number(row.mean);
           if (!this._validMean(id, mean)) continue;
           arr[i] += mean; // mean power (W) × 1 h = hourly Wh
           any = true;
@@ -924,6 +796,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     }
     this._weekBars = bars;
     this._loadState = any ? "ok" : "empty";
+    this._lastSuccess = new Date();
   }
 
   // --- rendering ----------------------------------------------------------
@@ -954,6 +827,11 @@ class BalconyPowerHistoryCard extends HTMLElement {
     body.appendChild(this._header(t));
     if (this._view === "week") {
       body.appendChild(this._weekPlot(t));
+      if (this._weekForecastError) {
+        const note = this._message(t.forecastError);
+        note.setAttribute("role", "status");
+        body.appendChild(note);
+      }
     } else {
       // Provenance caption ABOVE the plot whenever a line is drawn: live curve
       // vs the archived ~01:30 issued stand (the operator must never guess).
@@ -965,6 +843,28 @@ class BalconyPowerHistoryCard extends HTMLElement {
       if (note) body.appendChild(note);
     }
     body.appendChild(this._legend(t));
+    body.appendChild(this._table(t));
+  }
+
+  _statisticsError(t) {
+    return t.statisticsError + (this._lastSuccess
+      ? ` ${t.lastSuccess} ${this._lastSuccess.toLocaleString(this._hass?.language || "en", {
+        timeZone: this._calendar().timeZone })}` : "");
+  }
+
+  _table(t) {
+    const week = this._view === "week";
+    const bars = week ? this._weekBars : this._dayBars;
+    const forecast = week ? this._weekForecast : this._dayForecast;
+    const count = week ? 7 : this._dayHours().length;
+    const rows = Array.from({ length: count }, (_, i) => {
+      const date = week ? this._calendar().dayAt(this._offset - 6 + i) : this._dayHours()[i];
+      const values = this._modules.map((m) => bars[m.id]?.[i] ?? 0);
+      return [week ? this._calendar().key(date) : this._calendar().hourLabel(date),
+        ...values.map(fmtVal), fmtVal(values.reduce((a, b) => a + b, 0)),
+        forecast?.[i] == null ? "—" : fmtVal(forecast[i])];
+    });
+    return dataTable(t.table, [t.time, ...this._modules.map((m) => m.name), t.total, t.forecast], rows);
   }
 
   /** Right-aligned caption above the day plot while a forecast line is drawn. */
@@ -990,7 +890,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     } else if (this._forecastState === "missing") {
       text = t.forecastMissing.replace(
         "{d}",
-        shortDateYear(dayAt(this._offset)),
+        this._calendar().shortDate(this._calendar().dayAt(this._offset), true),
       );
       if (this._oldestIssued) {
         text += t.archiveSince.replace(
@@ -1049,6 +949,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
       btn.type = "button";
       btn.textContent = text;
       btn.className = "toggle-btn" + (this._view === key ? " active" : "");
+      pressed(btn, this._view === key);
       btn.addEventListener("click", () => this._setView(key));
       toggle.appendChild(btn);
     }
@@ -1059,18 +960,18 @@ class BalconyPowerHistoryCard extends HTMLElement {
   /** The nav label: Today/Yesterday/date (day) or the 7-day window (week). */
   _navLabel(t) {
     if (this._view === "week") {
-      const end = dayAt(this._offset);
-      const start = dayAt(this._offset - 6);
-      return `${shortDate(start)}–${shortDateYear(end)}`;
+      const end = this._calendar().dayAt(this._offset);
+      const start = this._calendar().dayAt(this._offset - 6);
+      return `${this._calendar().shortDate(start)}–${this._calendar().shortDate(end, true)}`;
     }
     if (this._offset === 0) return t.today;
     if (this._offset === -1) return t.yesterday;
     const lang = ((this._hass && this._hass.language) || "en").replace("_", "-");
-    const d = dayAt(this._offset);
+    const d = this._calendar().dayAt(this._offset);
     try {
-      return d.toLocaleDateString(lang);
+      return d.toLocaleDateString(lang, { timeZone: this._calendar().timeZone });
     } catch (_e) {
-      return isoDateOf(d);
+      return this._calendar().key(d);
     }
   }
 
@@ -1165,7 +1066,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
   _dayPlot(t) {
     // --- domains ---------------------------------------------------------
     let dataMax = 0;
-    for (let h = 0; h < HOURS; h++) {
+    for (let h = 0; h < this._dayHours().length; h++) {
       let stack = 0;
       for (const mod of this._modules) {
         const v = (this._dayBars[mod.id] && this._dayBars[mod.id][h]) || 0;
@@ -1186,8 +1087,8 @@ class BalconyPowerHistoryCard extends HTMLElement {
     const m = { top: 14, right: 16, bottom: 28, left: 52 };
     const plotW = W - m.left - m.right;
     const plotH = H - m.top - m.bottom;
-    const colW = plotW / HOURS;
-    const X = (hourFloat) => m.left + (hourFloat / HOURS) * plotW;
+    const colW = plotW / this._dayHours().length;
+    const X = (hourFloat) => m.left + (hourFloat / this._dayHours().length) * plotW;
     const Y = (wh) => m.top + (1 - wh / yMax) * plotH;
 
     const el = svg("svg", {
@@ -1197,11 +1098,12 @@ class BalconyPowerHistoryCard extends HTMLElement {
       role: "img",
     });
 
+    describeChart(el, t.chartDescription);
     el.appendChild(this._axes(X, Y, axis, unitKwh, m, plotW, plotH));
 
     // --- stacked bars ----------------------------------------------------
     const barW = Math.max(1, colW - 3);
-    for (let h = 0; h < HOURS; h++) {
+    for (let h = 0; h < this._dayHours().length; h++) {
       const bx = X(h) + (colW - barW) / 2;
       let acc = 0;
       for (const mod of this._modules) {
@@ -1225,7 +1127,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     // --- forecast: dashed stepped line at the hour widths ----------------
     if (this._dayForecast) {
       const pts = [];
-      for (let h = 0; h < HOURS; h++) {
+      for (let h = 0; h < this._dayHours().length; h++) {
         const y = Y(this._dayForecast[h]);
         pts.push(`${X(h)},${y}`, `${X(h + 1)},${y}`);
       }
@@ -1246,7 +1148,8 @@ class BalconyPowerHistoryCard extends HTMLElement {
       // A PAST day with no bars is "no statistics for this range" (the recorder
       // may not have covered that day); today with none is "not yet".
       const empty = this._offset === 0 ? t.noStats : t.noStatsRange;
-      const note = this._loadState === "loading" ? t.loading : empty;
+      const note = this._loadState === "loading" ? t.loading
+        : this._loadState === "error" ? this._statisticsError(t) : empty;
       const text = svg("text", {
         x: m.left + plotW / 2,
         y: m.top + plotH / 2,
@@ -1276,7 +1179,8 @@ class BalconyPowerHistoryCard extends HTMLElement {
       crosshair,
       t,
       mode: "day",
-      cols: HOURS,
+      hours: this._dayHours(),
+      cols: this._dayHours().length,
       modules: this._modules,
       bars: this._dayBars,
       forecast: this._dayForecast,
@@ -1300,7 +1204,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
   _weekPlot(t) {
     const COLS = 7;
     const days = [];
-    for (let i = 0; i < COLS; i++) days.push(dayAt(this._offset - 6 + i));
+    for (let i = 0; i < COLS; i++) days.push(this._calendar().dayAt(this._offset - 6 + i));
 
     // --- domain: max stacked daily total across the 7 days ---------------
     let dataMax = 0;
@@ -1335,6 +1239,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
       role: "img",
     });
 
+    describeChart(el, t.chartDescription);
     el.appendChild(this._weekAxes(X, Y, axis, unitKwh, m, plotW, plotH, days, t));
 
     // --- stacked day bars ------------------------------------------------
@@ -1389,7 +1294,8 @@ class BalconyPowerHistoryCard extends HTMLElement {
     // --- empty / loading note --------------------------------------------
     if (this._loadState !== "ok") {
       const note =
-        this._loadState === "loading" ? t.loading : t.noStatsRange;
+        this._loadState === "loading" ? t.loading
+          : this._loadState === "error" ? this._statisticsError(t) : t.noStatsRange;
       const text = svg("text", {
         x: m.left + plotW / 2,
         y: m.top + plotH / 2,
@@ -1504,7 +1410,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
         "font-size": "10",
         "text-anchor": "middle",
       });
-      wd.textContent = (t.weekdays && t.weekdays[d.getDay()]) || "";
+      wd.textContent = (t.weekdays && t.weekdays[this._calendar().weekday(d)]) || "";
       g.appendChild(wd);
       const dt = svg("text", {
         x: cx,
@@ -1513,7 +1419,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
         "font-size": "9",
         "text-anchor": "middle",
       });
-      dt.textContent = shortDate(d);
+      dt.textContent = this._calendar().shortDate(d);
       g.appendChild(dt);
     }
 
@@ -1572,10 +1478,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
       g.appendChild(label);
     }
 
-    // X hour ticks every 3 h ("00" … "21"), fixed 0–24 axis.
-    for (let h = 0; h <= HOURS; h += 3) {
+    // X ticks every three elapsed hours; DST days contain 23 or 25 bins.
+    for (let h = 0; h <= this._dayHours().length; h += 3) {
       const x = X(h);
-      if (h < HOURS) {
+      if (h < this._dayHours().length) {
         const label = svg("text", {
           x: X(h + 0.5),
           y: m.top + plotH + 14,
@@ -1583,7 +1489,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
           "font-size": "10",
           "text-anchor": "middle",
         });
-        label.textContent = pad2(h);
+        label.textContent = this._calendar().parts(this._dayHours()[h]).hour;
         g.appendChild(label);
       }
       g.appendChild(
@@ -1628,10 +1534,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
     const rows = [];
     if (ctx.mode === "week") {
       const d = ctx.days[i];
-      const wd = (ctx.t.weekdays && ctx.t.weekdays[d.getDay()]) || "";
-      rows.push({ kind: "title", text: `${wd} ${shortDateYear(d)}` });
+      const wd = (ctx.t.weekdays && ctx.t.weekdays[this._calendar().weekday(d)]) || "";
+      rows.push({ kind: "title", text: `${wd} ${this._calendar().shortDate(d)}` });
     } else {
-      rows.push({ kind: "title", text: `${pad2(i)}:00–${pad2(i)}:59` });
+      rows.push({ kind: "title", text: this._calendar().hourLabel(ctx.hours[i]) });
     }
     let total = 0;
     for (const mod of ctx.modules) {

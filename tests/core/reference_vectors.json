@@ -69,7 +69,7 @@
       19,
       20
     ],
-    "note": "POA components use fixed synthetic GHI/DNI/DHI to isolate transposition. Compare poa_global (our beam+circumsolar+isotropic+ground sum) with tol max(2 W/m2, 1.5%). Sun el<=3 deg cases: no-explosion only, not equality (our Rb cap deviates)."
+    "note": "POA components use fixed synthetic GHI/DNI/DHI to isolate transposition. Compare poa_global (our beam+circumsolar+isotropic+ground sum) with tol max(2 W/m2, 0.5%). Sun el<=3 deg cases: no-explosion only, not equality (our Rb cap deviates)."
   },
   "solpos": [
     {

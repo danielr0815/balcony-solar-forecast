@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cross-platform dev-environment bootstrap for balcony-solar-forecast.
 
-Installs `uv` if it is missing, then runs ``uv sync --group dev`` — which
+Installs `uv` if it is missing, then runs ``uv sync --locked --group dev`` — which
 creates ``./.venv`` from ``uv.lock`` (the single source of truth, also used
 by CI) with the dev tooling: Home Assistant, pytest, pytest-cov,
 pytest-homeassistant-custom-component, ruff and mypy. The integration itself
@@ -11,7 +11,7 @@ packages only run the tests + linter/typer.
 Pure standard-library, so it runs on a fresh machine (Linux / macOS / WSL /
 Windows) before anything is installed. It is the single implementation behind
 ``scripts/setup-env.{sh,ps1}``; with `uv` already on PATH, plain
-``uv sync --group dev`` (or ``make install``) does the same thing directly.
+``uv sync --locked --group dev`` (or ``make install``) does the same thing directly.
 
 Usage::
 
@@ -65,14 +65,14 @@ def install_uv() -> str:
         sys.exit(
             "uv was installed but its executable is not findable. Add the "
             "pip user-script directory to PATH (see the warning above), then "
-            "run `uv sync --group dev`."
+            "run `uv sync --locked --group dev`."
         )
     return uv
 
 
 def main() -> None:
     uv = _find_uv() or install_uv()
-    _run([uv, "sync", "--group", "dev"])
+    _run([uv, "sync", "--locked", "--group", "dev"])
     print("\n[OK] Dev environment ready.", flush=True)
     print("     Test:  make test   (or: uv run pytest tests -p no:homeassistant)")
     print("     Lint:  make lint   (or: uv run ruff check .)")

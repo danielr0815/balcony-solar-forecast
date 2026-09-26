@@ -93,6 +93,7 @@ def test_register_services_registers_all_ten_idempotently():
 
 
 class _DataCoordinator:
+    last_update_success = True
     """Coordinator double carrying a flat served-forecast data dict."""
 
     def __init__(self, data) -> None:

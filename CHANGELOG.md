@@ -13,6 +13,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-26
+
+### Fixed
+
+- Retry older gaps inside the nightly catch-up window and give inverter
+  calibration its own persisted daily completion marker.
+- Validate complete weather time axes before replacing the last-good cache;
+  compare future coverage and allow recovery from an expired richer payload.
+- Hide stale forecast curves from actions and Energy after failed updates;
+  report current availability, weather age and errors in diagnostics.
+- Join entry-owned work before the final unload/shutdown write and serialize
+  nightly training, bootstrap, direct import, reset and rollback.
+- Reconstruct bootstrap slow-only power with the live thermal model and apply
+  the second group clamp before quantile training. Enforce live daily quantile
+  sample limits, taxonomy and finite configuration/store values.
+- Exclude saturated inverter measurements from intraday learning while keeping
+  unsaturated deficits learnable against the pre-clip reference.
+- Keep card discovery stable across HA state updates, bind all requests to the
+  selected entry, use HA-local 23/25-hour days and retry transient archive errors.
+  Distinguish recorder errors from missing data and add accessible value tables.
+- Distinguish AC point forecasts from empirical medians in labels and contracts.
+
+### Changed
+
+- Share plane physics and curve aggregation, define nested-data ownership,
+  remove an unsafe result-copy helper and require complete persistence interfaces.
+- Add meaningful regression, complete-result equivalence, architecture,
+  branch-coverage and targeted mutation checks; extract reusable test helpers.
+- Make validation report incomplete evidence separately, pin reference-vector
+  generation, enforce locked setup and exact HA minimum-version testing, and
+  validate the exact release commit before creating its public tag/release.
+- Update SPEC, bootstrap, dashboard and development documentation.
+
 ## [0.27.2] - 2026-09-26
 
 This patch release restores structural reconfiguration in Home Assistant.

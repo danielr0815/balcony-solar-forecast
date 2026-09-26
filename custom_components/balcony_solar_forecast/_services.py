@@ -585,6 +585,7 @@ async def _handle_install_dashboard(
         entity_map=entity_map,
         measured_entities=measured_entities,
         version=INTEGRATION_VERSION,
+        entry_id=entry_id,
     )
     try:
         await dash.async_save(config)

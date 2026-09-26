@@ -644,3 +644,21 @@ def _all_entity_ids(cards):
             if isinstance(val, str):
                 ids.add(val)
     return ids
+
+
+async def test_generated_cards_bind_services_to_selected_entry(monkeypatch):
+    """Explicit sensor IDs alone cannot scope historical/comparison services."""
+    dash = _FakeDash(load_missing=True)
+    hass = _FakeHass(
+        {"e1": _FakeCoordinator(),
+         "e2": _FakeCoordinator(entry=_FakeEntry("e2"))},
+        lovelace=_FakeLovelace({"balcony-solar": dash}),
+    )
+    _patch_registry(monkeypatch, _registry_for_all_keys("e2"))
+    await svc._handle_install_dashboard(
+        hass, _Call({"dashboard": "balcony-solar", "entry_id": "e2"})
+    )
+    cards = [c for c in dash.saved["views"][0]["cards"]
+             if c["type"].startswith("custom:balcony-")]
+    assert len(cards) == 2
+    assert all(c.get("entry_id") == "e2" for c in cards)

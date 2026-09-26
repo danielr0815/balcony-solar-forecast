@@ -35,7 +35,7 @@ from pathlib import Path
 
 from .. import const
 from . import bias as bias_mod
-from . import clearsky, electrical, horizon, solpos, transpose
+from . import clearsky, electrical, horizon, plane_physics, solpos
 from . import quantiles as quantiles_mod
 from . import shademap as shademap_mod
 from .types import (
@@ -109,6 +109,9 @@ class PlaneHourReconstruction:
     sun_az: float
     sun_el: float
     beam_share: float       # ungated beam DC / Wp (>5% quasi-clear gate)
+    # Retain POA, not only RAW-temperature DC labels: a learned tau changes
+    # cell heating, so rendering the issued slow curve must recompute DC.
+    poa: plane_physics.PlanePoaComponents
 
 
 @dataclass
@@ -173,8 +176,8 @@ def reconstruct_plane_hour(
 ) -> PlaneHourReconstruction:
     """Reconstruct one plane's modeled hour split using the repo's core/.
 
-    Mirrors ``engine._plane_poa`` exactly (same horizon beam gate + SVF diffuse
-    gate + snow albedo), but keeps the beam+circumsolar and diffuse+ground POA
+    Uses ``plane_physics`` shared with the engine (horizon + SVF + snow albedo),
+    but keeps the beam+circumsolar and diffuse+ground POA
     components SEPARATE so the shademap's beam-referenced transmittance can be
     trained. Returns the modeled DC energy split for the hour (Wh == mean W *
     1 h), plus the sun position, kc and beam_share needed for the gate + bin
@@ -189,63 +192,15 @@ def reconstruct_plane_hour(
     # resolution the single sample reduces exactly to clear_sky_index.
     kc = clearsky.hourly_kc(((wx.ghi, sun_el),))
 
-    comps = transpose.hay_davies_poa(
-        ghi=wx.ghi,
-        dni=wx.dni,
-        dhi=wx.dhi,
-        sun_az=sun_az,
-        sun_el=sun_el,
-        plane_az=plane.azimuth_deg,
-        plane_tilt=plane.tilt_deg,
-        albedo=albedo,
-        doy=doy,
+    comps = plane_physics.poa_components(
+        plane, svf, ghi=wx.ghi, dni=wx.dni, dhi=wx.dhi,
+        sun_az=sun_az, sun_el=sun_el, albedo=albedo, doy=doy,
+        beam_gain=beam_gain,
     )
-    beam = comps.get("beam", 0.0)
-    circ = comps.get("circumsolar", 0.0)
-    iso = comps.get("isotropic", 0.0)
-    ground = comps.get("ground", 0.0)
-
-    # Incidence-angle modifier (ASHRAE, const IAM_B0) — byte-identical to
-    # engine._plane_poa_components: applied to beam+circumsolar BEFORE the ungated
-    # reference so the bootstrap trains the same optics-corrected T as live.
-    cos_theta = comps.get("cos_theta")
-    if cos_theta is not None:
-        f_iam = transpose.ashrae_iam(cos_theta)
-        beam *= f_iam
-        circ *= f_iam
-
-    # Site bifacial beam gain (forensik T6) — byte-identical to
-    # engine._plane_poa_components: applied to beam+circumsolar BEFORE the ungated
-    # reference so future bootstraps reconstruct the SAME direct-share physics the
-    # live engine issues. Default 1.0 => no-op.
-    if beam_gain != 1.0:
-        beam *= beam_gain
-        circ *= beam_gain
-
-    # UNGATED beam+circumsolar POA (static tau = 1): the counterfactual clear-
-    # horizon beam the shademap references, so a shaded bin still has a non-zero
-    # modeled beam to divide by (SPEC §9.1 — the learned T REPLACES the static
-    # tau, so the reference must be un-attenuated).
-    beam_poa_ungated = max(0.0, beam + circ)
-
-    # Static horizon beam gate (identical rule to engine._plane_poa): the beam
-    # the live pure-physics engine actually issues, for the day-ahead bias.
-    static_tau = 1.0
-    horizon_elev = horizon.interp_elevation(plane, sun_az)
-    if sun_el <= horizon_elev:
-        # Pass sun_el so an inline tau_points elevation profile resolves at the
-        # true sun elevation (v0.22) — byte-for-byte the engine's
-        # ``_plane_poa_components`` gate. A row without a profile ignores it and
-        # the result is the pre-0.22 scalar tau, so a legacy backfill is
-        # unchanged; a tau_points row now gates the reconstructed beam with the
-        # SAME el-dependent tau the live engine issues (the SLOW-reference /
-        # day-ahead-bias mirror invariant).
-        static_tau = horizon.transmittance_at(plane, sun_az, doy, sun_el=sun_el)
-    beam_poa_gated = beam_poa_ungated * static_tau
-
-    # Diffuse sky-view gate: static per-plane isotropic reduction. The ground
-    # reflection is unaffected by the horizon (it comes from below).
-    diffuse_poa = max(0.0, iso * svf + ground)
+    raw = plane_physics.gate_split(comps, comps.static_tau)
+    beam_poa_ungated = raw.beam_poa_ungated
+    beam_poa_gated = raw.beam_poa
+    diffuse_poa = raw.diffuse_poa
 
     # DC power is NOT linear in the POA split (Ross cell temperature depends on
     # the TOTAL incident POA). The panel's real operating point is the GATED
@@ -277,6 +232,7 @@ def reconstruct_plane_hour(
         sun_az=sun_az,
         sun_el=sun_el,
         beam_share=beam_share,
+        poa=comps,
     )
 
 
@@ -540,6 +496,7 @@ def _process_day_impl(
             el_by_hour[hkey] = any_r.sun_el
 
     hours_sorted = sorted(kc_by_hour.keys())
+    temperature_by_hour = {wx.start.isoformat(): wx.temp_c for wx in day_weather}
 
     # Freeze the state that would have issued this historical day. Bootstrap is
     # a walk-forward simulation: today's labels may update tomorrow's model,
@@ -571,12 +528,7 @@ def _process_day_impl(
             r = recon[plane.name].get(hkey)
             if r is None:
                 continue
-            static_prior = (
-                (r.gated_total_wh - r.diffuse_wh) / r.beam_wh
-                if r.beam_wh > 0.0
-                else 1.0
-            )
-            static_prior = _clamp(static_prior, 0.0, 1.0)
+            static_prior = r.poa.static_tau
             pool = list(members_by_channel.get(plane.shade_channel, [plane.name]))
             if (
                 plane.shade_channel in pre_day_shademap.channels
@@ -591,7 +543,11 @@ def _process_day_impl(
                 doy=_doy_of(hkey),
                 static_prior=static_prior,
             )
-            slow_unclamped[plane.name] = r.beam_wh * tau + r.diffuse_wh
+            split = plane_physics.gate_split(r.poa, tau)
+            beam_dc, diffuse_dc = plane_physics.dc_split(
+                split, plane, temperature_by_hour[hkey],
+            )
+            slow_unclamped[plane.name] = beam_dc + diffuse_dc
         slow_clamped = electrical.clamp_groups(slow_unclamped, site.groups)
         for plane in planes:
             issued_slow_by_plane[plane.name][hkey] = slow_clamped.get(
@@ -741,12 +697,11 @@ def _process_day_impl(
     # live-trained one — same (cloud_class x day_part) taxonomy, same clamp
     # [QUANTILE_REL_ERR_MIN, MAX], same >QUANTILE_MIN_FORECAST_WH gate, same
     # date-window (QUANTILE_RING_DAYS) + count-cap. The per-day-per-bin cap
-    # (QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN) is enforced here so correlated hours
-    # of a single day do not over-weight a bin (the coarse hourly backfill).
+    # (QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN) is enforced by the common trainer,
+    # for both live and historical samples, including repeated same-day calls.
     iso_date = day_weather[0].start.date().isoformat()
     if iso_date > acc.last_iso_date:
         acc.last_iso_date = iso_date
-    per_bin_today: dict[str, int] = {}
     q_samples: list[quantiles_mod.QuantileSample] = []
     for wx in day_weather:
         hkey = wx.start.isoformat()
@@ -761,7 +716,6 @@ def _process_day_impl(
             continue
         cloud_class = _classify_cloud(wx, tz, elevation_deg=el_by_hour.get(hkey))
         day_part = _day_part_for_slot(wx.start, lon)
-        key = QuantileState.bin_key(cloud_class, day_part)
         # Use the exact serving function, including RLS_MIN_SAMPLES and the
         # solar-boundary blend. A raw cell theta with n<3 is learned state but
         # was NOT part of the issued curve and must not enter its residual.
@@ -770,11 +724,13 @@ def _process_day_impl(
             cloud_class=cloud_class,
             hours_from_noon=solpos.hours_from_solar_noon(wx.start, lon),
         )
-        corrected = theta * modeled_site
+        corrected_planes = electrical.correct_groups(
+            {p.name: issued_slow_by_plane[p.name].get(hkey, 0.0) for p in planes},
+            site.groups, factor=theta,
+        ).served
+        corrected = sum(corrected_planes[name] for name in metered)
         if corrected <= const.QUANTILE_MIN_FORECAST_WH:
             continue  # below-threshold hour never enters the ring (live parity)
-        if per_bin_today.get(key, 0) >= const.QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN:
-            continue  # cap correlated hours per bin per day (SPEC §12.6)
         q_samples.append(
             quantiles_mod.QuantileSample(
                 cloud_class=cloud_class,
@@ -783,12 +739,19 @@ def _process_day_impl(
                 corrected_wh=corrected,
             )
         )
-        per_bin_today[key] = per_bin_today.get(key, 0) + 1
     if q_samples:
+        previous_count = sum(
+            sum(entry[0] == iso_date for entry in ring)
+            for ring in acc.quantile_state.bins.values()
+        )
         acc.quantile_state = quantiles_mod.train_quantiles(
             acc.quantile_state, q_samples, training_date=iso_date
         )
-        acc.quantile_samples += len(q_samples)
+        current_count = sum(
+            sum(entry[0] == iso_date for entry in ring)
+            for ring in acc.quantile_state.bins.values()
+        )
+        acc.quantile_samples += current_count - previous_count
         contributed = True
 
     return contributed

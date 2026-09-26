@@ -37,8 +37,8 @@ from custom_components.balcony_solar_forecast.store import ForecastStore  # noqa
 
 # Reuse the coordinator scaffold and the HA-Store backend fake from the two
 # existing test modules (same import-reuse pattern as test_training_idempotence_rollback.py).
-from tests.test_coordinator_learning import _make_coordinator  # noqa: E402
-from tests.test_store_v2 import FakeStore  # noqa: E402
+from tests.helpers.coordinator import _make_coordinator  # noqa: E402
+from tests.helpers.store import FakeStore  # noqa: E402
 
 
 def _real_store() -> tuple[ForecastStore, FakeStore]:
@@ -96,7 +96,7 @@ async def test_trained_state_survives_simulated_restart():
     assert c2._bias_state.cells["clear|midday"].theta == pytest.approx(1.23)
 
 
-def test_call_store_setter_failure_logs_warning(caplog):
+def test_required_store_setter_failure_reaches_the_operation_boundary():
     c = _make_coordinator()
 
     class _Raising:
@@ -104,9 +104,5 @@ def test_call_store_setter_failure_logs_warning(caplog):
             raise RuntimeError("boom")
 
     c._store = _Raising()
-    with caplog.at_level(logging.WARNING):
-        c._call_store_setter("set_bias_state", c._bias_state)
-    assert any(
-        r.levelno >= logging.WARNING and "set_bias_state" in r.getMessage()
-        for r in caplog.records
-    )
+    with pytest.raises(RuntimeError, match="boom"):
+        c._persist_bias_state()

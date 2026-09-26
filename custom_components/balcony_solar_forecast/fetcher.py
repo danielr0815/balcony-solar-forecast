@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 from datetime import UTC, datetime, timedelta
 
@@ -38,6 +39,7 @@ from .const import (
     OPEN_METEO_MINUTELY_15,
     OPEN_METEO_MODEL,
     OPEN_METEO_URL,
+    SLOT_MINUTES,
 )
 from .core.types import WeatherSeries, WeatherSlot
 
@@ -216,13 +218,25 @@ def _parse_time(value: object) -> datetime:
     return dt.astimezone(UTC)
 
 
+def _regular_times(values: list, step: timedelta) -> list[datetime]:
+    """Reject duplicate, reversed, off-grid and gapped provider time axes."""
+    times = [_parse_time(value) for value in values]
+    if any(stamp.second or stamp.microsecond
+           or stamp.minute % int(step.total_seconds() / 60) for stamp in times):
+        raise FetchError("Open-Meteo time axis is off the expected grid", retryable=False)
+    if any(right - left != step for left, right in zip(times, times[1:], strict=False)):
+        raise FetchError("Open-Meteo time axis is not regular and increasing", retryable=False)
+    return times
+
+
 def _to_float(value: object) -> float | None:
     """Coerce an Open-Meteo scalar to float; None/absent stays None."""
     if value is None:
         return None
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        result = float(value)
+        return result if math.isfinite(result) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -255,7 +269,8 @@ def parse_weather(payload: dict) -> WeatherSeries:
     m15 = payload["minutely_15"]
     hourly = payload["hourly"]
 
-    times = [_parse_time(t) for t in m15["time"]]
+    times = _regular_times(m15["time"], timedelta(minutes=SLOT_MINUTES))
+    _regular_times(hourly["time"], timedelta(hours=1))
     ghi = m15[OPEN_METEO_MINUTELY_15[0]]  # shortwave_radiation
     dni = m15[OPEN_METEO_MINUTELY_15[1]]  # direct_normal_irradiance
     dhi = m15[OPEN_METEO_MINUTELY_15[2]]  # diffuse_radiation
@@ -271,7 +286,7 @@ def parse_weather(payload: dict) -> WeatherSeries:
     slots: list[WeatherSlot] = []
     for i, stamp in enumerate(times):
         # Stamp = interval end (backward-averaged); slot start = stamp − 15 min.
-        start = stamp - timedelta(minutes=15)
+        start = stamp - timedelta(minutes=SLOT_MINUTES)
         hour_key = start.replace(minute=0, second=0, microsecond=0)
         # snowfall is already cm (hourly); snow_depth stays metres.
         slots.append(

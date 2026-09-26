@@ -84,8 +84,10 @@ The response is always a summary: `days_used`, `days_skipped`, `date_range`,
 
 **Notes.** The run takes a few minutes (~2–5 min in the HA container for ~320
 days) and logs progress every ~50 reconstructed days; the CPU work runs off the
-event loop. It is serialised against the nightly training job by a per-site lock,
-and a second concurrent `run_bootstrap` is rejected with a clear error. Because it
+event loop. It is serialised against all learner mutations by a per-site lock,
+and a second concurrent `run_bootstrap` is rejected with a clear error. Reload
+or shutdown cancels the awaiting operation before its final store write; a
+pure reconstruction still running in the executor cannot import afterwards. Because it
 reads the recorder **in-process** (epoch-seconds statistics rows, not the
 WebSocket's milliseconds), it uses the same hour-key normalisation as the nightly
 actuals reader. A forecast-relevant config edit (see
@@ -97,7 +99,7 @@ the rollback snapshot lets you undo it.
 
 ## Prerequisites
 
-- **Python 3.13+** on the dev machine (matching `pyproject`'s
+- **Python 3.14.2+** on the dev machine (matching `pyproject`'s
   `requires-python`), with `aiohttp` installed:
 
   ```sh
@@ -154,11 +156,12 @@ several thousand quasi-clear shademap samples and all twelve (4 cloud classes ×
 |---|---|---|
 | `--ha-url` | yes | HA base URL for the WebSocket LTS pull. |
 | `--token` | no | HA long-lived access token; defaults to the `HA_LONG_LIVED_TOKEN` env var. |
-| `--start` | yes | Range start `YYYY-MM-DD` (UTC calendar). |
+| `--start` | yes | Range start `YYYY-MM-DD` in the selected site calendar. |
 | `--end` | yes | Range end `YYYY-MM-DD` (inclusive). |
 | `--out` | no | Output path (default `bootstrap.json`). |
 | `--site` | **yes*** | Your site object as JSON (`SiteConfig.from_dict` shape). |
 | `--use-default-site` | no | *Opt in to the shipped **reference** site instead of `--site`. Demo / tests / CI only — it is **not** your plant; logs a warning. |
+| `--tz` | no | Site IANA timezone, e.g. `Europe/Berlin`; defaults to UTC. Sets local calendar boundaries; day parts follow solar time. |
 | `--dry-run` | no | Do everything except write `--out`. |
 | `-v/--verbose` | no | Debug logging (per-day skip reasons). |
 
@@ -189,7 +192,7 @@ data:
 
 The service **validates and clamps** every factor, rejects any
 `schema_version` it does not recognise, and checks the embedded
-`site_signature` against the running site (lat/lon + plane names) so a
+`site_signature` against the running site (the complete versioned geometry signature, SPEC §12.5) so a
 bootstrap built for a different install is refused. Backfilled shademap bins
 carry a small `n` (capped at `BOOTSTRAP_MAX_BIN_N`), so the first weeks of live
 15-min data quickly outweigh them.
@@ -259,24 +262,23 @@ The interim az-ramp (τ(az) sun-path projection) is **deprecated**: migrate it t
   `(sun-az 5° × sun-el 2.5° × half-year)` bin for that module. The measured
   per-hour module energy comes straight from your hourly LTS.
 
-- **Day-ahead RLS bias**: modeled vs. measured **site** energy is aggregated per
-  `(cloud class × day part)` per day and fed through one scalar
-  recursive-least-squares step per cell (forgetting factor, clamped bias band).
+- **Walk-forward order:** freeze shademap and theta before reading each day's
+  labels. Reconstruct the slow-only curve with the shared `core.plane_physics`
+  transformation, including the actual slow-only POA temperature and first
+  group clamp. Train day-ahead RLS against that frozen slow-only curve. Quantile
+  labels use the prior theta and the second physical group clamp, never the
+  theta just fitted to those labels. Only the next day sees the new learner
+  states. The precise contract is [SPEC §12.4](SPEC.md#124-gemeinsamer-ha-freier-kern).
 
-- **Quantile bands**: after that RLS step, each daylight hour becomes one
-  `relerr = measured_site / (clamp(θ_cell) × gated_modeled_site)` sample (clamped
-  to `[QUANTILE_REL_ERR_MIN, MAX]`, only where the corrected forecast exceeds
-  `QUANTILE_MIN_FORECAST_WH`) in the SAME `(cloud class × day part)` bin. The ring
-  is date-windowed to `QUANTILE_RING_DAYS` relative to the **last** backfill day,
-  count-capped, and limited to `QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN` samples per
-  bin per day so the correlated hours of one coarse hourly day never over-weight a
-  band. A bin needs both enough samples and enough distinct days before it emits a
-  real (non-collapsed) band — the seeding is what gets the common bins past that
-  floor on day 0 instead of weeks later.
+- **Quantile bands:** daylight-hour `measured / issued_corrected` samples use
+  the same trainer, date window, minimum forecast energy, valid taxonomy and
+  per-day/per-bin cap as live training. A bin needs enough independent days as
+  well as samples before it emits a non-collapsed band (SPEC §11.1).
 
-- **Cloud class / day part** in the backfill key on the **UTC** hour (the dev
-  script has no site calendar). At the operator site (UTC+1/+2) this is within
-  ~2 h of local — acceptable for a bootstrap that live nightly training refines.
+- **Cloud class / day part:** classification uses the shared weather taxonomy;
+  day parts follow solar time at the site's longitude. `--tz` sets the local
+  calendar used to group days. The in-process action uses HA's configured
+  timezone; pass the same timezone to the CLI for matching reconstruction.
 
 ---
 
@@ -284,7 +286,8 @@ The interim az-ramp (τ(az) sun-path projection) is **deprecated**: migrate it t
 
 A bootstrap is only as good as the geometry it reconstructs against — and one
 built against a *foreign* site looks perfectly healthy: the `site_signature`
-check runs at **import** time and only compares lat/lon + plane names. So since
+check runs at **import** time and compares the versioned geometry, horizon,
+electrical and schema inputs described in SPEC §12.5. So since
 **0.23.1** the CLI refuses to guess:
 
 - **`--site site.json` is required.** Export the site object your config flow
@@ -355,5 +358,5 @@ contract shape, and the LTS statistics-row parser.
 (fetch-mocked) CLI path emit byte-identical bootstrap dicts. Run:
 
 ```sh
-py -3.14 -m pytest tests/core/test_backfill_math.py tests/core/test_backfill_parity.py -q
+uv run --no-sync pytest tests/core/test_backfill_math.py tests/core/test_backfill_parity.py -p no:homeassistant
 ```

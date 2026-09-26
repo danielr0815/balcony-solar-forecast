@@ -9,36 +9,16 @@ ein Release exakt abläuft.
 taggst. Fachliche Inhalte stehen in `01`–`06`; hier geht es ausschließlich um
 Handwerk und Prozess.
 
-Stand: `main` @ **v0.27.0** (2026-08-26). Belege sind *Datei + Funktions-/
-Konstantenname* (keine Zeilennummern — die veralten sofort). Zusätzlich verbindlich:
+Stand: **v0.27.2**, überarbeitet am 2026-09-26. Belege sind Datei +
+Funktions-/Konstantenname, keine Zeilennummern. Zusätzlich verbindlich:
 `CONTRIBUTING.md` im Repo-Root.
 
-> **Update 2026-07-30 — Dev-Setup 2026 (uv):** Das Dev-Environment läuft jetzt
-> über **uv** mit committetem `uv.lock` (einzige Wahrheit für Tool-Versionen,
-> auch in CI; `uv.lock` wird bewusst **nicht** gitignoriert). Setup:
-> `uv sync --group dev` (bzw. `make install` — das Makefile ist nur noch eine
-> dünne Hülle um uv; `scripts/setup-env.{sh,ps1}`/`scripts/setup_env.py`
-> installieren uv, falls es fehlt). Python ist **3.14** (`.python-version`,
-> `requires-python >= 3.14.2`), HA-Floor der Dev-Tools `homeassistant>=2026.7.4`;
-> `pytest-homeassistant-custom-component` bleibt als einziges Paket voll gepinnt,
-> weil es die HA-Kopplung führt (Begründung im `pyproject.toml`-Kommentar).
-> Alle Kommandos heißen jetzt `uv run …` (`uv run pytest tests
-> -p no:homeassistant`, `uv run ruff check .`, `uv run mypy`) — die
-> Kommando-Blöcke in §3 und die CI-Tabelle in §6 unten zeigen noch den
-> Pip-Vorgänger und sind durch diesen Kasten ersetzt (in 00 bereits
-> aktualisiert). Neu dazu: **mypy-Baseline** auf `core/` (acht ältere
-> Module mit bekannten Fehlern sind im `[tool.mypy]`-Kommentar namentlich
-> ausgenommen, die übrigen müssen sauber bleiben), **Coverage**-Config in
-> `pyproject.toml` (zunächst report-only; inzwischen mit 95-%-Gate in CI,
-> siehe §6.3), **Devcontainer**
-> (`.devcontainer/`, Python-3.14-Image + Node-Feature für den JS-Harness in
-> `tests/harness/`, postCreateCommand = `pip install uv && uv sync --group dev`),
-> **pre-commit** nur mit `ruff-check --fix` (kein `ruff-format` — Verbot
-> unverändert), `.editorconfig`/`.gitattributes` (LF-Zwang, `brand/*.png`
-> binär), CI auf `checkout@v7`/`setup-uv@v9.0.0` mit uv-Cache plus einem
-> `devcontainer`-Job, der die volle Suite im Container fährt. An den Regeln
-> dieses Dokuments (HA-Freiheit, SPEC-Vertrag, `-p no:homeassistant`, kein
-> `ruff format`, drei Versionsstellen) ändert das nichts.
+Setup: `uv sync --locked --group dev` erzeugt `.venv` aus dem committeten
+`uv.lock` und installiert Python 3.14 bei Bedarf. Ohne uv helfen
+`scripts/setup-env.sh` bzw. `scripts/setup-env.ps1` (Bootstrap: Python 3.10+).
+Der Devcontainer führt dasselbe Setup aus und installiert Node für den
+Karten-Harness. Die Mindestversionen stehen in `pyproject.toml`, exakte
+Versionen im Lockfile; Änderungen daran sind bewusste Dependency-Updates.
 
 ---
 
@@ -53,8 +33,9 @@ Konstantenname* (keine Zeilennummern — die veralten sofort). Zusätzlich verbi
 | `.../translations/` | `de.json`, `en.json` | Tests erzwingen Deckungsgleichheit (§4) |
 | `scripts/backfill.py` | dünner CLI-Wrapper um `core/bootstrap_build.py` (aiohttp + HA-WebSocket-LTS) | keine Mathematik hier |
 | `scripts/validation/` | Post-Deployment-Validierung (stdlib, REST/WS gegen die Live-Instanz) | §4 (Ende) · `scripts/validation/README.md` |
-| `scripts/setup_env.py` | pure-stdlib `.venv`-Bootstrap; einzige Implementierung hinter `make` und `setup-env.{sh,ps1}` | |
-| `tests/` · `tests/core/` | HA-Layer-Tests · reine Kern-Tests | §3 |
+| `scripts/setup_env.py` | pure-stdlib uv-Bootstrap hinter `setup-env.{sh,ps1}`; `make` ruft uv direkt auf | |
+| `tests/` · `tests/core/` · `tests/integration/` | portable HA-Unit-Tests · reine Kern-Tests · echte HA-Lifecycle-Tests | §3 |
+| `tests/helpers/` | gemeinsame Fakes und versionierte synthetische Datengeneratoren | keine Imports zwischen Testmodulen |
 | `docs/SPEC.md` · `docs/adr/` | **der Vertrag** (deutsch) · Architecture Decision Records | §5 |
 | `dashboards/` | ausgeliefertes Lovelace-YAML | von `tests/core/test_dashboard_yaml.py` bewacht |
 | `.github/workflows/` | `validate.yml` (CI) und `release.yml` (Release-Guard) | §6 |
@@ -72,7 +53,7 @@ Debug-Logger für die Domain); `.claude/launch.json` startet sie als `ha-dev` ü
 `homeassistant`". Das ist keine Stilfrage, sondern trägt drei Dinge:
 
 1. **Testbarkeit.** Der gesamte Kern läuft mit blankem `pytest` auf jedem Python
-   3.13 — kein HA-Setup, keine Event-Loop, keine Fixtures.
+   3.14 — kein HA-Setup und keine laufende Event-Loop erforderlich.
 2. **Wiederverwendung im Backfill.** `scripts/backfill.py` importiert den Kern über
    einen Namespace-Package-Shim direkt aus dem Repo (ohne das HA-importierende
    Paket-`__init__`). Seit **0.23** liegt auch die Bootstrap-Rekonstruktion dort
@@ -81,8 +62,8 @@ Debug-Logger für die Domain); `.claude/launch.json` startet sie als `ha-dev` ü
 3. **Keine Runtime-Dependencies.** `manifest.json` hat `requirements: []`; im Kern
    erscheinen ausschließlich stdlib-Importe (`math`, `dataclasses`, `datetime`,
    `functools.lru_cache`, `logging`, `hashlib`, `json`, `pathlib.Path`,
-   `collections.abc`, `zoneinfo`) plus `from __future__ import annotations` —
-   `typing` braucht der Kern nicht (PEP 604/585: `X | None` statt `Optional[X]`).
+   `collections.abc`, `zoneinfo`, `typing`) plus `from __future__ import annotations`.
+   Typen nutzen PEP 604/585 (`X | None` statt `Optional[X]`).
    Kein numpy/pandas/pvlib — auch nicht „nur kurz".
 
 **Die einzige dokumentierte Ausnahme:** `core/openmeteo_backfill.py` ist das eine
@@ -94,127 +75,101 @@ Provider-Vertrag auseinanderdriften.
 
 ### Prüfkommando
 
-```powershell
-# muss LEER sein (nur Kommentare/Docstrings dürfen das Wort enthalten):
-Select-String -Path custom_components\balcony_solar_forecast\core\*.py,`
-                    custom_components\balcony_solar_forecast\const.py `
-             -Pattern '^\s*(import|from)\s+homeassistant'
+```bash
+uv run python scripts/check_core_imports.py
 ```
 
-Bash-Äquivalent: `grep -rnE '^\s*(import|from)\s+homeassistant' custom_components/balcony_solar_forecast/core/ custom_components/balcony_solar_forecast/const.py`
-
-Ergänzend die Fremd-Import-Prüfung — sie **muss führenden Whitespace zulassen**, auf
-Spalte 0 verankert entgeht ihr sonst der Lazy-Import im Funktionsrumpf:
-`grep -rhE '^[[:space:]]*(import [A-Za-z_]|from [A-Za-z_][A-Za-z0-9_.]* import )' custom_components/balcony_solar_forecast/core/*.py | grep -vE 'from \.' | sed 's/^[[:space:]]*//' | sort -u`
-Einziger zulässiger Nicht-stdlib-Treffer: `import aiohttp  # lazy` in `core/openmeteo_backfill.py`.
-
-`make test-core` allein beweist die HA-Freiheit **nicht**, wenn HA im `.venv`
-installiert ist (der Import würde einfach gelingen). Die Greps sind der Beweis.
+Der AST-Guard läuft in CI und prüft auch verzögerte Imports in Funktionen:
+stdlib und relative Kernmodule sind erlaubt, HA-/Glue-/Fremdimporte werden
+abgewiesen. Nur `core/openmeteo_backfill.py` darf `aiohttp` innerhalb einer
+Funktion laden. `const.py` darf seinerseits keinen HA-Glue importieren.
+Eine grüne Kern-Testsuite allein beweist die Importgrenze nicht, wenn HA im
+Test-Environment installiert ist.
 
 ---
 
 ## 3. Tests: Aufbau und Kommandos
 
-### Umfang (gemessen am aktuellen Stand)
+* `tests/core/`: reine Rechenkern-Tests. Ein Namespace-Package-Shim umgeht das
+  HA-importierende Root-`__init__.py`.
+* `tests/*.py`: portable HA-Schicht-Tests gegen Fakes und `monkeypatch`.
+  Gemeinsame Fakes liegen in `tests/helpers/`, nicht in anderen Testmodulen.
+* `tests/integration/`: echter HA-Bootstrap, Flow-Manager, Entitäten, Services,
+  Reload und Store-Lifecycle auf Linux. Der getrennte Aufruf mit `--confcutdir`
+  vermeidet die Package-Shims aus `tests/conftest.py`.
+* `tests/harness/`: gebündeltes Karten-JavaScript unter Node mit kleinen DOM-Stubs.
+  CI installiert Node 22, damit diese Tests nicht still übersprungen werden.
 
-| Menge | gesammelt | grün | übersprungen |
-|---|---|---|---|
-| `tests/` gesamt | 2734 | 2494 | 240 |
-| davon `tests/core/` | 1843 | 1603 | 240 |
-| daraus HA-Layer (`tests/*.py`) | 891 | 891 | 0 |
+Die aktuelle Testzahl steht im pytest-Ergebnis; eine statische Zahl im Runbook
+veraltet. Golden-Parametrisierungen unterhalb der definierten Sonnenhöhe werden
+bewusst übersprungen und durch eigene Grenztests ergänzt. Fehlende Golden-Dateien
+sind dagegen ein Fehler, kein Skip.
 
-Die 240 Skips sind **keine Lücken**: es sind die Parametrisierungen von
-`tests/core/test_golden.py` mit Sonnenhöhe ≤ `LOW_SUN_CUTOFF_DEG` (3°), wo bewusst
-keine pvlib-Gleichheit behauptet wird (eigener „no-explosion"-Test). Gesamtlaufzeit
-~25 s (Kern allein ~10 s).
-
-### Struktur
-
-* **`tests/core/`** — reine Kern-Tests. `tests/core/conftest.py` registriert
-  `balcony_solar_forecast` und `balcony_solar_forecast.core` als *Namespace-Pakete*,
-  die auf die echten Verzeichnisse zeigen, **ohne** das HA-importierende
-  Root-`__init__.py` auszuführen. Deshalb laufen sie auch ohne HA-Installation.
-* **`tests/`** — HA-Layer. Unit-Stil gegen Fakes/`monkeypatch`; es wird nie eine
-  echte `hass`-Instanz gestartet. `tests/conftest.py` lädt zusätzlich `const`,
-  `core.types` und `fetcher` per `importlib` unter einem synthetischen Paket, damit
-  die reinen Fetcher-Tests ohne HA laufen. Module, die HA wirklich brauchen
-  (`store.py` u. a.), skippen sich, wenn HA fehlt.
-
-### Kommandos
-
-```powershell
-# Windows / PowerShell, ohne make:
-.\.venv\Scripts\python.exe -m pytest tests -p no:homeassistant           # volle Suite
-.\.venv\Scripts\python.exe -m pytest tests\core -p no:homeassistant      # nur Kern
-.\.venv\Scripts\python.exe -m ruff check .                               # Lint
+```bash
+uv run pytest tests --ignore=tests/integration -p no:homeassistant
+uv run pytest tests/core -p no:homeassistant
+uv run pytest --confcutdir=tests/integration tests/integration -p no:homeassistant
+uv run ruff check .
+uv run mypy
+uv run python scripts/check_mypy_baseline.py
 ```
 
-Mit `make` (ruft `scripts/setup_env.py` auf, identisch auf allen OS):
-`make install` · `make test` · `make test-core` · `make lint` ·
-`make format` (= `ruff check --fix .`, **nicht** `ruff format`) · `make clean`.
+Diese Kommandos funktionieren auch in PowerShell; nur der reale HA-Lifecycle-Lauf
+setzt Linux voraus. `make test`, `make test-core`, `make lint` sind uv-Wrapper.
+`make format` bedeutet `ruff check --fix`, **niemals** `ruff format`.
 
 ### Warum `-p no:homeassistant`?
 
-Das Plugin `pytest-homeassistant-custom-component` (PHACC) wird **abgeschaltet**,
-weil die Suite es nicht braucht und es zwei Schäden anrichtet (begründet in
-`CONTRIBUTING.md` §4 und im Docstring von `scripts/setup_env.py::test`):
+Keine Suite benutzt PHACC-Fixtures. Dessen Autouse-Fixtures können mit
+synchronen Tests und der Event-Loop kollidieren; der Import zieht zudem das
+POSIX-only `fcntl`. PHACC bleibt deshalb auch beim echten HA-Lauf abgeschaltet.
+`pytest-asyncio` führt die Async-Tests weiterhin aus.
 
-* Sein Import zieht das **POSIX-only `fcntl`** — auf Windows nicht importierbar,
-  die Sammlung stirbt sofort.
-* Seine **autouse**-Fixtures rufen beim Setup `asyncio.get_event_loop()`, was ab
-  Python 3.12 für die synchronen Tests wirft.
+`pyproject.toml` setzt bereits `addopts = "-q"`. Kein zweites `-q` ergänzen,
+sonst fehlt die Abschlusszeile. Maschinenlesbare Ergebnisse über
+`--junitxml=<pfad>` erzeugen, Erfolg über den Exit-Code prüfen.
 
-Da kein Test PHACC-Fixtures benutzt, bricht das Plugin nur eine Suite, die es nie
-verwendet. Abgeschaltet läuft die **volle** Suite identisch auf Linux, macOS, WSL
-und Windows; `pytest-asyncio` (kommt via PHACC mit) treibt die async-Tests weiter.
-CI schaltet das Plugin identisch ab (`.github/workflows/validate.yml`, Job `tests`)
-und hängt nur die Coverage-Flags an — **kein** `-q` (der Job-Kommentar begründet
-das: `pyproject.toml` setzt bereits `addopts = "-q"`, ein zweites verschluckt die
-Ergebniszeile); CI wertet ausschließlich den Exit-Code aus.
+### Lint und Typen
 
-### `addopts` enthält bereits `-q`
+`ruff check .` ist verpflichtend; `ruff format` bleibt verboten. Aktive
+Regelsets sind `E, F, I, UP, B, SIM`, `E501` ist bewusst ausgenommen.
+`F811` ist für pytest-Fixture-Imports unter `tests/` ausgenommen.
 
-`pyproject.toml` → `[tool.pytest.ini_options] addopts = "-q"`. Wer auf der
-Kommandozeile **noch** ein `-q` anhängt, bekommt effektiv `-qq` — und dann
-**verschluckt pytest die Abschlusszeile „N passed"** komplett (empirisch
-reproduziert). Genau daran ist in einem Review die Testzahl falsch berichtet
-worden. Konsequenz:
-
-* Beim manuellen Lauf **kein** `-q` anhängen.
-* Brauchst du eine maschinenlesbare Zahl: `--junitxml=<pfad>` verwenden oder
-  `$LASTEXITCODE` prüfen. (CI hängt ebenfalls kein `-q` an und verlässt sich
-  auf den Exit-Code.)
-
-### Lint
-
-`ruff check .` ist enforced (CI-Job `lint`), `ruff format` ist **verboten** —
-der Code ist absichtlich handformatiert (ausgerichtete Argumentlisten, gesetzte
-Umbrüche), deshalb ist `E501` in `[tool.ruff.lint] ignore` bewusst aus.
-Aktive Regelsets: `E, F, I, UP, B, SIM`; `tests/**` hat `F811` ausgenommen (das
-Fixture-Import-Muster von pytest). Nie „format on save" auf dieses Repo loslassen
-und nie Zeilen umbrechen, die du ohnehin nicht anfasst.
+`mypy` bewacht die bereits sauberen Kernmodule. Der ergänzende
+`scripts/check_mypy_baseline.py` entfernt die alten Modulunterdrückungen und
+prüft den gesamten Kern sowie die in `HA_BOUNDARIES` genannten kritischen
+HA-Module. `scripts/mypy_baseline.json` dokumentiert jede bekannte Diagnose
+mit Pfad und Symbol. Neue Fehler und nicht entfernte, bereits behobene
+Einträge lassen CI scheitern. `--write-baseline` ist ausschließlich für eine
+bewusst geprüfte Schuldenänderung gedacht. Keine pauschalen `Any` oder Casts,
+um Meldungen kosmetisch zu verstecken.
 
 ---
 
 ## 4. Test-Konventionen: was ein Test hier beweisen muss
 
-### Neue Tests müssen den ALTEN Code durchfallen lassen
+### Die Testabsicht bestimmt den Nachweis
 
-Ein Test, der auch vor deiner Änderung grün gewesen wäre, beweist nichts. Die im
-Projekt etablierte Technik (durchgängig in den Reviews der Forensik-Tranchen T4–T9
-angewandt und protokolliert):
+* **Bugfix:** Ein neuer Test muss den alten Fehler semantisch nachweisen.
+  Im Parent-Worktree nur die neuen Tests ausführen; Importfehler oder neue
+  Signaturen zählen nicht als RED-Beleg für das Verhalten.
+* **Feature:** Den neuen Vertrag mit relevanten Grenzen und ungültigen Eingaben
+  prüfen; erwartete Ergebnisse unabhängig vom Produktionsalgorithmus bestimmen.
+* **Refactoring:** Gleichheit alter und neuer Ergebnisse über repräsentative
+  und geseedete Eingaben nachweisen.
+* **Charakterisierung/Regression:** Darf vorher schon grün sein, wenn ein bisher
+  ungesicherter Vertrag oder eine unabhängige Referenz geschützt wird.
+  Gezielt eingebaute semantische Fehler können die Testwirksamkeit belegen.
 
-1. Wegwerf-Worktree auf den **Parent-Commit** legen:
-   `git worktree add ../bsf-parent <parent-sha>`
-2. Nur die **neuen Testdateien** dorthin kopieren.
-3. Suite im Worktree laufen lassen — die neuen Tests **müssen** fehlschlagen
-   (`TypeError` auf neue Signaturen zählt, aber schwächer als ein
-   *semantischer* Fehlschlag auf einem diskriminierenden Eingabevektor).
-4. Worktree wieder entfernen: `git worktree remove ../bsf-parent`.
+`scripts/mutation_smoke.py` führt drei solche Experimente in einer temporären
+Kopie aus: entfernter Gruppen-Clamp, akzeptierte veraltete Leistungssamples und
+übersprungene Catchup-Lücken. Die unveränderten Tests müssen zuerst bestehen;
+jede Mutation muss dann einen Assertion-Fehler erzeugen. Collection-/Importfehler
+zählen nicht. Aufruf: `uv run python scripts/mutation_smoke.py`.
 
-Variante für Fixes ohne Signaturänderung: den Einzeiler-Fix im Baum reverten und
-prüfen, dass **genau** der neue Test fällt (Mutationstest), danach den Baum
-restaurieren und `git status` verifizieren.
+Coverage dient zum Auffinden ungesicherter Entscheidungen, nicht zum Erzeugen
+von Tests ohne Verhaltensaussage. Der separate Branch-Bericht hat kein
+Prozent-Gate; der vorhandene Statement-Grenzwert bleibt unverändert.
 
 ### Bit-Identitäts-Tests für Abwärtskompatibilität
 
@@ -236,12 +191,25 @@ behauptet. Muster im Repo:
 
 | Datei | bewacht |
 |---|---|
-| `tests/core/test_golden.py` | Sonnenstand + Hay-Davies gegen **pvlib**-Referenzvektoren (`tests/core/reference_vectors.json`, offline in einer Wegwerf-pvlib-venv erzeugt). Toleranzen: 0,5° Winkel, `max(2 W/m², 0,5 %)` POA |
+| `tests/core/test_golden.py` | Sonnenstand + Hay-Davies gegen **pvlib**-Referenzvektoren (`tests/core/reference_vectors.json`, reproduzierbar mit separat gesperrtem Generator-Environment). Toleranzen: 0,5° Winkel, `max(2 W/m², 0,5 %)` POA |
 | `tests/core/test_season_regression.py` | Design-Beweis für `tau_points` (Saisondrift der abgelösten τ(az)-Rampe) |
 | `tests/test_store_v2.py`, `tests/test_store_v3_migration.py` | Store-Migrationen, additiv + byte-treu (§5.2) |
 | `tests/test_config_flow_validation.py` | jeder Fehlercode des Validators hat einen Übersetzungsschlüssel; `de.json`/`en.json` sind schlüsselgleich; jeder `translation_key` einer Entität ist übersetzt |
 | `tests/core/test_dashboard_yaml.py` | ausgeliefertes Dashboard nutzt nur Built-in-Karten und referenziert die tragenden Entity-IDs (fängt Umbenennungen in `sensor.py`) |
 | `tests/test_frontend_harness.py` | fährt die echte Karten-JS unter minimalen DOM-Stubs in **Node**; skippt, wenn `node` nicht im PATH ist |
+
+
+Golden-Referenzen reproduzieren:
+
+```bash
+uv run --script --locked scripts/generate_reference_vectors.py --check
+```
+
+Der Generator nutzt pvlib 0.15.2 und explizite Solarposition-/Hay-Davies-Parameter.
+Eingaben stehen in `scripts/reference_inputs.json`, die optionale Umgebung in
+`scripts/generate_reference_vectors.py.lock`. `--write` regeneriert die
+Referenzdatei nach einer bewussten Modell-/Eingabeänderung; numerische Diffs
+prüfen. Normale Tests benötigen pvlib nicht.
 
 ### Post-Deployment-Validierung: `scripts/validation/`
 
@@ -253,7 +221,7 @@ Import aus `custom_components/`). Vier Module mit klarer Rollenteilung — die d
 
 | Datei | Rolle |
 |---|---|
-| `validate.py` | CLI + Orchestrierung + Report. `--offline --data-dir <pfad>` **oder** `--ha-url` + `--token` (live); optional `--days` (Default 8), `--eta`, `--entry-id`, `--json <datei>`, `--fetch-only`. Ruft `fetch_all` → `load_bundle` → `run_all` → `render`. Exit-Code **0 = alles grün, 1 = mind. ein WARN, 2 = mind. ein FAIL** (oder Fetch-/Datenfehler) — CI-/Skript-tauglich. Enthält selbst **keine** Prüflogik |
+| `validate.py` | CLI + Orchestrierung + Report. `--offline --data-dir <pfad>` **oder** `--ha-url` + `--token` (live); optional `--days` (Default 8), `--eta`, `--entry-id`, `--json <datei>`, `--fetch-only`. Ruft `fetch_all` → `load_bundle` → `run_all` → `render`. Exit-Code **0 = vollständig PASS, 1 = WARN oder INCOMPLETE, 2 = FAIL oder ERROR** (auch Fetch-/Datenfehler) — CI-/Skript-tauglich. Enthält selbst **keine** Prüflogik |
 | `bsf_fetch.py` | nur im Live-Modus. REST per `urllib` (`/api/states`, `/api/history/period`, Aktion `get_issued_forecast` mit `?return_response` je Tag, `/api/diagnostics/config_entry/<id>`) plus ein **minimaler RFC-6455-WebSocket-Client** für `recorder/statistics_during_period` (`period: hour` und `5minute`, `types: ["mean"]`) — Langzeitstatistiken gibt es nicht über REST. Diagnostics sind optional/non-fatal |
 | `bsf_data.py` | Laden + Normalisieren in die `Bundle`-Dataclass und die Semantikfallen zentral erschlagen: epoch-**Millisekunden** der Recorder-WS-API automatisch erkannt, `minimal_response`-Historien expandiert, Zeitzone Europe/Berlin mit eigener EU-DST-`tzinfo` als Fallback (Windows ohne `tzdata`), Erkennung **partieller Tage**, dazu die Feature-Erkennung (`hourly_wh_ac`, `cloud_class_by_hour`, `clamped`-Flag, Quantil-Bins in den Diagnostics) samt dokumentierter Fallbacks |
 | `bsf_checks.py` | der Prüfkatalog **C1–C8** (Morgen-Peak, Scalar-Hygiene, Morgen-Physik, Bias-Konvergenz, day-0-Bänder, Headline-Stabilität, Vorabend-Prognose, Regressionswachen) inklusive aller Schwellen und Baseline-Konstanten |
@@ -274,10 +242,12 @@ CheckResult` schreiben, Messwerte mit `c.add(name, value, threshold, status)`
 anhängen (`_band(...)` liefert PASS/WARN/FAIL aus einem Pass- und einem
 Warn-Intervall), eine `interpretation` setzen, `return c.finalize()` — `finalize`
 nimmt den **schlechtesten** bewerteten Status. Dann in die Liste `ALL_CHECKS`
-eintragen; Renderer, Gesamtübersicht und JSON-Report ziehen sich daraus
-automatisch. Fehlende Daten mit `SKIP`/`INFO` quittieren, nie mit `FAIL` — nur
-PASS/WARN/FAIL bewerten den Check. `run_all` fängt Exceptions je Check ab und
-degradiert ihn zu `SKIP`: ein kaputter Check reißt nie den ganzen Lauf.
+eintragen und bei einem Pflichtcheck `REQUIRED_CHECK_IDS` ergänzen; Renderer
+und JSON-Report übernehmen den neuen Check automatisch. Fehlende Daten mit `SKIP`/`INFO` quittieren, nie als fachlichen `FAIL` — nur
+PASS/WARN/FAIL bewerten den fachlichen Check; ERROR kennzeichnet einen internen Fehler. `run_all` fängt Exceptions je Check ab und
+meldet ihn als `ERROR`: die übrigen Checks laufen weiter, aber der Gesamtstatus
+ist nicht erfolgreich. `summarize` verlangt C1–C8 mit auswertbaren Belegen;
+fehlende Checks oder Pflichtbelege ergeben `INCOMPLETE`, niemals PASS.
 
 **Eichung der Baselines.** Die Schwellen sind gegen die **VOR-Fix-Woche
 17.–24.07.2026** kalibriert: auf diesem Referenzpaket muss `--offline` C1–C7 auf
@@ -289,7 +259,9 @@ Zahlen stehen als benannte Konstanten in `bsf_checks.py`
 kein `hourly_wh_ac` liefert; per `--eta` überschreibbar). **Achtung:** das
 Referenzpaket (`hadata/`) liegt **nicht im Git** — ohne es ist der
 Kalibrierungs-Selbsttest nicht nachspielbar; ein frischer Live-Pull ersetzt es als
-Datenquelle, nicht als Eich-Nachweis. Details und die Nachjustierungs-Matrix
+Datenquelle, nicht als Eich-Nachweis. Der versionierte synthetische Generator
+`tests/helpers/validation_bundle.py` sichert PASS/FAIL/INCOMPLETE/ERROR als
+Softwarevertrag über den CLI-Pfad; er ersetzt keine Anlagenkalibrierung. Details und die Nachjustierungs-Matrix
 („wenn ein Check rot bleibt") stehen in `scripts/validation/README.md`.
 
 ---
@@ -435,69 +407,58 @@ Repair-Issue (`ISSUE_CONFIG_CHANGED_BIAS_RESEED`) stellen.
 
 ## 6. Release-Prozess (exakt)
 
-### 6.1 Die Versionsnummer steht an drei Stellen
+### 6.1 Metadaten und Reihenfolge
 
-| Datei | Feld |
+Die Version steht synchron in `manifest.json` (`version`), `pyproject.toml`
+(`[project] version`) und `const.py` (`INTEGRATION_VERSION`). Die SPEC trägt
+denselben Versionsstempel. HACS installiert den Zipball des Tags; alle Angaben
+müssen im getaggten Commit stimmen. `_frontend.py` nutzt die Version zusätzlich
+für das Cache-Busting der gebündelten Karten.
+
+1. Release-PR mit den drei Versionswerten, SPEC-Stempel, datiertem
+   `## [x.y.z] - YYYY-MM-DD`-Changelog und betroffenen Docs vorbereiten.
+2. Nach Review und grüner PR-CI nach `main` mergen. Den erfolgreichen
+   **Push-Lauf** von `validate.yml` für genau den entstandenen Commit abwarten.
+3. Den Workflow **Release** von `main` manuell starten: Version ohne `v`,
+   vollständiger Commit-SHA mit 40 Zeichen.
+4. Read-only-Preflight prüft Checkout, Main-Abstammung, alle Metadaten und den
+   jüngsten Validate-Push-Lauf dieses SHAs. Ein älterer grüner Lauf ersetzt
+   keinen neueren fehlgeschlagenen oder noch laufenden Versuch.
+5. Erst der Publish-Job erhält Schreibrechte, wiederholt die Prüfungen und
+   erzeugt Tag und Release mit den passenden Changelog-Notizen. Tags werden
+   niemals erzwungen verschoben.
+
+Umsetzung: `.github/workflows/release.yml` und `scripts/release_guard.py`.
+Keine manuellen Tags/Veröffentlichungen vor diesem Gate. Ein Metadaten-Bump
+nach der Veröffentlichung korrigiert den ausgelieferten Tag nicht.
+
+### 6.2 CI-Jobs (`validate.yml`)
+
+Alle Actions sind per Commit-SHA gepinnt. Top-Level gilt
+`permissions: contents: read`; zusätzliche Rechte werden pro Job vergeben.
+Setup verwendet `uv sync --locked --group dev`, spätere Befehle
+`uv run --no-sync`. Eine veraltete Lockdatei fällt auf, statt still neu
+aufgelöst zu werden.
+
+| Job | Nachweis |
 |---|---|
-| `custom_components/balcony_solar_forecast/manifest.json` | `version` |
-| `pyproject.toml` | `[project] version` |
-| `custom_components/balcony_solar_forecast/const.py` | `INTEGRATION_VERSION` |
+| `validate-hacs` | HACS-Struktur, für öffentliche Repos (Upstream liest Dateien ohne Auth) |
+| `validate-hassfest` | Manifest-/HA-Struktur-Konformität |
+| `spec-reminder` | nur PR-Hinweis; der harte SPEC-Vertrag läuft in pytest |
+| `lint` | Ruff, sauberer mypy-Scope, expliziter Typfehler-Ratchet, AST-Importgrenze, synchrone Versionen |
+| `tests` | portable Suite + Node-Harness, **95 % Statement-Coverage**, XML-Artefakt |
+| `branch-coverage` | eigener Branch-Bericht ohne Prozent-Gate und drei semantische Mutationstests |
+| `ha-lifecycle` | echte HA-Instanz ohne Unit-Shims, getrennter Linux-Lauf |
+| `tests-ha-min` | portable Suite und echter HA-Lifecycle gegen **exakt** den Wert aus `hacs.json` |
+| `windows-bootstrap` | PowerShell-Smoke mit vorhandenen uv-/Python-Launcher-Varianten, ohne Installation |
+| `golden-reproduction` | nächtlich/manuell: Referenzen mit separat gesperrtem pvlib-Environment reproduzieren |
+| `devcontainer` | Container bauen, portable Suite + Ruff + mypy darin ausführen |
 
-Alle drei müssen **gleich** sein. Zwei Wächter erzwingen das:
-
-* **CI-Guard** — `.github/workflows/validate.yml`, Schritt *Version consistency* im
-  Job `lint`: liest die drei Werte und `assert mf == pp == const`. Läuft bei jedem
-  Push/PR, nächtlich und manuell.
-* **Release-Guard** — `.github/workflows/release.yml`, Schritt *Version guard*:
-  vergleicht zusätzlich den **Tag** (`refs/tags/v…`, `v`-Prefix entfernt) gegen die
-  drei Strings und lässt das Release fehlschlagen, wenn etwas abweicht.
-
-**Warum der Tag mitgeprüft wird:** `hacs.json` hat `zip_release: false`, HACS
-installiert also den **Zipball des Tags**. Was im getaggten Commit steht, ist das,
-was bei jedem Nutzer landet. Ein Bump-Commit *nach* dem Tag landet nur auf `main`
-und liefert stillschweigend die alte Version aus. `INTEGRATION_VERSION` ist dabei
-nicht kosmetisch: `_frontend.py` hängt `?v=<INTEGRATION_VERSION>` an die
-Karten-Ressourcen-URLs — das ist der **einzige** Cache-Busting-Mechanismus für die
-ausgelieferten Lovelace-Karten; `sensor.py` setzt es als `sw_version` des Geräts.
-
-### 6.2 Reihenfolge
-
-1. Alle drei Versionsstrings synchron bumpen.
-2. `CHANGELOG.md`: `[Unreleased]` zu `## [x.y.z] - YYYY-MM-DD` machen (Keep a
-   Changelog + SemVer; Rubriken `### Added`/`### Changed`/`### Fixed`, davor ein
-   Prosa-Absatz, der das Release in 3–6 Zeilen erklärt — siehe 0.22.0/0.23.0).
-3. SPEC-Nachtrag und betroffene Docs (`BACKFILL.md`, `DASHBOARD.md`, `README.md`).
-4. Commit, PR, CI grün, Merge nach `main`.
-5. **Erst dann** auf GitHub ein Release mit Tag `vx.y.z` publizieren →
-   `release.yml` läuft (HACS-Validation, hassfest, Version-Guard).
-
-Bumpen oder CHANGELOG-Pflege *nach* dem Tag ist zu spät.
-
-### 6.3 CI-Jobs im Überblick (`validate.yml`)
-
-Alle Actions sind per **Commit-SHA gepinnt** (der Versionskommentar steht
-dahinter, Dependabot zieht die SHAs hoch); Top-Level gilt
-`permissions: contents: read`, mehr deklariert ein Job lokal.
-
-| Job | Inhalt |
-|---|---|
-| `validate-hacs` | `hacs/action` (SHA-gepinnt), `category: integration`, `ignore: brands` (Brand-Assets liegen bewusst lokal unter `custom_components/.../brand/`); läuft nur gegen **öffentliche** Repos (Sichtbarkeits-Guard, weil die Action `hacs.json` ohne Auth von raw.githubusercontent.com lädt) |
-| `validate-hassfest` | `home-assistant/actions/hassfest` (Master-SHA gepinnt, hassfest hat keine brauchbaren Release-Tags) — Manifest-/Struktur-Konformität |
-| `spec-reminder` | nur bei PRs, **advisory** (`continue-on-error`): warnt, wenn sich `custom_components/` ohne `docs/SPEC.md` ändert — der harte Teil des Vertrags läuft als `tests/test_spec_integrity.py` im `tests`-Job |
-| `lint` | `ruff check .` **plus** `mypy` (Baseline auf `core/`) **plus** der Versions-Konsistenz-Check (manifest == pyproject == const) |
-| `tests` | `uv run pytest tests -p no:homeassistant --cov --cov-fail-under=95 --cov-report=term-missing:skip-covered --cov-report=xml`; `actions/setup-node` (Node 22) stellt sicher, dass der JS-Karten-Harness (`tests/harness/`) nicht still skippt; das Coverage-XML landet als Build-Artefakt |
-| `tests-ha-min` | dieselbe Suite gegen die deklarierte HA-Untergrenze: `uv pip install "homeassistant==2026.3.*"` über das Lockfile drüber (Pin-Konflikt mit PHACC im Job-Kommentar dokumentiert), dann `uv run --no-sync pytest` |
-| `devcontainer` | baut `.devcontainer/` und fährt Suite + `ruff check` + `mypy` im Container |
-
-Coverage ist **gegatet**: `--cov-fail-under=95` bricht den `tests`-Job unter 95 %
-(Review 0.23.x — die Suite stand bei ~92 %, und jede neue Verhaltensänderung
-kommt per CLAUDE.md-Regel 6 mit ihrem Test; das Gate hält das so).
-
-`hacs.json` pinnt `"homeassistant": "2026.3.0"` — die HA-Untergrenze, gegen die die
-Config-Flow-Selectors und Entity-Konventionen validiert sind und gegen die der
-Job `tests-ha-min` die Suite fährt (ein Floor, der nicht getestet wird, ist
-keiner). Bewusst anheben (wenn du eine neuere API brauchst und darauf getestet
-hast), **nie** absenken ohne Gegenprobe.
+`hacs.json` deklariert `2026.3.0`. Der Minimum-Job installiert diese exakte
+Version nach dem normalen Setup und verwendet anschließend `--no-sync`, damit
+uv nicht wieder die Lockfile-HA installiert. PHACC bleibt deaktiviert; dessen
+HA-Pin ist nur für das reguläre Dev-Environment maßgeblich. Den Floor bewusst
+anheben oder erst nach einer erfolgreichen Gegenprobe senken.
 
 ---
 
@@ -539,9 +500,9 @@ inklusive verschobener `SPEC §…`-Zitate.
 **Windows / PowerShell**
 
 * `make` ist auf der Betreibermaschine nicht garantiert. Ersatz:
-  `.\scripts\setup-env.ps1` oder `python scripts/setup_env.py <install|test|test-core|lint|format|clean>`.
-* Immer `.\.venv\Scripts\python.exe -m pytest …` aufrufen, nicht ein globales
-  `pytest` — sonst fehlt HA und die halbe Suite skippt still.
+  `.\scripts\setup-env.ps1` für das Setup, danach `uv run …` für Prüfungen.
+* Tests mit `uv run pytest …` ausführen, nicht mit einem globalen `pytest`,
+  damit das gesperrte Projekt-Environment verwendet wird.
 * `-p no:homeassistant` ist auf Windows **nicht optional** (`fcntl`, siehe §3).
 * PowerShell kennt kein `&&`/`||`-Verketten (Windows PowerShell 5.1): `A; if ($?) { B }`.
 * Kein zusätzliches `-q` (§3) — sonst fehlt die Ergebniszeile.
