@@ -10,6 +10,29 @@ keine Runtime-Dependencies (`requirements: []` im Manifest), stdlib-only im Kern
 [docs/SPEC.md](docs/SPEC.md) (deutsch) — jede Verhaltensänderung zieht sie im
 selben PR nach.
 
+## Lokaler Live-Zugriff
+
+Für angefragte Home-Assistant-Live-Analysen den **Playwright-MCP-Server**
+(`mcp__playwright__browser_*`) und dessen lokale Browserinstanz verwenden.
+Zuerst vorhandene Tabs prüfen; eine leere CUA-Browserliste sagt nichts über
+Playwright aus. Der Benutzer meldet sich bei Bedarf manuell im Browser an.
+Keine Passwörter, Tokens oder Browser-Sitzungsdaten in Notizen speichern.
+Lokale Verbindungsdetails stehen, sofern vorhanden, in
+`.ha-dev/live-access.md` (Git-ignoriert). Nur die für die beauftragte Analyse
+benötigten Daten lesen; Live-Konfigurationsänderungen sind ein eigener Auftrag.
+
+Einrichtung und Fehlerbehebung: [docs/PLAYWRIGHT-MCP.md](docs/PLAYWRIGHT-MCP.md).
+Im Devcontainer ist der Server über `.codex/config.toml` projektlokal registriert;
+`scripts/playwright-mcp.sh` startet einen sichtbaren Browser auf dem VM-Desktop.
+Bei fehlenden Tools zuerst `codex mcp list` und den dokumentierten Neustart prüfen.
+Eine konfigurierte Verbindung ist noch kein erfolgreicher Browser-/HA-Login-Test.
+
+Live-Softwareupdates erfolgen aus einem regulären Release: Branch/PR, grüne
+Prüfungen, Merge, synchroner Versionsstand und Tag/Release, danach Installation
+über HACS und Live-Verifikation. Keine direkten Patches installierter
+Python-Dateien als Ersatz für diesen Ablauf. Anlagen-Konfigurationsänderungen
+sind davon getrennt und benötigen keinen Software-Release.
+
 ## Projektstruktur
 
 - `custom_components/balcony_solar_forecast/core/` — reiner Rechenkern ohne

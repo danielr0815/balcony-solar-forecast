@@ -111,6 +111,13 @@ praktischen Fallen (Windows/PowerShell, Floats, DC/AC in Diagnostics).
 
 ## 3. Einstiegs-Pfade
 
+Aktuelle Betriebsanalyse: [Monatsvergleich 27.08.–25.09.2026 und live übernommene
+Baumkanten](../analysis/2026-09-26-monatsanalyse-baumkanten.md). Enthält die
+Messdatenqualität, verbleibende Modellgrenzen, den Rekonfigurationsfix und den
+geprüften Übernahme-/Rücknahmepfad. Die dortigen Live-Werte sind eine datierte
+Momentaufnahme, kein unveränderlicher Anlagenstandard.
+
+
 | Ich will … | Lies zuerst | Dann |
 |---|---|---|
 | **Code ändern** | `07-entwicklung-tests-release.md` (Regeln, Tests, Contracts) | `01-…` für die Modul-Landkarte; das Fachdokument des betroffenen Bereichs (`02`/`03`/`04`); `docs/SPEC.md` für den Vertrag |

@@ -1,6 +1,6 @@
 # Spezifikation: Balcony Solar Forecast — Mehrebenen-PV-Prognose mit Selbstlernen
 
-> **Gilt für Version: 0.27.1** · Zuletzt aktualisiert: 2026-08-27
+> **Gilt für Version: 0.27.2** · Zuletzt aktualisiert: 2026-09-26
 >
 > Diese Spezifikation beschreibt **ausschließlich den Ist-Stand dieser Version**:
 > was die Integration `balcony_solar_forecast` heute tut und tun muss. Sie
@@ -456,6 +456,12 @@ Auf Entry-Ebene stehen `name`, `latitude`, `longitude`,
 `fetch_interval_seconds`, `recompute_interval_seconds` und das Objekt `site`.
 `latitude`/`longitude` werden zusätzlich **in** das `site`-Objekt gespiegelt,
 denn Fetcher und Sonnenstand lesen ausschließlich die site-eigenen Koordinaten.
+
+Der Rekonfigurationsdialog speichert strukturelle Änderungen in `entry.data`.
+Dabei bleiben der bestehende Name und unbekannte Entry-Felder erhalten; veraltete
+strukturelle Kopien werden im selben Update aus `entry.options` entfernt.
+`async_update_entry` erhält die vollständig zusammengeführten `data`, keine
+`data_updates`. Genau der Update-Listener übernimmt das anschließende Neuladen.
 
 Nur **Laufzeitschalter** (Kill-Switches der Lernschichten §9, der Quantile
 §11.2, der Ensemble-Bänder §11.3) leben in

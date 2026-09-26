@@ -11,6 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > table in [docs/HISTORIE.md](docs/HISTORIE.md) §H13. Historical entries are
 > deliberately left untouched.
 
+## [Unreleased]
+
+## [0.27.2] - 2026-09-26
+
+This patch release restores structural reconfiguration in Home Assistant.
+Saving a changed site now preserves existing entry metadata and triggers only
+one reload. Forecast physics and learning algorithms are unchanged.
+
+### Fixed
+
+- Fix Home Assistant reconfiguration failing with HTTP 500: pass merged `data`
+  to `async_update_entry`, preserving the entry name and unknown fields while
+  removing stale structural options in the same update. Regression coverage
+  checks the real HA API signature and retains the single-reload contract.
+
+### Development
+
+- Add project-scoped Playwright MCP configuration, a pinned local browser setup,
+  and a VM/Wayland troubleshooting guide for Home Assistant live analysis.
+  This changes development tooling only; the integration contract is unchanged.
+
 ## [0.27.1] - 2026-08-27
 
 This patch release prevents one corrupt inverter frame from contaminating the
