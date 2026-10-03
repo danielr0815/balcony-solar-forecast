@@ -247,6 +247,7 @@ async def _fetch_weather(
                 longitude=site.longitude,
                 start=win_start,
                 end=win_end,
+                tz=dt_util.get_time_zone(hass.config.time_zone) or UTC,
             )
             records.extend(chunk)
             all_as_issued = all_as_issued and chunk_issued
@@ -288,8 +289,10 @@ async def _read_hourly_actuals(
     }
     stat_ids = set(entity_by_module.values())
     # UTC-day bounds (the core groups weather + filters actuals by UTC date).
-    start_dt = datetime(start.year, start.month, start.day, tzinfo=UTC)
-    end_dt = datetime(end.year, end.month, end.day, tzinfo=UTC) + timedelta(days=1)
+    tz = dt_util.get_time_zone(hass.config.time_zone) or UTC
+    start_dt = datetime(start.year, start.month, start.day, tzinfo=tz)
+    nxt = end + timedelta(days=1)
+    end_dt = datetime(nxt.year, nxt.month, nxt.day, tzinfo=tz)
 
     try:
         from homeassistant.components.recorder import get_instance
@@ -312,7 +315,7 @@ async def _read_hourly_actuals(
         )
 
         stats = statistics_during_period(
-            hass, start_dt, end_dt, stat_ids, "hour", None, {"mean"}
+            hass, start_dt, end_dt, stat_ids, "hour", {"power": "W"}, {"mean"}
         )
         return _reduce_stats(stats, entity_by_module)
 
@@ -368,6 +371,7 @@ def _build_accumulator(site, weather, hourly_actuals, svf_by_plane, tz):
         svf_by_plane=svf_by_plane,
         tz=tz,
         progress_cb=_progress,
+        require_complete_day=True,
     )
 
 

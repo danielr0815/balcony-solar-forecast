@@ -1,11 +1,10 @@
 """Config and options flow for the Balcony Solar Forecast integration.
 
-One config entry per named site (SPEC §2). The user step collects the site
-name, latitude/longitude (defaulting to ``hass.config``), the fetch/recompute
-cadences, and a single ``site`` object (config-flow object selector) whose
-default is the full operator reference site from ``const.DEFAULT_SITE`` — so
-the operator sets it up in one click, but every plane, horizon table and
-inverter group stays fully editable and generic (SPEC §2, §7.8).
+One config entry per named site (SPEC §2). Initial setup offers a guided
+location/panel/inverter flow and the advanced ``site`` object editor. Both
+produce the same structural data, with HA location and neutral open-sky
+defaults. Every plane, horizon table and inverter group remains editable
+and generic (SPEC §2, §7.8); nothing is persisted until final submission.
 
 The submitted ``site`` object is validated by round-tripping it through
 ``SiteConfig.from_dict`` plus explicit range checks (azimuth 0..360, tilt
@@ -34,13 +33,13 @@ entry options; the coordinator resolves every tunable via ``LearnerConfig`` from
 ``{**entry.data, **entry.options}`` on the next reload.
 
 Azimuth here is the INTERNAL convention (0 = North, clockwise). The rany2 UI
-uses the same 0=N numbers; conversions to Open-Meteo / PVGIS conventions live
-in the fetcher, not here (SPEC §20.1).
+uses the same 0=N numbers. This flow does no conversion from foreign azimuth
+conventions (SPEC §20.1).
 """
 
 from __future__ import annotations
 
-import copy
+from copy import deepcopy
 from typing import Any
 
 import voluptuous as vol
@@ -73,16 +72,19 @@ from .const import (
     DEFAULT_DAY_AHEAD_BIAS_ENABLED,
     DEFAULT_ENSEMBLE_ENABLED,
     DEFAULT_FAST_LEARNER_ENABLED,
+    DEFAULT_INVERTER_EFFICIENCY,
     DEFAULT_QUANTILES_ENABLED,
-    DEFAULT_SITE,
     DEFAULT_SLOW_LEARNER_ENABLED,
     DOMAIN,
     FETCH_INTERVAL_SECONDS,
+    INVERTER_EFFICIENCY_MAX,
+    INVERTER_EFFICIENCY_MIN,
     RECOMPUTE_INTERVAL_SECONDS,
     SITE_ALBEDO_MAX,
     SITE_ALBEDO_MIN,
     SITE_BEAM_GAIN_MAX,
     SITE_BEAM_GAIN_MIN,
+    SITE_MAX_PLANES,
 )
 from .core.types import SiteConfig
 
@@ -138,6 +140,31 @@ def _site_selector() -> selector.Selector:
 def _bool_selector() -> selector.Selector:
     """A plain on/off toggle for a learner / feature kill switch."""
     return selector.BooleanSelector()
+
+
+def _guided_number(minimum: float, maximum: float, unit: str | None = None) -> selector.Selector:
+    config = selector.NumberSelectorConfig(
+        min=minimum, max=maximum, step="any", mode=selector.NumberSelectorMode.BOX,
+    )
+    if unit:
+        config["unit_of_measurement"] = unit
+    return selector.NumberSelector(config)
+
+
+def _guided_panel_schema(values: dict[str, Any]) -> vol.Schema:
+    return vol.Schema({
+        vol.Required("name", default=values["name"]): str,
+        vol.Required("azimuth_deg", default=values.get("azimuth_deg", 180)): _guided_number(0, 360, "°"),
+        vol.Required("tilt_deg", default=values.get("tilt_deg", 30)): _guided_number(0, 90, "°"),
+        vol.Required("wp", default=values.get("wp", 400)): _guided_number(.1, 100000, "Wp"),
+        vol.Optional("actual_entity", description={"suggested_value": values.get("actual_entity")}):
+            selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+        vol.Required("group_name", default=values.get("group_name", "Inverter 1")): str,
+        vol.Required("ac_limit_w", default=values.get("ac_limit_w", 800)): _guided_number(.1, 100000, "W"),
+        vol.Required("inverter_efficiency", default=values.get("inverter_efficiency", DEFAULT_INVERTER_EFFICIENCY)):
+            _guided_number(INVERTER_EFFICIENCY_MIN, INVERTER_EFFICIENCY_MAX),
+        vol.Required("add_panel", default=False): _bool_selector(),
+    })
 
 
 def _user_schema(
@@ -349,6 +376,28 @@ def _structural_data(site: SiteConfig, user_input: dict[str, Any]) -> dict[str, 
     }
 
 
+
+def _validate_measurement_sources(hass, site, user_input):
+    """Check configured power roles while keeping unavailable sources usable."""
+    from collections.abc import Mapping
+
+    from .core.measurement_quality import power_source_problem
+
+    dc = {p.actual_entity for p in site.planes if p.actual_entity}
+    ac = user_input.get(CONF_AC_ACTUAL_ENTITY) or site.ac_actual_entity
+    if ac in dc:
+        raise SiteValidationError("measurement_role_collision")
+    states = getattr(hass, "states", None)
+    if states is None:
+        return
+    for entity_id in dc | ({ac} if ac else set()):
+        state = states.get(entity_id)
+        attrs = getattr(state, "attributes", None)
+        if isinstance(attrs, Mapping):
+            problem = power_source_problem(dict(attrs))
+            if problem is not None:
+                raise SiteValidationError(problem)
+
 class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
     """Initial setup and later reconfiguration of the structural site data."""
 
@@ -365,6 +414,8 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        if user_input is None and not getattr(self, "_advanced_mode", False):
+            return self.async_show_menu(step_id="user", menu_options=["guided", "advanced"])
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -379,6 +430,7 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
             if not errors:
                 try:
                     site = validate_site(user_input.get(CONF_SITE))
+                    _validate_measurement_sources(self.hass, site, user_input)
                 except SiteValidationError as err:
                     errors[CONF_SITE] = err.code
                 else:
@@ -387,7 +439,7 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
 
         # First render (or re-render after an error): default location from
         # hass.config, default site from const, keep just-entered values.
-        defaults = _current_values(user_input, hass_config=self.hass.config)
+        defaults = _current_values(user_input or getattr(self, "_setup_draft", None), hass_config=self.hass.config)
         return self.async_show_form(
             step_id="user",
             data_schema=_user_schema(
@@ -404,6 +456,90 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
         )
+
+    async def async_step_advanced(self, user_input=None) -> ConfigFlowResult:
+        self._advanced_mode = True
+        return await self.async_step_user(user_input)
+
+    async def async_step_guided(self, user_input=None) -> ConfigFlowResult:
+        """Location first; panels are accumulated privately until final review."""
+        errors = {}
+        defaults = _current_values(user_input, hass_config=self.hass.config)
+        if user_input is not None:
+            if not str(user_input.get(CONF_NAME, "")).strip():
+                errors[CONF_NAME] = "name_required"
+            else:
+                self._setup_draft = {**user_input, CONF_FETCH_INTERVAL: defaults["fetch_interval"],
+                                     CONF_RECOMPUTE_INTERVAL: defaults["recompute_interval"]}
+                self._setup_draft[CONF_SITE] = {
+                    "latitude": float(user_input[CONF_LATITUDE]), "longitude": float(user_input[CONF_LONGITUDE]),
+                    "planes": [], "groups": [],
+                }
+                return await self.async_step_guided_panel()
+        return self.async_show_form(step_id="guided", errors=errors, data_schema=vol.Schema({
+            vol.Required(CONF_NAME, default=defaults[CONF_NAME]): str,
+            vol.Required(CONF_LATITUDE, default=defaults[CONF_LATITUDE]): _guided_number(-90, 90),
+            vol.Required(CONF_LONGITUDE, default=defaults[CONF_LONGITUDE]): _guided_number(-180, 180),
+        }))
+
+    async def async_step_guided_panel(self, user_input=None) -> ConfigFlowResult:
+        errors = {}
+        draft = getattr(self, "_setup_draft", None)
+        if draft is None:
+            return await self.async_step_guided()
+        defaults = {**getattr(self, "_guided_panel_defaults", {}),
+                    "name": f"Panel {len(draft[CONF_SITE]['planes'])+1}"}
+        if user_input is not None:
+            defaults.update(user_input)
+            proposed = deepcopy(draft[CONF_SITE])
+            plane = {key: user_input[key] for key in ("name", "azimuth_deg", "tilt_deg", "wp")}
+            plane["name"] = str(plane["name"]).strip()
+            plane["horizon"] = []
+            if user_input.get("actual_entity"):
+                plane["actual_entity"] = user_input["actual_entity"]
+            proposed["planes"].append(plane)
+            group_name = str(user_input.get("group_name", "")).strip()
+            group = next((g for g in proposed["groups"] if g["name"] == group_name), None)
+            if not group_name:
+                errors["group_name"] = "name_required"
+            elif group is not None and (group["ac_limit_w"] != user_input["ac_limit_w"]
+                                       or group["inverter_efficiency"] != user_input["inverter_efficiency"]):
+                errors["group_name"] = "guided_group_conflict"
+            else:
+                if group is None:
+                    group = {"name": group_name, "plane_names": [], "ac_limit_w": user_input["ac_limit_w"],
+                             "inverter_efficiency": user_input["inverter_efficiency"]}
+                    proposed["groups"].append(group)
+                group["plane_names"].append(plane["name"])
+                try:
+                    site = validate_site(proposed)
+                    _validate_measurement_sources(self.hass, site, {})
+                except SiteValidationError as err:
+                    errors["base"] = err.code
+                else:
+                    draft[CONF_SITE] = site.to_dict()
+                    self._guided_panel_defaults = {key: user_input[key] for key in
+                        ("azimuth_deg", "tilt_deg", "wp", "group_name", "ac_limit_w", "inverter_efficiency")}
+                    if user_input.get("add_panel") and len(site.planes) < SITE_MAX_PLANES:
+                        return await self.async_step_guided_panel()
+                    return await self.async_step_guided_review()
+        return self.async_show_form(step_id="guided_panel", errors=errors,
+                                    data_schema=_guided_panel_schema(defaults))
+
+    async def async_step_guided_review(self, user_input=None) -> ConfigFlowResult:
+        draft = getattr(self, "_setup_draft", None)
+        if draft is None or not draft[CONF_SITE]["planes"]:
+            return await self.async_step_guided()
+        site = draft[CONF_SITE]
+        summary = "; ".join(f"{p['name']}: {p['wp']} Wp, {p['azimuth_deg']}° / {p['tilt_deg']}°" for p in site['planes'])
+        groups = "; ".join(f"{g['name']}: {', '.join(g['plane_names'])}, {g['ac_limit_w']} W" for g in site['groups'])
+        if user_input is not None:
+            if user_input.get("advanced"):
+                return await self.async_step_advanced()
+            return await self.async_step_user(draft)
+        return self.async_show_form(step_id="guided_review", data_schema=vol.Schema({
+            vol.Required("advanced", default=False): _bool_selector(),
+        }), description_placeholders={"panels": summary, "groups": groups})
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
@@ -423,32 +559,22 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 site = validate_site(user_input.get(CONF_SITE))
+                _validate_measurement_sources(self.hass, site, user_input)
             except SiteValidationError as err:
                 errors[CONF_SITE] = err.code
             else:
-                # Strip any stale structural keys from options in the SAME
-                # atomic update: left behind, they would shadow the just-
-                # reconfigured data through the {**data, **options} merge and
-                # silently revert the live site to the pre-edit values.
-                stripped_options = {
-                    k: v
-                    for k, v in entry.options.items()
-                    if k not in _STRUCTURAL_OPTION_KEYS
-                }
-                # Update + abort only — NEVER async_update_reload_and_abort:
-                # the entry has an update listener (__init__._async_reload_entry)
-                # that fires the reload off this very update, so the helper's
-                # own async_schedule_reload would reload TWICE — and HA reports
-                # exactly that pattern as deprecated (breaks in 2026.12).
-                self.hass.config_entries.async_update_entry(
-                    entry,
-                    # async_update_entry accepts a full data mapping, unlike
-                    # the flow helper's data_updates patch (HA rejected it).
-                    # Merge explicitly to preserve the name and unknown keys.
-                    data={**entry.data, **_structural_data(site, user_input)},
-                    options=stripped_options,
-                )
-                return self.async_abort(reason="reconfigure_successful")
+                proposed = {**entry.data, **_structural_data(site, user_input)}
+                previous = {**entry.data, **entry.options}
+                from .core.config_changes import site_changes
+                from .core.types import SiteConfig
+
+                old_site = dict(previous[CONF_SITE])
+                for key in (CONF_LATITUDE, CONF_LONGITUDE):
+                    if key in previous:
+                        old_site[key] = previous[key]
+                changes = site_changes(SiteConfig.from_dict(old_site), SiteConfig.from_dict(proposed[CONF_SITE]))
+                self._pending_reconfigure = (proposed, dict(entry.data), dict(entry.options), changes)
+                return await self.async_step_confirm_changes()
 
         merged = {**entry.data, **entry.options}
         defaults = _current_values(user_input, existing=merged)
@@ -468,6 +594,54 @@ class BalconySolarForecastConfigFlow(ConfigFlow, domain=DOMAIN):
                 include_name=False,
             ),
             errors=errors,
+        )
+
+
+    async def async_step_confirm_changes(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Review concrete site/learning consequences before the atomic update."""
+        pending = getattr(self, "_pending_reconfigure", None)
+        if pending is None:
+            return await self.async_step_reconfigure()
+        proposed, old_data, old_options, changes = pending
+        entry = self._get_reconfigure_entry()
+        if entry.data != old_data or entry.options != old_options:
+            self._pending_reconfigure = None
+            return await self.async_step_reconfigure()
+        if user_input is not None:
+            stripped_options = {key: value for key, value in entry.options.items()
+                                if key not in _STRUCTURAL_OPTION_KEYS}
+            # The update listener owns reload. Scheduling another reload here
+            # duplicates setup and is deprecated in HA's reconfigure helper.
+            self.hass.config_entries.async_update_entry(entry, data=proposed, options=stripped_options)
+            self._pending_reconfigure = None
+            return self.async_abort(reason="reconfigure_successful")
+        language = getattr(getattr(self.hass, "config", None), "language", "en")
+        german = language.startswith("de")
+        if changes["model_changed"]:
+            effect = ("Die Tageskorrektur lernt beschleunigt neu. Quantil-Evidenz und Drift-Verlustfolgen beginnen neu."
+                      if german else "The day correction reopens learning. Quantile evidence and drift loss streaks restart.")
+        else:
+            effect = "Der Lernzustand bleibt erhalten." if german else "Learning state is retained."
+        # Use the same empty-plane fallback as SiteConfig.from_dict: legacy
+        # structural options can contain an incomplete site awaiting repair.
+        before = {p["name"]: p for p in {**old_data, **old_options}[CONF_SITE].get("planes", [])}
+        after = {p["name"]: p for p in proposed[CONF_SITE]["planes"]}
+        module_descriptions = []
+        for module, changed_fields in changes["modules"].items():
+            if changed_fields == ["display_name"]:
+                old_label = before[module].get("display_name") or module
+                new_label = after[module].get("display_name") or module
+                module_descriptions.append(f"{old_label} → {new_label}")
+            else:
+                module_descriptions.append(module)
+        modules = ", ".join(module_descriptions) or ("keine" if german else "none")
+        field_names = set(changes["site_fields"]) | {key for keys in changes["modules"].values() for key in keys}
+        fields = ", ".join(sorted(field_names)) or ("keine" if german else "none")
+        return self.async_show_form(
+            step_id="confirm_changes", data_schema=vol.Schema({}),
+            description_placeholders={"modules": modules, "fields": fields, "learning_effect": effect},
         )
 
 
@@ -560,8 +734,7 @@ def _current_values(
 
     Precedence: just-submitted ``user_input`` (so an error re-render keeps
     the operator's edits) > ``existing`` entry data/options > hass.config /
-    shipped constants. The site default is a deep copy so the shared
-    ``DEFAULT_SITE`` is never mutated by later editing. Returns both the
+    neutral defaults. The new-site template is freshly allocated on each call. Returns both the
     structural values (user/reconfigure steps) and the runtime tunables (options
     step); each caller reads only the subset its schema renders.
     """
@@ -580,7 +753,12 @@ def _current_values(
     default_site = (
         existing.get(CONF_SITE)
         if existing is not None and existing.get(CONF_SITE)
-        else copy.deepcopy(DEFAULT_SITE)
+        else {
+            "latitude": default_lat, "longitude": default_lon,
+            "planes": [{"name": "Panel 1", "azimuth_deg": 180.0,
+                        "tilt_deg": 30.0, "wp": 400.0}],
+            "groups": [{"name": "Inverter 1", "plane_names": ["Panel 1"], "ac_limit_w": 800.0}],
+        }
     )
 
     # AC-meter picker defaults (Phase 4): the meter lives INSIDE the site dict

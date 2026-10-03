@@ -48,8 +48,8 @@
 
 // Propagate the resource cache-buster to every local dependency (SPEC §18.5).
 const dependency = (name) => new URL(`./${name}${new URL(import.meta.url).search}`, import.meta.url);
-const { ensureRegistry, resolveEntities, callEntryService } = await import(dependency("card_data.js"));
-const { pressed, describeChart, dataTable } = await import(dependency("card_ui.js"));
+const { ensureRegistry, stopRegistry, resolveEntities, callEntryService } = await import(dependency("card_data.js"));
+const { preserveUiState, pressed, describeChart, dataTable } = await import(dependency("card_ui.js"));
 const { SiteCalendar } = await import(dependency("site_calendar.js"));
 
 const CARD_TAG = "balcony-power-history-card";
@@ -97,6 +97,11 @@ const REFETCH_MS = 5 * 60 * 1000;
 const I18N = {
   en: {
     table: "Values as a table", time: "Time",
+    learningCold: "Too little evidence for a learned band",
+    learningPartial: "Band partly learned", learningTrained: "Band learned",
+    evidenceDays: "dated evidence days",
+    learningCached: "Weather data cached", learningDegraded: "Weather source degraded",
+    coverage: "Measurement coverage (closed hours)", partialTotals: "* Partial sum: hours missing or day ongoing",
     chartDescription: "Measured DC energy per module and DC forecast. Detailed values follow in a table.",
     statisticsError: "Statistics lookup failed.", lastSuccess: "Last successful update:",
     title: "Hourly production per module",
@@ -111,7 +116,7 @@ const I18N = {
     // model curve; past days: the issued ring's hourly_wh) are all DC — the
     // caption names the line's ORIGIN (SPEC §18.4), never a unit basis.
     forecastLive: "Forecast (live)",
-    forecastIssued: "Forecast (as issued 01:30)",
+    forecastIssued: "Forecast (archived issue)",
     // Under-plot notes when NO past-day line is drawn ({d} = the date).
     forecastError: "Forecast lookup failed",
     forecastMissing:
@@ -128,6 +133,11 @@ const I18N = {
   },
   de: {
     table: "Werte als Tabelle", time: "Zeit",
+    learningCold: "Noch zu wenig Evidenz für ein gelerntes Band",
+    learningPartial: "Band teilweise gelernt", learningTrained: "Band gelernt",
+    evidenceDays: "datierte Evidenztage",
+    learningCached: "Wetterdaten aus dem Cache", learningDegraded: "Wetterquelle eingeschränkt",
+    coverage: "Messabdeckung (abgeschlossene Stunden)", partialTotals: "* Teilsumme: Stunden fehlen oder Tag läuft",
     chartDescription: "Gemessene DC-Energie je Modul und DC-Prognose. Detailwerte stehen in der folgenden Tabelle.",
     statisticsError: "Statistik-Abruf fehlgeschlagen.", lastSuccess: "Letzte erfolgreiche Aktualisierung:",
     title: "Stündliche Produktion je Modul",
@@ -143,7 +153,7 @@ const I18N = {
     // DC — die Beschriftung nennt die HERKUNFT der Linie (SPEC §18.4), keine
     // Einheiten-Basis.
     forecastLive: "Prognose (live)",
-    forecastIssued: "Prognose (Stand 01:30)",
+    forecastIssued: "Prognose (archivierter Stand)",
     // Under-plot notes when NO past-day line is drawn ({d} = the date).
     forecastError: "Prognose-Abruf fehlgeschlagen",
     forecastMissing:
@@ -173,6 +183,14 @@ function svg(tag, attrs, children) {
   }
   if (children) for (const c of children) el.appendChild(c);
   return el;
+}
+
+/** Missing and corrupt labels must never become measured zero through coercion. */
+function energyValue(value) {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && !value.trim()) return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
 function isArray(x) {
@@ -309,6 +327,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    stopRegistry(this);
     this._fetchSeq += 1;
     this._liveDayKey = undefined;
     if (this._timer) {
@@ -451,6 +470,11 @@ class BalconyPowerHistoryCard extends HTMLElement {
 
   /** Forecast sensor's 15-min `wh_period` → the live TODAY line (number[23/24/25]). */
   _recomputeForecast(forecast) {
+    if (forecast && ["unknown", "unavailable"].includes(forecast.state)) {
+      this._dayForecast = null;
+      this._forecastState = "unavailable";
+      return;
+    }
     if (this._config.hours_forecast === false) {
       this._dayForecast = null;
       this._forecastState = "none";
@@ -464,14 +488,14 @@ class BalconyPowerHistoryCard extends HTMLElement {
       this._forecastState = "none";
       return;
     }
-    const arr = new Array(this._dayHours().length).fill(0);
+    const arr = new Array(this._dayHours().length).fill(null);
     let any = false;
     for (const iso in wh) {
       const h = this._hourIndex(iso);
       if (h < 0) continue;
-      const v = Number(wh[iso]);
-      if (!Number.isFinite(v)) continue;
-      arr[h] += v;
+      const v = energyValue(wh[iso]);
+      if (v === null) continue;
+      arr[h] = (arr[h] ?? 0) + v;
       any = true;
     }
     this._dayForecast = any ? arr : null;
@@ -554,6 +578,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
         statistic_ids: sources,
         period: "hour",
         types: ["mean"],
+        units: { power: "W" },
       });
     } catch (err) {
       if (seq !== this._fetchSeq) return;
@@ -593,6 +618,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
         statistic_ids: sources,
         period: "hour",
         types: ["mean"],
+        units: { power: "W" },
       });
     } catch (err) {
       if (seq !== this._fetchSeq) return;
@@ -662,10 +688,15 @@ class BalconyPowerHistoryCard extends HTMLElement {
       const result = await callEntryService(this, hass, "get_issued_forecast", { date: iso });
       if (!result || typeof result !== "object") throw new Error("Invalid forecast response");
       if (result.available === false) return { status: "missing", value: null };
-      let total = 0;
-      for (const value of Object.values(result.hourly_wh || {})) {
-        if (Number.isFinite(Number(value))) total += Number(value);
+      const curve = result.hourly_wh;
+      if (!curve || typeof curve !== "object" || Array.isArray(curve)) {
+        return { status: "missing", value: null };
       }
+      const values = Object.values(curve).map(energyValue);
+      if (!values.length || values.some((value) => value === null)) {
+        return { status: "missing", value: null };
+      }
+      const total = values.reduce((sum, value) => sum + value, 0);
       return { status: "available", value: total };
     } catch (_error) {
       return { status: "error" };
@@ -676,14 +707,15 @@ class BalconyPowerHistoryCard extends HTMLElement {
   _liveForecastTotal(hass) {
     const ids = this._resolveIds(hass);
     const forecast = hass.states[ids.forecast_sensor];
+    if (["unknown", "unavailable"].includes(forecast?.state)) return null;
     const wh =
       forecast && forecast.attributes && forecast.attributes[A_WH_PERIOD];
     if (!wh || typeof wh !== "object") return null;
     let total = 0;
     let any = false;
     for (const iso in wh) {
-      const v = Number(wh[iso]);
-      if (!Number.isFinite(v)) continue;
+      const v = energyValue(wh[iso]);
+      if (v === null) continue;
       total += v;
       any = true;
     }
@@ -726,15 +758,16 @@ class BalconyPowerHistoryCard extends HTMLElement {
           : null;
       return;
     }
+    this._issuedAt = typeof result.issued_at === "string" ? result.issued_at : null;
     const wh = result.hourly_wh;
-    const arr = new Array(this._dayHours().length).fill(0);
+    const arr = new Array(this._dayHours().length).fill(null);
     if (wh && typeof wh === "object") {
       for (const key in wh) {
         const h = this._hourIndex(key);
         if (h < 0) continue;
-        const v = Number(wh[key]);
-        if (!Number.isFinite(v)) continue;
-        arr[h] += v;
+        const v = energyValue(wh[key]);
+        if (v === null) continue;
+        arr[h] = (arr[h] ?? 0) + v;
       }
     }
     this._dayForecast = arr;
@@ -747,15 +780,14 @@ class BalconyPowerHistoryCard extends HTMLElement {
     let any = false;
     for (const id of sources) {
       const rows = result && result[id];
-      const arr = new Array(this._dayHours().length).fill(0);
+      const arr = new Array(this._dayHours().length).fill(null);
       if (isArray(rows)) {
         for (const row of rows) {
           const h = this._hourIndex(row && row.start);
           if (h < 0) continue;
-          if (row?.mean === null || row?.mean === undefined) continue;
-          const mean = Number(row.mean);
+          const mean = energyValue(row?.mean);
           if (!this._validMean(id, mean)) continue;
-          arr[h] += mean; // mean power (W) × 1 h = Wh
+          arr[h] = (arr[h] ?? 0) + mean; // mean power (W) × 1 h = Wh
           any = true;
         }
       }
@@ -777,22 +809,25 @@ class BalconyPowerHistoryCard extends HTMLElement {
     const index = {};
     for (let i = 0; i < 7; i++) index[this._calendar().key(days[i])] = i;
     const bars = {};
+    this._weekCoverage = {};
     let any = false;
     for (const id of sources) {
       const rows = result && result[id];
-      const arr = new Array(7).fill(0);
+      const arr = new Array(7).fill(null);
+      const observed = Array.from({ length: 7 }, () => new Set());
       if (isArray(rows)) {
         for (const row of rows) {
           const i = index[this._calendar().key(row && row.start)];
           if (i === undefined) continue;
-          if (row?.mean === null || row?.mean === undefined) continue;
-          const mean = Number(row.mean);
+          const mean = energyValue(row?.mean);
           if (!this._validMean(id, mean)) continue;
-          arr[i] += mean; // mean power (W) × 1 h = hourly Wh
+          observed[i].add(String(row.start));
+          arr[i] = (arr[i] ?? 0) + mean; // mean power (W) × 1 h = hourly Wh
           any = true;
         }
       }
       bars[id] = arr;
+      this._weekCoverage[id] = observed.map((hours) => hours.size);
     }
     this._weekBars = bars;
     this._loadState = any ? "ok" : "empty";
@@ -802,6 +837,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
   // --- rendering ----------------------------------------------------------
 
   _render() {
+    return preserveUiState(this.shadowRoot, () => this._renderContent());
+  }
+
+  _renderContent() {
     const t = this._t();
     const root = this.shadowRoot;
     root.textContent = "";
@@ -842,8 +881,38 @@ class BalconyPowerHistoryCard extends HTMLElement {
       const note = this._forecastNote(t);
       if (note) body.appendChild(note);
     }
+    const readiness = this._learningNote(t);
+    if (readiness) body.appendChild(readiness);
     body.appendChild(this._legend(t));
+    body.appendChild(this._coverageNote(t));
     body.appendChild(this._table(t));
+  }
+
+  _coverageNote(t) {
+    const now = Date.now();
+    if (this._view === "week") return this._message(t.partialTotals);
+    const hours = this._dayHours();
+    const complete = hours.map((hour, index) => hour.getTime()+3600000 <= now ? index : -1).filter((i) => i >= 0);
+    const values = this._modules.map((mod) => `${mod.name}: ${complete.filter((i) => this._dayBars[mod.id]?.[i] != null).length}/${complete.length}`);
+    return this._message(`${t.coverage}: ${values.join("; ")}`);
+  }
+
+  _learningNote(t) {
+    if (this._offset !== 0 || this._view === "week") return null;
+    const ids = this._resolveIds(this._hass || {});
+    const sensor = this._hass?.states?.[ids.forecast_sensor];
+    if (!sensor || ["unknown", "unavailable"].includes(sensor.state)) return null;
+    const readiness = sensor.attributes?.quantile_readiness;
+    if (!readiness?.enabled) return null;
+    const key = this._calendar().key(this._calendar().dayAt(this._offset));
+    const day = readiness.by_day?.[key];
+    if (!day) return null;
+    const label = day.state === "trained" ? t.learningTrained : day.state === "partial" ? t.learningPartial : t.learningCold;
+    const weather = readiness.weather_status === "fresh" ? "" :
+      ` ${readiness.weather_status === "cached" ? t.learningCached : t.learningDegraded}.`;
+    const note = this._message(`${label}: ${day.trained_slots}/${day.positive_slots}; ${readiness.dated_days} ${t.evidenceDays}.${weather}`);
+    note.setAttribute("role", "status");
+    return note;
   }
 
   _statisticsError(t) {
@@ -859,9 +928,12 @@ class BalconyPowerHistoryCard extends HTMLElement {
     const count = week ? 7 : this._dayHours().length;
     const rows = Array.from({ length: count }, (_, i) => {
       const date = week ? this._calendar().dayAt(this._offset - 6 + i) : this._dayHours()[i];
-      const values = this._modules.map((m) => bars[m.id]?.[i] ?? 0);
+      const values = this._modules.map((m) => bars[m.id]?.[i] ?? null);
+      const expected = week ? this._calendar().hours(date).length : 1;
+      const partial = week && this._modules.some((mod) => (this._weekCoverage?.[mod.id]?.[i] || 0) < expected);
       return [week ? this._calendar().key(date) : this._calendar().hourLabel(date),
-        ...values.map(fmtVal), fmtVal(values.reduce((a, b) => a + b, 0)),
+        ...values.map((v, module) => v == null ? "—" : fmtVal(v)+(week && (this._weekCoverage?.[this._modules[module].id]?.[i] || 0) < expected ? " *" : "")),
+        values.some((v) => v == null) ? "—" : fmtVal(values.reduce((a, b) => a + b, 0))+(partial ? " *" : ""),
         forecast?.[i] == null ? "—" : fmtVal(forecast[i])];
     });
     return dataTable(t.table, [t.time, ...this._modules.map((m) => m.name), t.total, t.forecast], rows);
@@ -876,6 +948,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
     if (!text) return null;
     const div = document.createElement("div");
     div.className = "provenance";
+    if (this._forecastState === "issued" && this._issuedAt) {
+      const stamp = new Date(this._issuedAt);
+      if (Number.isFinite(stamp.getTime())) text += ` · ${stamp.toLocaleString(this._hass?.language || "en", { timeZone: this._calendar().timeZone })}`;
+    }
     div.textContent = text;
     return div;
   }
@@ -1124,23 +1200,20 @@ class BalconyPowerHistoryCard extends HTMLElement {
       }
     }
 
-    // --- forecast: dashed stepped line at the hour widths ----------------
+    // Missing intervals break the line; a real zero remains on the baseline.
     if (this._dayForecast) {
-      const pts = [];
+      const commands = [];
+      let gap = true;
       for (let h = 0; h < this._dayHours().length; h++) {
-        const y = Y(this._dayForecast[h]);
-        pts.push(`${X(h)},${y}`, `${X(h + 1)},${y}`);
+        const value = this._dayForecast[h];
+        if (value == null) { gap = true; continue; }
+        const y = Y(value);
+        commands.push(`${gap ? "M" : "L"}${X(h)},${y} L${X(h + 1)},${y}`);
+        gap = false;
       }
-      el.appendChild(
-        svg("polyline", {
-          points: pts.join(" "),
-          fill: "none",
-          stroke: "var(--primary-text-color)",
-          "stroke-width": "2",
-          "stroke-dasharray": "5 4",
-          opacity: "0.7",
-        }),
-      );
+      el.appendChild(svg("path", { d: commands.join(" "), fill: "none",
+        stroke: "var(--primary-text-color)", "stroke-width": "2",
+        "stroke-dasharray": "5 4", opacity: "0.7" }));
     }
 
     // --- empty / loading note (bars absent) ------------------------------
@@ -1540,14 +1613,16 @@ class BalconyPowerHistoryCard extends HTMLElement {
       rows.push({ kind: "title", text: this._calendar().hourLabel(ctx.hours[i]) });
     }
     let total = 0;
+    let complete = true;
     for (const mod of ctx.modules) {
-      const v = (ctx.bars[mod.id] && ctx.bars[mod.id][i]) || 0;
-      total += v;
-      if (v > 0.5) {
+      const v = ctx.bars[mod.id]?.[i] ?? null;
+      if (v == null) complete = false;
+      else total += v;
+      if (v == null || v > 0.5) {
         rows.push({ kind: "mod", color: mod.color, name: mod.name, val: v });
       }
     }
-    rows.push({ kind: "total", name: ctx.t.total, val: total });
+    rows.push({ kind: "total", name: ctx.t.total, val: complete ? total : null });
     // Day view: the hourly line value. Week view: the day's forecast total —
     // null on a gap day (no archived snapshot), rendered as "—".
     if (ctx.forecast) {

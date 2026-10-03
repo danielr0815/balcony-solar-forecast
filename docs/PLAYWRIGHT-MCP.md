@@ -34,6 +34,15 @@ Copilot-MCP-Konfiguration (`.vscode/mcp.json`).
 
 ## Prüfung und tägliche Nutzung
 
+Bei zwei VS-Code-Instanzen für jeden MCP-Prozess einen eigenen Namen setzen,
+zum Beispiel `BSF_PLAYWRIGHT_INSTANCE=review` bzw. `BSF_PLAYWRIGHT_INSTANCE=dev`.
+Den Wert in der jeweiligen MCP-Prozessumgebung setzen, bevor der Server startet.
+Der Launcher verwendet dann `.ha-dev/playwright-profile-<Name>` und
+`.playwright-mcp/<Name>`. Erlaubt sind Buchstaben, Zahlen, `_` und `-`.
+Ohne Variable bleibt das bisherige Profil erhalten. Jedes neue Profil benötigt
+seinen eigenen manuellen HA-Login. Laufende Browser und deren Locks bleiben
+unangetastet; eine neue Variable trennt bereits gestartete Prozesse nicht nachträglich.
+
 1. `codex mcp list` muss `playwright` als `enabled` aufführen.
    `Auth: Unsupported` ist für diesen lokalen STDIO-Server normal und sagt
    nichts über den HA-Login aus.

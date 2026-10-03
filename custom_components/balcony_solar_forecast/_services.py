@@ -233,7 +233,7 @@ def async_register_services(hass: HomeAssistant) -> None:
             # Lazy import: the response builder lives in sensor.py (its tests
             # exercise it there); importing it at module load would pull the
             # whole sensor platform in before HA needs it.
-            from .sensor import _build_forecast_response
+            from ._forecast_presenter import _build_forecast_response
 
             return _build_forecast_response(hass, call.data.get(ATTR_ENTRY_ID))
 
@@ -911,7 +911,16 @@ def _handle_get_issued_forecast(
             "raw_hourly_wh": {k: _round3(v) for k, v in raw.items()},
             # The served (corrected) DC curve converted to AC with the issue-time
             # eta — the DC curves above are explicitly DC (SPEC §18.4).
-            "hourly_wh_ac": {k: _round3(v * eta) for k, v in corrected.items()},
+            "hourly_wh_ac": ({k: _round3(v) for k, v in
+                              _filter_hourly_to_local_day(snap.corrected_ac_hourly_wh, iso).items()}
+                             if snap.corrected_ac_hourly_wh is not None else
+                             {k: _round3(v * eta) for k, v in corrected.items()}),
+            "ac_source": "snapshot" if snap.corrected_ac_hourly_wh is not None else "reconstructed",
+            "computed_at": snap.computed_at,
+            "archived_at": snap.archived_at,
+            "provenance": snap.provenance,
+            "bands": snap.bands,
+            "band_aggregation": "marginal_slot_curves" if snap.bands is not None else None,
             "eta": round(eta, 4),
             "eta_source": eta_source,
             "cloud_class_by_hour": dict(snap.cloud_class_by_hour),

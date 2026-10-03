@@ -2,12 +2,31 @@
 
 | | |
 |---|---|
-| **Status** | Proposed |
+| **Status** | Neutraler Einstieg und geführte Panels/Gruppen umgesetzt im Arbeitsbranch; additive Anzeigenamen umgesetzt; weitere Stufen Proposed |
 | **Datum** | 2026-07-25 |
 | **Ziel-Release** | gestuft: MVP ~0.24/0.25, v1 zur ersten breiten Veröffentlichung, Ausbaustufen danach |
 | **Autoren** | Design-Agent (Fable) |
 | **Evidenz** | Code-Analyse `main` @ v0.23.0 (`config_flow.py`, `_site_validation.py`, `const.py::DEFAULT_SITE`, `core/types.py`, `core/shademap.py`, `_services.py`, `manifest.json`); 7-Tage-Forensik Juli 2026 (`docs/project-knowledge/06-…`); ADR-0022; Wissensbasis `docs/project-knowledge/` (02 Physik, 03 Lernschichten, 05 Runbook); Kampagnen-Site-YAML des Betreibers (Session-Artefakt, 333 Zeilen) |
 | **Scope** | NUR Analyse + Design. Kein Code, keine bestehende Doku geändert. Frage: Wie entsteht und ändert sich die STANDORT-KONFIGURATION, wenn die Integration von der Einzel-Betreiber-HACS-Installation zur allgemein veröffentlichten Integration wird? |
+
+## Umgesetzter erster Schritt (2026-10-03)
+
+`config_flow._current_values` bietet bei neuen Entries eine einzelne offene
+400-Wp-Ebene ohne Messquelle und eine 800-W-Wechselrichtergruppe an. Standort
+ist HA; bestehende Entries und eingereichte Werte behalten Vorrang.
+`const.DEFAULT_SITE` bleibt ein explizites Struktur-/Testbeispiel, kein
+Neuinstallationsdefault. Doppelte DC-Quellen werden durch `validate_site`
+abgelehnt, damit dieselbe Messung nicht zwei Module trainiert.
+
+Der Ersteinrichtungsdialog bietet nun einen geführten Weg für Standort,
+wiederholte Panels und Wechselrichtergruppen sowie eine Übersicht vor dem
+Anlegen. Der erweiterte Site-Editor bleibt alternativ erreichbar und übernimmt
+den geführten Entwurf verlustfrei, etwa für bekannte Horizontzeilen oder einen
+AC-Zähler. Beide Wege erzeugen denselben bestehenden Site-Vertrag; keine
+Subentries oder Entry-Migration sind dafür nötig. Die bestehende `name`-Identität ist nun von `display_name` getrennt
+(ADR-0025); die Migration ist absichtlich identitätserhaltend und schreibt
+keine alten Schlüssel um. Fernhorizontbezug und datenbasierte
+Geometrievorschläge bleiben eigene Ausbaustufen.
 
 ---
 

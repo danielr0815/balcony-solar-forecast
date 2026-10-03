@@ -160,10 +160,10 @@ def test_usable_power_rejects_missing_state():
 def test_usable_power_rejects_frozen_stale_sensor():
     now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
     stale = now - timedelta(seconds=LABEL_FROZEN_STALE_SECONDS + 60)
-    s = State("sensor.m1", "210.0", last_updated=stale)
+    s = State("sensor.m1", "210.0", last_updated=stale, last_reported=stale)
     assert _usable_power(s, now) is None
     fresh = now - timedelta(seconds=LABEL_FROZEN_STALE_SECONDS - 60)
-    s2 = State("sensor.m1", "210.0", last_updated=fresh)
+    s2 = State("sensor.m1", "210.0", last_updated=fresh, last_reported=fresh)
     assert _usable_power(s2, now) == pytest.approx(210.0)
 
 
@@ -1763,11 +1763,10 @@ async def test_compute_passes_learner_hooks(monkeypatch):
 
     monkeypatch.setattr(coord_mod, "compute_forecast", _fake_compute)
 
-    class _W:
-        slots = ()
+    from custom_components.balcony_solar_forecast.core.types import WeatherSeries
 
     now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
-    await c._compute(_W(), now)
+    await c._compute(WeatherSeries(()), now)
     assert isinstance(captured["hooks"], LearnerHooks)
 
 

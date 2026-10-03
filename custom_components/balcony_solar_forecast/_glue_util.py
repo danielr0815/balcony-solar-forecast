@@ -21,13 +21,13 @@ keep resolving.
 
 from __future__ import annotations
 
-import math
 from datetime import UTC, datetime, timedelta
 
 from homeassistant.core import State
 from homeassistant.util import dt as dt_util
 
 from .const import LABEL_FROZEN_STALE_SECONDS, SLOT_HOURS, SLOT_MINUTES
+from .core.measurement_quality import dc_power
 from .core.types import DriftState, ForecastResult
 
 # Live-actual state guards: states we never treat as a measurement.
@@ -61,15 +61,12 @@ def _usable_power(
     raw = (state.state or "").strip().lower()
     if raw in _UNUSABLE_STATES:
         return None
-    try:
-        value = float(state.state)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(value) or value < 0.0:
+    value = dc_power(state.state, getattr(state, "attributes", {}).get("unit_of_measurement", "W"))
+    if value is None:
         return None
     if max_w is not None and value > max_w:
         return None
-    last_updated = getattr(state, "last_updated", None)
+    last_updated = getattr(state, "last_reported", None) or getattr(state, "last_updated", None)
     if last_updated is not None:
         age = (dt_util.as_utc(now) - dt_util.as_utc(last_updated)).total_seconds()
         if age > LABEL_FROZEN_STALE_SECONDS:

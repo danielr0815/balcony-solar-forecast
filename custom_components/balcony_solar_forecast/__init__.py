@@ -94,6 +94,7 @@ async def async_setup_entry(
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     coordinator.async_start_nightly_job()
+    coordinator.async_start_panel_observer()
 
     # Learning visibility (0.23.1, SPEC §10): verify every configured
     # ``actual_entity`` actually exists in this HA. The nightly gates discard

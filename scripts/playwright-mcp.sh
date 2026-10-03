@@ -4,6 +4,19 @@ set -euo pipefail
 umask 077
 
 task_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# Independent VS Code windows must explicitly choose different instance names.
+# Preserve the existing profile for users who already logged in there.
+task_instance="${BSF_PLAYWRIGHT_INSTANCE:-default}"
+if [[ ! "$task_instance" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo 'BSF_PLAYWRIGHT_INSTANCE: nur Buchstaben, Zahlen, _ und - erlaubt.' >&2
+    exit 1
+fi
+task_profile="$task_root/.ha-dev/playwright-profile"
+task_output="$task_root/.playwright-mcp"
+if [[ "$task_instance" != default ]]; then
+    task_profile="$task_root/.ha-dev/playwright-profile-$task_instance"
+    task_output="$task_root/.playwright-mcp/$task_instance"
+fi
 task_runtime="$task_root/.ha-dev/playwright-runtime"
 export PLAYWRIGHT_BROWSERS_PATH="$task_root/.ha-dev/playwright-browsers"
 task_cli="$task_runtime/node_modules/@playwright/mcp/cli.js"
@@ -42,6 +55,6 @@ if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
 fi
 exec node "$task_cli" \
     --executable-path "$task_browser" \
-    --user-data-dir "$task_root/.ha-dev/playwright-profile" \
-    --output-dir "$task_root/.playwright-mcp" \
+    --user-data-dir "$task_profile" \
+    --output-dir "$task_output" \
     --codegen none "${task_options[@]}" "$@"

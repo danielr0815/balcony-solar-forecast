@@ -16,7 +16,7 @@ from __future__ import annotations
 DOMAIN = "balcony_solar_forecast"
 
 INTEGRATION_NAME = "Balcony Solar Forecast"
-INTEGRATION_VERSION = "0.28.0"
+INTEGRATION_VERSION = "0.29.0"
 
 # --- Update behaviour (SPEC §2: fetch 30 min, recompute 15 min) ---
 FETCH_INTERVAL_SECONDS = 1800  # Open-Meteo pull cadence
@@ -101,7 +101,8 @@ CONF_SITE_BEAM_GAIN = "bifacial_beam_gain"
 SITE_BEAM_GAIN_MIN = 1.0
 SITE_BEAM_GAIN_MAX = 1.3
 # plane fields
-CONF_PLANE_NAME = "name"
+CONF_PLANE_NAME = "name"  # stable module identity, retained from legacy configs
+CONF_PLANE_DISPLAY_NAME = "display_name"  # optional editable label; never a learner key
 CONF_AZIMUTH = "azimuth_deg"  # 0=N clockwise
 CONF_TILT = "tilt_deg"  # degrees from horizontal, 90 = vertical
 CONF_WP = "wp"  # module STC peak power, watts

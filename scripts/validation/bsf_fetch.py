@@ -24,47 +24,44 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from bsf_data import LOC, UTC
+from bsf_data import UTC
 
 DOMAIN = "balcony_solar_forecast"
 
-HOURLY_STAT_IDS = [
-    "sensor.inverter_port_1_dc_power",
-    "sensor.inverter_port_2_dc_power",
-    "sensor.inverter_port_1_dc_power_2",
-    "sensor.inverter_port_2_dc_power_2",
-    "sensor.inverter_port_1_dc_power_3",
-    "sensor.inverter_port_2_dc_power_3",
-    "sensor.inverter_port_1_dc_power_4",
-    "sensor.inverter_port_2_dc_power_4",
-    "sensor.victron_vebus_out_l1_power_228",
-    "sensor.balcony_solar_forecast_measured_dc_power_total",
-    "sensor.balcony_solar_forecast_measured_ac_power",
-    "sensor.balcony_solar_forecast_power_production_now",
-    "sensor.balcony_solar_forecast_power_production_now_dc",
-]
-FIVEMIN_STAT_IDS = [
-    "sensor.balcony_solar_forecast_intraday_correction_scalar",
-    "sensor.balcony_solar_forecast_power_production_now",
-    "sensor.balcony_solar_forecast_power_production_now_dc",
-    "sensor.balcony_solar_forecast_measured_ac_power",
-    "sensor.balcony_solar_forecast_measured_dc_power_total",
-]
-HISTORY_MINIMAL_EIDS = [
-    "sensor.balcony_solar_forecast_energy_production_today",
-    "sensor.balcony_solar_forecast_energy_production_tomorrow",
-    "sensor.balcony_solar_forecast_energy_production_today_p10",
-    "sensor.balcony_solar_forecast_energy_production_today_p90",
-    "sensor.balcony_solar_forecast_energy_production_today_dc",
-    "sensor.balcony_solar_forecast_source_status",
-]
-HISTORY_ATTR_EIDS = [
-    "sensor.balcony_solar_forecast_day_ahead_bias_status",
-    "sensor.balcony_solar_forecast_fast_learner_status",
-    "sensor.balcony_solar_forecast_shademap_learner_status",
-    "sensor.balcony_solar_forecast_daily_kwh_mae",
-]
+def resolve_sources(entries: list[dict], registry: list[dict], states: list[dict],
+                    entry_id: str | None = None) -> tuple[str, dict[str, str], list[str]]:
+    """Resolve one site through registry identity, including renamed entities.
+
+    Source attributes belong to the selected entry's DC/AC aggregate entities;
+    entity names and another site's diagnostics never establish membership.
+    """
+    ours = {e['entry_id'] for e in entries if e.get('domain') == DOMAIN}
+    if entry_id is None:
+        if len(ours) != 1:
+            raise FetchError('Select --entry-id: no unique balcony-solar config entry')
+        entry_id = next(iter(ours))
+    if entry_id not in ours:
+        raise FetchError('Selected entry does not belong to balcony_solar_forecast')
+    roles = {}
+    for row in registry:
+        if row.get('config_entry_id') != entry_id or row.get('disabled_by'):
+            continue
+        unique = row.get('unique_id', '')
+        prefix = entry_id + '_'
+        if row.get('platform') == DOMAIN and unique.startswith(prefix):
+            roles[unique[len(prefix):]] = row['entity_id']
+    by_id = {s['entity_id']: s for s in states}
+    sources = []
+    for key, attr in [('measured_dc_power_total', 'sources'), ('measured_ac_power', 'source')]:
+        attrs = by_id.get(roles.get(key), {}).get('attributes') or {}
+        value = attrs.get(attr, [])
+        values = [value] if isinstance(value, str) else value
+        if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+            raise FetchError('Invalid measurement-source metadata')
+        sources.extend(values)
+    return entry_id, roles, list(dict.fromkeys(sources))
 
 
 class FetchError(RuntimeError):
@@ -269,15 +266,33 @@ def fetch_all(
     os.makedirs(out_dir, exist_ok=True)
     rest = Rest(ha_url, token)
     now = dt.datetime.now(UTC)
+    entries = rest.get(f"/api/config/config_entries/entry?domain={DOMAIN}")
+    if isinstance(entries, dict):
+        entries = entries.get("entries") or entries.get("result") or []
+    states = rest.get("/api/states")
+    ws = MiniWS(ha_url, token)
+    ws.connect()
+    try:
+        registry = ws.call({"type": "config/entity_registry/list"})
+    finally:
+        ws.close()
+    entry_id, roles, sources = resolve_sources(entries, registry, states, entry_id)
+    timezone = rest.get("/api/config")["time_zone"]
+    loc = ZoneInfo(timezone)
+    power_keys = ("power_production_now", "power_production_now_dc",
+                  "measured_ac_power", "measured_dc_power_total")
+    hourly_ids = list(dict.fromkeys(sources + [roles[k] for k in power_keys if k in roles]))
+    five_ids = [roles[k] for k in (*power_keys, "intraday_scalar") if k in roles]
+    history_minimal = [value for key, value in roles.items() if key.startswith("energy_production_")]
+    history_attrs = [value for key, value in roles.items() if key.endswith("_status") or key == "daily_kwh_mae"]
     start_local = dt.datetime.combine(
-        (now.astimezone(LOC) - dt.timedelta(days=days)).date(), dt.time(0), tzinfo=LOC
+        (now.astimezone(loc) - dt.timedelta(days=days)).date(), dt.time(0), tzinfo=loc
     )
     start = start_local.astimezone(UTC)
     log(f"Fenster: {start.isoformat()} .. {now.isoformat()} (UTC)")
 
     # 1) Entities-Snapshot -------------------------------------------------
     log("1/5 Entities-Snapshot (REST /api/states) ...")
-    states = rest.get("/api/states")
     ents = {
         s["entity_id"]: {
             "state": s.get("state"),
@@ -286,7 +301,7 @@ def fetch_all(
             "attributes": s.get("attributes") or {},
         }
         for s in states
-        if DOMAIN in s.get("entity_id", "")
+        if s.get("entity_id") in roles.values()
     }
     _write(out_dir, "entities_now.json", ents)
     log(f"    {len(ents)} Entities.")
@@ -301,9 +316,10 @@ def fetch_all(
                 "type": "recorder/statistics_during_period",
                 "start_time": _iso(start),
                 "end_time": _iso(now),
-                "statistic_ids": HOURLY_STAT_IDS,
+                "statistic_ids": hourly_ids,
                 "period": "hour",
                 "types": ["mean"],
+                "units": {"power": "W"},
             }
         )
         _write(
@@ -312,7 +328,7 @@ def fetch_all(
             {
                 "stats": hourly,
                 "stat_ids": [
-                    {"id": s, "mean": True, "sum": False} for s in HOURLY_STAT_IDS
+                    {"id": s, "mean": True, "sum": False} for s in hourly_ids
                 ],
             },
         )
@@ -322,9 +338,10 @@ def fetch_all(
                 "type": "recorder/statistics_during_period",
                 "start_time": _iso(start),
                 "end_time": _iso(now),
-                "statistic_ids": FIVEMIN_STAT_IDS,
+                "statistic_ids": five_ids,
                 "period": "5minute",
                 "types": ["mean"],
+                "units": {"power": "W"},
             }
         )
         _write(
@@ -342,6 +359,8 @@ def fetch_all(
     q_end = urllib.parse.quote(_iso(now))
 
     def _hist(eids: list[str], minimal: bool) -> list:
+        if not eids:
+            return []
         flt = ",".join(eids)
         url = (
             f"/api/history/period/{q_start}?end_time={q_end}"
@@ -353,8 +372,8 @@ def fetch_all(
         return res if isinstance(res, list) else []
 
     hist = {
-        "minimal": _hist(HISTORY_MINIMAL_EIDS, True),
-        "with_attrs": _hist(HISTORY_ATTR_EIDS, False),
+        "minimal": _hist(history_minimal, True),
+        "with_attrs": _hist(history_attrs, False),
     }
     _write(out_dir, "forecast_sensor_history.json", hist)
     log(
@@ -365,7 +384,7 @@ def fetch_all(
     # 4) get_issued_forecast pro Tag (REST mit return_response) ------------
     log("4/5 get_issued_forecast pro Tag ...")
     issued: dict[str, Any] = {}
-    today_local = now.astimezone(LOC).date()
+    today_local = now.astimezone(loc).date()
     for i in range(days, -1, -1):
         day = today_local - dt.timedelta(days=i)
         body: dict[str, Any] = {"date": day.isoformat()}
@@ -386,13 +405,6 @@ def fetch_all(
     diagnostics = None
     try:
         eid = entry_id
-        if not eid:
-            entries = rest.get(f"/api/config/config_entries/entry?domain={DOMAIN}")
-            if isinstance(entries, dict):
-                entries = entries.get("entries") or entries.get("result") or []
-            ours = [e for e in entries if e.get("domain") == DOMAIN]
-            if ours:
-                eid = ours[0].get("entry_id")
         if eid:
             diagnostics = rest.get(f"/api/diagnostics/config_entry/{eid}")
             # HA verpackt Diagnostics teils als {"data": {...}} auf oberster Ebene
@@ -414,6 +426,19 @@ def fetch_all(
         "issued_forecasts_and_diag.json",
         {"issued": issued, "diagnostics": diagnostics},
     )
+    names = ["entities_now.json", "actuals_hourly_stats.json", "fiveminute_stats.json",
+             "forecast_sensor_history.json", "issued_forecasts_and_diag.json"]
+    import hashlib
+    hashes = {}
+    for name in names:
+        with open(os.path.join(out_dir, name), "rb") as captured:
+            hashes[name] = hashlib.sha256(captured.read()).hexdigest()
+    _write(out_dir, "capture_manifest.json", {
+        "schema_version": 1, "captured_at": _iso(now), "entry_id": entry_id,
+        "timezone": timezone, "roles": roles, "measurement_sources": sources,
+        "statistics_units": {"power": "W"}, "files_sha256": hashes,
+        "sharing": "private operator capture; review and anonymize before publication",
+    })
     log(f"Fertig. Daten in {out_dir}")
 
 

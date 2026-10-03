@@ -19,7 +19,7 @@ reaches ``bootstrap_build`` (bypassing the HA-importing package ``__init__``).
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, tzinfo
 
 from .. import const
 from .bootstrap_build import HourlyWeather
@@ -134,7 +134,9 @@ def parse_hourly_payload(
             continue
         out.append(
             HourlyWeather(
-                start=_as_utc_hour(stamp),
+                # Radiation is the preceding-hour mean, while recorder keys
+                # identify the beginning of that interval (also at midnight).
+                start=_as_utc_hour(stamp) - timedelta(hours=1),
                 ghi=max(0.0, ghi),
                 dni=max(0.0, dni),
                 dhi=max(0.0, dhi),
@@ -161,6 +163,7 @@ async def fetch_weather_range(
     longitude: float,
     start: date,
     end: date,
+    tz: tzinfo = UTC,
 ) -> tuple[list[HourlyWeather], bool]:
     """Fetch hourly as-issued weather for [start, end] (Previous-Runs API).
 
@@ -170,6 +173,15 @@ async def fetch_weather_range(
     forecast (SPEC §12.1: graceful degrade, still useful for the geometric
     shademap). Returns ``(records, is_as_issued)``.
     """
+    if start > end:
+        raise ValueError("Weather range must be ordered")
+    lower = datetime.combine(start, datetime.min.time(), tzinfo=tz).astimezone(UTC)
+    upper = datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(UTC)
+    # Radiation is stamped at interval END. Include the following UTC date so
+    # the final hour has its end stamp, then slice on canonical interval starts.
+    def within(records: list[HourlyWeather]) -> list[HourlyWeather]:
+        return [record for record in records if lower <= record.start < upper]
+
     suffix = f"_previous_day{PREVIOUS_RUN_LEAD_DAY}"
     prev_vars = [f"{v}{suffix}" for v in _RADIATION_VARS]
     hourly_vars = ",".join([*prev_vars, *_CONTEXT_VARS])
@@ -178,13 +190,13 @@ async def fetch_weather_range(
         "longitude": f"{longitude:.6f}",
         "hourly": hourly_vars,
         "models": const.OPEN_METEO_MODEL,
-        "start_date": start.isoformat(),
-        "end_date": end.isoformat(),
+        "start_date": lower.date().isoformat(),
+        "end_date": upper.date().isoformat(),
         "timezone": "UTC",
     }
     try:
         payload = await _get_json(session, PREVIOUS_RUNS_URL, params)
-        records = parse_hourly_payload(payload, var_suffix=suffix)
+        records = within(parse_hourly_payload(payload, var_suffix=suffix))
         if records:
             return records, True
         _LOGGER.warning(
@@ -193,18 +205,18 @@ async def fetch_weather_range(
             "as-issued forecast data)",
             start, end,
         )
-    except Exception as err:  # noqa: BLE001 - degrade on any provider failure
+    except Exception:  # noqa: BLE001 - degrade on any provider failure
         _LOGGER.warning(
-            "Previous-Runs API fetch failed for %s..%s (%s); falling back to "
+            "Previous-Runs API fetch failed for %s..%s; falling back to "
             "the Historical Forecast API (analysis, NOT as-issued forecast)",
-            start, end, err,
+            start, end,
         )
 
     # --- Degrade: Historical Forecast API (plain, unsuffixed variables). ---
     hourly_vars = ",".join([*_RADIATION_VARS, *_CONTEXT_VARS])
     params["hourly"] = hourly_vars
     payload = await _get_json(session, HISTORICAL_FORECAST_URL, params)
-    records = parse_hourly_payload(payload, var_suffix="")
+    records = within(parse_hourly_payload(payload, var_suffix=""))
     return records, False
 
 

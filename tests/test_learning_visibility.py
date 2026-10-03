@@ -1080,6 +1080,9 @@ def test_setup_entry_schedules_the_channel_health_check(monkeypatch):
         def async_start_nightly_job(self) -> None:
             calls.append("nightly")
 
+        def async_start_panel_observer(self) -> None:
+            pass
+
         def async_schedule_channel_health_check(self) -> None:
             calls.append("channel_health")
 

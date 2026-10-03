@@ -18,7 +18,6 @@ Conventions (all internal):
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -46,6 +45,7 @@ from ..const import (
     CONF_HZ_TAU_POINTS_BARE,
     CONF_LATITUDE,
     CONF_LONGITUDE,
+    CONF_PLANE_DISPLAY_NAME,
     CONF_PLANE_NAME,
     CONF_PLANES,
     CONF_ROSS_COEFF,
@@ -73,6 +73,8 @@ from ..const import (
     SITE_BEAM_GAIN_MIN,
     SLOT_SECONDS,
 )
+from .archive_types import IssuedSnapshot as IssuedSnapshot
+from .archive_types import PlaneHourlyModeled as PlaneHourlyModeled
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -245,6 +247,12 @@ class PlaneConfig:
     actual_entity: str | None = None
     shade_group: str | None = None
     ross_coeff: float | None = None
+    display_name: str | None = None
+
+    @property
+    def label(self) -> str:
+        """Editable presentation, independent of the persisted ``name`` identity."""
+        return self.display_name or self.name
 
     @property
     def shade_channel(self) -> str:
@@ -269,6 +277,8 @@ class PlaneConfig:
         shade_group = raw_group.strip() or None if isinstance(raw_group, str) else None
         return cls(
             name=str(d[CONF_PLANE_NAME]),
+            display_name=(d[CONF_PLANE_DISPLAY_NAME].strip()
+                          if isinstance(d.get(CONF_PLANE_DISPLAY_NAME), str) else None),
             azimuth_deg=float(d[CONF_AZIMUTH]),
             tilt_deg=float(d[CONF_TILT]),
             wp=float(d[CONF_WP]),
@@ -300,6 +310,8 @@ class PlaneConfig:
         # so a default plane round-trips without the new field.
         if self.ross_coeff is not None:
             d[CONF_ROSS_COEFF] = self.ross_coeff
+        if self.display_name is not None:
+            d[CONF_PLANE_DISPLAY_NAME] = self.display_name
         return d
 
 
@@ -570,9 +582,9 @@ class ForecastResult:
     keyed by ISO-8601 UTC hour start (for the energy sensors and the
     ``async_get_solar_forecast`` hook).
 
-    AC curve (Phase 1, additive): ``ac_watts`` / ``ac_hourly_wh`` /
-    ``ac_daily_kwh`` are the corrected, unclamped plane DC passed through each
-    inverter group's DC->AC efficiency and AC clamp
+    AC curve: ``ac_watts`` / ``ac_hourly_wh`` / ``ac_daily_kwh`` convert the
+    actually served postclip plane DC through each inverter group's efficiency
+    and AC clamp
     (``electrical.clamp_groups_ac``) — the physically-correct AC the site
     delivers. The DC fields above are UNCHANGED by this phase and remain the
     self-learning / scoreboard / kill-gate truth. All AC fields default empty
@@ -1245,184 +1257,8 @@ class LearnerSnapshot:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class PlaneHourlyModeled:
-    """Per-plane per-hour modeled curves stored in the issued snapshot v2.
-
-    Enables training the shademap from HOURLY long-term statistics (the
-    backfill and the nightly LTS path both work at hourly resolution, SPEC §12.4).
-    Each dict is keyed by ISO-8601 UTC hour start.
-      - ``beam_wh`` / ``diffuse_wh``: modeled DC energy split for the plane;
-      - ``raw_wh`` / ``slow_wh`` / ``corrected_wh``: exact issued per-plane
-        curves for attribution against a partially metered site;
-      - ``ghi_wh`` proxy and ``kc``: the mean clear-sky index that hour, so the
-        quasi-clear gate can be reconstructed offline.
-    """
-
-    beam_wh: dict[str, float] = field(default_factory=dict)
-    diffuse_wh: dict[str, float] = field(default_factory=dict)
-    ghi: dict[str, float] = field(default_factory=dict)
-    kc: dict[str, float] = field(default_factory=dict)
-    raw_wh: dict[str, float] = field(default_factory=dict)
-    slow_wh: dict[str, float] = field(default_factory=dict)
-    corrected_wh: dict[str, float] = field(default_factory=dict)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> PlaneHourlyModeled:
-        if not isinstance(d, dict):
-            return cls()
-
-        def _fd(key: str) -> dict[str, float]:
-            v = d.get(key, {})
-            if not isinstance(v, dict):
-                return {}
-            return {k: float(x) for k, x in v.items()
-                    if isinstance(k, str) and isinstance(x, (int, float))}
-
-        return cls(
-            beam_wh=_fd("beam_wh"),
-            diffuse_wh=_fd("diffuse_wh"),
-            ghi=_fd("ghi"),
-            kc=_fd("kc"),
-            raw_wh=_fd("raw_wh"),
-            slow_wh=_fd("slow_wh"),
-            corrected_wh=_fd("corrected_wh"),
-        )
-
-    def to_dict(self) -> dict:
-        # Store trim: omit EMPTY curves entirely. ``from_dict`` treats a missing
-        # key as {}, so this is round-trip safe — and it stops serializing the
-        # vestigial ``ghi`` dict (never populated by the coordinator) into every
-        # plane of every snapshot of the 90-day issued ring.
-        out: dict = {}
-        for key, curve in (
-            ("beam_wh", self.beam_wh),
-            ("diffuse_wh", self.diffuse_wh),
-            ("ghi", self.ghi),
-            ("kc", self.kc),
-            ("raw_wh", self.raw_wh),
-            ("slow_wh", self.slow_wh),
-            ("corrected_wh", self.corrected_wh),
-        ):
-            if curve:
-                out[key] = dict(curve)
-        return out
 
 
-@dataclass(frozen=True, slots=True)
-class IssuedSnapshot:
-    """The v2 forecast-as-issued snapshot (one per calendar day, SPEC §16.2).
-
-    Stores BOTH site-hourly curves plus the per-plane modeled
-    beam/diffuse/ghi/kc and exact RAW/SLOW/CORRECTED curves needed by the
-    shademap trainer and partial-metering evaluators. Round-trips through the issued ring in the
-    store. ``version`` == 2 distinguishes it from the v1 issued dict (which had
-    only ``hourly_wh`` / ``daily_kwh`` / ``status``); the store carries v1
-    entries forward untouched and writes v2 going forward.
-
-    ``slow_only_hourly_wh`` (audit #13b) is the hourly Wh curve with ONLY the
-    SLOW layer (shademap beam_tau) applied — no day-ahead factor — so the drift
-    monitor can decompose ``corrected = slow ∘ day-ahead`` and attribute a losing day
-    to the guilty layer. It is written only when the slow layer was active (else
-    it equals raw and is omitted); an empty value means the monitor falls back
-    to day-ahead-vs-raw only; it does not invent a slow-layer verdict.
-    """
-
-    issued_at: str  # iso utc
-    status: str
-    raw_hourly_wh: dict[str, float] = field(default_factory=dict)
-    corrected_hourly_wh: dict[str, float] = field(default_factory=dict)
-    raw_daily_kwh: dict[str, float] = field(default_factory=dict)
-    corrected_daily_kwh: dict[str, float] = field(default_factory=dict)
-    per_plane: dict[str, PlaneHourlyModeled] = field(default_factory=dict)
-    # Forecast cloud class per ISO-UTC hour (SPEC §8 day-ahead conditioning): so
-    # the nightly RLS trainer can key the (cloud class x day part) cell on the
-    # ACTUAL forecast weather, not a fixed "clear" label. Empty on legacy/v0.1.
-    cloud_class_by_hour: dict[str, str] = field(default_factory=dict)
-    # Slow-only (shademap ∘ physics, NO day-ahead factor) hourly Wh curve for the
-    # drift monitor's per-layer attribution (audit #13b). Empty on legacy/v0.1 or
-    # a slow-inactive day (slow-only == raw); the monitor then uses the legacy
-    # shared signal.
-    slow_only_hourly_wh: dict[str, float] = field(default_factory=dict)
-    # Site inverter DC->AC efficiency in effect AT ISSUE TIME (IRC-5/SCT-4): lets
-    # a reader convert the stored DC curves to AC without hindsight. ``None`` on
-    # legacy/v0.1 snapshots (written before v0.20.7); the reader then falls back
-    # to the CURRENT learned eta and flags the substitution.
-    eta: float | None = None
-    version: int = 2
-
-    @classmethod
-    def from_dict(cls, d: dict) -> IssuedSnapshot:
-        if not isinstance(d, dict):
-            return cls(issued_at="", status="")
-
-        def _fd(key: str) -> dict[str, float]:
-            v = d.get(key, {})
-            if not isinstance(v, dict):
-                return {}
-            return {k: float(x) for k, x in v.items()
-                    if isinstance(k, str) and isinstance(x, (int, float))}
-
-        per_plane_raw = d.get("per_plane", {})
-        per_plane: dict[str, PlaneHourlyModeled] = {}
-        if isinstance(per_plane_raw, dict):
-            for k, v in per_plane_raw.items():
-                if isinstance(k, str):
-                    per_plane[k] = PlaneHourlyModeled.from_dict(v)
-
-        cloud_raw = d.get("cloud_class_by_hour", {})
-        cloud_class_by_hour: dict[str, str] = {}
-        if isinstance(cloud_raw, dict):
-            cloud_class_by_hour = {
-                k: str(v) for k, v in cloud_raw.items()
-                if isinstance(k, str) and isinstance(v, str)
-            }
-
-        eta_raw = d.get("eta")
-        eta = (
-            float(eta_raw)
-            if isinstance(eta_raw, (int, float)) and math.isfinite(float(eta_raw))
-            else None
-        )
-
-        return cls(
-            issued_at=str(d.get("issued_at", "")),
-            status=str(d.get("status", "")),
-            raw_hourly_wh=_fd("raw_hourly_wh"),
-            corrected_hourly_wh=_fd("corrected_hourly_wh"),
-            raw_daily_kwh=_fd("raw_daily_kwh"),
-            corrected_daily_kwh=_fd("corrected_daily_kwh"),
-            per_plane=per_plane,
-            cloud_class_by_hour=cloud_class_by_hour,
-            slow_only_hourly_wh=_fd("slow_only_hourly_wh"),
-            eta=eta,
-            version=_safe_int(d.get("version", 2), 2),
-        )
-
-    def to_dict(self) -> dict:
-        out: dict = {
-            "version": self.version,
-            "issued_at": self.issued_at,
-            "status": self.status,
-            "raw_hourly_wh": dict(self.raw_hourly_wh),
-            "corrected_hourly_wh": dict(self.corrected_hourly_wh),
-            "raw_daily_kwh": dict(self.raw_daily_kwh),
-            "corrected_daily_kwh": dict(self.corrected_daily_kwh),
-            "per_plane": {k: v.to_dict() for k, v in self.per_plane.items()},
-            "cloud_class_by_hour": dict(self.cloud_class_by_hour),
-        }
-        # Store trim: write the slow-only curve ONLY when non-empty (slow layer
-        # was active). Empty == slow-only == raw, and ``from_dict`` reads a
-        # missing key as {}, so omitting it keeps the round-trip exact while
-        # avoiding a second full copy of the raw curve in every snapshot of the
-        # 90-day issued ring.
-        if self.slow_only_hourly_wh:
-            out["slow_only_hourly_wh"] = dict(self.slow_only_hourly_wh)
-        # Written only when known (a legacy/omitted eta round-trips as None, which
-        # the reader replaces with the current learned eta).
-        if self.eta is not None:
-            out["eta"] = self.eta
-        return out
 
 
 # ===========================================================================

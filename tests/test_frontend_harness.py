@@ -45,3 +45,10 @@ def test_cards_runtime_dom_regressions(browser_zone):
         capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_review_card_quality_contracts():
+    proc = subprocess.run([shutil.which("node"), str(Path(__file__).parent / "harness" / "review_quality_harness.mjs")],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr

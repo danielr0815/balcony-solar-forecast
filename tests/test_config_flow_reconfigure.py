@@ -120,8 +120,9 @@ def _flow(monkeypatch, entry):
             "breaks in HA 2026.12)"
         )
 
-    def _show_form(*, step_id, data_schema, errors=None):
-        captured["form"] = {"step_id": step_id, "errors": dict(errors or {})}
+    def _show_form(*, step_id, data_schema, errors=None, description_placeholders=None):
+        captured["form"] = {"step_id": step_id, "errors": dict(errors or {}),
+                            "description_placeholders": description_placeholders}
         return {"type": "form", "step_id": step_id, "errors": errors}
 
     monkeypatch.setattr(flow, "async_abort", _abort)
@@ -130,6 +131,13 @@ def _flow(monkeypatch, entry):
     )
     monkeypatch.setattr(flow, "async_show_form", _show_form)
     return flow, captured
+
+
+async def _reconfigure(flow, user_input):
+    result = await flow.async_step_reconfigure(user_input)
+    if result.get("step_id") == "confirm_changes":
+        return await flow.async_step_confirm_changes({})
+    return result
 
 
 def _submit(**overrides) -> dict:
@@ -161,7 +169,7 @@ async def test_reconfigure_merges_coordinates_and_strips_stale_options(monkeypat
     )
     flow, captured = _flow(monkeypatch, entry)
 
-    result = await flow.async_step_reconfigure(_submit())
+    result = await _reconfigure(flow, _submit())
 
     assert result["type"] == "abort"
     assert len(captured["update_calls"]) == 1
@@ -199,7 +207,7 @@ async def test_reconfigure_ac_meter_merges_into_site_and_round_trips(monkeypatch
     entry = _entry()
     flow, captured = _flow(monkeypatch, entry)
 
-    await flow.async_step_reconfigure(
+    await _reconfigure(flow,
         _submit(
             **{
                 CONF_AC_ACTUAL_ENTITY: "sensor.house_ac_meter",
@@ -230,7 +238,7 @@ async def test_reconfigure_empty_ac_meter_stays_none(monkeypatch):
     stale_site[CONF_AC_ACTUAL_ENTITY] = "sensor.stale"
     stale_site[CONF_AC_ACTUAL_INVERT] = True
 
-    await flow.async_step_reconfigure(
+    await _reconfigure(flow,
         _submit(**{CONF_SITE: stale_site, CONF_AC_ACTUAL_ENTITY: "  "})
     )
 
@@ -246,7 +254,7 @@ async def test_reconfigure_with_empty_options_still_strips_cleanly(monkeypatch):
     entry = _entry()  # no options
     flow, captured = _flow(monkeypatch, entry)
 
-    await flow.async_step_reconfigure(_submit())
+    await _reconfigure(flow, _submit())
 
     assert captured["update_calls"][0]["kwargs"]["options"] == {}
 
@@ -263,7 +271,7 @@ async def test_reconfigure_aborts_without_scheduling_a_reload(monkeypatch):
     entry = _entry()
     flow, captured = _flow(monkeypatch, entry)
 
-    result = await flow.async_step_reconfigure(_submit())
+    result = await _reconfigure(flow, _submit())
 
     assert result == {"type": "abort", "reason": "reconfigure_successful"}
     assert captured["abort_reason"] == "reconfigure_successful"
@@ -281,7 +289,7 @@ async def test_reconfigure_invalid_site_maps_error_and_rerenders(monkeypatch):
     bad_site = copy.deepcopy(DEFAULT_SITE)
     bad_site["planes"] = []  # -> SiteValidationError("no_planes")
 
-    result = await flow.async_step_reconfigure(_submit(**{CONF_SITE: bad_site}))
+    result = await _reconfigure(flow, _submit(**{CONF_SITE: bad_site}))
 
     assert result["type"] == "form"
     assert captured["form"]["step_id"] == "reconfigure"
@@ -293,7 +301,7 @@ async def test_reconfigure_first_render_shows_form(monkeypatch):
     entry = _entry()
     flow, captured = _flow(monkeypatch, entry)
 
-    result = await flow.async_step_reconfigure(None)
+    result = await _reconfigure(flow, None)
 
     assert result["type"] == "form"
     assert captured["form"]["step_id"] == "reconfigure"
@@ -316,7 +324,7 @@ async def test_reconfigure_uses_ha_data_api_and_preserves_existing_data(monkeypa
         return True
 
     monkeypatch.setattr(flow.hass.config_entries, "async_update_entry", capture)
-    await flow.async_step_reconfigure(_submit())
+    await _reconfigure(flow, _submit())
     assert len(calls) == 1
     entry_arg, kwargs = calls[0]
     assert "data" in kwargs, "HA requires full data, not a data_updates patch"
@@ -326,3 +334,23 @@ async def test_reconfigure_uses_ha_data_api_and_preserves_existing_data(monkeypa
     assert kwargs["data"][CONF_LATITUDE] == SUBMIT_LAT
     assert kwargs["options"] == {"fast_learner_enabled": False}
     assert entry.data == original, "building the update must not mutate entry.data"
+
+
+async def test_reconfigure_previews_learning_effects_before_any_write(monkeypatch):
+    flow, captured = _flow(monkeypatch, _entry())
+    result = await flow.async_step_reconfigure(_submit())
+    assert result['step_id'] == 'confirm_changes'
+    assert not captured.get('update_calls')
+    assert 'reopens learning' in captured['form']['description_placeholders']['learning_effect']
+    await flow.async_step_confirm_changes({})
+    assert len(captured['update_calls']) == 1
+
+
+async def test_concurrent_entry_change_invalidates_pending_preview(monkeypatch):
+    entry = _entry()
+    flow, captured = _flow(monkeypatch, entry)
+    await flow.async_step_reconfigure(_submit())
+    entry.options = {'quantiles_enabled': False}
+    result = await flow.async_step_confirm_changes({})
+    assert result['step_id'] == 'reconfigure'
+    assert not captured.get('update_calls')

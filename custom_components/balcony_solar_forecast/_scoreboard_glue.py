@@ -30,6 +30,7 @@ from .const import (
 )
 from .core import IssuedSnapshot, ScoreboardState
 from .core import scoreboard as scoreboard_mod
+from .core.measurement_quality import dc_power
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -65,6 +66,17 @@ async def score_scoreboard_day(coord, day: date) -> None:
     if not issued or not actuals:
         return
 
+    original_curve = issued.get("corrected_hourly_wh") or issued.get("raw_hourly_wh")
+    if not isinstance(original_curve, dict) or any(
+        not isinstance(stamp, str) or isinstance(value, bool)
+        or not isinstance(value, (int, float)) or dc_power(value) is None
+        for stamp, value in original_curve.items()
+    ):
+        # The loader may sanitize individual entries for display. Scoring the
+        # surviving subtotal as a whole-day forecast would fabricate a miss;
+        # falling back to RAW would silently change the evaluated model.
+        return
+
     # Snow / total dropout is not a forecast label. Keep it out of the skill
     # window for the same reason the nightly learner quarantine does.
     if coord._is_collapse_day(iso, issued, actuals):
@@ -91,7 +103,9 @@ async def score_scoreboard_day(coord, day: date) -> None:
     corrected_hourly = metered_modeled_hourly(
         coord, snap, corrected_hourly, layer="corrected"
     )
-    if corrected_hourly is None:
+    if not corrected_hourly:
+        # Missing/corrupt curves are unknown, whereas an explicit zero-valued
+        # hour is valid energy. An empty sum must never become a zero forecast.
         return
 
     hourly_actuals = coord._store_hourly_actuals(iso)

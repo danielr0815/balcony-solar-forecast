@@ -7,27 +7,13 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 
-DOMAIN = "balcony_solar_forecast"
-
-
-def user_data(name="Test balcony"):
-    return {
-        "name": name, "latitude": 52.0, "longitude": 13.0,
-        "fetch_interval_seconds": 3600, "recompute_interval_seconds": 900,
-        "site": {
-            "latitude": 52.0, "longitude": 13.0,
-            "planes": [{"name": "M1", "azimuth_deg": 180.0, "tilt_deg": 70.0,
-                        "wp": 400, "efficiency": 0.2, "horizon": [],
-                        "actual_entity": "sensor.module_dc"}],
-            "groups": [{"name": "WR", "plane_names": ["M1"], "ac_limit_w": 400}],
-        },
-    }
+from tests.integration.helpers import DOMAIN, start_advanced, user_data
 
 
 async def test_real_flow_entities_services_reload_unload(real_hass):
     """Prove HA-managed reload preserves entities, stored learning and other sites."""
     hass = real_hass
-    flow = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
+    flow = await start_advanced(hass)
     assert flow["type"] == FlowResultType.FORM
     invalid = user_data()
     invalid["name"] = " "
@@ -103,7 +89,7 @@ async def test_real_flow_entities_services_reload_unload(real_hass):
 
     # A second real entry owns different registry entities and survives the
     # first entry's unload. Service resolution must enforce explicit targeting.
-    second = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
+    second = await start_advanced(hass)
     second_result = await hass.config_entries.flow.async_configure(second["flow_id"], user_data("Other balcony"))
     await hass.async_block_till_done()
     other = second_result["result"]

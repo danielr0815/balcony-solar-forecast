@@ -85,6 +85,9 @@ async def async_get_config_entry_diagnostics(
         "last_error": provenance.get("last_error", data.get("last_error")),
         "computed_at": data.get("computed_at"),
     }
+    observer = getattr(coordinator, "_panel_weather", None)
+    diagnostics["panel_weather"] = (observer.summary() if observer is not None
+                                    else {"state": "unknown", "reason": "not_started"})
     diagnostics["forecast"] = _forecast_summary(data)
     diagnostics["store"] = _store_stats(coordinator)
     diagnostics["learners"] = async_redact_data(

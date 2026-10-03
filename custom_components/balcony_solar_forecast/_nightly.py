@@ -20,8 +20,7 @@ re-imports ``_NIGHTLY_HOUR`` / ``_NIGHTLY_MINUTE`` for ``async_start_nightly_job
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from homeassistant.util import dt as dt_util
 
@@ -34,8 +33,6 @@ from ._glue_util import (
 )
 from .const import (
     CLOUD_CLASS_CLEAR,
-    COLLAPSE_FORECAST_MIN_WH,
-    COLLAPSE_MEASURED_MAX_FRAC,
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_RAW_HOURLY_WH,
     DAY_AHEAD_BIAS_RESEED_N,
@@ -53,8 +50,6 @@ from .const import (
     LEARNER_LAYER_SLOW,
     NIGHTLY_CATCHUP_MAX_DAYS,
     SHADEMAP_MEASURED_CLEAR_MIN_FRAC,
-    SLOT_HOURS,
-    SLOT_MINUTES,
 )
 from .core import (
     IssuedSnapshot,
@@ -62,8 +57,8 @@ from .core import (
     PlaneHourlyModeled,
     QuantileState,
     ShademapState,
-    clearsky,
     electrical,
+    learning_inputs,
     solpos,
 )
 from .core import bias as bias_mod
@@ -73,9 +68,8 @@ from .core import (
 from .core import (
     quantiles as quantiles_mod,
 )
-from .core import (
-    shademap as shademap_mod,
-)
+from .core.learning_inputs import DayAheadSample as _DayAheadSample
+from .core.measurement_quality import production_collapsed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,14 +81,6 @@ _NIGHTLY_MINUTE = 30
 # One nightly day-part-aggregated observation for the RLS bias. Duck-typed like
 # the intraday sample the bias contract accepts (SPEC §9.5); the trainer only
 # requires attribute access, so a frozen dataclass suffices.
-@dataclass(frozen=True, slots=True)
-class _DayAheadSample:
-    """One nightly day-part-aggregated observation for the RLS bias."""
-
-    cloud_class: str
-    day_part: str
-    measured_wh: float
-    modeled_wh: float
 
 
 async def async_nightly_job(coord, now: datetime | None = None) -> None:
@@ -187,32 +173,65 @@ def catchup_days(coord, latest: date) -> list[date]:
 
 async def snapshot_issued(coord, today: date) -> None:
     """Record today's issued forecast as a v2 dual-curve snapshot."""
-    if coord.data is None or coord._store.get_issued(today.isoformat()) is not None:
+    if (coord.data is None or not getattr(coord, "last_update_success", True)
+            or coord._store.get_issued(today.isoformat()) is not None):
         return
     # Slice the full-horizon curves to the snapshot's own LOCAL day so the
     # 90-day issued ring never carries 4 days of hours per snapshot (store
     # size / flash-wear) and every nightly consumer sees exactly one day.
     iso = today.isoformat()
+    data = coord.data
+    generation = getattr(coord, "_last_result", None)
     raw_hourly = _filter_hourly_to_local_day(
-        coord.data.get(DATA_KEY_RAW_HOURLY_WH, {}), iso)
+        data.get(DATA_KEY_RAW_HOURLY_WH, {}), iso)
     corrected_hourly = _filter_hourly_to_local_day(
-        coord.data.get(DATA_KEY_CORRECTED_HOURLY_WH, {}), iso)
+        data.get(DATA_KEY_CORRECTED_HOURLY_WH, {}), iso)
+    # Freeze synchronous provenance before the executor await. If a refresh
+    # overtakes this pass, retry later rather than archiving mixed generations.
+    per_plane = coord._per_plane_modeled(iso)
+    cloud_classes = coord._cloud_class_by_hour(iso)
+    eta = coord._effective_inverter_eta()
+    from .core.provenance import bounded_provenance
+
+    provenance = bounded_provenance(data.get("provenance"))
+    bands = {}
+    quantile_curves = data.get("quantile_curves") or {}
+    for key in ("p10", "p50", "p90"):
+        if isinstance(quantile_curves.get(key), dict):
+            bands[f"dc_{key}_slot_wh"] = _filter_hourly_to_local_day(quantile_curves[key], iso)
+    for key in ("p10", "p90"):
+        if isinstance(data.get(f"wh_period_ac_{key}"), dict):
+            bands[f"ac_{key}_slot_wh"] = _filter_hourly_to_local_day(data[f"wh_period_ac_{key}"], iso)
+    slow_only = await coord._slow_only_hourly(iso)
+    if (coord.data is not data or getattr(coord, "_last_result", None) is not generation
+            or not getattr(coord, "last_update_success", True)):
+        return
+    computed = data.get("computed_at")
+    archived = dt_util.utcnow().isoformat()
     snapshot = IssuedSnapshot(
-        issued_at=dt_util.utcnow().isoformat(),
-        status=str(coord.data.get("status", "")),
+        issued_at=computed if isinstance(computed, str) else archived,
+        computed_at=computed if isinstance(computed, str) else None,
+        archived_at=archived,
+        corrected_ac_hourly_wh=(
+            _filter_hourly_to_local_day(data["hourly_wh_ac"], iso)
+            if isinstance(data.get("hourly_wh_ac"), dict) else None
+        ),
+        status=str(data.get("status", "")),
         raw_hourly_wh=raw_hourly,
         corrected_hourly_wh=corrected_hourly,
         raw_daily_kwh=_daily_kwh_from_hourly(raw_hourly),
         corrected_daily_kwh=_daily_kwh_from_hourly(corrected_hourly),
-        per_plane=coord._per_plane_modeled(iso),
-        cloud_class_by_hour=coord._cloud_class_by_hour(iso),
+        per_plane=per_plane,
+        cloud_class_by_hour=cloud_classes,
         # Slow-only (shademap ∘ physics, no day-ahead) curve for the drift
         # monitor's per-layer attribution (audit #13b); {} when the slow layer
         # is inactive (slow-only == raw, so nothing extra is stored).
-        slow_only_hourly_wh=await coord._slow_only_hourly(iso),
+        slow_only_hourly_wh=slow_only,
         # Site DC->AC efficiency in effect right now, so the issued AC curve can be
         # reconstructed later without hindsight (IRC-5/SCT-4).
-        eta=coord._effective_inverter_eta(),
+        eta=eta,
+        provenance=provenance,
+        bands=bands or None,
     )
     coord._store.record_issued(iso, snapshot.to_dict())
 
@@ -253,109 +272,9 @@ def cloud_class_by_hour(coord, iso: str) -> dict[str, str]:
 
 
 def per_plane_modeled(coord, iso: str) -> dict[str, PlaneHourlyModeled]:
-    """Per-plane hourly modeled beam/diffuse/ghi/kc for the shademap trainer.
-
-    Reconstructed from the last computed ForecastResult held on ``self`` via
-    ``_last_result``, sliced to the snapshot's LOCAL day ``iso``. The beam /
-    diffuse energy is sourced from the engine's UNGATED, unclamped,
-    un-factored reference series (``beam_ref_watts`` / ``diffuse_ref_watts``,
-    FIX-3): the shademap learns a beam-referenced T that REPLACES the static
-    tau, so the reference must be the raw geometric beam — otherwise T
-    self-references toward sqrt(true_t) and a wall bin (static tau 0) has ~0
-    modeled beam and is untrainable. Engine builds without the reference
-    export are simply not trained (no fallback to the gated series). When
-    ``_last_result`` is absent (older cached build), returns an empty mapping
-    (SPEC §12.1: attempt, not a blocker).
-    """
-    result = getattr(coord, "_last_result", None)
-    if result is None:
-        return {}
-
-    # Site-level hourly kc via THE shared reduction (clearsky.hourly_kc):
-    # the clear-sky-energy-weighted mean over the hour's slots, the same
-    # estimator the offline backfill applies to its hourly data. The
-    # previous per-slot last-write-wins collapsed each hour to its FINAL
-    # slot — the highest-elevation slot of a morning hour but the LOWEST of
-    # an evening hour — so the quasi-clear gate was azimuth-asymmetric and
-    # diverged from the backfill. The slot GHI is recovered by inverting
-    # the engine's unclamped kc = ghi / haurwitz(midpoint elevation).
-    kc_samples: dict[str, list[tuple[float, float]]] = {}
-    site_kc = result.plane_results[0].kc if result.plane_results else ()
-    for i, start in enumerate(result.slot_starts):
-        if i >= len(site_kc):
-            break
-        start_utc = dt_util.as_utc(start)
-        if dt_util.as_local(start_utc).date().isoformat() != iso:
-            continue
-        mid = start_utc + timedelta(minutes=SLOT_MINUTES / 2)
-        _az, el = solpos.sun_position(
-            mid, coord._site.latitude, coord._site.longitude
-        )
-        hw = clearsky.haurwitz_ghi(el)
-        kc_samples.setdefault(_hour_key(start), []).append(
-            (site_kc[i] * hw, el)
-        )
-    kc_by_hour = {h: clearsky.hourly_kc(s) for h, s in kc_samples.items()}
-
-    out: dict[str, PlaneHourlyModeled] = {}
-    for pr in result.plane_results:
-        if not pr.beam_ref_watts and not pr.diffuse_ref_watts:
-            continue  # engine without the reference export: do NOT train
-        beam_wh: dict[str, float] = {}
-        diffuse_wh: dict[str, float] = {}
-        raw_wh: dict[str, float] = {}
-        slow_wh: dict[str, float] = {}
-        corrected_wh: dict[str, float] = {}
-        raw_series = getattr(pr, "raw_watts", ())
-        slow_series = getattr(pr, "slow_watts", ()) or raw_series
-        corrected_series = getattr(pr, "watts", ())
-        for i, start in enumerate(result.slot_starts):
-            if dt_util.as_local(dt_util.as_utc(start)).date().isoformat() != iso:
-                continue
-            hkey = _hour_key(start)
-            if i < len(pr.beam_ref_watts):
-                beam_wh[hkey] = beam_wh.get(hkey, 0.0) + pr.beam_ref_watts[i] * SLOT_HOURS
-            if i < len(pr.diffuse_ref_watts):
-                diffuse_wh[hkey] = diffuse_wh.get(hkey, 0.0) + pr.diffuse_ref_watts[i] * SLOT_HOURS
-            if i < len(raw_series):
-                raw_wh[hkey] = raw_wh.get(hkey, 0.0) + raw_series[i] * SLOT_HOURS
-            if i < len(slow_series):
-                slow_wh[hkey] = slow_wh.get(hkey, 0.0) + slow_series[i] * SLOT_HOURS
-            if i < len(corrected_series):
-                corrected_wh[hkey] = (
-                    corrected_wh.get(hkey, 0.0) + corrected_series[i] * SLOT_HOURS
-                )
-        # Store trim: the issued ring keeps 90 days of these — drop NIGHT
-        # hours (all-zero, nothing to train on: the trainer skips beam<=0
-        # anyway) and round to 0.01 Wh / 6-decimal kc, far below trainer
-        # noise, instead of 17-significant-digit floats.
-        keep = {
-            h
-            for h in set(beam_wh) | set(diffuse_wh) | set(kc_by_hour)
-            if beam_wh.get(h, 0.0) > 0.0
-            or diffuse_wh.get(h, 0.0) > 0.0
-            or kc_by_hour.get(h, 0.0) > 0.0
-        }
-        out[pr.name] = PlaneHourlyModeled(
-            beam_wh={
-                h: round(v, 2) for h, v in beam_wh.items() if h in keep
-            },
-            diffuse_wh={
-                h: round(v, 2) for h, v in diffuse_wh.items() if h in keep
-            },
-            ghi={},
-            kc={
-                h: round(v, 6)
-                for h, v in kc_by_hour.items()
-                if h in keep
-            },
-            raw_wh={h: round(v, 2) for h, v in raw_wh.items() if h in keep},
-            slow_wh={h: round(v, 2) for h, v in slow_wh.items() if h in keep},
-            corrected_wh={
-                h: round(v, 2) for h, v in corrected_wh.items() if h in keep
-            },
-        )
-    return out
+    """Bind HA timezone/result to the shared pure issued-reference reducer."""
+    tz = dt_util.get_time_zone(coord.hass.config.time_zone) or UTC
+    return learning_inputs.per_plane_modeled(coord._site, getattr(coord, "_last_result", None), iso, tz)
 
 
 async def train_and_guard(coord, day: date) -> None:
@@ -377,47 +296,30 @@ async def train_and_guard(coord, day: date) -> None:
     issued = coord._store.get_issued(iso)
     actuals = coord._store.get_actuals(iso)
 
-    # --- 3) Rollback snapshot (pre-training) --------------------------
-    # Take one snapshot per night, idempotently (date-keyed by taken-day).
-    coord._maybe_push_rollback_snapshot(iso)
+    from .core.training_plan import TrainingContext, plan_training
 
-    # --- 4) Collapse detector -----------------------------------------
-    # All channels ~0 while forecast high => snow / total dropout: freeze
-    # BOTH geometric learners for the FOLLOWING served day (SPEC §9.8), and
-    # skip training the geometric learners on the collapse day itself.
-    collapse = coord._is_collapse_day(iso, issued, actuals)
-    if collapse:
-        coord._set_collapse_frozen_date(next_iso)
-        _LOGGER.info(
-            "Collapse detected for %s: freezing geometric learners for %s",
-            iso, next_iso,
-        )
-        # A collapse cannot distinguish snow-covered modules from failed
-        # measurement channels. Quarantine it from every empirical evaluator;
-        # otherwise one outage can poison uncertainty bands and drift streaks.
-    else:
-        # A non-collapse day closes: clear any freeze it (or an earlier day)
-        # set that has not been superseded by a later collapse.
-        frozen = coord._drift_state.collapse_frozen_date
-        if frozen is not None and frozen <= next_iso:
-            coord._set_collapse_frozen_date(None)
-        # --- 5) Training under label gates ----------------------------
+    context = TrainingContext(
+        day=day, already_trained=False, has_issued=bool(issued), has_actuals=bool(actuals),
+        collapsed=coord._is_collapse_day(iso, issued, actuals),
+        frozen_date=coord._drift_state.collapse_frozen_date,
+    )
+    plan = plan_training(context)
+    # The pure plan exposes intended mutations. Keep the historical application
+    # order: rollback first, freeze, geometry, empirical bands, drift, date marker.
+    if plan.rollback_snapshot:
+        coord._maybe_push_rollback_snapshot(iso)
+    if plan.freeze_changed:
+        coord._set_collapse_frozen_date(plan.freeze_date)
+    if context.collapsed:
+        _LOGGER.info("Collapse detected for %s: freezing geometric learners for %s",
+                     iso, next_iso)
+    if plan.train_geometric:
         coord._train_day_ahead(iso, issued, actuals)
         coord._train_shademap(iso, issued, actuals)
-
-    # --- 5b) Quantile bands (SPEC §11.1) -----------------------------
-    if not collapse:
-        # Sample the day's hourly relative errors and judge persisted layers
-        # only when the label passed the collapse quarantine.
+    if plan.train_empirical:
         coord._train_quantiles_day(day)
-
-        # --- 6) Drift monitor ----------------------------------------
         coord._update_drift(iso, issued, actuals)
-
-    # Mark the day consumed ONLY when both inputs existed: a day whose
-    # actuals arrive later (LTS lag, manual re-run) must be retried by a
-    # future catch-up instead of being skipped forever.
-    if issued and actuals:
+    if plan.mark_consumed:
         coord._store.mark_day_trained(iso)
 
 
@@ -741,133 +643,22 @@ def site_measured_hourly(
     }
 
 
-def metered_modeled_hourly(
-    coord,
-    snap: IssuedSnapshot,
-    modeled_hourly: dict[str, float],
-    *,
-    layer: str = "raw",
-) -> dict[str, float] | None:
-    """Restrict a SITE-total modeled hourly curve to the METERED planes.
-
-    Teilmengen-Regel (SPEC §9.5/§9.1, mirrors the live
-    ``coordinator._rearm_samples_from_rows`` subset rule): learners compare
-    against the measured side, which only ever sums planes with an
-    ``actual_entity``. An unmetered plane inside the modeled total reads as a
-    permanent production deficit — the RLS theta would learn the METERING
-    SHARE instead of the forecast error. Snapshot v2 stores the exact RAW,
-    SLOW-only and CORRECTED curve for each plane; ``layer`` selects the one
-    matching the site curve. No beam-share approximation is allowed because
-    group clipping and learned factors make that share layer-dependent.
-
-    Returns None when the comparison is impossible or meaningless: no metered
-    plane at all (no measured side exists), or unmetered planes present but
-    no per-plane breakdown to scale them out (legacy v0.1 snapshot) — the
-    caller then SKIPS the day rather than training the metering gap.
-    """
-    planes = getattr(getattr(coord, "_site", None), "planes", ())
-    metered = {p.name for p in planes if p.actual_entity}
-    if not metered:
+def metered_modeled_hourly(coord, snap: IssuedSnapshot, modeled_hourly: dict[str, float], *, layer: str = "raw") -> dict[str, float] | None:
+    """Preserve the HA seam; exact metered-subset reduction is HA-free."""
+    site = getattr(coord, "_site", None)
+    if site is None:
         return None
-    if len(metered) == len(planes):
-        return dict(modeled_hourly)
-    if not snap.per_plane or layer not in {"raw", "slow", "corrected"}:
-        return None
-    attr = f"{layer}_wh"
-    exact: dict[str, dict[str, float]] = {}
-    for name in metered:
-        pm = snap.per_plane.get(name)
-        curve = getattr(pm, attr, None) if pm is not None else None
-        if not curve:
-            # Legacy snapshot: exact subset attribution is impossible. Skip the
-            # day instead of manufacturing a metering-share correction.
-            return None
-        exact[name] = curve
-    out: dict[str, float] = {}
-    for hkey in modeled_hourly:
-        out[hkey] = sum(curve.get(hkey, 0.0) for curve in exact.values())
-    return out
+    return learning_inputs.metered_modeled_hourly(site, snap, modeled_hourly, layer=layer)
 
 
-def day_ahead_samples(
-    coord,
-    raw_hourly: dict[str, float],
-    actuals: dict,
-    snap: IssuedSnapshot,
-    site_measured_hourly: dict[str, float] | None,
-) -> list[_DayAheadSample]:
-    """Build (cloud class x day part) RLS training samples for one day.
-
-    Modeled Wh per part comes from the issued SLOW-ONLY hourly curve (shademap ∘
-    physics; ``raw_hourly`` here is that curve, raw only as a legacy fallback —
-    see :func:`train_day_ahead`), RESTRICTED to the metered planes
-    (:func:`metered_modeled_hourly`); the cloud class is the forecast cloud
-    class of each hour (snap.cloud_class_by_hour,
-    SPEC §8) so a fog/overcast day trains its own cell, not a fixed "clear"
-    one. When TRUE per-hour measured site energy is available
-    (``site_measured_hourly``) each (class, part) cell carries its OWN
-    measured/modeled pair — a real independent per-part signal. Otherwise the
-    day's measured total is apportioned by the modeled shape (coarse
-    fallback, daily ring only).
-    """
-    # Teilmengen-Regel: modeled side restricted to the metered planes; None
-    # means the comparison is impossible (no metered plane / legacy snapshot
-    # on a partially metered site) -> the day is skipped, never poisoned.
-    metered_hourly = metered_modeled_hourly(
-        coord, snap, raw_hourly, layer="slow"
-    )
-    if metered_hourly is None:
+def day_ahead_samples(coord, raw_hourly: dict[str, float], actuals: dict, snap: IssuedSnapshot,
+                      site_measured_hourly: dict[str, float] | None) -> list[_DayAheadSample]:
+    """Build samples against the original slow curve with production solar bins."""
+    site = getattr(coord, "_site", None)
+    if site is None:
         return []
-    raw_hourly = metered_hourly
-    measured_total = sum(
-        float(v) for v in actuals.values() if isinstance(v, (int, float))
-    )
-    modeled_total = sum(raw_hourly.values())
-    if modeled_total <= 0.0 or measured_total <= 0.0:
-        return []
-
-    # Aggregate modeled (+ measured, when hourly) per (cloud class, day part)
-    # cell keyed on the forecast cloud class of each hour.
-    cell_modeled: dict[tuple[str, str], float] = {}
-    cell_measured: dict[tuple[str, str], float] = {}
-    for hkey, wh in raw_hourly.items():
-        if (
-            site_measured_hourly is not None
-            and hkey not in site_measured_hourly
-        ):
-            # A recorder gap is absence of evidence, never a zero-production
-            # label. Keep modeled and measured sides on the same hour set.
-            continue
-        part = coord._day_part_for_hourkey(hkey)
-        if part is None:
-            continue
-        cc = snap.cloud_class_by_hour.get(hkey, CLOUD_CLASS_CLEAR)
-        key = (cc, part)
-        cell_modeled[key] = cell_modeled.get(key, 0.0) + float(wh)
-        if site_measured_hourly is not None:
-            cell_measured[key] = cell_measured.get(key, 0.0) + float(
-                site_measured_hourly[hkey]
-            )
-
-    samples: list[_DayAheadSample] = []
-    for (cc, part), modeled_wh in cell_modeled.items():
-        if modeled_wh <= 0.0:
-            continue
-        if site_measured_hourly is not None:
-            measured_wh = cell_measured.get((cc, part), 0.0)
-        else:
-            # Daily-only fallback: apportion the measured total by modeled
-            # share of this cell (coarse; only when hourly actuals absent).
-            measured_wh = measured_total * (modeled_wh / modeled_total)
-        samples.append(
-            _DayAheadSample(
-                cloud_class=cc,
-                day_part=part,
-                measured_wh=measured_wh,
-                modeled_wh=modeled_wh,
-            )
-        )
-    return samples
+    return learning_inputs.day_ahead_samples(site, raw_hourly, actuals, snap, site_measured_hourly,
+                                            day_part=coord._day_part_for_hourkey)
 
 
 def day_part_for_hourkey(coord, hkey: str) -> str | None:
@@ -983,92 +774,10 @@ def day_is_measured_clear(
     return measured >= SHADEMAP_MEASURED_CLEAR_MIN_FRAC * modeled
 
 
-def train_channel(
-    coord,
-    state: ShademapState,
-    channel: str,
-    modeled: PlaneHourlyModeled,
-    measured_by_hour: dict[str, float],
-) -> tuple[ShademapState, bool]:
-    """EMA-update one channel's bins from its quasi-clear hourly samples.
-
-    The neighbour-stability leg of the gate is applied to the MEASURED/
-    modeled ratio sequence (not the smooth forecast kc, coordinator:1015): a
-    lone bright measured hour between shaded ones is a fluctuation and is
-    rejected.
-    """
-    plane = coord._site.plane_by_name(channel)
-    if plane is None:
-        return state, False
-    # Storage is ALWAYS per plane (SPEC §9.2): each plane's learning is stored under
-    # its OWN measurement channel (the plane name) forever. Grouping is applied
-    # only at READ time (coordinator._build_shade_pool_map + effective_tau_pooled),
-    # so it stays fully reversible — a dissolved group instantly reads each plane's
-    # own channel again, with no data lost.
-    store_channel = channel
-    changed = False
-    hkeys = sorted(modeled.beam_wh)
-    # Precompute the measured/modeled-gated ratio per hour for the neighbour-
-    # stability test (measured-side, not forecast-side).
-    ratio_by_hour: dict[str, float] = {}
-    for hkey in hkeys:
-        beam = modeled.beam_wh.get(hkey, 0.0)
-        diff = modeled.diffuse_wh.get(hkey, 0.0)
-        meas = measured_by_hour.get(hkey)
-        denom = beam + diff
-        if meas is not None and denom > 0.0:
-            ratio_by_hour[hkey] = float(meas) / denom
-    for idx, hkey in enumerate(hkeys):
-        beam_wh = modeled.beam_wh.get(hkey, 0.0)
-        diffuse_wh = modeled.diffuse_wh.get(hkey, 0.0)
-        measured_wh = measured_by_hour.get(hkey)
-        if measured_wh is None or beam_wh <= 0.0:
-            continue
-        beam_share = beam_wh / (plane.wp) if plane.wp else 0.0
-        dt = dt_util.parse_datetime(hkey)
-        if dt is None:
-            continue
-        mid = dt + timedelta(minutes=30)
-        sun_az, sun_el = solpos.sun_position(
-            mid, coord._site.latitude, coord._site.longitude
-        )
-        # Neighbour-slot stability on the MEASURED/modeled ratio: the smooth
-        # forecast k_c cannot see a real cloud fluctuation, so the gate keys
-        # on this slot's ratio vs the previous slot's (shared with backfill).
-        this_ratio = ratio_by_hour.get(hkey)
-        neighbour_ratio = (
-            ratio_by_hour.get(hkeys[idx - 1]) if idx > 0 else None
-        )
-        try:
-            if not shademap_mod.is_quasi_clear(
-                kc=modeled.kc.get(hkey, 0.0),
-                sun_el=sun_el,
-                beam_share=beam_share,
-                stability_ratio=this_ratio,
-                neighbour_ratio=neighbour_ratio,
-            ):
-                continue
-            measured_t = shademap_mod.beam_referenced_t(
-                float(measured_wh), diffuse_wh, beam_wh
-            )
-            if measured_t is None:
-                continue
-            doy = mid.timetuple().tm_yday
-            state = shademap_mod.update_bin(
-                state,
-                channel=store_channel,
-                sun_az=sun_az,
-                sun_el=sun_el,
-                doy=doy,
-                measured_t=measured_t,
-            )
-            changed = True
-        except NotImplementedError:
-            return state, False
-        except Exception:  # pragma: no cover - defensive
-            _LOGGER.debug("shademap update failed for %s", channel, exc_info=True)
-            continue
-    return state, changed
+def train_channel(coord, state: ShademapState, channel: str, modeled: PlaneHourlyModeled,
+                  measured_by_hour: dict[str, float]) -> tuple[ShademapState, bool]:
+    """Production and replay share the identical issued beam-reference trainer."""
+    return learning_inputs.train_channel(coord._site, state, channel, modeled, measured_by_hour)
 
 
 def store_hourly_actuals(coord, iso: str) -> dict[str, dict[str, float]] | None:
@@ -1102,12 +811,10 @@ def is_collapse_day(
     if metered_hourly is None:
         return False
     forecast_wh = sum(metered_hourly.values())
-    if forecast_wh < COLLAPSE_FORECAST_MIN_WH:
-        return False
     measured_wh = sum(
         float(v) for v in actuals.values() if isinstance(v, (int, float))
     )
-    return measured_wh < COLLAPSE_MEASURED_MAX_FRAC * forecast_wh
+    return production_collapsed(forecast_wh, measured_wh)
 
 
 def update_drift(

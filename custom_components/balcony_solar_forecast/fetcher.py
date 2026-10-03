@@ -580,17 +580,17 @@ class OpenMeteoFetcher:
                     )
                 try:
                     return await resp.json()
-                except (aiohttp.ContentTypeError, ValueError) as err:
+                except (aiohttp.ContentTypeError, ValueError):
                     raise FetchError(
-                        f"Open-Meteo returned non-JSON body: {err}", retryable=True
-                    ) from err
+                        "Open-Meteo returned non-JSON body", retryable=True
+                    ) from None
         except FetchError:
             raise
-        except TimeoutError as err:
+        except TimeoutError:
             raise FetchError(
-                f"Open-Meteo request timed out: {err}", retryable=True
-            ) from err
-        except aiohttp.ClientError as err:
+                "Open-Meteo request timed out", retryable=True
+            ) from None
+        except aiohttp.ClientError:
             raise FetchError(
-                f"Open-Meteo request failed: {err}", retryable=True
-            ) from err
+                "Open-Meteo request failed", retryable=True
+            ) from None
