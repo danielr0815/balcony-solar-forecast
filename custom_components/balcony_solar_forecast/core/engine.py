@@ -68,8 +68,8 @@ AC-side served curve (Phase 1, AC-side forecast)
 ------------------------------------------------
 On top of the DC pipeline the engine additionally derives the served AC as a
 deterministic physical transform (``electrical.clamp_groups_ac``): per inverter
-group AC = min(eta_inv * factor * sum(DC_unclamped), ac_limit), clipping the DC
-at ac_limit/eta_inv (where the micro-inverter's AC clamp back-drives the MPP).
+group AC = min(eta_inv * sum(DC_served), ac_limit). The served DC already
+contains the postclip learned correction and its second electrical clamp.
 This is emitted as the additive ``ac_watts`` / ``ac_hourly_wh`` /
 ``ac_daily_kwh`` fields.
 
@@ -429,13 +429,13 @@ def compute_forecast(
 
     raw_energy = EnergyTotals(tz=cal_tz)
     corrected_energy = EnergyTotals(tz=cal_tz)
-    # AC point forecast: corrected unclamped DC through each group's eta and
+    # AC point forecast: served DC through each group's eta and
     # AC limit. Separate from the DC learning curve, aligned to slot_starts.
     ac_watts: list[float] = []
     ac_energy = EnergyTotals(tz=cal_tz)
     # AC-side PRE-clamp total per slot (Phase 2): the AC analogue of
-    # ``corrected_unclamped_watts`` — Sum_planes eta(group) * (cor_unclamped *
-    # factor) BEFORE the inverter AC clamp, aligned to slot_starts.
+    # ``corrected_unclamped_watts`` — Sum_planes eta(group) * (cor_clamped *
+    # factor) BEFORE the second inverter clamp, aligned to slot_starts.
     ac_corrected_unclamped_watts: list[float] = []
     # Physical AC ceiling per slot (aligned to slot_starts): sum of the group AC
     # limits + the AC of any ceiling-free (ungrouped) planes. Used only to cap the
@@ -642,17 +642,10 @@ def compute_forecast(
         raw_energy.add(start, raw_slot_total)
         corrected_energy.add(start, cor_slot_total)
 
-        # --- AC-side served curve (Phase 1) ---------------------------------
-        # Physical DC->AC transform: per group AC = min(eta_inv * factor *
-        # sum(DC_unclamped), ac_limit), with the DC clip point at ac_limit/eta.
-        # Fed the corrected UNCLAMPED per-plane DC scaled by the fast-learner
-        # factor (NOT cor_clamped): only the unclamped DC lets the inverter's own
-        # AC clamp bite, so the corrected clip point ac_limit/eta_inv is reflected
-        # in the AC curve. The DC path above uses the same configured eta clip
-        # point and remains the learner/scoreboard truth.
-        ac_input = {
-            name: watts * factor for name, watts in cor_unclamped.items()
-        }
+        # AC must consume the same corrected postclip DC as the learners.
+        # Returning to cor_unclamped here resurrected clipped energy under
+        # factors < 1 (50 W served DC could produce 90 W AC; ADR-0024).
+        ac_input = cor_final
         _, ac_by_plane = electrical.clamp_groups_ac(
             ac_input, ac_groups, ungrouped_eta=_ungrouped_eta
         )
@@ -665,7 +658,7 @@ def compute_forecast(
         # the coordinator's AC day-ahead strip uses the gap to detect a clamped
         # slot (SPEC §14.1). Equals ``ac_slot_total`` exactly on an unclipped slot.
         ac_corrected_unclamped_watts.append(
-            sum(plane_eta[name] * w for name, w in ac_input.items())
+            sum(plane_eta[name] * w for name, w in cor_factored.items())
         )
         # Physical AC ceiling for this slot's band cap: the group AC limits plus
         # the served AC of any ceiling-free (ungrouped) planes (mirrors the DC

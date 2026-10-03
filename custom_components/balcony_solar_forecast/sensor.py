@@ -50,7 +50,7 @@ from homeassistant.const import (
     UnitOfPower,
     UnitOfTime,
 )
-from homeassistant.core import HomeAssistant, ServiceResponse, callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -58,7 +58,13 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from ._forecast_access import current_forecast
+from ._forecast_presenter import (
+    _band_blocks,  # noqa: F401 -- historical import surface
+    _build_forecast_response,  # noqa: F401 -- historical import surface
+    _empty_forecast_entry,  # noqa: F401 -- historical import surface
+    _hourly_from_slots,  # noqa: F401 -- historical import surface
+    _iter_curve,  # noqa: F401 -- historical import surface
+)
 from .const import (
     ATTR_SP_AXIS_AZ_MAX,
     ATTR_SP_AXIS_AZ_MIN,
@@ -130,6 +136,7 @@ from .const import (
     STATUS_PHYSICS_FALLBACK,
     STATUS_UNAVAILABLE,
 )
+from .core.measurement_quality import power_watts
 
 # Diagnostic sensor keys (owned here; not part of the consumer contract).
 SENSOR_LAST_FETCH_AGE = "last_fetch_age_min"
@@ -283,127 +290,6 @@ async def async_setup_entry(
     # response builder (_build_forecast_response below) lives in this module.
 
 
-def _build_forecast_response(
-    hass: HomeAssistant, entry_id: str | None
-) -> ServiceResponse:
-    """Assemble the get_forecast response for one or all entries.
-
-    Returns ``{entries: {entry_id: {planes, slot_starts, total_15min,
-    total_hourly, issued_at}}}``. ``planes`` maps plane name -> list of 15-min
-    watts aligned to ``slot_starts``. All read from the coordinator's flat
-    ``self.data`` dict; a coordinator without a current forecast yields empty
-    curves rather than a stale one (SPEC §13).
-    """
-    entries: dict[str, Any] = {}
-    store = hass.data.get(DOMAIN, {})
-    for eid, coordinator in store.items():
-        if entry_id is not None and eid != entry_id:
-            continue
-        data = current_forecast(coordinator)
-        if not data:
-            entries[eid] = _empty_forecast_entry()
-            continue
-        entry_resp = {
-            "slot_starts": list(data.get(_KEY_SLOT_STARTS, [])),
-            "planes": {
-                name: list(watts)
-                for name, watts in (data.get(_KEY_PLANE_WATTS) or {}).items()
-            },
-            "total_15min": [
-                w for _, w in _iter_curve(data)
-            ],
-            "total_hourly": dict(data.get(_KEY_HOURLY_WH) or {}),
-            "issued_at": data.get(_KEY_COMPUTED_AT),
-        }
-        # v0.4 quantile bands (SPEC §11.2/§14.4): plane-agnostic TOTAL p10/p50/p90
-        # 15-min + hourly Wh curves alongside the served (corrected) curve. Only
-        # present when the engine issued bands this cycle; absent otherwise so a
-        # quantiles-off / cold-start install simply omits the blocks rather than
-        # fabricating a spread.
-        bands = _band_blocks(data)
-        if bands:
-            entry_resp.update(bands)
-            # Band provenance (SCT-4): the today-level source label + the compact
-            # per-local-day count breakdown, so a consumer of the raw curves can
-            # tell which days actually carry a trained band. Gated on ``bands``
-            # like the curve blocks above: a quantiles-off / cold-start response
-            # carries no band block at all, so it must not claim a band_source
-            # either (would be a status lie — cf. EnergyBandSensor gating).
-            entry_resp["band_source"] = data.get(DATA_KEY_BAND_SOURCE, "learned")
-            by_day = data.get(DATA_KEY_BAND_SOURCE_BY_DAY)
-            if isinstance(by_day, dict) and by_day:
-                entry_resp["band_source_by_day"] = dict(by_day)
-        entries[eid] = entry_resp
-    return {"entries": entries}
-
-
-def _band_blocks(data: dict[str, Any]) -> dict[str, Any]:
-    """Assemble the p10/p50/p90 15-min + hourly forecast-response blocks.
-
-    Reads the coordinator's ``DATA_KEY_QUANTILE_CURVES`` (15-min band Wh curves
-    keyed by ISO-UTC slot start) and rolls each up to hourly Wh. Returns a dict
-    ``{p10: {"wh_period": {...}, "hourly": {...}}, p50: ..., p90: ...}`` — or an
-    empty dict when no bands were issued (quantiles off / cold start), so the
-    caller omits the blocks entirely. Pure; never raises on a malformed curve.
-    """
-    curves = data.get(DATA_KEY_QUANTILE_CURVES)
-    if not isinstance(curves, dict) or not curves:
-        return {}
-    out: dict[str, Any] = {}
-    for key in (_Q_P10, _Q_P50, _Q_P90):
-        curve = curves.get(key)
-        if not isinstance(curve, dict) or not curve:
-            continue
-        out[key] = {
-            ATTR_WH_PERIOD: dict(curve),
-            "hourly": _hourly_from_slots(curve),
-        }
-    return out
-
-
-def _hourly_from_slots(slot_wh: dict[str, float]) -> dict[str, float]:
-    """Roll a 15-min ``{iso_slot: Wh}`` curve up to ``{iso_hour: Wh}``.
-
-    Buckets each slot's Wh into its containing UTC hour (truncating the slot
-    start to the hour). Malformed keys/values are skipped so a diagnostic curve
-    can never crash the response.
-    """
-    hourly: dict[str, float] = {}
-    for iso, wh in slot_wh.items():
-        parsed = dt_util.parse_datetime(iso) if isinstance(iso, str) else None
-        if parsed is None or not isinstance(wh, (int, float)):
-            continue
-        hour_key = parsed.replace(minute=0, second=0, microsecond=0).isoformat()
-        hourly[hour_key] = round(hourly.get(hour_key, 0.0) + float(wh), 2)
-    return hourly
-
-
-def _empty_forecast_entry() -> dict[str, Any]:
-    return {
-        "planes": {},
-        "slot_starts": [],
-        "total_15min": [],
-        "total_hourly": {},
-        "issued_at": None,
-    }
-
-
-def _iter_curve(data: dict[str, Any]):
-    """Yield ``(iso_start, watts)`` pairs of the site-total 15-min curve.
-
-    Ordered by ``slot_starts`` when present (the ``watts`` dict is keyed by
-    the same ISO strings); falls back to the dict's own order otherwise.
-    """
-    watts = data.get(_KEY_WATTS) or {}
-    starts = data.get(_KEY_SLOT_STARTS)
-    if starts:
-        for iso in starts:
-            if iso in watts:
-                yield iso, watts[iso]
-    else:
-        yield from watts.items()
-
-
 class BalconyForecastEntity(CoordinatorEntity):
     """Common device grouping + honest availability for all our entities.
 
@@ -530,7 +416,7 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
                 wh_ac_p10[iso] = wh_ac_p10_all[iso]
             if iso in wh_ac_p90_all:
                 wh_ac_p90[iso] = wh_ac_p90_all[iso]
-        return {
+        attrs = {
             ATTR_WATTS: watts,
             ATTR_WH_PERIOD: wh_period,
             ATTR_WH_PERIOD_P10: wh_p10,
@@ -539,6 +425,10 @@ class EnergyProductionSensor(BalconyForecastEntity, SensorEntity):
             ATTR_WH_PERIOD_AC_P10: wh_ac_p10,
             ATTR_WH_PERIOD_AC_P90: wh_ac_p90,
         }
+        readiness = data.get("quantile_readiness")
+        if isinstance(readiness, dict):
+            attrs["quantile_readiness"] = readiness
+        return attrs
 
 
 class PowerNowSensor(BalconyForecastEntity, SensorEntity):
@@ -585,12 +475,12 @@ class PowerNowSensor(BalconyForecastEntity, SensorEntity):
         getter = getattr(self.coordinator, "inverter_efficiency_learned", None)
         if callable(getter):
             learned = getter()
-        calibrated = learned is not None and learned.get("n", 0)
+        calibrated = learned is not None and learned.get("effective") is not None
         # Shown once the calibration folded a sample OR produced raw gated
         # ratios (v0.20): an all-out-of-band night (n stays 0) must still
         # surface its ``raw`` evidence — that case is exactly the mis-scaled
         # DC-sensor diagnosis the raw block exists for.
-        if calibrated or (learned is not None and learned.get("raw")):
+        if learned is not None and (learned.get("n", 0) or learned.get("raw")):
             attrs["inverter_efficiency_learned"] = learned
         # Provenance label (v0.19.2 status honesty): without an AC meter the
         # per-group eta is a verbatim CONFIG echo that never changes — identical
@@ -876,6 +766,12 @@ class SourceStatusSensor(_DiagnosticSensor):
             # No fresh/cached/physics curve was issued this cycle.
             return STATUS_UNAVAILABLE
         return data.get(_KEY_STATUS)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data or {}
+        readiness = data.get("quantile_readiness")
+        return {"quantile_readiness": readiness} if isinstance(readiness, dict) else {}
 
 
 # ---------------------------------------------------------------------------
@@ -1266,6 +1162,9 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
         by_day = data.get(DATA_KEY_BAND_SOURCE_BY_DAY)
         if isinstance(by_day, dict) and by_day:
             attrs["band_source_by_day"] = by_day
+        readiness = data.get("quantile_readiness")
+        if isinstance(readiness, dict):
+            attrs["quantile_readiness"] = readiness
         return attrs
 
 
@@ -1383,11 +1282,7 @@ def _numeric_state(state: Any) -> float | None:
     raw = getattr(state, "state", None)
     if raw is None or raw in (STATE_UNKNOWN, STATE_UNAVAILABLE):
         return None
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return None
-    return value if math.isfinite(value) else None
+    return power_watts(raw, getattr(state, "attributes", {}).get("unit_of_measurement", "W"), signed=True)
 
 
 def _measured_sources(coordinator: Any) -> list[tuple[str, str, float]]:
@@ -1409,7 +1304,7 @@ def _measured_sources(coordinator: Any) -> list[tuple[str, str, float]]:
         entity_id = getattr(plane, "actual_entity", None)
         if isinstance(entity_id, str) and entity_id and entity_id not in seen:
             seen.add(entity_id)
-            name = getattr(plane, "name", None)
+            name = getattr(plane, "label", None) or getattr(plane, "name", None)
             wp = getattr(plane, "wp", None)
             if not isinstance(wp, (int, float)) or not math.isfinite(wp) or wp <= 0:
                 continue

@@ -1,0 +1,11 @@
+{
+  "input": {
+    "path": "synthetic.json",
+    "sha256": "3512a00658e4d2d605789ef346531aac3e87be8c4a370ae0d0706d788a4d3b6d"
+  },
+  "basis": "DC",
+  "timezone": "UTC",
+  "captured_at": "2026-10-03T00:00:00Z",
+  "licence": "CC0-1.0 synthetic data",
+  "source_role": "synthetic_frozen_forecast_and_closed_actual"
+}

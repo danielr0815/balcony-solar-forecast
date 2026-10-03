@@ -183,6 +183,8 @@ def patched_setup(monkeypatch):
 
     monkeypatch.setattr(init_mod, "async_get_clientsession", lambda hass: object())
     monkeypatch.setattr(coordinator_mod, "async_track_time_change", _fake_track)
+    from custom_components.balcony_solar_forecast import _panel_weather
+    monkeypatch.setattr(_panel_weather, "async_track_time_change", lambda *args, **kwargs: lambda: None)
     monkeypatch.setattr(
         BalconySolarCoordinator,
         "async_config_entry_first_refresh",
@@ -228,6 +230,7 @@ async def test_setup_entry_runs_real_constructor_and_wiring(patched_setup, monke
     # catch-up backgrounded, stop-flush + update listener registered.
     assert hass.config_entries.forwarded == [(entry, init_mod.PLATFORMS)]
     assert patched_setup == [{"hour": 1, "minute": 30, "second": 0}]
+    assert coordinator._panel_weather._unsub is not None
     assert entry.background_tasks == [f"{DOMAIN}_startup_catchup"]
     assert len(entry.on_unload) >= 2
     assert entry.update_listeners == [init_mod._async_reload_entry]

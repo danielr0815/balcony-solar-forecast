@@ -240,3 +240,15 @@ Before you open a PR, make sure:
 
 Small, focused PRs are easiest to review. If you're planning something large,
 open an issue first to discuss the approach.
+
+The portable core can also be tested without Home Assistant's Linux dependencies:
+
+```bash
+uv sync --locked --only-group core-test
+uv run --no-sync pytest tests/core -p no:homeassistant
+```
+
+This is the Windows core CI path. Restore the full development environment with
+`uv sync --locked --group dev` before working on HA boundaries. Public benchmark
+examples are synthetic and licensed separately; historical operator checks in
+`scripts/validation/bsf_checks.py` are diagnostics, not community release gates.

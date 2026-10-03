@@ -1,3 +1,149 @@
+# Reproducible forecast comparisons
+
+The community benchmark uses immutable input bundles, explicit AC/DC basis and
+chronological development/selection/test partitions. Run from the repository root:
+
+```bash
+uv run --no-sync python scripts/validation/replay_benchmark.py tests/fixtures/replay/manifest.json --output /tmp/comparison.json --report /tmp/comparison.md
+uv run --no-sync python -m scripts.validation.experiment_candidates tests/fixtures/replay/manifest.json --experiment persistence
+```
+
+The CC0 example is synthetic and demonstrates arithmetic only. Its few days do
+not prove forecast improvement. Every model uses the same valid target mask;
+availability is reported separately. Test comparisons resample paired complete
+local-day clusters and need at least 30 distinct days before a decision. Day
+counts are not proof of independent weather episodes. A promising result still
+requires regime and availability review; nothing activates production learning.
+
+The JSON report includes fixed lead-time and local-time strata. Optional frozen
+`regime` metadata adds `sun_elevation_deg`, `forecast_weather`,
+`observed_weather`, `electrical_state` (`saturated`/`unsaturated`) and
+`learning_state` (`cold`/`partial`/`trained`). Weather categories are
+`clear`/`mixed`/`overcast`; absent metadata stays `unknown`. Observed weather is
+a separate audit axis and must have its own reference provenance. No category
+is inferred from the error of the forecast being evaluated. All strata retain
+the same paired-target mask; small subsets do not establish improvement.
+
+Persistence experiments require frozen `candidate_inputs` per target:
+`feature_end`, `feature_available_at`, `sum_ratio`, `panel_ratio`, and optional
+`forecast_class`. The original `theta` curve is the common starting point, and
+`served` is the existing baseline. Missing inputs remain unavailable. Features
+must be closed and available before the issue. One bounded correction fades to
+identity after 120 minutes. No second correction is stacked on served intraday.
+
+`--experiment daily-bands` consumes `daily_records`: one original issue for each
+complete local calendar day, its original `available_at`, `forecast_wh`, `actual_wh`, actual availability,
+`target_start`, `target_end`, `local_day`, and `issued_interval`. Partial targets
+never seed daily residuals. Before 20 available distinct historical days, the
+candidate is cold. Coverage, interval score, width and one-sided misses are
+compared on paired test days. Summed marginal slot bands are not automatically
+calibrated day intervals. Application comparisons do not simulate independently
+trained learner variants.
+
+`--experiment shade-gate` consumes DC `shade_records` with a unique label `id`,
+`decision_at`, `target_source`, frozen `baseline_eligible` and ordered `frames`.
+Frames carry `end`, `available_at`, `generation` and panel observations
+(`source`, `group`, `orientation`, `reported_at`, DC `watts`, `reference_watts`,
+optional `clipped`/`eligible`). The experimental geometric gate uses only steady
+evidence after excluding the target's entire electrical group. It reports lost
+training coverage and distinct days. Bias/quantile eligibility remains unchanged.
+False alarms require `shadow_alarm`, `independent_shade` and a separately declared
+`independent_reference_role` (`external_shade_reference`, `camera` or
+`synthetic_truth`); same-panel cloud labels remain unknown. Role declaration is
+provenance, not proof that the reference is perfect. Lower alarm counts from
+discarding labels alone are not evidence of better forecasts. A separate causal
+learning replay and future targets must measure that consequence.
+
+`learning_replay.py` provides a separate callback boundary for learning trials:
+each `LearnerVariant` has its own copied initial state and availability time.
+Prediction callbacks receive issue inputs without target actuals; training uses
+only closed labels that have become available, plus the variant's own frozen
+training reference. The original inputs and live stores remain untouched.
+Adapters for a physical learner must supply its exact historical reference;
+the arithmetic scheduler example is not a replay of the entire HA learner.
+
+A complete day-ahead **physical persisted-learning adapter** is also available:
+
+```bash
+uv run --no-sync python -m scripts.validation.physical_learning_replay tests/fixtures/replay/physical-manifest.json --output /tmp/physical-report.json
+```
+
+This CC0 seven-day example verifies arithmetic and lifecycle only. It begins cold
+and delays recorded labels until after calendar closure; the report scores four
+synthetic test days, which cannot establish predictive improvement. A minimal
+Python environment without Home Assistant can run the command. The manifest
+uses the same verified input hash, basis, timezone, capture time, licence and
+source-role contract as the ordinary benchmark.
+
+Input is `schema_version: 1`, `basis: DC`, `timezone`, a validated stationary
+`site`, and `days`. Each day declares `local_day`, `issued_at` (before local day
+start), `weather_role: issued_forecast`, `weather_available_at`, original ordered
+15-minute `weather_slots`, `actuals_available_at` (after day end) and
+`actuals_hourly: {stable_module_id: {UTC_hour_start: Wh}}`. An hourly mean W is
+Wh for its complete one-hour interval; `actual_unit`, when provided, must be
+`Wh`. Complete weather axes include local 23/24/25-hour days. Corrupt, stuck,
+implausible, missing or collapsed training labels cannot seed a learner.
+
+Default presets are `raw`, `bias`, `slow` and `full` (persistent shading, bias
+and quantiles). A `variants` object can name separate candidates with
+`{preset: full, site: optional_candidate_site}`. Geometry candidates must retain
+the measured module IDs/sources and weather location. `days[].variant_weather`
+may provide originally available forecast weather for each named model, with
+the same weather fields and availability contract. Observed weather is rejected.
+Each variant retains its own physical reference and independently trained state;
+no current/live θ or shaded curve is borrowed into the past. Configuration,
+weather and kernel hashes identify the calculation.
+
+Optional `initial_states` supply separately archived `bias`, `shade` and
+`quantile` state per variant plus `available_at` before the first issue. Absent
+states are cold. State loading follows the production validate-and-clamp
+contract, and the report records each origin. A declared timestamp is provenance,
+not independent proof that an export represents that historical state.
+
+With `development_end` and `selection_end`, the report includes the ordinary
+paired DC error metrics and day-cluster decisions. Scoring uses exactly the
+configured measured subset and complete hourly targets; curve omissions at
+night become zero only because the full finite input axis was verified. Partial
+metering never silently compares measured ports against all panels. Collapsed
+but otherwise valid zero measurements remain scoreable, even though they cannot
+train. RAW's consumed-day count describes shared label eligibility, never a RAW
+state update. End-of-run labels still unavailable at the last issue remain pending.
+
+Scope is the persistent day-ahead learning experiment, **not** a complete HA
+simulator: intraday, automatic drift disabling, next-day collapse freeze,
+calibrated inverter η, and ensemble fusion are explicitly excluded. Dense panel
+traces and independent shade references remain necessary for evaluating a new
+panel-driven training policy. Historical data lacking original issued weather
+or available learner states cannot be retroactively certified by this adapter.
+
+To measure the magnitude of a physics change against another checkout:
+
+```bash
+uv run --no-sync python scripts/validation/model_contract_impact.py --baseline-root /path/to/baseline-checkout --output /tmp/model-impact.json
+node scripts/validation/browser_cards.mjs /tmp/cards-preview
+```
+
+The 18-case synthetic matrix separates sky visibility, DC energy and AC energy;
+kernel hashes identify the compared code. It reports model changes, not forecast
+accuracy. The browser command requires the local Playwright runtime described
+in `docs/PLAYWRIGHT-MCP.md`, launches a fresh synthetic-only Chromium instance
+and never reuses the MCP login profile.
+
+Live operator captures select one config entry through registry identity, support
+renamed sensors, use the HA timezone and request power statistics in W. With
+multiple entries `--entry-id` is required. `capture_manifest.json` contains source
+roles and file hashes; loading rejects changed captured bytes. These captures
+use conservative full-calendar coverage (including DST) for daily totals and
+reject nonfinite, boolean or negative power labels. Without geometry, a fixed
+European daylight window cannot establish complete days. Captures remain
+private until the owner reviews, anonymizes and explicitly releases them.
+They are not the same schema as frozen benchmark input bundles.
+
+The following C1–C8 runbook is historical, specific to the reference installation
+and July 2026 intervention. Its thresholds are not community release gates.
+
+---
+
 # Post-Deployment-Validierung `balcony_solar_forecast` v0.21.0
 
 Runbook + Skriptpaket, um **~1 Woche nach dem Deployment** von v0.21.0 samt
@@ -209,3 +355,9 @@ identisch und jeder Report reproduzierbar.
   bleiben gültig.
 - Die Weather-Refresh-Erkennung in C6 ist indirekt (Scalar-Koinzidenz);
   echte Refresh-Events loggt die Integration nicht in den Recorder.
+
+Panel frames may include `azimuth_deg` and `tilt_deg`. When geometry is supplied,
+orientation cohorts use surface normals with a 30-degree separation criterion;
+invalid or incomplete geometry is excluded. Legacy frames without geometry use
+their declared `orientation` labels. Any change in usable sources restarts the
+five-minute ramp reference, including after leave-target-group-out filtering.

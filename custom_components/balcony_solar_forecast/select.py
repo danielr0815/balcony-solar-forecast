@@ -53,15 +53,30 @@ class ShadeProfileModuleSelect(BalconyForecastEntity, SelectEntity, RestoreEntit
 
     @property
     def options(self) -> list[str]:
-        return self.coordinator.shade_profile_plane_names()
+        return list(self._labels().values())
 
     @property
     def current_option(self) -> str | None:
         module = self.coordinator.shade_profile_module
-        return module or None
+        return self._labels().get(module, module) or None
+
+    def _labels(self) -> dict[str, str]:
+        getter = getattr(self.coordinator, "shade_profile_labels", None)
+        if getter is not None:
+            return getter()
+        return {name: name for name in self.coordinator.shade_profile_plane_names()}
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"module_id": self.coordinator.shade_profile_module,
+                "module_labels": self._labels()}
 
     async def async_select_option(self, option: str) -> None:
-        self.coordinator.set_shade_profile_module(option)
+        labels = self._labels()
+        module = next((key for key, label in labels.items() if label == option), None)
+        if module is None:
+            raise ValueError("Unknown module label")
+        self.coordinator.set_shade_profile_module(module)
         self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
@@ -71,5 +86,11 @@ class ShadeProfileModuleSelect(BalconyForecastEntity, SelectEntity, RestoreEntit
         # back to the coordinator default (the front-facing plane — the azimuth
         # the most planes share, see coordinator.shade_profile_module ->
         # shadeprofile.default_module) rather than a dead option.
-        if last is not None and last.state in self.options:
-            self.coordinator.set_shade_profile_module(last.state)
+        if last is not None:
+            module = getattr(last, "attributes", {}).get("module_id")
+            labels = self._labels()
+            if module not in labels:
+                module = last.state if last.state in labels else next(
+                    (key for key, label in labels.items() if label == last.state), None)
+            if module in labels:
+                self.coordinator.set_shade_profile_module(module)

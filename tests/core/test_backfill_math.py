@@ -97,7 +97,7 @@ def test_parse_previous_runs_suffix_reads_suffixed_radiation():
     assert recs[0].ghi == 700.0
     assert recs[1].temp_c == 24.0
     assert recs[0].cloud_low == 5.0
-    assert recs[0].start == datetime(2025, 6, 21, 9, 0, tzinfo=UTC)
+    assert recs[0].start == datetime(2025, 6, 21, 8, 0, tzinfo=UTC)
 
 
 def test_parse_historical_plain_variables():
@@ -129,7 +129,7 @@ def test_parse_drops_hours_with_missing_physics_inputs():
     recs = bf.parse_hourly_payload(payload, var_suffix="")
     # Only hour 1 has all four inputs.
     assert len(recs) == 1
-    assert recs[0].start.hour == 9
+    assert recs[0].start.hour == 8
 
 
 def test_parse_negative_irradiance_clamped_to_zero():
@@ -1108,14 +1108,13 @@ def _tracked_actuals(
     out: dict[str, dict[str, float]] = {}
     for plane in site.planes:
         hh = {}
-        for wx in weather:
+        for index, wx in enumerate(weather):
             r = bf.reconstruct_plane_hour(
                 plane, svf[plane.name], wx,
                 latitude=site.latitude, longitude=site.longitude,
             )
-            total = (r.beam_wh + r.diffuse_wh) * factor
-            if total > 0.0:
-                hh[wx.start.isoformat()] = total
+            total = (r.beam_wh + r.diffuse_wh) * factor * (1 + index * .001)
+            hh[wx.start.isoformat()] = total
         if hh:
             out[plane.name] = hh
     return out
@@ -1161,9 +1160,9 @@ def test_process_day_shademap_skips_snow_hours(site: SiteConfig):
     assert not acc.shade
 
 
-def test_process_day_drops_frozen_module_only(site: SiteConfig):
+def test_process_day_quarantines_frozen_module_day(site: SiteConfig):
     """A module whose hourly means repeat byte-identically (stuck Hoymiles/DTU
-    sensor) is dropped for the day — the other modules keep training."""
+    sensor) quarantines every learner for that day."""
     n_hours = const.LABEL_FROZEN_MIN_REPEATS + 1
     acc = bf.BootstrapAccumulator()
     weather = _clear_hours(n_hours)
@@ -1179,8 +1178,9 @@ def test_process_day_drops_frozen_module_only(site: SiteConfig):
 
     bf.process_day_hourly(acc, site, weather, hourly_actuals, svf_by_plane=svf)
 
-    assert acc.shade_samples > 0, "healthy modules must still train"
-    assert "M2" not in acc.shade, "the frozen module-day must be dropped"
+    assert acc.shade_samples == 0
+    assert not acc.shade and not acc.bias and not acc.quantile_state.bins
+    assert acc.last_iso_date == ""
 
 
 # ---------------------------------------------------------------------------

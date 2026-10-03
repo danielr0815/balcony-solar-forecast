@@ -224,6 +224,19 @@ def test_score_day_garbage_numbers_leave_day_unscored():
     assert store.get_scoreboard_state().days == {}
 
 
+@pytest.mark.parametrize('bad', ['invalid', True, -1])
+def test_partly_corrupt_issued_curve_cannot_be_scored_as_a_partial_sum(bad):
+    store = _FakeStore()
+    iso = '2026-07-08'
+    store.issued[iso] = _issued_for_day(iso, corrected_hourly={
+        iso+'T10:00:00+00:00': 1000, iso+'T11:00:00+00:00': bad})
+    store.issued[iso]['raw_hourly_wh'] = {iso+'T10:00:00+00:00': 1000, iso+'T11:00:00+00:00': 1000}
+    store.actuals[iso] = {'M1': 1000, 'M2': 1000}
+    coord = _make_coordinator(store)
+    asyncio.run(coord._score_scoreboard_day(date(2026, 7, 8)))
+    assert store.get_scoreboard_state().days == {}
+
+
 def test_score_day_disabled_is_noop():
     store = _FakeStore()
     iso = "2026-07-07"

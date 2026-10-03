@@ -62,9 +62,57 @@ export function resolveEntities(config, list, hass, definitions) {
   return ids;
 }
 
-/** Retain discovery across renders and detached cards, never across connections. */
+// One event subscription per connection, released after the last card detaches.
+// subscribeEvents is the HA websocket connection API; it returns an async
+// unsubscribe function. A pending subscription must also be released on detach.
+const registryWatchers = new WeakMap();
+function watchRegistry(card, hass, connection) {
+  if (!card.isConnected || typeof connection?.subscribeEvents !== "function") return;
+  if (card._registryWatchConnection !== connection) {
+    stopRegistry(card);
+    card._registryWatchConnection = connection;
+    card._registryList = null;
+    card._registryRequest = null;
+  }
+  let watch = registryWatchers.get(connection);
+  if (!watch) {
+    watch = { cards: new Set(), unsubscribe: null };
+    registryWatchers.set(connection, watch);
+    Promise.resolve().then(() => connection.subscribeEvents(() => {
+      registryCache.delete(connection);
+      for (const current of watch.cards) {
+        current._registryList = null;
+        current._registryRequest = null;
+        ensureRegistry(current, current._hass || hass);
+      }
+    }, "entity_registry_updated")).then((unsubscribe) => {
+      if (!watch.cards.size) unsubscribe();
+      else watch.unsubscribe = unsubscribe;
+    }).catch(() => {
+      if (registryWatchers.get(connection) === watch) registryWatchers.delete(connection);
+    });
+  }
+  watch.cards.add(card);
+}
+
+export function stopRegistry(card) {
+  const connection = card._registryWatchConnection;
+  const watch = connection && registryWatchers.get(connection);
+  if (watch) {
+    watch.cards.delete(card);
+    if (!watch.cards.size) {
+      if (watch.unsubscribe) watch.unsubscribe();
+      registryWatchers.delete(connection);
+      registryCache.delete(connection);
+    }
+  }
+  card._registryWatchConnection = null;
+}
+
+/** Retain discovery across renders, while tracking renames/removals. */
 export function ensureRegistry(card, hass) {
   const connection = connectionKey(hass);
+  watchRegistry(card, hass, connection);
   if (card._registryConnection !== connection) {
     card._registryConnection = connection;
     card._registryList = null;
@@ -73,9 +121,9 @@ export function ensureRegistry(card, hass) {
   if (card._registryList) return Promise.resolve(card._registryList);
   if (card._registryRequest) return card._registryRequest;
   const pending = entityRegistry(hass).then((list) => {
-    if (card._registryConnection !== connection) return null;
+    if (card._registryConnection !== connection || card._registryRequest !== pending) return null;
     card._registryRequest = null;
-    if (!list) return null; // next state push / reconnect retries
+    if (!list) return null;
     const before = card._resolveIds(card._hass || hass);
     card._registryList = list;
     const after = card._resolveIds(card._hass || hass);

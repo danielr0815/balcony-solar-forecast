@@ -18,6 +18,7 @@ from dataclasses import replace
 from typing import Any
 
 from .const import (
+    CONF_PLANE_DISPLAY_NAME,
     CONF_PLANES,
     CONF_SHADE_GROUP,
     HZ_DIFFUSE_TAU_MAX,
@@ -84,6 +85,8 @@ def validate_site(raw: Any) -> SiteConfig:
         raw_planes = []
 
     plane_names: set[str] = set()
+    actual_sources: set[str] = set()
+    labels: set[str] = set()
     normalised_planes: list[PlaneConfig] = []
     for idx, plane in enumerate(site.planes):
         if not plane.name:
@@ -91,8 +94,19 @@ def validate_site(raw: Any) -> SiteConfig:
         if plane.name in plane_names:
             raise SiteValidationError("plane_dup_name")
         plane_names.add(plane.name)
+        if plane.actual_entity:
+            if plane.actual_entity in actual_sources:
+                raise SiteValidationError("duplicate_actual_entity")
+            actual_sources.add(plane.actual_entity)
 
         raw_plane = raw_planes[idx] if idx < len(raw_planes) else None
+        if isinstance(raw_plane, dict) and CONF_PLANE_DISPLAY_NAME in raw_plane:
+            label = raw_plane[CONF_PLANE_DISPLAY_NAME]
+            if not isinstance(label, str) or not label.strip() or len(label.strip()) > 100 or any(ord(c) < 32 for c in label):
+                raise SiteValidationError("bad_display_name")
+        if plane.label in labels:
+            raise SiteValidationError("duplicate_display_name")
+        labels.add(plane.label)
         if isinstance(raw_plane, dict) and CONF_SHADE_GROUP in raw_plane:
             raw_group = raw_plane.get(CONF_SHADE_GROUP)
             # A present-but-blank value is a fat-finger, not "no group": reject
@@ -121,6 +135,9 @@ def validate_site(raw: Any) -> SiteConfig:
 
         sorted_horizon = _validate_horizon(plane.horizon)
         normalised_planes.append(replace(plane, horizon=sorted_horizon))
+
+    if site.ac_actual_entity and site.ac_actual_entity in actual_sources:
+        raise SiteValidationError("measurement_role_collision")
 
     _validate_groups(site, plane_names)
     _validate_shade_groups(site)

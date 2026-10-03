@@ -64,7 +64,7 @@ def test_parse_skips_non_string_time_stamps():
     recs = omb.parse_hourly_payload(payload, var_suffix="")
     # Only the well-formed stamp survives; the columns stay index-aligned.
     assert [r.ghi for r in recs] == [700.0]
-    assert recs[0].start == datetime(2025, 6, 21, 9, 0, tzinfo=UTC)
+    assert recs[0].start == datetime(2025, 6, 21, 8, 0, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +166,7 @@ async def test_fetch_range_previous_runs_success_is_as_issued(aiohttp_mod):
     assert params["latitude"] == "51.100000"
     assert params["longitude"] == "10.400000"
     assert params["start_date"] == "2025-06-21"
-    assert params["end_date"] == "2025-06-22"
+    assert params["end_date"] == "2025-06-23"
     assert params["timezone"] == "UTC"
     assert params["models"] == "icon_seamless"
     assert "shortwave_radiation_previous_day1" in params["hourly"]
@@ -235,3 +235,21 @@ async def test_fetch_range_propagates_when_both_apis_fail(aiohttp_mod):
             session, latitude=51.1, longitude=10.4,
             start=date(2025, 6, 21), end=date(2025, 6, 21),
         )
+
+
+@pytest.mark.parametrize("day, count", [(date(2026, 3, 29), 23), (date(2026, 10, 25), 25)])
+async def test_fetch_local_dst_day_includes_final_radiation_interval(aiohttp_mod, day, count):
+    from datetime import UTC, datetime, timedelta
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Europe/Berlin")
+    lower = datetime.combine(day, datetime.min.time(), tzinfo=tz).astimezone(UTC)
+    upper = datetime.combine(day+timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(UTC)
+    times = [(lower+timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M") for i in range(count+2)]
+    session = _FakeSession([_FakeResponse(_payload(times, suffix="_previous_day1", ghi=[100]*len(times)))])
+    records, issued = await omb.fetch_weather_range(session, latitude=0, longitude=0,
+                                                   start=day, end=day, tz=tz)
+    assert issued and len(records) == count
+    assert records[0].start == lower
+    assert records[-1].start + timedelta(hours=1) == upper
+    assert session.calls[0][1]["start_date"] == lower.date().isoformat()
+    assert session.calls[0][1]["end_date"] == upper.date().isoformat()

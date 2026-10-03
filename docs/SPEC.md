@@ -1,6 +1,6 @@
 # Spezifikation: Balcony Solar Forecast — Mehrebenen-PV-Prognose mit Selbstlernen
 
-> **Gilt für Version: 0.28.0** · Zuletzt aktualisiert: 2026-09-26
+> **Gilt für Version: 0.29.0** · Zuletzt aktualisiert: 2026-10-03
 >
 > Diese Spezifikation beschreibt **ausschließlich den Ist-Stand dieser Version**:
 > was die Integration `balcony_solar_forecast` heute tut und tun muss. Sie
@@ -366,6 +366,11 @@ denselben Config-Fingerprint ergibt (§7.6).
 
 ### §5.3 Sky-View-Faktor: halbtransparenter Horizont fürs Diffus
 
+Die Himmelsintegration verwendet pro Richtung ausschließlich positive
+Einfallsgewichte. Rückseitige Richtungen tragen null bei; ein nachträglicher
+Clamp der gesamten vorzeichenbehafteten Azimutspalte ist unzulässig.
+Mehr Transparenz kann den SVF deshalb nicht reduzieren.
+
 Der isotrope Diffusanteil wird je Ebene mit ihrem **eigenen Sky-View-Faktor**
 skaliert. Der Himmel **unterhalb** der Horizontlinie geht dabei
 **τ-gewichtet** ein statt als Wand: eine halbtransparente Baumreihe verdunkelt
@@ -413,7 +418,7 @@ je Wechselrichter-Gruppe aus dem Mikro-Wechselrichter-Wirkungsgrad η_inv und
 dem AC-Clamp (`electrical.clamp_groups_ac`):
 
 ```
-AC_Gruppe = min(η_inv · Σ_Ports DC_unclamped · Slot-Faktor, ac_limit_w)
+AC_Gruppe = min(η_inv · Σ_Ports DC_served, ac_limit_w)
 ```
 
 Der **DC-Clip-Punkt** liegt entsprechend bei `ac_limit_w / η_inv` — dort clippen
@@ -464,6 +469,23 @@ Auf Entry-Ebene stehen `name`, `latitude`, `longitude`,
 `latitude`/`longitude` werden zusätzlich **in** das `site`-Objekt gespiegelt,
 denn Fetcher und Sonnenstand lesen ausschließlich die site-eigenen Koordinaten.
 
+Die Ersteinrichtung bietet **geführt** und **erweiterter Standorteditor** an.
+Der geführte Weg sammelt zuerst Anlagenname und HA-vorbelegten Standort,
+danach beliebig wiederholt Panelname, Azimut, Neigung, Wp, optionale DC-Quelle,
+Wechselrichtergruppe, deren AC-Grenze und Wirkungsgrad. Panels derselben Gruppe
+müssen dieselben elektrischen Werte angeben (`guided_group_conflict`).
+Eingaben werden gegen dieselbe Site-/Messquellenvalidierung wie der erweiterte
+Editor geprüft. Ein Fehler verändert den bisherigen Entwurf nicht. Die
+abschließende Übersicht zeigt Panels und Gruppen; erst ihr Absenden erzeugt
+den Entry. Alternativ öffnet sie den erweiterten Editor mit erhaltenem Entwurf,
+etwa für Horizontzeilen oder einen AC-Zähler. Keine Subentries oder neuen
+Persistenzformate werden eingeführt.
+
+Neuvorgaben sind eine offene ungemessene 400-Wp-Ebene (180°/30°), eine
+800-W-Wechselrichtergruppe und HA-Koordinaten. Im geführten Weg werden die
+tatsächlichen Werte abgefragt. Offener Himmel ist ein Startprior, kein Nachweis
+fehlender Wände/Bäume. Bestehende Entries werden durch neue Vorgaben nicht verändert.
+
 Der Rekonfigurationsdialog speichert strukturelle Änderungen in `entry.data`.
 Dabei bleiben der bestehende Name und unbekannte Entry-Felder erhalten; veraltete
 strukturelle Kopien werden im selben Update aus `entry.options` entfernt.
@@ -494,11 +516,23 @@ läuft davon getrennt über die innere `schema_version` (§16.1).
 | `albedo` | Bodenalbedo des Reflexterms (§4.6) | optional, geklemmt `[SITE_ALBEDO_MIN, SITE_ALBEDO_MAX]`; ungesetzt ⇒ `ALBEDO_DEFAULT`; Schnee überschreibt mit `ALBEDO_SNOW` | **ja** |
 | `bifacial_beam_gain` | Faktor auf **nur** Beam + Zirkumsolar (§4.5) | optional, geklemmt `[SITE_BEAM_GAIN_MIN, SITE_BEAM_GAIN_MAX]`; ungesetzt ⇒ `BEAM_GAIN_DEFAULT` (Identität) | **ja** |
 
+Messquellenvalidierung im Config Flow: explizite Einheiten müssen W/kW,
+`device_class` (wenn gesetzt) `power` und `state_class` (wenn gesetzt)
+`measurement` sein. Eine DC-Modulquelle darf nicht zugleich der AC-Anlagenzähler
+sein. Fehlende Metadaten sind unbekannt; sie beweisen weder falsche Einheiten
+noch verfügbare Recorderhistorie. Die Recorderpfade fordern Leistungswerte
+kanonisch in W an.
+
 ### §7.3 Ebene (`planes[]`)
+
+Ein `actual_entity` darf bei der Konfigurationsvalidierung nur einer Ebene
+zugeordnet sein. Geteilte Summensensoren werden nicht implizit auf Module
+verteilt und nicht doppelt gezählt (`duplicate_actual_entity`).
 
 | Feld | Bedeutung | Bereich / Default | Fingerprint |
 |---|---|---|---|
-| `name` | Ebenenname, eindeutig; zugleich Default-Shademap-Kanal | `plane_no_name`, `plane_dup_name` | **ja** |
+| `name` | stabile Modul-ID (historischer Schlüssel), eindeutig; zugleich Default-Shademap-Kanal | `plane_no_name`, `plane_dup_name` | **ja** |
+| `display_name` | optionaler, editierbarer Anzeigename; ungesetzt ⇒ `name` | eindeutig unter allen effektiven Modulnamen; 1–100 Zeichen ohne Steuerzeichen, `bad_display_name`, `duplicate_display_name` | nein |
 | `azimuth_deg` | Ebenenazimut, **0 = Nord im Uhrzeigersinn** (§20.1) | 0…360, `bad_azimuth` | **ja** |
 | `tilt_deg` | Neigung gegen die Horizontale, 90 = senkrecht (§20.2) | 0…90, `bad_tilt` | **ja** |
 | `wp` | STC-Peakleistung des Moduls (W) | endlich und > 0, `bad_wp` | **ja** |
@@ -507,6 +541,18 @@ läuft davon getrennt über die innere `schema_version` (§16.1).
 | `actual_entity` | Entity-ID der gemessenen **DC**-Leistung dieses Kanals | optional | nein |
 | `shade_group` | poolt den langsamen Lerner: gleiche Gruppe ⇒ **ein** Verschattungs-Pool (§9.2) | optional; leer ⇒ `shade_group_empty`; Namenskollision ⇒ `shade_group_collision`; > `SITE_MAX_SHADE_GROUPS` (8) verschiedene Gruppen ⇒ `too_many_shade_groups` | **ja** (ändert die Slow-only-Kurve und damit die Trainingsbasis von θ) |
 | `ross_coeff` | montageabhängiger Ross-Koeffizient (§6.1) | optional, `[0,005; 0,12]`, `bad_ross_coeff`; ungesetzt ⇒ `ROSS_COEFF` | **ja** |
+
+`name` bleibt die bestehende Identität für Gruppenmitgliedschaft, Lernkanäle,
+Archive und Modulparameter von Aktionen. Zum Umbenennen nur `display_name`
+ändern; `PlaneConfig.label` liefert den effektiven Anzeigenamen. Ein Wechsel
+von `name` ist weiterhin explizites Entfernen/Hinzufügen in der Vorschau.
+Alt-Konfigurationen bekommen kein neues Feld und keine Schlüsselmigration;
+Fingerprint, Bootstrap-Signatur und gelernte Daten bleiben unverändert.
+Die gemessenen Modulquellen und die Shade-Modulauswahl zeigen Anzeigenamen.
+Die Auswahl speichert zusätzlich `module_id`, sodass ein Reload nach einer
+Anzeigenamenänderung dieselbe Ebene wieder auswählt; alte Auswahlzustände ohne
+Attribut können weiterhin über ihre ID geladen werden. `get_shade_profile`
+behält `module` als ID und ergänzt `display_name` als Bezeichnung.
 
 ### §7.4 Horizontzeile (`planes[].horizon[]`)
 
@@ -550,6 +596,19 @@ Recompute-Tick allozieren kann.
    ein harmloser Edit kein Lernen zurücksetzt.
 
 ### §7.7 Config-Fingerprint und Bias-Reseed
+
+Beim Reconfigure zeigt `confirm_changes` vor dem Speichern die betroffenen
+Modulidentitäten, Anlagenfelder und Lernfolgen. Grundlage ist derselbe
+HA-freie `core/config_fingerprint.py::site_fingerprint` wie beim Coordinator.
+Bei geändertem Modellfingerprint werden Bias-Vertrauen wieder geöffnet,
+Quantil-Evidenz und Drift-Verlustfolgen neu gestartet; Archive, Ist-Werte und
+Rollbackhistorie bleiben erhalten. Messquellen- und Gruppenlabeländerungen
+ändern den Modellfingerprint nicht. Ebenennamen sind weiterhin Identitäten;
+ein geänderter Ebenenname erscheint als entfernt/hinzugefügt. Die Vorschau
+verspricht keine automatische Übertragung alter Kanalidentitäten. Ändert sich
+der Entry während der Vorschau, werden die alten Eingaben nicht über den
+neueren Stand geschrieben; der Flow kehrt zur Bearbeitung zurück.
+
 
 Die Bias-Zellen (§9.5) werden gegen eine bestimmte **prognoserelevante
 Konfiguration** gelernt. Neben dem Bias-State wird deshalb ein
@@ -601,7 +660,9 @@ mehrebenigen Balkonanlage: acht Modulebenen, vier Wechselrichter-Gruppen mit je
 800 VA `ac_limit_w`, Fernfeld-Horizontzeilen (az 60–100 el 13°, az 100–150
 el 16°, jeweils τ 0), saisonale Baumzeilen (τ 0,45 belaubt / 0,8 kahl) und eine
 harte Wandzeile (az > 212, el 90, τ 0). Sein Inhalt ist hier beschrieben, weil
-Tests ihn prüfen und der Config-Flow ihn als Ausgangspunkt anbietet. Der
+Tests ihn prüfen. Neue Config-Flows starten stattdessen mit einer offenen
+400-Wp-Ebene ohne Messquelle und einer 800-W-Gruppe am HA-Standort.
+Bestehende Entries bleiben unverändert; die Referenzanlage ist ein bewusstes Beispiel. Der
 Standort ist ein **generischer Mitteldeutschland-Default** (51,1 N / 10,4 O,
 nahe dem geographischen Zentrum) — bewusst **kein** realer Betreiberstandort,
 damit eine kopierte Default-Config auf einer fremden Installation nicht
@@ -625,10 +686,10 @@ setzen ihre echten Koordinaten im Config-Flow.
 **Verwendung.** Ein realer Bootstrap läuft **nie** gegen dieses Objekt: die
 Aktion `run_bootstrap` nutzt immer die Live-Config (§12.2), und
 `scripts/backfill.py` erreicht `DEFAULT_SITE` ausschließlich über das
-ausdrückliche Opt-in `--use-default-site` (§12.3). Die inhaltliche Neufassung
-des Auslieferungs-Defaults (neutraler Minimal-Standort + Onboarding) ist
-Gegenstand von `docs/adr/ADR-0023-onboarding-standortkonfiguration.md` (Status
-*Proposed*). Die Herleitung der Zahlenwerte steht in `docs/HISTORIE.md`.
+ausdrückliche Opt-in `--use-default-site` (§12.3). Neuinstallationen verwenden
+die neutralen Vorgaben und den geführten oder erweiterten Einstieg aus §7.1.
+`docs/adr/ADR-0023-onboarding-standortkonfiguration.md` dokumentiert die
+gestufte Umsetzung. Die Herleitung der Referenzzahlen steht in `docs/HISTORIE.md`.
 
 ## §8 Wetterklassifikation und Zeitbinnung (gemeinsame Taxonomie)
 
@@ -1424,6 +1485,34 @@ HA-Box).
 
 ### §12.4 Gemeinsamer HA-freier Kern
 
+Historische Open-Meteo-Strahlungswerte sind Mittel der vorausgehenden Stunde:
+`parse_hourly_payload` verschiebt ihren Endstempel um eine Stunde auf den
+UTC-Intervallstart. Sonnenpositionen werden am Mittelpunkt dieser Stunde
+berechnet. Tagesgruppen, Ist-Zuordnung und Quantil-Evidenzdatum verwenden die
+übergebene lokale Zeitzone (ohne Angabe UTC); UTC-Stundenidentitäten bleiben
+auch bei Sommerzeitwechseln getrennt.
+
+Numerisch ungültige DC-Stunden (NaN/Inf, negative, boolesche oder unlesbare
+Werte), fehlende gemeterte Kanäle, eingefrorene positive Stundenfolgen und
+Kollapstage verwerfen den gesamten Bootstrap-Tag vor jeder Lernmutation.
+Bias, Shademap, Quantile und Evidenzmarker bleiben unverändert. Eine gültige
+Nullstunde allein ist kein Fehler. Der Kollapsvertrag entspricht dem
+Live-Trainer (§9.8); gültige Wetterabweichungen bleiben Bias-/Quantillabels.
+`core.measurement_quality` ist die gemeinsame numerische/Frozen-/Kollapsgrenze.
+Pro gemetertem Kanal müssen mindestens 75 % (aufgerundet) der übergebenen
+Wetterstunden mit positivem Sonnenhöhen-Mittelpunkt ein gültiges DC-Label haben.
+Dieser niedrigschwellige Einzeltagkern bezieht seine Abdeckung auf den
+übergebenen Wetterinput. Die produktiven HA-/CLI-Aufrufer aktivieren zusätzlich
+`accumulate_days(require_complete_day=True)`: Jede geometrische Tageslichtstunde
+des vollständigen lokalen Tages muss Wetterdaten tragen; auf jedem Messkanal
+müssen mindestens 75 % dieser vollständigen Tageslichtstunden vorhanden sein.
+`core.daylight` ist dafür die gemeinsame UTC-Stundengrenze mit dem Live-Reader;
+auch bei nichtganzzahligen UTC-Offsets liegt der Sonnenmittelpunkt bei UTC :30.
+Ein bereits erfolgreich
+verarbeiteter lokaler Tag wird innerhalb desselben Akkumulators nicht erneut
+trainiert; verworfene Tage können mit korrigierten Eingaben erneut versucht werden.
+Der Idempotenzmarker ist laufbezogen und wird nicht als neue Store-Sektion persistiert.
+
 Beide Wege teilen denselben Kern: `core/bootstrap_build.py` (Rekonstruktions-
 und Akkumulationsmathematik) und `core/openmeteo_backfill.py` (Previous-Runs- /
 Historical-Forecast-Fetch, `PREVIOUS_RUN_LEAD_DAY` = 1, also der ~24 h vor der
@@ -1559,6 +1648,13 @@ sagt das.
 
 ### §14.3 Ist-Messung
 
+Live-Leistung in W und kW wird auf Watt normiert; Energieeinheiten wie kWh
+sind keine Leistungsquellen. Recorder-Anfragen verlangen die Power-Einheit W.
+AC-Vorzeichenkorrektur ist davon getrennt. Transportfrische richtet sich nach
+`last_reported` (Fallback `last_updated`); ein frisch gemeldeter konstanter
+Wert ist kein Transportausfall. Die stündliche Frozen-Labelprüfung bleibt
+eine gesonderte Entscheidung (§9.8).
+
 - `measured_dc_power_total` (W, `MEASUREMENT` ⇒ Langzeitstatistik) ist die
   **ereignisgesteuerte Summe** der `actual_entity`-Sensoren aller Ebenen: sie
   abonniert die Quellsensoren direkt und rechnet bei jeder Änderung neu,
@@ -1633,6 +1729,39 @@ Prognose liefert der Hook `None` statt einer alten Kurve — das Dashboard zeigt
 dann keinen Overlay statt eines stillen Altwerts (§13).
 
 ### §14.6 Diagnose-Dump (Config-Entry-Diagnostics)
+
+`quantile_readiness` nennt bekannte datierte Evidenztage sowie je Prognosetag
+die Zahl positiver Slots, trainierter Slots, deren Anteil und `cold`/`partial`/
+`trained`. Nacht-/Nullslots erhöhen den Nenner nicht. Die Bereitschaft folgt dem
+Serving-Gate; ein trainierter konstanter Residualring kann deshalb auch bei
+kollabiertem Band als trainiert zählen. `weather_status` bleibt separat. Datierte
+Tage werden nicht als statistisch unabhängige Wetterepisoden bezeichnet. Der
+Quellenstatus-Sensor zeigt diesen Block auch während des Lernanlaufs.
+
+Der Block `panel_weather` enthält einen ausschließlich beobachtenden
+Panel-/Wetterindikator: Zustand, Grund, Zahl nutzbarer Panels, elektrischer
+Gruppen und Ausrichtungen, gemeinsamen Rampenquotienten, Prognoseresiduum,
+Forecast-Wetterklasse und Messzeit. Es wird kein beobachteter Wolkenanteil
+behauptet. `unknown` gilt unter anderem bei ungültiger Zeit, veralteten oder
+zeitlich inkohärenten Kanälen, fehlender Prognose und unzureichender Vielfalt.
+
+Der Adapter liest aktuelle konfigurierte W-/kW-Leistungsquellen im
+Minutentakt; `last_reported` beurteilt die Transportfrische auch bei
+unverändertem Wert. Höchstens 31 Frames bleiben im RAM. Mindestens drei
+unterschiedliche Quellen, zwei elektrische Gruppen und zwei Ausrichtungsklassen
+sind nötig. Der Adapter liefert Azimut und Neigung; der Kern bildet deterministische
+Klassen nach Flächennormalen. Innerhalb einer Klasse liegen alle Paare weniger
+als 30° auseinander. Nahe Winkel an Rundungsgrenzen oder unterschiedliche
+Azimute horizontaler Flächen erzeugen keine künstliche Vielfalt. Sättigung, schwache Referenzleistung und ungünstiger Sonnenstand
+schließen Kanäle aus. Orientierungen innerhalb einer Gruppe und anschließend
+Gruppen tragen gleiches Gewicht. Referenz ist interpoliertes Slow-only × θ
+ohne Intraday. θ und Wetterreferenz bleiben an dieselbe Berechnungsgeneration
+gebunden; ein laufendes Update tauscht diese Referenz nicht vorzeitig aus. Nach Neustart, neuem Berechnungsergebnis oder einer Änderung der nutzbaren
+Quellen samt Gruppen/Geometrie beginnt der Fünf-Minuten-Rampenvergleich neu.
+Ein Kanalverlust wird dadurch nicht als gemeinsame Leistungsrampe interpretiert. Gemeinsame Änderungen bleiben als
+Wolken-/Abregelungsmehrdeutigkeit gekennzeichnet. Weder RAW noch servierte
+Kurve, Bias, Shademap oder Quantile werden durch den Indikator verändert.
+Unload beendet den Zeitlistener; Rohframes gehen nicht in Recorder oder Store.
 
 - `store`-Block mit **echten Füllständen** aus `coordinator.store_stats()`:
   `issued_days`, `actuals_days`, `hourly_actuals_days`, `snapshot_ring`,
@@ -1726,6 +1855,11 @@ Persistenz) — die frühere 0,0-Klemmung fabrizierte mit `|Motor − 0|` den
 schlechtestmöglichen Motortag ins Fenster. Auf dem Aggregationspfad bereits
 gewerteter Tage degradieren nicht-finite Einzelwerte weiterhin zu 0,0, statt
 eine Exception oder einen unsinnigen Fehler in die Aggregate zu tragen.
+Eine leere oder teilweise numerisch beschädigte ausgegebene Stundenkurve
+bleibt ebenfalls ungewertet. Einzelne ungültige Einträge (einschließlich
+boolescher Werte) werden für diesen Tagesvergleich nicht still entfernt;
+ein RAW-Ersatz für eine beschädigte korrigierte Kurve würde den bewerteten
+Modellstand ändern. Explizite endliche Nullwerte bleiben gültige Energie.
 
 ### §15.5 Sensorik
 
@@ -1773,6 +1907,27 @@ Unbekannte oder zukünftige Schemaversionen werden mit einer Warnung verworfen
 statt geraten.
 
 ### §16.2 Ringe und ihre Verträge
+
+Neue Issued-Snapshots halten zusätzlich `corrected_ac_hourly_wh`, die exakte
+berechnete AC-Stundenkurve mit damaligen Gruppenwirkungsgraden und Clipping.
+`computed_at`/`issued_at` bezeichnen den ursprünglichen Berechnungszeitpunkt,
+`archived_at` die spätere Archivierung. Fehlgeschlagene Coordinator-Updates
+erzeugen keinen frischen Snapshot aus Altattributen. Ein während der
+asynchronen Rekonstruktion gewechseltes Berechnungsergebnis wird verworfen;
+die nächste Ausführung kann einen konsistenten Stand archivieren.
+`provenance` hält begrenzte Modell-/Integrationskennung, SHA-256-Identitäten
+von Config, Lernzustand und Wetter sowie den bekannten Wetterabrufzeitpunkt.
+Diese Werte stammen aus dem Berechnungspayload; private Rohzustände und
+Koordinaten werden nicht zusätzlich archiviert. Die Identität wird zusammen
+mit den Lernhooks vor dem Executor-Aufruf erfasst und an genau dessen Ergebnis
+gebunden; spätere Lern-/Wetteränderungen etikettieren diese Ausgabe nicht um.
+Der Lernhash umfasst auch Schalter, Driftgates und Ensemblefaktoren.
+`bands` hält vorhandene
+DC-P10/P50/P90- und AC-P10/P90-Slotkurven für denselben lokalen Tag. Der Service
+liefert sie mit `band_aggregation: "marginal_slot_curves"`; diese Kurven sind
+keine eigenständig kalibrierten Tagesintervalle.
+Alle neuen Felder sind optional; Legacy-Stände werden nicht nachträglich mit
+heutigen Informationen vervollständigt. Der äußere Store bleibt Version 1.
 
 - **Horizonttabellen-Cache** und **Last-Good-Wettercache** (§3).
 - **Forecast-as-issued-Ring** (`_ISSUED_RING_DAYS` = 90). Der nächtliche
@@ -1963,11 +2118,19 @@ weggelassenen `missing_entities`.
 **Gemeinsame Kartenverträge.** Registry-Auflösung und Servicezugriff liegen in
 `frontend/card_data.js`, der HA-Kalender in `site_calendar.js`, zugängliche
 UI-Bausteine in `card_ui.js`. Der Registry-Cache gehört zur Websocket-Verbindung,
-nicht zum kurzlebigen `hass`-Stateobjekt; fehlgeschlagene Erkennung ist erneut
+nicht zum kurzlebigen `hass`-Stateobjekt. Ein gemeinsames Abonnement für
+`entity_registry_updated` aktualisiert Umbenennungen und Entfernungen; die
+letzte entfernte Karte meldet es ab. Überholte Antworten ersetzen keinen
+neueren Registrystand. Fehlgeschlagene Erkennung ist erneut
 versuchbar. Optionales `entry_id` wählt die Anlage explizit, alternativ wird sie
 aus einem expliziten Integrationssensor abgeleitet. Bei mehreren Anlagen ohne
 eindeutige Auswahl erscheint ein Hinweis. Der Dashboard-Generator trägt die
 Entry-ID ein; alle Profil- und Archivaufrufe bleiben an diese Anlage gebunden.
+Beide Diagramme erhalten bei Zustandsupdates Tastaturfokus und aufgeklappte
+Wertetabellen. Stundenlücken bleiben „—“; Wochen-Teilsummen werden mit `*`
+markiert und Tagesansichten nennen die Messabdeckung abgeschlossener Stunden.
+Eine Archivcaption verwendet den tatsächlichen gespeicherten Ausgabezeitpunkt,
+soweit vorhanden, und behauptet keinen festen 01:30-Zeitpunkt.
 Beide Diagramme bieten beschriftete Controls, Zustandsangaben (`aria-pressed`),
 Diagrammbeschreibungen und eine per Tastatur zugängliche ausklappbare Wertetabelle.
 
@@ -2033,7 +2196,9 @@ Live-`wh_period`-Summe, Tage ohne Snapshot bleiben **ehrlich lückenhaft**.
 
 **Antwortvertrag `get_issued_forecast`** (gilt auch für §16.2 und §19):
 `hourly_wh` (bedient/korrigiert) und `raw_hourly_wh` sind **explizit DC**.
-Zusätzlich liefert die Aktion `hourly_wh_ac` = DC × `eta`, wobei `eta` die
+Zusätzlich liefert die Aktion `hourly_wh_ac` aus der eingefrorenen exakten
+AC-Kurve (`ac_source: "snapshot"`). Bei Legacy-Ständen wird DC × `eta`
+rekonstruiert (`ac_source: "reconstructed"`), wobei `eta` die
 DC→AC-Effizienz **zum Ausgabezeitpunkt** ist (in den Snapshot eingefroren,
 `eta_source: "snapshot"`); ältere Snapshots ohne gespeichertes eta fallen auf das
 **aktuelle** gelernte eta zurück und weisen das über `eta_source: "current"` aus
@@ -2046,6 +2211,9 @@ angewandte Korrektur sichtbar. Ein Fehltreffer ist **kein Fehler**.
 **Kalender und Fehler.** Tagesgrenzen, Archivdatum und Buckets richten sich
 nach `hass.config.time_zone`. Sommerzeitwechsel ergeben 23 bzw. 25 tatsächliche
 Stunden; doppelte Herbststunden sind mit UTC-Offset unterscheidbar. Der
+Leere oder beschädigte Archivkurven ergeben keine vollständige Tagessumme.
+Boolwerte, Leerstrings, negative und nichtendliche Energiewerte bleiben fehlend;
+explizite endliche Nullwerte sind gültig. Der
 Wochen-Cache speichert nur bestätigte vorhandene/fehlende Snapshots, keine
 Transportfehler. Fehler bleiben sichtbar und werden bei der nächsten
 Aktualisierung bzw. beim nächsten Besuch erneut versucht. Recorderfehler sind

@@ -260,7 +260,7 @@ def _svf_brute(plane, doy, n_az=360, n_el=600):
                 math.sin(beta) * math.cos(el_rad) * math.cos(az_rad - az_p)
                 + math.cos(beta) * math.sin(el_rad)
             )
-            w = cos_t * math.cos(el_rad)
+            w = max(0.0, cos_t) * math.cos(el_rad)
             if use_horizon and el_deg < h:
                 tau = H._interp_rows(
                     rows, az_deg, lambda r, _e=el_deg: H._row_tau_at(r, _e, doy)

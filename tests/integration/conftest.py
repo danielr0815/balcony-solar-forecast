@@ -72,3 +72,17 @@ async def real_hass(tmp_path, monkeypatch, unused_tcp_port):
         yield hass
     finally:
         await hass.async_stop(force=True)
+
+
+@pytest.fixture
+async def recorder_hass(real_hass, tmp_path):
+    """Real SQLite and statistics import queue; no mocked recorder read path."""
+    from homeassistant.components.recorder import get_instance
+    from homeassistant.helpers.recorder import async_initialize_recorder
+
+    async_initialize_recorder(real_hass)
+    config = {'recorder': {'db_url': f'sqlite:///{tmp_path / "statistics.db"}', 'commit_interval': 0}}
+    assert await async_setup_component(real_hass, 'recorder', config)
+    await real_hass.async_block_till_done()
+    await get_instance(real_hass).async_block_till_done()
+    return real_hass

@@ -45,6 +45,12 @@ def write_validation_bundle(path: Path, *, morning_multiplier: float = 1.0) -> N
             }
             for sid, value in values.items():
                 hourly[sid].append({"start": ts.timestamp(), "mean": value})
+        # Complete local Europe/Berlin calendar coverage includes night zeros.
+        # The old fixed daylight-only package cannot establish complete daily totals.
+        for hour in [*range(-2, 4), *range(19, 22)]:
+            ts = day + timedelta(hours=hour)
+            for rows in hourly.values():
+                rows.append({"start": ts.timestamp(), "mean": 0.0})
         for minute in range(0, 180, 5):
             ts = day.replace(hour=4) + timedelta(minutes=minute)
             for sid, value in ((actual_dc, 400.0), (served_dc, 400.0),

@@ -1,0 +1,17 @@
+name: Feature proposal
+description: Explain a concrete operator or contributor need.
+title: "[Feature] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired behavior and how to validate it
+      description: For forecast changes, include target horizon, baseline and proposed holdout evidence.
+    validations:
+      required: true

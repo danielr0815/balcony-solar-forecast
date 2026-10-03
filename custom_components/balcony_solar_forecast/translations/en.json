@@ -315,7 +315,7 @@
     "step": {
       "user": {
         "title": "Set up Balcony Solar Forecast",
-        "description": "Set the name, location and update intervals. The \"Site configuration\" field is pre-filled with the full operator setup (8 modules, horizon tables, inverter groups) — just confirm it for the reference site, or edit it freely. Azimuth: 0° = North, clockwise (90° = East, 180° = South). Tilt: degrees from horizontal (90° = vertical). Optional per plane: a \"shade_group\" — planes that share the same obstruction (building edge, tree line) learn one shared shade map when given the same group. A plane may also set a \"ross_coeff\" to override the mounting-dependent Ross cell-temperature coefficient (~0.02 free-standing to ~0.056 facade-parallel).",
+        "description": "Choose guided setup or edit the complete site configuration. New installations start with one unmetered panel under open sky at your HA location. Azimuth: north 0°, east 90°, south 180°, west 270°. Tilt: horizontal 0°, vertical 90°. Check your actual geometry and known obstructions.",
         "data": {
           "name": "Name",
           "latitude": "Latitude",
@@ -335,8 +335,16 @@
           "ac_actual_entity": "Optional. The sensor metering total AC power behind all inverters — the target the learned inverter efficiency (η) is calibrated against, and the apples-to-apples AC-vs-AC dashboard comparison. Leave empty if you have no whole-site AC meter.",
           "ac_actual_invert": "Enable if your AC meter reports the fed-in balcony-solar power as a negative value; the reading is negated once so measured AC reads positive.",
           "albedo": "Reflectivity of the ground in front of the modules for the reflected-diffuse term. Dark courtyard/lawn ≈ 0.1, textbook default 0.2, light concrete ≈ 0.3. Matters most on steep balcony tilts. Leave blank for the default.",
-          "bifacial_beam_gain": "Multiplier on the direct (beam+circumsolar) share only, to lift the honestly under-modeled direct beam on clear mornings (bifacial rear-side gain, steep east-facing geometry). Range 1.0–1.3; the reference site validated ≈ 1.23. Leave blank for 1.0 (no change)."
+          "bifacial_beam_gain": "Optional multiplier on direct beam and circumsolar irradiance. Leave blank for 1.0; increase it only with independent evidence for your installation. Range 1.0–1.3."
+        },
+        "menu_options": {
+          "guided": "Guided setup",
+          "advanced": "Advanced site editor"
         }
+      },
+      "confirm_changes": {
+        "title": "Review configuration changes",
+        "description": "Changed modules: {modules}\n\nChanged site settings: {fields}\n\n{learning_effect}\n\nArchived forecasts, measurements and rollback history are retained. Confirm to save these settings."
       },
       "reconfigure": {
         "title": "Reconfigure Balcony Solar Forecast",
@@ -360,12 +368,46 @@
           "albedo": "Reflectivity of the ground in front of the modules for the reflected-diffuse term. Dark courtyard/lawn ≈ 0.1, textbook default 0.2, light concrete ≈ 0.3. Matters most on steep balcony tilts. Leave blank for the default.",
           "bifacial_beam_gain": "Multiplier on the direct (beam+circumsolar) share only, to lift the honestly under-modeled direct beam on clear mornings (bifacial rear-side gain, steep east-facing geometry). Range 1.0–1.3; the reference site validated ≈ 1.23. Leave blank for 1.0 (no change)."
         }
+      },
+      "guided": {
+        "title": "Installation location",
+        "description": "Choose a unique name and check the location inherited from Home Assistant.",
+        "data": {
+          "name": "Installation name",
+          "latitude": "Latitude",
+          "longitude": "Longitude"
+        }
+      },
+      "guided_panel": {
+        "title": "Add a panel",
+        "description": "One panel is one measured DC channel. A DC power sensor is optional; use W or kW, never an energy meter. Panels on the same inverter use the same group name and electrical limits. Start with open sky; known walls and trees can be entered in the advanced editor before saving.",
+        "data": {
+          "name": "Panel name",
+          "azimuth_deg": "Azimuth (north 0°, east 90°, south 180°, west 270°)",
+          "tilt_deg": "Tilt (horizontal 0°, vertical 90°)",
+          "wp": "Rated panel power",
+          "actual_entity": "DC power sensor (optional)",
+          "group_name": "Inverter group",
+          "ac_limit_w": "Group AC limit",
+          "inverter_efficiency": "Inverter efficiency",
+          "add_panel": "Add another panel"
+        }
+      },
+      "guided_review": {
+        "title": "Review installation",
+        "description": "Panels: {panels}\n\nInverters: {groups}\n\nThe forecast starts with open sky and cold learning. Select the advanced editor to add known obstructions or an AC meter. Otherwise submit to create the installation.",
+        "data": {
+          "advanced": "Open advanced editor before saving"
+        }
       }
     },
     "error": {
       "name_required": "Please provide a name.",
       "site_not_object": "The site configuration must be an object.",
       "site_malformed": "The site configuration is invalid or incomplete.",
+      "duplicate_actual_entity": "Each module needs its own DC power source; one source cannot be counted twice.",
+      "invalid_power_source": "Measurement sources must report power in W or kW with measurement state class, rather than energy in Wh/kWh.",
+      "measurement_role_collision": "The same sensor cannot be both a DC module source and the site AC meter.",
       "no_planes": "At least one plane must be defined.",
       "plane_no_name": "Every plane needs a name.",
       "plane_dup_name": "Plane names must be unique.",
@@ -392,7 +434,10 @@
       "shade_group_collision": "A shade group must not equal the name of a plane that is not itself in that group.",
       "too_many_planes": "At most 8 planes can be configured.",
       "too_many_shade_groups": "At most 8 distinct shade groups can be configured.",
-      "too_many_horizon_points": "A plane's horizon table can hold at most 64 rows."
+      "too_many_horizon_points": "A plane's horizon table can hold at most 64 rows.",
+      "guided_group_conflict": "This inverter group already has different limits. Use its existing values or choose a different group name.",
+      "bad_display_name": "Display names must contain 1–100 characters without control characters.",
+      "duplicate_display_name": "Module display names must be unique."
     },
     "abort": {
       "already_configured": "An installation with this name already exists."
@@ -422,6 +467,9 @@
     "error": {
       "site_not_object": "The site configuration must be an object.",
       "site_malformed": "The site configuration is invalid or incomplete.",
+      "duplicate_actual_entity": "Each module needs its own DC power source; one source cannot be counted twice.",
+      "invalid_power_source": "Measurement sources must report power in W or kW with measurement state class, rather than energy in Wh/kWh.",
+      "measurement_role_collision": "The same sensor cannot be both a DC module source and the site AC meter.",
       "no_planes": "At least one plane must be defined.",
       "plane_no_name": "Every plane needs a name.",
       "plane_dup_name": "Plane names must be unique.",

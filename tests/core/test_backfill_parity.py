@@ -60,11 +60,13 @@ def _weather_days(n_days: int = 3) -> list[bb.HourlyWeather]:
     out: list[bb.HourlyWeather] = []
     for d in range(n_days):
         day = start + timedelta(days=d)
-        for h in (8, 9, 10, 14, 15, 16, 17):
+        for h in range(24):
             out.append(
                 bb.HourlyWeather(
                     start=day.replace(hour=h),
-                    ghi=780.0, dni=820.0, dhi=120.0, temp_c=24.0,
+                    ghi=780.0 if 3 <= h <= 19 else 0.0,
+                    dni=820.0 if 3 <= h <= 19 else 0.0,
+                    dhi=120.0 if 3 <= h <= 19 else 0.0, temp_c=24.0,
                 )
             )
     return out
@@ -85,16 +87,15 @@ def _entity_lts(
     out: dict[str, dict[str, float]] = {}
     for plane in site.planes:
         ent = plane.actual_entity
-        for wx in weather:
+        for index, wx in enumerate(weather):
             day_idx = (wx.start.date() - weather[0].start.date()).days
             factor = 0.7 + 0.08 * day_idx
             r = bb.reconstruct_plane_hour(
                 plane, svf[plane.name], wx,
                 latitude=site.latitude, longitude=site.longitude,
             )
-            total = (r.beam_wh + r.diffuse_wh) * factor
-            if total > 0.0:
-                out.setdefault(ent, {})[wx.start.isoformat()] = total
+            total = (r.beam_wh + r.diffuse_wh) * factor * (1 + index * .001)
+            out.setdefault(ent, {})[wx.start.isoformat()] = total
     return out
 
 

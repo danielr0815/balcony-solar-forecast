@@ -13,6 +13,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-03
+
+Panel/weather evidence is observational only and does not modify forecasts or
+learning. Existing learned state and legacy archives are preserved. Physics and
+data-quality corrections change future outputs; independent real-data accuracy
+validation of the new variants remains pending.
+
+### Added
+
+- Separate optional panel display names from stable legacy module identities;
+  preserve model fingerprints, bootstrap compatibility, learned channels and
+  archived keys across label edits. Restore HA selection by module ID.
+- Share issued-reference reduction and geometric training between nightly HA
+  and a physical offline replay. Verify full-output equivalence on 250 seeded
+  cases and retain historical imports.
+- Add a hash-verified CC0 physical replay with independent bias/shademap/quantile
+  states, delayed labels, original weather, optional historical initial states,
+  geometry/weather candidates and paired chronological DC scoring.
+
+- Add guided location/panel/inverter setup with validation and review before
+  creation; preserve the draft when switching to the advanced site editor.
+- Require full geometric daylight weather coverage in production bootstrap;
+  share recorder-hour midpoint geometry across live and historical paths,
+  including nonintegral timezone offsets.
+- Reject partially corrupt issued curves from whole-day scoring; capture
+  calculation identity before executor work and keep it bound to that result.
+- Add chronological independent-state learning replay, fixed regime breakdowns
+  and an 18-case synthetic before/after physics report. Archive contracts move
+  to their own module with compatibility reexports and two fewer legacy type diagnostics.
+- Test named Playwright process isolation without touching user profiles;
+  expose cached/degraded weather alongside learned-band readiness.
+- Reconfiguration previews affected module identities and model/learning effects
+  before the atomic save; competing entry updates invalidate the preview.
+- Quantile readiness reports dated evidence and the trained share of positive
+  forecast slots. Cards retain focus/open tables and expose partial coverage.
+- Bootstrap rejects low-coverage channel labels and consumes each accepted local
+  day only once per accumulator. Real SQLite tests cover kW normalization, DST,
+  dropout quarantine, nightly state and HA reload.
+
+- Forecast archives retain optional bounded model/config/learner/weather identity
+  and issued slot bands; old entries remain unchanged.
+- Entry-scoped validation exports use registry roles, the HA timezone, canonical
+  watt statistics and immutable capture hashes. Registry renames/removals refresh
+  both cards through one connection subscription.
+- Offline comparisons add paired day-cluster confidence intervals, common target
+  masks, explicit cold/insufficient decisions and a readable report. Windows CI
+  runs the portable core from a minimal locked dependency group.
+- Forecast response presentation is separated from sensor lifecycle, preserving
+  historical imports and the existing service contract.
+
+### Fixed
+
+- Restart panel-weather ramp evidence when available sources change; classify
+  orientation diversity by surface normals instead of rounded angle bins.
+
+- Keep boolean, blank, negative and nonfinite card/export measurements missing;
+  empty or damaged archives cannot become complete daily totals. Export daily
+  coverage follows full local calendar days including DST.
+- Align historical radiation end stamps with recorder interval starts and
+  group bootstrap evidence by the configured local calendar day.
+- Quarantine invalid, frozen and collapsed bootstrap labels before any learner
+  changes; share numeric and channel checks with the recorder reader.
+- Integrate only incoming sky directions for diffuse visibility, restoring
+  monotonic transparency and agreement with independent ray quadrature.
+- Preserve exact issued AC curves and original computation times; reject
+  mixed forecast generations and failed updates during archive capture.
+- Keep location-bearing provider exception text out of public fetch errors.
+
+### Changed
+
+- Add observational panel/weather diagnostics with balanced inverter/orientation
+  evidence, causal fresh minute frames and a bounded in-memory history.
+  Common curtailment remains ambiguous; forecasts and learners are unchanged
+  by this indicator.
+- Allow separate Playwright browser profiles and artifacts through
+  `BSF_PLAYWRIGHT_INSTANCE`, retaining the existing default login profile.
+
 ## [0.28.0] - 2026-09-26
 
 ### Fixed

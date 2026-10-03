@@ -342,9 +342,9 @@ def transmittance_at(
 #       J2(h) = integral_{h..90} cos^2(el) del
 #             = (pi/2 - h)/2 + sin(2*90)/4 - sin(2h)/4
 #             = (pi/2 - h)/2 - sin(2h)/4.
-#   The plane cannot see the half of the dome behind itself; we clamp the
-#   *per-azimuth* inner integral G to be non-negative so those sectors (and
-#   grazing ones) never subtract. Because dOmega already carries the cos(el)
+#   The plane sees only directions with positive cos(theta_i). For A < 0,
+#   the lower elevation bound is raised to the zero crossing before integrating,
+#   so rear-facing rays cannot subtract visible sky. Because dOmega carries cos(el)
 #   factor and the (1/pi) is the Lambertian normalisation, the outer azimuth
 #   integral is simply
 #       F = (1/pi) * integral_{az=0..2pi} G(az) d(az).
@@ -369,6 +369,10 @@ def _inner_elevation_integral(h_deg: float, az_rad: float,
     h = math.radians(max(0.0, min(90.0, h_deg)))
     a = math.sin(beta_rad) * math.cos(az_rad - az_p_rad)
     b = math.cos(beta_rad)
+    # Integrate incoming rays only. Clamping the final signed integral loses
+    # front-facing sky and creates negative weights in profiled tau bands.
+    if a < 0.0:
+        h = max(h, math.atan2(-a, b))
     # J1 = int_h^{pi/2} sin(el)cos(el) del = (1 - sin^2 h)/2
     sin_h = math.sin(h)
     j1 = (1.0 - sin_h * sin_h) / 2.0

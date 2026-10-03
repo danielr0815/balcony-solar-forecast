@@ -1,0 +1,25 @@
+name: Bug report
+description: Report a reproducible forecast, learning, configuration or card bug.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: "Remove tokens, private locations and browser/session data. Security vulnerabilities: see SECURITY.md."
+  - type: input
+    id: versions
+    attributes:
+      label: Integration and Home Assistant versions
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps, expected result and actual result
+      description: Include AC/DC basis, timezone and missing-data coverage for forecast comparisons.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Minimal site shape and redacted diagnostics
+      description: Use synthetic sensor names and omit private coordinates.

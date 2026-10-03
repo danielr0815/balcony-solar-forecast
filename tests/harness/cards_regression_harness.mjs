@@ -52,6 +52,42 @@ for (const Class of [Shade, Power]) {
       `sensor.second_deutsch_${Class === Shade ? 0 : 3}`);
   });
 }
+await check("shared registry subscription follows rename/removal and releases on detach", async () => {
+  let event, subscriptions = 0, releases = 0, requests = 0;
+  let rows = registry.filter((r) => r.config_entry_id === "second");
+  const connection = { subscribeEvents: async (callback, type) => {
+    assert.equal(type, "entity_registry_updated"); event = callback; subscriptions++;
+    return () => { releases++; };
+  }};
+  const h = hass(async () => { requests++; return rows; }, { connection });
+  const shade = make(Shade), power = make(Power);
+  shade.hass = h; power.hass = h; await settle();
+  assert.equal(subscriptions, 1); assert.equal(requests, 1);
+  rows = rows.map((r) => r.unique_id.endsWith("measured_dc_power_total")
+    ? { ...r, entity_id: "sensor.renamed" } : r);
+  event({}); await settle();
+  assert.equal(power._resolveIds(h).total_sensor, "sensor.renamed");
+  assert.equal(requests, 2);
+  rows = rows.filter((r) => !r.unique_id.endsWith("measured_dc_power_total"));
+  event({}); await settle();
+  assert.equal(power._resolveIds(h).total_sensor, undefined);
+  shade.disconnectedCallback(); assert.equal(releases, 0);
+  power.disconnectedCallback(); assert.equal(releases, 1);
+});
+await check("keyboard focus and expanded details survive card rendering", async () => {
+  const { preserveUiState } = await import(new URL("../../custom_components/balcony_solar_forecast/frontend/card_ui.js", import.meta.url));
+  const root = document.createElement("div");
+  const input = document.createElement("input"); input.id = "date";
+  const details = document.createElement("details"); details.open = true;
+  root.appendChild(input); root.appendChild(details); input.focus();
+  preserveUiState(root, () => {
+    root.textContent = "";
+    const next = document.createElement("input"); next.id = "date";
+    root.appendChild(next); root.appendChild(document.createElement("details"));
+  });
+  assert.equal(root.activeElement, root.children[0]);
+  assert.equal(root.children[1].open, true);
+});
 await check("multi-site service and entity scope", async () => {
   const messages = [];
   const h = hass(async (msg) => { messages.push(msg); return msg.type === "config/entity_registry/list"

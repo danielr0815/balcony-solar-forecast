@@ -29,8 +29,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 
 from .. import const
@@ -38,6 +39,8 @@ from . import bias as bias_mod
 from . import clearsky, electrical, horizon, plane_physics, solpos
 from . import quantiles as quantiles_mod
 from . import shademap as shademap_mod
+from .daylight import daylight_hour_keys
+from .measurement_quality import dc_power, frozen_nonzero, production_collapsed
 from .types import (
     BiasCell,
     BiasState,
@@ -131,6 +134,7 @@ class BootstrapAccumulator:
     # the last backfill day.
     quantile_state: QuantileState = field(default_factory=QuantileState)
     last_iso_date: str = ""
+    processed_days: set[str] = field(default_factory=set)
     days_used: int = 0
     days_skipped: int = 0
     shade_samples: int = 0
@@ -335,7 +339,7 @@ def process_day(
     day_actuals: dict[str, float],
     *,
     svf_by_plane: dict[str, float],
-    tz: timezone | None = None,
+    tz: tzinfo | None = None,
 ) -> bool:
     """Fold one day's weather + measured per-module Wh into the accumulator.
 
@@ -376,7 +380,7 @@ def process_day_hourly(
     hourly_actuals: dict[str, dict[str, float]],
     *,
     svf_by_plane: dict[str, float],
-    tz: timezone | None = None,
+    tz: tzinfo | None = None,
 ) -> bool:
     """Like :func:`process_day` but with TRUE hourly measured module energy.
 
@@ -403,9 +407,13 @@ def _process_day_impl(
     actuals_daily: dict[str, float] | None,
     actuals_hourly: dict[str, dict[str, float]] | None,
     svf_by_plane: dict[str, float],
-    tz: timezone | None = None,
+    tz: tzinfo | None = None,
 ) -> bool:
     if not day_weather:
+        return False
+
+    iso_date = day_weather[0].start.astimezone(tz or UTC).date().isoformat()
+    if iso_date in acc.processed_days:
         return False
 
     lat = site.latitude
@@ -441,6 +449,18 @@ def _process_day_impl(
             offender,
             const.CHANNEL_PLAUSIBILITY_MAX_WP_FRAC,
         )
+        return False
+
+    # Reject a channel fault before ANY learner or evidence marker changes.
+    # Frozen values formerly blocked only Shademap, poisoning bias and bands.
+    if actuals_hourly is not None:
+        for name in metered:
+            values = actuals_hourly.get(name, {})
+            if (not values or any(dc_power(value) is None for value in values.values())
+                    or frozen_nonzero([values[key] for key in sorted(values)])):
+                return False
+    elif (actuals_daily is not None
+          and any(dc_power(actuals_daily.get(name)) is None for name in metered)):
         return False
 
     # --- 1) Reconstruct every plane's modeled split for every hour. ---
@@ -494,6 +514,19 @@ def _process_day_impl(
         if any_r is not None:
             kc_by_hour[hkey] = any_r.kc
             el_by_hour[hkey] = any_r.sun_el
+
+    if actuals_hourly is not None:
+        daylight_keys = {key for key, elevation in el_by_hour.items() if elevation > 0}
+        needed = math.ceil(len(daylight_keys) * const.DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE)
+        if any(len(set(actuals_hourly[name]) & daylight_keys) < needed for name in metered):
+            return False
+
+    forecast_wh = sum(sum(modeled_total_by_plane[name].values()) for name in metered)
+    measured_wh = (sum(sum(actuals_hourly[name].values()) for name in metered)
+                   if actuals_hourly is not None else
+                   sum((actuals_daily or {}).get(name, 0.0) for name in metered))
+    if production_collapsed(forecast_wh, measured_wh):
+        return False
 
     hours_sorted = sorted(kc_by_hour.keys())
     temperature_by_hour = {wx.start.isoformat(): wx.temp_c for wx in day_weather}
@@ -699,7 +732,7 @@ def _process_day_impl(
     # date-window (QUANTILE_RING_DAYS) + count-cap. The per-day-per-bin cap
     # (QUANTILE_MAX_SAMPLES_PER_DAY_PER_BIN) is enforced by the common trainer,
     # for both live and historical samples, including repeated same-day calls.
-    iso_date = day_weather[0].start.date().isoformat()
+    iso_date = day_weather[0].start.astimezone(tz or UTC).date().isoformat()
     if iso_date > acc.last_iso_date:
         acc.last_iso_date = iso_date
     q_samples: list[quantiles_mod.QuantileSample] = []
@@ -754,6 +787,8 @@ def _process_day_impl(
         acc.quantile_samples += current_count - previous_count
         contributed = True
 
+    if contributed:
+        acc.processed_days.add(iso_date)
     return contributed
 
 
@@ -776,15 +811,7 @@ def _is_frozen_hourly(values: list[float]) -> bool:
     ``LABEL_FROZEN_MIN_REPEATS`` or more consecutive hours. A run of identical
     zeros is legitimate night/shade and never trips the gate.
     """
-    run = 1
-    for i in range(1, len(values)):
-        if values[i] == values[i - 1] and values[i] != 0.0:
-            run += 1
-            if run >= const.LABEL_FROZEN_MIN_REPEATS:
-                return True
-        else:
-            run = 1
-    return False
+    return frozen_nonzero(values)
 
 
 def _implausible_actuals_module(
@@ -810,7 +837,7 @@ def _implausible_actuals_module(
         if wp is None or wp <= 0.0:
             continue
         limit = const.CHANNEL_PLAUSIBILITY_MAX_WP_FRAC * wp
-        if any(wh > limit for wh in hours.values()):
+        if any(dc_power(wh) is None or wh > limit for wh in hours.values()):
             return module
     return None
 
@@ -886,7 +913,7 @@ def _site_measured_hourly(
     return site if have_any else {}
 
 
-def _local_hour(dt: datetime, tz: timezone | None) -> tuple[int, int]:
+def _local_hour(dt: datetime, tz: tzinfo | None) -> tuple[int, int]:
     """(local_hour, local_month) for a UTC hour start under ``tz`` (UTC if None).
 
     Converting to the site's local time before day-part / fog-month
@@ -900,7 +927,7 @@ def _local_hour(dt: datetime, tz: timezone | None) -> tuple[int, int]:
 
 def _classify_cloud(
     wx: HourlyWeather,
-    tz: timezone | None = None,
+    tz: tzinfo | None = None,
     *,
     elevation_deg: float | None = None,
 ) -> str:
@@ -954,11 +981,12 @@ def _day_part_for_slot(dt: datetime, lon: float) -> str:
 
 def _group_by_day(
     records: list[HourlyWeather],
+    tz: tzinfo | None = None,
 ) -> dict[str, list[HourlyWeather]]:
-    """Bucket hourly weather records by their UTC calendar date."""
+    """Bucket weather by the configured local day; hour identities stay UTC."""
     by_day: dict[str, list[HourlyWeather]] = {}
     for r in records:
-        dkey = r.start.date().isoformat()
+        dkey = r.start.astimezone(tz or UTC).date().isoformat()
         by_day.setdefault(dkey, []).append(r)
     for day in by_day.values():
         day.sort(key=lambda w: w.start)
@@ -968,12 +996,14 @@ def _group_by_day(
 def _filter_actuals_for_day(
     hourly_actuals: dict[str, dict[str, float]],
     day: str,
+    tz: tzinfo | None = None,
 ) -> dict[str, dict[str, float]]:
-    """Slice the full hourly-actuals map down to one UTC day (per module)."""
+    """Slice UTC identities to one local calendar day (including DST folds)."""
     out: dict[str, dict[str, float]] = {}
     for module, hours in hourly_actuals.items():
         day_hours = {
-            hk: wh for hk, wh in hours.items() if hk[:10] == day
+            hk: wh for hk, wh in hours.items()
+            if datetime.fromisoformat(hk).astimezone(tz or UTC).date().isoformat() == day
         }
         if day_hours:
             out[module] = day_hours
@@ -986,10 +1016,11 @@ def accumulate_days(
     hourly_actuals: dict[str, dict[str, float]],
     *,
     svf_by_plane: dict[str, float],
-    tz: timezone | None = None,
+    tz: tzinfo | None = None,
     progress_cb=None,
+    require_complete_day: bool = False,
 ) -> BootstrapAccumulator:
-    """Fold every processable UTC day into a fresh accumulator.
+    """Fold every processable local day into a fresh accumulator.
 
     Groups ``weather`` by calendar day, and for each day WITH measured actuals
     runs one :func:`process_day_hourly` step, tracking ``days_used`` /
@@ -1003,17 +1034,32 @@ def accumulate_days(
     to emit periodic INFO logs across a multi-minute reconstruction (the reduce
     itself stays pure; the callback must not raise). ``None`` (the CLI) is a
     no-op.
+    Production HA/CLI callers set ``require_complete_day``: every geometric
+    daylight hour must have weather, and each channel must meet the full-day
+    label coverage threshold. The default preserves the smaller low-level
+    reconstruction interface for explicit interval studies.
     """
     acc = BootstrapAccumulator()
-    by_day = _group_by_day(weather)
+    by_day = _group_by_day(weather, tz)
     day_keys = sorted(by_day.keys())
     total = len(day_keys)
     for done, dkey in enumerate(day_keys, start=1):
         day_weather = by_day[dkey]
-        day_actuals = _filter_actuals_for_day(hourly_actuals, dkey)
-        if not day_actuals:
+        day_actuals = _filter_actuals_for_day(hourly_actuals, dkey, tz)
+        complete = True
+        if require_complete_day:
+            start = datetime.fromisoformat(dkey).replace(tzinfo=tz or UTC)
+            end = start+timedelta(days=1)
+            expected = daylight_hour_keys(site.latitude, site.longitude, start, end)
+            available = {wx.start.isoformat() for wx in day_weather}
+            needed = math.ceil(len(expected)*const.DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE)
+            complete = len(available) == len(day_weather) and expected.issubset(available) and all(
+                len(expected & set(day_actuals.get(plane.name, {}))) >= needed
+                for plane in site.planes if plane.actual_entity
+            )
+        if not day_actuals or not complete:
             acc.days_skipped += 1
-            _LOGGER.debug("Day %s: no measured actuals, skipped", dkey)
+            _LOGGER.debug("Day %s: missing actuals or incomplete daylight input, skipped", dkey)
         else:
             used = process_day_hourly(
                 acc, site, day_weather, day_actuals,

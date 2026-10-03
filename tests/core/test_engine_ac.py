@@ -276,12 +276,12 @@ class TestAcCorrectedUnclamped:
             )
 
     def test_clipped_slot_preclamp_exceeds_served_ac(self, patched_physics):
-        # On a clamp-biting site the inverter AC clamp caps the served AC at the
-        # 800 W limit, but the PRE-clamp AC (eta * factored DC) is far higher, so
-        # the gap reveals the clamped slot (the AC analogue of MED-1).
+        # A correction of the postclip baseline introduces a second-clamp
+        # reserve. The first clamp alone must not resurrect lost DC on AC.
         site = _clamped_site()
         weather = _clear_sky_series()
-        res = engine.compute_forecast(site, weather, now=_TEST_DATE)
+        res = engine.compute_forecast(site, weather, now=_TEST_DATE,
+                                      hooks=LearnerHooks(slot_factor=lambda start: 1.3))
         assert res.ac_watts[_NOON_INDEX] == pytest.approx(800.0)
         assert res.ac_corrected_unclamped_watts[_NOON_INDEX] > 800.0
         # Never below the served AC anywhere (pre-clamp >= served by construction).

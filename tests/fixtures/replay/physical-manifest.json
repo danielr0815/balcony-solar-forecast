@@ -1,0 +1,11 @@
+{
+  "input": {
+    "path": "physical-synthetic.json",
+    "sha256": "b8f2bcb361c7fa6d1669c2f4eb52ba11867b7b25dbcf310e75461c15f2cfb19c"
+  },
+  "basis": "DC",
+  "timezone": "UTC",
+  "captured_at": "2026-10-03T00:00:00Z",
+  "licence": "CC0-1.0 synthetic data",
+  "source_role": "synthetic_original_weather_and_closed_hourly_labels"
+}

@@ -24,6 +24,11 @@ export class Element {
   removeChild(child) { this.children = this.children.filter((c) => c !== child); child.parentNode = null; }
   get firstChild() { return this.children[0]; }
   attachShadow() { this.shadowRoot = new Element("shadow-root"); return this.shadowRoot; }
+  focus() {
+    let root = this;
+    while (root.parentNode) root = root.parentNode;
+    root.activeElement = this;
+  }
   addEventListener(event, callback) { (this.listeners[event] ||= []).push(callback); }
   dispatch(event, properties = {}) { for (const cb of this.listeners[event] || []) cb({ target: this, preventDefault() {}, ...properties }); }
   getBoundingClientRect() { return { left: 0, top: 0, width: 700, height: 380 }; }

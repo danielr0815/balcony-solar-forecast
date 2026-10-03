@@ -1,0 +1,178 @@
+{
+  "schema_version": 1,
+  "basis": "DC",
+  "timezone": "UTC",
+  "development_end": "2026-09-01",
+  "selection_end": "2026-09-02",
+  "models": [
+    "raw",
+    "slow_only",
+    "theta",
+    "served"
+  ],
+  "records": [
+    {
+      "issued_at": "2026-09-01T08:00:00Z",
+      "available_at": "2026-09-01T08:00:00Z",
+      "target_start": "2026-09-01T09:00:00Z",
+      "target_end": "2026-09-01T09:30:00Z",
+      "actual_available_at": "2026-09-01T09:35:00Z",
+      "actual_wh": 100,
+      "forecasts": {
+        "raw": 130,
+        "slow_only": 120,
+        "theta": 110,
+        "served": 105
+      },
+      "intervals": {
+        "served": [
+          84.0,
+          126.0
+        ]
+      },
+      "candidate_inputs": {
+        "feature_end": "2026-09-01T07:55:00Z",
+        "feature_available_at": "2026-09-01T07:56:00Z",
+        "sum_ratio": 0.9,
+        "panel_ratio": 0.95,
+        "forecast_class": "clear"
+      }
+    },
+    {
+      "issued_at": "2026-09-01T08:00:00Z",
+      "available_at": "2026-09-01T08:00:00Z",
+      "target_start": "2026-09-01T10:00:00Z",
+      "target_end": "2026-09-01T10:30:00Z",
+      "actual_available_at": "2026-09-01T10:35:00Z",
+      "actual_wh": 200,
+      "forecasts": {
+        "raw": 180,
+        "slow_only": 185,
+        "theta": 195,
+        "served": 205
+      },
+      "intervals": {
+        "served": [
+          164.0,
+          246.0
+        ]
+      },
+      "candidate_inputs": {
+        "feature_end": "2026-09-01T07:55:00Z",
+        "feature_available_at": "2026-09-01T07:56:00Z",
+        "sum_ratio": 0.9,
+        "panel_ratio": 0.95,
+        "forecast_class": "clear"
+      }
+    },
+    {
+      "issued_at": "2026-09-02T08:00:00Z",
+      "available_at": "2026-09-02T08:00:00Z",
+      "target_start": "2026-09-02T09:00:00Z",
+      "target_end": "2026-09-02T09:30:00Z",
+      "actual_available_at": "2026-09-02T09:35:00Z",
+      "actual_wh": 100,
+      "forecasts": {
+        "raw": 130,
+        "slow_only": 120,
+        "theta": 110,
+        "served": 105
+      },
+      "intervals": {
+        "served": [
+          84.0,
+          126.0
+        ]
+      },
+      "candidate_inputs": {
+        "feature_end": "2026-09-02T07:55:00Z",
+        "feature_available_at": "2026-09-02T07:56:00Z",
+        "sum_ratio": 0.9,
+        "panel_ratio": 0.95,
+        "forecast_class": "clear"
+      }
+    },
+    {
+      "issued_at": "2026-09-02T08:00:00Z",
+      "available_at": "2026-09-02T08:00:00Z",
+      "target_start": "2026-09-02T10:00:00Z",
+      "target_end": "2026-09-02T10:30:00Z",
+      "actual_available_at": "2026-09-02T10:35:00Z",
+      "actual_wh": 200,
+      "forecasts": {
+        "raw": 180,
+        "slow_only": 185,
+        "theta": 195,
+        "served": 205
+      },
+      "intervals": {
+        "served": [
+          164.0,
+          246.0
+        ]
+      },
+      "candidate_inputs": {
+        "feature_end": "2026-09-02T07:55:00Z",
+        "feature_available_at": "2026-09-02T07:56:00Z",
+        "sum_ratio": 0.9,
+        "panel_ratio": 0.95,
+        "forecast_class": "clear"
+      }
+    },
+    {
+      "issued_at": "2026-09-03T08:00:00Z",
+      "available_at": "2026-09-03T08:00:00Z",
+      "target_start": "2026-09-03T09:00:00Z",
+      "target_end": "2026-09-03T09:30:00Z",
+      "actual_available_at": "2026-09-03T09:35:00Z",
+      "actual_wh": 100,
+      "forecasts": {
+        "raw": 130,
+        "slow_only": 120,
+        "theta": 110,
+        "served": 105
+      },
+      "intervals": {
+        "served": [
+          84.0,
+          126.0
+        ]
+      },
+      "candidate_inputs": {
+        "feature_end": "2026-09-03T07:55:00Z",
+        "feature_available_at": "2026-09-03T07:56:00Z",
+        "sum_ratio": 0.9,
+        "panel_ratio": 0.95,
+        "forecast_class": "clear"
+      }
+    },
+    {
+      "issued_at": "2026-09-03T08:00:00Z",
+      "available_at": "2026-09-03T08:00:00Z",
+      "target_start": "2026-09-03T10:00:00Z",
+      "target_end": "2026-09-03T10:30:00Z",
+      "actual_available_at": "2026-09-03T10:35:00Z",
+      "actual_wh": 200,
+      "forecasts": {
+        "raw": 180,
+        "slow_only": 185,
+        "theta": 195,
+        "served": 205
+      },
+      "intervals": {
+        "served": [
+          164.0,
+          246.0
+        ]
+      },
+      "candidate_inputs": {
+        "feature_end": "2026-09-03T07:55:00Z",
+        "feature_available_at": "2026-09-03T07:56:00Z",
+        "sum_ratio": 0.9,
+        "panel_ratio": 0.95,
+        "forecast_class": "clear"
+      }
+    }
+  ],
+  "description": "Synthetic demonstration only; no empirical claim of forecast improvement."
+}

@@ -378,12 +378,18 @@ Zwei Digests im `coordinator.py`, nicht verwechseln:
 `efficiency`/`ross_coeff` (`_plane_sig`) und **jede Horizontzeile** (`_hz_row`:
 **Azimut** als erstes Feld, Elevation, `tau`, `seasonal`, `tau_leafed`,
 `tau_bare`, `tau_points`, `tau_points_bare`, `diffuse_tau`), dazu `albedo`,
-`bifacial_beam_gain`, jede Inverter-Gruppe mit **Name** und `ac_limit_w`
-(`grp:{name}:ac{…}`) sowie `CLASSIFIER_VERSION` (Wolkenklassen-Taxonomie).
-Bewusst **nicht** enthalten: Entity-IDs, Shade-Grouping, Meter-Vorzeichen — eine
-harmlose Bearbeitung darf nie Lernen zurücksetzen. **Achtung:** Weil Namen
-mithashen, kippt schon eine reine **Umbenennung** von Ebene oder Gruppe den
-Fingerprint und re-seedet die Bias-Zellen — ebenso ein verschobener Horizont-Azimut.
+`bifacial_beam_gain`, Standortkoordinaten, Shade-Pool-Mitgliedschaft und jede
+Inverter-Gruppe mit Mitgliedern, `ac_limit_w` und konfiguriertem Wirkungsgrad,
+sowie `CLASSIFIER_VERSION` (Wolkenklassen-Taxonomie). Die gemeinsame Funktion
+liegt in `core/config_fingerprint.py::site_fingerprint`; der Coordinator
+delegiert und die Rekonfigurationsvorschau benutzt denselben Vertrag.
+Bewusst **nicht** enthalten: Entity-IDs, Shade-/Inverter-Gruppenlabels und
+Meter-Vorzeichen. **Achtung:** `name` bleibt die stabile Modul-/Kanalidentität;
+seine Änderung entspricht einem Entfernen/Anlegen und verändert den
+Fingerprint. Für Anzeigeumbenennungen wird ausschließlich das optionale
+`display_name` geändert; es bleibt wie Gruppenlabels außerhalb des Fingerprints
+und erhält Lernen sowie Archivschlüssel (ADR-0025). Die Vorschau zeigt
+die betroffenen Identitäten vor dem Speichern.
 
 Wenn du ein Feld hinzufügst, das die RAW-Kurve verändert, **musst du es hier
 hashen** — sonst behalten die Bias-Zellen ein Theta, das auf eine veraltete
@@ -471,11 +477,9 @@ Klammern nennt die Tranche/das Thema, z. B. `(0.23 run_bootstrap service)` oder
 `(forensik A4 B2)`; Release-Commits heißen `chore: release vX.Y.Z` (ältere) bzw.
 `feat: release X.Y.Z … (X.Y release)` (neuere). Danach ein **Body in Fließtext**,
 der erklärt *was* und *warum* (deutsch oder englisch — beides kommt vor, innerhalb
-einer Message konsistent bleiben). Letzte Zeile:
-
-```
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
-```
+einer Message konsistent bleiben). Co-Author-Trailer sind optional und nennen
+nur tatsächlich beteiligte Personen oder Werkzeuge. Es gibt keine Verpflichtung
+auf ein bestimmtes KI-Werkzeug oder eine personengebundene Signatur.
 
 **Branches.** `feat/<version-oder-thema>`, `fix/<thema>`, gelegentlich
 `release/v<x.y.z>` — Beispiele: `feat/0.23-run-bootstrap-service`,

@@ -1,7 +1,7 @@
 """bsf_data -- Laden + Normalisieren der HA-Datenpakete (Format wie hadata/).
 
 Nur Python-stdlib. Alle Zeitstempel intern als aware datetime (UTC).
-Lokale Zeit = Europe/Berlin (zoneinfo, Fallback: eigene EU-DST-Regel).
+Lokale Zeit aus Capturemanifest; Legacy ohne Manifest: Europe/Berlin.
 
 Semantik-Fallen, die hier zentral behandelt werden:
   * recorder-WS liefert start/end als epoch-MILLISEKUNDEN (auto-detektiert).
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -98,10 +99,11 @@ def parse_iso(s: str) -> dt.datetime:
 
 
 def to_float(s: Any) -> float | None:
-    if s is None or s in ("unknown", "unavailable", ""):
+    if isinstance(s, bool) or s is None or s in ("unknown", "unavailable", ""):
         return None
     try:
-        return float(s)
+        number = float(s)
+        return number if math.isfinite(number) else None
     except (TypeError, ValueError):
         return None
 
@@ -134,6 +136,7 @@ EID_BIAS = "sensor.balcony_solar_forecast_day_ahead_bias_status"
 @dataclass
 class Bundle:
     data_dir: str
+    timezone: dt.tzinfo = field(default_factory=local_tz)
     # {stat_id: {utc_start: mean}} Stundenmittel W (Mittel W x 1h = Wh)
     hourly: dict[str, dict[dt.datetime, float]] = field(default_factory=dict)
     # {stat_id: [(utc_start, mean), ...]} sortiert, 5-min
@@ -169,7 +172,7 @@ class Bundle:
         """Summe der Stundenmittel (== Wh) eines lokalen Tages, opt. Fenster."""
         tot = 0.0
         for t, v in self.hourly_series(sid).items():
-            tl = t.astimezone(LOC)
+            tl = t.astimezone(self.timezone)
             if tl.date() != day:
                 continue
             if loc_hours and not (loc_hours[0] <= tl.hour < loc_hours[1]):
@@ -184,7 +187,7 @@ class Bundle:
     ) -> float:
         best = 0.0
         for t, v in self.hourly_series(sid).items():
-            tl = t.astimezone(LOC)
+            tl = t.astimezone(self.timezone)
             if tl.date() == day and loc_hours[0] <= tl.hour < loc_hours[1]:
                 best = max(best, v)
         return best
@@ -194,7 +197,7 @@ class Bundle:
     ) -> list[tuple[dt.datetime, float]]:
         out = []
         for t, v in self.five.get(sid, []):
-            tl = t.astimezone(LOC)
+            tl = t.astimezone(self.timezone)
             if tl.date() != day:
                 continue
             hh = tl.hour + tl.minute / 60.0
@@ -276,9 +279,10 @@ def load_bundle(data_dir: str) -> Bundle:
         for sid, rows in _load_stats_file(p).items():
             ser = {}
             for r in rows:
-                if r.get("mean") is None or r.get("start") is None:
+                value = to_float(r.get("mean"))
+                if value is None or value < 0 or r.get("start") is None:
                     continue
-                ser[parse_epoch(r["start"])] = float(r["mean"])
+                ser[parse_epoch(r["start"])] = value
             if ser:
                 b.hourly[sid] = ser
     else:
@@ -289,9 +293,10 @@ def load_bundle(data_dir: str) -> Bundle:
     if p:
         for sid, rows in _load_stats_file(p).items():
             ser = [
-                (parse_epoch(r["start"]), float(r["mean"]))
+                (parse_epoch(r["start"]), value)
                 for r in rows
-                if r.get("mean") is not None and r.get("start") is not None
+                if r.get("start") is not None
+                and (value := to_float(r.get("mean"))) is not None and value >= 0
             ]
             ser.sort(key=lambda x: x[0])
             if ser:
@@ -340,6 +345,27 @@ def load_bundle(data_dir: str) -> Bundle:
     else:
         b.notes.append(f"FEHLT: {FILE_ISSUED} - issued-Checks (C3/C7/C8c) entfallen.")
 
+    manifest_path = _path("capture_manifest.json")
+    if manifest_path:
+        import hashlib
+        from zoneinfo import ZoneInfo
+
+        manifest = _load_json(manifest_path)
+        b.timezone = ZoneInfo(manifest["timezone"])
+        for name, expected in manifest["files_sha256"].items():
+            if os.path.basename(name) != name:
+                raise ValueError("Capture paths must remain inside bundle")
+            with open(os.path.join(data_dir, name), "rb") as captured:
+                if hashlib.sha256(captured.read()).hexdigest() != expected:
+                    raise ValueError("Captured input hash mismatch")
+        # Legacy operator checks use stable internal role keys. Original capture
+        # IDs remain in the immutable files; private M4/M8 checks have no alias.
+        for key, entity_id in manifest["roles"].items():
+            alias = SID_SCALAR if key == "intraday_scalar" else "sensor.balcony_solar_forecast_" + key
+            for mapping in (b.hourly, b.five, b.entities, b.history_min, b.history_attrs):
+                if entity_id in mapping:
+                    mapping[alias] = mapping[entity_id]
+        b.features["capture_entry_scoped"] = True
     _derive(b)
     return b
 
@@ -347,16 +373,21 @@ def load_bundle(data_dir: str) -> Bundle:
 def _derive(b: Bundle) -> None:
     # lokale Tage + partial-Erkennung ueber Ist-AC-Stundenreihe
     ref = b.hourly_series(SID_ACT_AC) or b.hourly_series(SID_ACT_DC)
-    days = sorted({t.astimezone(LOC).date() for t in ref})
+    days = sorted({t.astimezone(b.timezone).date() for t in ref})
     b.days = days
     for day in days:
-        # Tageslicht-Slots 04:00Z..18:00Z (15 Stueck) vorhanden?
-        n = sum(
-            1
-            for t in ref
-            if t.astimezone(LOC).date() == day and 4 <= t.hour < 19
-        )
-        if n < 14:
+        # No fixed European daylight window: calendar coverage remains conservative
+        # without independent site geometry, including 23/25-hour DST days.
+        start = dt.datetime.combine(day, dt.time(), b.timezone).astimezone(UTC)
+        end = dt.datetime.combine(day + dt.timedelta(days=1), dt.time(), b.timezone).astimezone(UTC)
+        cursor = start.replace(minute=0, second=0, microsecond=0)
+        if cursor < start:
+            cursor += dt.timedelta(hours=1)
+        expected = set()
+        while cursor < end:
+            expected.add(cursor)
+            cursor += dt.timedelta(hours=1)
+        if not expected.issubset(ref):
             b.partial_days.add(day)
 
     # Feature-Erkennung (v0.21.0-Felder)
@@ -384,7 +415,7 @@ def _derive(b: Bundle) -> None:
     if b.diagnostics:
         qd = ((b.diagnostics.get("data") or {}).get("quantiles") or {}).get("bins")
     feats["quantile_bins_available"] = qd is not None
-    b.features = feats
+    b.features.update(feats)
 
     if not feats["issued_has_hourly_wh_ac"]:
         b.notes.append(

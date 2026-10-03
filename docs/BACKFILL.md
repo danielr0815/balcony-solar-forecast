@@ -1,5 +1,13 @@
 # Learner Bootstrap Backfill (SPEC §12)
 
+Historical radiation is normalized from provider end stamps to UTC interval
+starts. Daily folds and quantile evidence dates follow the configured local
+timezone, including 23/25-hour days. Invalid numeric labels, missing channels,
+frozen positive readings and production collapses quarantine the whole day
+before any learner changes. Zero alone remains a valid measurement.
+Existing learner stores are retained: this parser correction does not launch
+an automatic reset or import. Use the dry run below to review a new bootstrap.
+
 The re-bootstrap warm-starts the three learner states (day-ahead bias, shademap,
 quantile bands) from ~2 years of history so the system does not meet its first
 live winter cold. There are **two ways to run it**, sharing one HA-free core so
@@ -360,3 +368,9 @@ contract shape, and the LTS statistics-row parser.
 ```sh
 uv run --no-sync pytest tests/core/test_backfill_math.py tests/core/test_backfill_parity.py -p no:homeassistant
 ```
+
+Die Wetter- und Recorderfenster folgen der HA-Zeitzone. Der Wetterabruf enthält
+den Folgetag in UTC, damit der Endstempel der letzten Strahlungsstunde vorliegt;
+anschließend werden die Intervalle auf den angefragten lokalen Zeitraum
+beschnitten. Recorder-Leistung wird ausdrücklich in W angefordert, auch wenn
+der Quellsensor kW verwendet.

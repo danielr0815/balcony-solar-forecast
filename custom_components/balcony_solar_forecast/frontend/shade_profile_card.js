@@ -30,8 +30,8 @@
 
 // Propagate the resource cache-buster to every local dependency (SPEC §18.5).
 const dependency = (name) => new URL(`./${name}${new URL(import.meta.url).search}`, import.meta.url);
-const { ensureRegistry, resolveEntities, callEntryService } = await import(dependency("card_data.js"));
-const { labelControl, pressed, describeChart, dataTable } = await import(dependency("card_ui.js"));
+const { ensureRegistry, stopRegistry, resolveEntities, callEntryService } = await import(dependency("card_data.js"));
+const { preserveUiState, labelControl, pressed, describeChart, dataTable } = await import(dependency("card_ui.js"));
 
 const CARD_TAG = "balcony-shade-profile-card";
 
@@ -249,6 +249,7 @@ class BalconyShadeProfileCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    stopRegistry(this);
     this._compareSeq += 1;
     this._compareLoading = false;
     this._stopNowTimer();
@@ -340,6 +341,10 @@ class BalconyShadeProfileCard extends HTMLElement {
   }
 
   _render(hass, ids, s, sel, d) {
+    return preserveUiState(this.shadowRoot, () => this._renderContent(hass, ids, s, sel, d));
+  }
+
+  _renderContent(hass, ids, s, sel, d) {
     // Remember the inputs so the toggle can force a re-render without a hass push.
     this._renderArgs = { hass, ids, s, sel, d };
     const t = this._t();

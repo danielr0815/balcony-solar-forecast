@@ -213,6 +213,8 @@ def test_bootstrap_omits_hours_missing_one_metered_channel(
     starts = (
         datetime(2026, 6, 21, 10, 0, tzinfo=UTC),
         datetime(2026, 6, 21, 11, 0, tzinfo=UTC),
+        datetime(2026, 6, 21, 12, 0, tzinfo=UTC),
+        datetime(2026, 6, 21, 13, 0, tzinfo=UTC),
     )
     weather = [
         bootstrap_build.HourlyWeather(
@@ -239,7 +241,7 @@ def test_bootstrap_omits_hours_missing_one_metered_channel(
             poa=PlanePoaComponents(250.0, 0.0, 0.0, 250.0, 1.0),
         ),
     )
-    h10, h11 = (start.isoformat() for start in starts)
+    h10, h11, h12, h13 = (start.isoformat() for start in starts)
     acc = bootstrap_build.BootstrapAccumulator()
 
     assert bootstrap_build.process_day_hourly(
@@ -247,8 +249,10 @@ def test_bootstrap_omits_hours_missing_one_metered_channel(
         site,
         weather,
         {
-            "P1": {h10: 100.0, h11: 100.0},
-            "P2": {h10: 100.0},
+            "P1": {h10: 100.0, h11: 101.0, h12: 102.0, h13: 103.0},
+            # The day meets the 75% gate; its incomplete hour must still be
+            # excluded from site quantiles instead of treating P2 as zero.
+            "P2": {h10: 100.0, h12: 102.0, h13: 103.0},
         },
         svf_by_plane={"P1": 1.0, "P2": 1.0},
         tz=UTC,
@@ -259,8 +263,8 @@ def test_bootstrap_omits_hours_missing_one_metered_channel(
         for ring in acc.quantile_state.bins.values()
         for entry in ring
     ]
-    assert len(entries) == 1
-    assert entries[0][1] == pytest.approx(1.0)
+    assert len(entries) == 3
+    assert sorted(entry[1] for entry in entries) == pytest.approx([1.0, 1.02, 1.03])
 
 
 def test_bootstrap_signature_changes_with_geometry() -> None:

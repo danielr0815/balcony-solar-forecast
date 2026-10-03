@@ -28,9 +28,9 @@ from .const import (
     DROPOUT_REASON_FROZEN_CHANNEL,
     DROPOUT_REASON_IMPLAUSIBLE_CHANNEL,
     DROPOUT_REASON_LOW_COVERAGE,
-    LABEL_FROZEN_MIN_REPEATS,
 )
-from .core import SiteConfig, solpos
+from .core import SiteConfig
+from .core.measurement_quality import dc_power, frozen_nonzero
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ async def async_read_actuals(
             end,
             stat_ids,
             "hour",
-            None,
+            {"power": "W"},
             {"mean", "state"},
         )
         daylight_keys = _daylight_hour_keys_in_local_day(
@@ -165,7 +165,7 @@ async def async_read_ac_actuals(
         )
 
         stats = statistics_during_period(
-            hass, start, end, {ac_entity}, "hour", None, {"mean", "state"},
+            hass, start, end, {ac_entity}, "hour", {"power": "W"}, {"mean", "state"},
         )
         return _ac_hourly_from_stats(stats.get(ac_entity), invert=invert)
 
@@ -212,27 +212,12 @@ def _daylight_hour_keys_in_local_day(
     site: SiteConfig, start: datetime, end: datetime
 ) -> set[str]:
     """UTC hour keys in the local day whose midpoint is above the horizon."""
+    from .core.daylight import daylight_hour_keys
+
     try:
-        start_utc = dt_util.as_utc(start)
-        end_utc = dt_util.as_utc(end)
+        return daylight_hour_keys(site.latitude, site.longitude, start, end)
     except Exception:  # pragma: no cover - defensive
         return set()
-    keys: set[str] = set()
-    cur = start_utc
-    step = timedelta(hours=1)
-    # Guard against a runaway loop (DST safety): a local day is <= 25 hours.
-    for _ in range(26):
-        if cur >= end_utc:
-            break
-        mid = cur + timedelta(minutes=30)
-        try:
-            _az, el = solpos.sun_position(mid, site.latitude, site.longitude)
-        except Exception:  # pragma: no cover - defensive
-            el = 0.0
-        if el > 0.0:
-            keys.add(cur.replace(minute=0, second=0, microsecond=0).isoformat())
-        cur += step
-    return keys
 
 
 def _actuals_from_stats(
@@ -303,7 +288,12 @@ def _actuals_from_stats(
             hkey = _stat_row_hour_key(row.get("start"))
             if hkey is None:
                 continue
-            means.append(float(mean))
+            watts = dc_power(mean)
+            if watts is None:
+                _LOGGER.warning("Invalid DC statistics for %s (%s) on %s; "
+                                "discarding the whole day", module, entity_id, day)
+                return _dropout(DROPOUT_REASON_IMPLAUSIBLE_CHANNEL, module)
+            means.append(watts)
             hkeys.append(hkey)
         if not means:
             _LOGGER.warning(
@@ -381,15 +371,7 @@ def _is_frozen_channel(means: list[float]) -> bool:
     so the recorder carries the same non-zero mean forward hour after hour. A run
     of identical zeros is legitimate night/shade and never trips the gate.
     """
-    run = 1
-    for i in range(1, len(means)):
-        if means[i] == means[i - 1] and means[i] != 0.0:
-            run += 1
-            if run >= LABEL_FROZEN_MIN_REPEATS:
-                return True
-        else:
-            run = 1
-    return False
+    return frozen_nonzero(means)
 
 
 # Numeric statistics-row ``start`` values above this are epoch-MILLISECONDS

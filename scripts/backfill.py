@@ -279,6 +279,7 @@ async def fetch_lts_hourly(
     statistic_ids: list[str],
     start: date,
     end: date,
+    tz=UTC,
 ) -> dict[str, dict[str, float]]:
     """Pull hourly per-statistic mean power from HA LTS via the WebSocket API.
 
@@ -297,10 +298,9 @@ async def fetch_lts_hourly(
     ws_url = ha_url.rstrip("/").replace("http://", "ws://").replace(
         "https://", "wss://"
     ) + "/api/websocket"
-    start_dt = datetime(start.year, start.month, start.day, tzinfo=UTC)
-    end_dt = datetime(end.year, end.month, end.day, tzinfo=UTC) + timedelta(
-        days=1
-    )
+    start_dt = datetime(start.year, start.month, start.day, tzinfo=tz).astimezone(UTC)
+    nxt = end + timedelta(days=1)
+    end_dt = datetime(nxt.year, nxt.month, nxt.day, tzinfo=tz).astimezone(UTC)
 
     out: dict[str, dict[str, float]] = {sid: {} for sid in statistic_ids}
     timeout = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_SECONDS)
@@ -329,6 +329,7 @@ async def fetch_lts_hourly(
                     "statistic_ids": statistic_ids,
                     "period": "hour",
                     "types": ["mean"],
+                    "units": {"power": "W"},
                 }
             )
             result = await _await_ws_result(ws, msg_id)
@@ -439,6 +440,7 @@ async def run_backfill(args: argparse.Namespace) -> int:
             longitude=site.longitude,
             start=start,
             end=end,
+            tz=site_tz,
         )
         if not weather:
             _LOGGER.error("No weather returned for the requested range")
@@ -458,13 +460,15 @@ async def run_backfill(args: argparse.Namespace) -> int:
             statistic_ids=stat_ids,
             start=start,
             end=end,
+            tz=site_tz,
         )
 
     # Re-key LTS from entity_id -> channel(plane) name for accumulate_days.
     hourly_actuals = _entity_to_channel_actuals(site, lts_by_entity)
 
     acc = accumulate_days(
-        site, weather, hourly_actuals, svf_by_plane=svf_by_plane, tz=site_tz
+        site, weather, hourly_actuals, svf_by_plane=svf_by_plane, tz=site_tz,
+        require_complete_day=True,
     )
 
     _summarise(acc, as_issued)

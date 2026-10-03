@@ -5,12 +5,14 @@ Balkonkraftwerke mit mehreren Modulausrichtungen, starker
 Standortverschattung (Gelände, Bäume, Gebäude) und Mikrowechselrichtern
 mit Port-genauen Messwerten.
 
-**Version: v0.27.2** — selbstlernende PV-Prognose im Betrieb: Physik-Motor mit
+**Version: v0.28.0** — selbstlernende PV-Prognose im Betrieb: Physik-Motor mit
 lokaler Transposition und elevationsabhängigen Horizont-τ-Profilen, Lernschichten
 (Shademap, Intraday-Skalar, Day-ahead-Bias, η-Kalibrierung), Drift-Überwachung,
 P10/P50/P90-Quantilbändern, optionalem Ensemble-Band und einem Skill-Scoreboard.
 Versionshistorie in [CHANGELOG.md](CHANGELOG.md), vollständige
 Spezifikation in [docs/SPEC.md](docs/SPEC.md).
+
+**English:** [Quickstart](docs/QUICKSTART.en.md) · [Contributing](CONTRIBUTING.md)
 
 ## Installation
 
@@ -41,9 +43,9 @@ Hinzufügen der Integration werden abgefragt:
 - **Intervalle** für Datenabruf und Neuberechnung,
 - das **Site-Objekt**: die Modul-**Ebenen** (Azimut, Neigung, Wp), die
   **Horizont**-Profile je Ebene und die **Wechselrichter-Gruppen** mit ihren
-  Mess-Entitäten. Das mitgelieferte Referenz-Setup ist als **editierbarer
-  Default** vorbelegt (Standort: generisches Mitteldeutschland, 51,1° N /
-  10,4° O) — Vorlage und Testfall, kein Zwang.
+  Mess-Entitäten. Neue Anlagen starten mit einem offenen 400-Wp-Panel ohne
+  fremde Messsensoren am HA-Standort. Die Referenz-Site bleibt ein ausdrücklich
+  gewähltes Struktur-/Testbeispiel.
 - optional ein **Gesamt-AC-Zähler** (hinter allen Wechselrichtern) plus ein
   Vorzeichen-Invert-Flag: das Kalibrierungsziel für den gelernten
   Wechselrichter-Wirkungsgrad η und der gleichwertige AC-gegen-AC-Vergleich im

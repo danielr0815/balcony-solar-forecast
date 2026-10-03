@@ -40,3 +40,28 @@ export function dataTable(title, headings, rows) {
   details.appendChild(scroll);
   return details;
 }
+
+/** Keep keyboard position and expanded tables through a state-driven render. */
+export function preserveUiState(root, render) {
+  const walk = (node) => [node, ...Array.from(node.children || []).flatMap(walk)];
+  const controls = (nodes) => nodes.filter((node) =>
+    ["BUTTON", "INPUT", "SELECT", "SUMMARY"].includes(node.tagName?.toUpperCase()));
+  const before = walk(root);
+  const active = root.activeElement;
+  const position = controls(before).indexOf(active);
+  const open = before.filter((node) => node.tagName?.toUpperCase() === "DETAILS").map((node) => node.open);
+  const selection = active && typeof active.selectionStart === "number"
+    ? [active.selectionStart, active.selectionEnd] : null;
+  const result = render();
+  const after = walk(root);
+  after.filter((node) => node.tagName?.toUpperCase() === "DETAILS")
+    .forEach((node, index) => { if (index < open.length) node.open = open[index]; });
+  const target = active?.id ? after.find((node) => node.id === active.id) : controls(after)[position];
+  if (position >= 0 && target?.tagName === active?.tagName && typeof target.focus === "function") {
+    target.focus({ preventScroll: true });
+    if (selection && typeof target.setSelectionRange === "function") {
+      target.setSelectionRange(...selection);
+    }
+  }
+  return result;
+}
