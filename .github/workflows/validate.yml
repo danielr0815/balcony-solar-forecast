@@ -157,7 +157,7 @@ jobs:
       # The JS card harness (tests/harness, node runtime) SKIPS silently when
       # no node is on PATH; install one explicitly so the harness always runs.
       - name: Set up Node.js
-        uses: "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020" # v7
+        uses: "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1" # v7
         with:
           node-version: 22
 
@@ -264,7 +264,7 @@ jobs:
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
       - run: uv sync --locked --group dev
