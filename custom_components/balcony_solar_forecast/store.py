@@ -85,7 +85,6 @@ as module-level functions so it is testable without a running ``hass``.
 from __future__ import annotations
 
 import logging
-import math
 import time
 from typing import Any
 
@@ -135,10 +134,12 @@ from .core.types import (
     QuantileState,
     ScoreboardState,
     ShademapState,
+    _finite_json_float,
     _safe_int,
 )
 
 _INVERTER_TRAINED_DAYS = "inverter_cal_trained_days"
+_UNVERIFIED_INVERTER_CAL = "inverter_cal_unverified_legacy"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -210,12 +211,11 @@ def _coerce_learning_health(raw: Any) -> dict[str, Any]:
     out["eta_oob_streak"] = max(0, _safe_int(raw.get("eta_oob_streak"), 0))
     last_day = raw.get("eta_oob_last_day")
     out["eta_oob_last_day"] = last_day if isinstance(last_day, str) else None
-    median = raw.get("eta_oob_last_median")
-    out["eta_oob_last_median"] = (
-        float(median)
-        if isinstance(median, (int, float)) and math.isfinite(median)
-        else None
-    )
+    out["eta_oob_last_median"] = _finite_json_float(raw.get("eta_oob_last_median"))
+    for key in ("eta_source", "eta_source_changed_day"):
+        value = raw.get(key)
+        if isinstance(value, str) and value:
+            out[key] = value
     return out
 
 
@@ -247,14 +247,6 @@ def _coerce_last_revision(raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
 
-    def _num(key: str) -> float | None:
-        value = raw.get(key)
-        return (
-            float(value)
-            if isinstance(value, (int, float)) and math.isfinite(value)
-            else None
-        )
-
     at = raw.get("at")
     date = raw.get("date")
     offset = raw.get("day_offset")
@@ -267,8 +259,8 @@ def _coerce_last_revision(raw: Any) -> dict[str, Any] | None:
             and offset in (0, 1, 2)
             else None
         ),
-        "old_kwh": _num("old_kwh"),
-        "new_kwh": _num("new_kwh"),
+        "old_kwh": _finite_json_float(raw.get("old_kwh")),
+        "new_kwh": _finite_json_float(raw.get("new_kwh")),
         # Strict bool: a truthy junk string must not masquerade as provenance.
         "payload_refreshed": (
             raw.get("payload_refreshed")
@@ -404,9 +396,9 @@ def _coerce_hourly_actuals(raw: Any) -> dict[str, Any]:
             if not isinstance(chan, str) or not isinstance(hours, dict):
                 continue
             hour_out = {
-                hk: float(wh)
+                hk: number
                 for hk, wh in hours.items()
-                if isinstance(hk, str) and isinstance(wh, (int, float))
+                if isinstance(hk, str) and (number := _finite_json_float(wh)) is not None
             }
             if hour_out:
                 chan_out[chan] = hour_out
@@ -545,10 +537,15 @@ def _validate_learner_sections(
     state[STORE_KEY_TRAINED_DAYS] = sorted(
         {d for d in trained if isinstance(d, str)}
     )[-TRAINED_DAYS_RING:] if isinstance(trained, list) else []
-    inverter_days = raw.get(_INVERTER_TRAINED_DAYS, [])
-    state[_INVERTER_TRAINED_DAYS] = sorted(
-        {d for d in inverter_days if isinstance(d, str)}
-    )[-TRAINED_DAYS_RING:] if isinstance(inverter_days, list) else []
+    state[_INVERTER_TRAINED_DAYS] = _coerce_inverter_dates(raw.get(_INVERTER_TRAINED_DAYS))
+    unverified = raw.get(_UNVERIFIED_INVERTER_CAL)
+    if isinstance(unverified, dict):
+        legacy = InverterCalState.from_dict(unverified.get("state", {}))
+        if legacy.source is None and legacy.n > 0:
+            state[_UNVERIFIED_INVERTER_CAL] = {
+                "state": legacy.to_dict(),
+                "trained_dates": _coerce_inverter_dates(unverified.get("trained_dates")),
+            }
     # Inverter-efficiency calibration (AC-side Phase 3), carried through the SAME
     # clamping round-trip: a store that PREDATES this key (any v2, or a v3 written
     # before Phase 3) has no entry, so ``from_dict({})`` yields the neutral state
@@ -573,6 +570,12 @@ def _validate_learner_sections(
     )
 
 
+def _coerce_inverter_dates(raw: object) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    return sorted({day for day in raw if isinstance(day, str)})[-TRAINED_DAYS_RING:]
+
+
 def _coerce_comparison_ring(raw: Any) -> dict[str, Any]:
     """Validate the comparison ring: {iso_date: {comparison_name: daily_kwh}}.
 
@@ -592,9 +595,9 @@ def _coerce_comparison_ring(raw: Any) -> dict[str, Any]:
         if not isinstance(day, str) or not isinstance(cmps, dict):
             continue
         row = {
-            name: float(v)
-            for name, v in cmps.items()
-            if isinstance(name, str) and isinstance(v, (int, float))
+            name: number
+            for name, value in cmps.items()
+            if isinstance(name, str) and (number := _finite_json_float(value)) is not None
         }
         out[day] = row
     return _trim_ring(out, _ACTUALS_RING_DAYS)
@@ -947,15 +950,34 @@ class ForecastStore:
     # Learner state: inverter DC->AC efficiency site calibration (Phase 3)
     # ------------------------------------------------------------------
 
+    def inverter_trained_dates(self) -> tuple[str, ...]:
+        """Dates that contributed to the single persisted calibration."""
+        return tuple(self._data.get(_INVERTER_TRAINED_DAYS, ()))
+
     def is_inverter_day_trained(self, iso_date: str) -> bool:
         """Calibration has its own completion marker, independent of DC training."""
-        return iso_date in self._data.get(_INVERTER_TRAINED_DAYS, [])
+        return iso_date in self.inverter_trained_dates()
 
     def mark_inverter_day_trained(self, iso_date: str) -> None:
-        days = set(self._data.get(_INVERTER_TRAINED_DAYS, []))
+        days = set(self.inverter_trained_dates())
         days.add(iso_date)
         self._data[_INVERTER_TRAINED_DAYS] = sorted(days)[-TRAINED_DAYS_RING:]
         self._schedule_save()
+
+    def record_inverter_training(self, iso_date: str, state: InverterCalState) -> None:
+        """Persist a fold and date marker together, clearing old-source dates."""
+        previous = self.get_inverter_cal_state()
+        if previous.source != state.source:
+            # Preserve one pre-source calibration when its origin could not be
+            # established. New evidence starts independently at the new meter.
+            if previous.source is None and previous.n > 0 and _UNVERIFIED_INVERTER_CAL not in self._data:
+                self._data[_UNVERIFIED_INVERTER_CAL] = {
+                    "state": previous.to_dict(),
+                    "trained_dates": list(self.inverter_trained_dates()),
+                }
+            self._data[_INVERTER_TRAINED_DAYS] = []
+        self._data[STORE_KEY_INVERTER_CAL_STATE] = state.to_dict()
+        self.mark_inverter_day_trained(iso_date)
 
     def get_inverter_cal_state(self) -> InverterCalState:
         """Return the persisted inverter calibration (neutral if absent/corrupt).
@@ -967,6 +989,13 @@ class ForecastStore:
         return InverterCalState.from_dict(
             self._data.get(STORE_KEY_INVERTER_CAL_STATE, {})
         )
+
+    def get_unverified_inverter_calibration(self) -> tuple[InverterCalState, tuple[str, ...]] | None:
+        """Read retained legacy evidence independently from the active state."""
+        unverified = self._data.get(_UNVERIFIED_INVERTER_CAL)
+        if unverified is None:
+            return None
+        return InverterCalState.from_dict(unverified["state"]), tuple(unverified["trained_dates"])
 
     def set_inverter_cal_state(self, state: InverterCalState) -> None:
         """Persist the inverter calibration (schedules a bundled write)."""

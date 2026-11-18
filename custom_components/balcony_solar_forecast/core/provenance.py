@@ -23,6 +23,14 @@ def digest(value: object) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def dc_bindings_digest(entry_id: str, site) -> str:
+    """Identify the selected entry and its configured per-plane DC bindings."""
+    return digest({
+        "entry_id": entry_id,
+        "dc_sources": {p.name: p.actual_entity for p in site.planes if p.actual_entity},
+    })
+
+
 def bounded_provenance(value: object) -> dict[str, str] | None:
     if not isinstance(value, dict):
         return None

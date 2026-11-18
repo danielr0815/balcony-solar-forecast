@@ -15,11 +15,13 @@ from .const import (
     DATA_KEY_BAND_SOURCE,
     DATA_KEY_BAND_SOURCE_BY_DAY,
     DATA_KEY_QUANTILE_CURVES,
+    DATA_KEY_RAW_HOURLY_WH,
     DOMAIN,
     FORECAST_RESP_KEY_P10,
     FORECAST_RESP_KEY_P50,
     FORECAST_RESP_KEY_P90,
 )
+from .core.provenance import dc_bindings_digest
 
 _KEY_SLOT_STARTS = "slot_starts"
 _KEY_PLANE_WATTS = "plane_watts"
@@ -32,7 +34,7 @@ _Q_P90 = FORECAST_RESP_KEY_P90
 
 
 def _build_forecast_response(
-    hass: HomeAssistant, entry_id: str | None
+    hass: HomeAssistant, entry_id: str | None, *, include_capture_metadata: bool = False
 ) -> ServiceResponse:
     """Assemble the get_forecast response for one or all entries.
 
@@ -47,9 +49,13 @@ def _build_forecast_response(
     for eid, coordinator in store.items():
         if entry_id is not None and eid != entry_id:
             continue
+        capture_meta = {}
+        site = getattr(coordinator, "_site", None)
+        if include_capture_metadata and site is not None:
+            capture_meta["dc_bindings_sha256"] = dc_bindings_digest(eid, site)
         data = current_forecast(coordinator)
         if not data:
-            entries[eid] = _empty_forecast_entry()
+            entries[eid] = {**_empty_forecast_entry(), **capture_meta}
             continue
         entry_resp = {
             "slot_starts": list(data.get(_KEY_SLOT_STARTS, [])),
@@ -62,7 +68,21 @@ def _build_forecast_response(
             ],
             "total_hourly": dict(data.get(_KEY_HOURLY_WH) or {}),
             "issued_at": data.get(_KEY_COMPUTED_AT),
+            **capture_meta,
         }
+        if isinstance(raw := data.get(DATA_KEY_RAW_HOURLY_WH), dict):
+            entry_resp["raw_hourly_wh"] = dict(raw)
+        if isinstance(published_at := data.get("issued_at"), str):
+            entry_resp["published_at"] = published_at
+        if isinstance(gaps := data.get("invalid_weather_slots"), list):
+            entry_resp["invalid_weather_slots"] = list(gaps)
+        if include_capture_metadata:
+            if isinstance(bindings := data.get("forecast_dc_bindings_sha256"), str):
+                entry_resp["forecast_dc_bindings_sha256"] = bindings
+            if isinstance(night := data.get("night_zero_slots"), list):
+                entry_resp["night_zero_slots"] = list(night)
+            if isinstance(evidence := data.get("band_evidence_by_slot"), dict):
+                entry_resp["band_evidence_by_slot"] = dict(evidence)
         # v0.4 quantile bands (SPEC §11.2/§14.4): plane-agnostic TOTAL p10/p50/p90
         # 15-min + hourly Wh curves alongside the served (corrected) curve. Only
         # present when the engine issued bands this cycle; absent otherwise so a

@@ -184,9 +184,10 @@ weder den gespeicherten Last-Good-Payload noch seinen Altersanker.
 (§16.2) und **übersteht einen Neustart**. Sein Alter wird ehrlich fortgeschrieben
 (§13) und nie auf ~0 zurückgesetzt, auch nicht, wenn ein ärmerer neuer Payload
 zugunsten des reicheren alten verworfen wird. „Reicher“ zählt ausschließlich
-nutzbare Strahlungsintervalle mit Temperatur, deren Ende noch in der Zukunft
-liegt. Ohne einen solchen zukünftigen Slot ist die neue Antwort ein
-Fehlversuch. Ein alter Payload darf einen Ersatz nur bis `MAX_PAYLOAD_AGE_HOURS`
+Intervalle mit numerisch gültigem GHI, DNI, DHI und Temperatur, deren Ende noch in der Zukunft liegt. Ein expliziter Strahlungswert von 0 ist gültig. Fehlende Strahlung oder Temperatur kennzeichnet einen unbekannten Slot. Ohne einen solchen zukünftigen Slot ist die neue Antwort ein
+Fehlversuch. Beim Veröffentlichen muss noch mindestens ein nutzbares Wetterintervall
+offen sein. Läuft es während der Berechnung ab, wird keine neue Ausgabe veröffentlicht
+oder archiviert. Ein alter Payload darf einen Ersatz nur bis `MAX_PAYLOAD_AGE_HOURS`
 zurückhalten; abgelaufene historische Abdeckung blockiert die Erholung nicht.
 
 **Retry.** Begrenzte Versuche (`MAX_TRIES`) mit **Backoff und Jitter**. Ein
@@ -382,8 +383,7 @@ den Profilknoten **segmentiert** und je Segment mit seiner Mittelpunkts-τ
 gewichtet (Band-Integral in geschlossener Form). Trägt sie `diffuse_tau`, wird
 für den Diffuspfad **dieses** statt der Beam-τ verwendet.
 
-Weil die τ saisonal sind, ist der SVF **`doy`-abhängig**; die Engine memoisiert
-ihn je (Ebene, `doy`). Der Sommer-SVF einer belaubten Baumzeile ist damit
+Bei saisonaler diffuser Transmission berücksichtigt der Cache den Tag des Jahres (`doy`). Bei statischer diffuser Transmission teilen sich alle Tage den Eintrag für dieselbe Geometrie. Der Sommer-SVF einer belaubten Baumzeile ist damit
 kleiner als der Winter-SVF derselben Zeile.
 
 ### §5.4 Wirkung auf die Kurve
@@ -1012,7 +1012,13 @@ DC-Nenner würde η systematisch nach oben treiben.
 Verhältnisse außerhalb **[0,90 … 0,99]** werden **verworfen** (kein plausibles
 Wechselrichter-η — etwa ein Zähler, der auch Hauslast sieht oder netto
 verrechnet). Erst nach **≥ 20** kalibrierfähigen Stunden wird das gelernte η
-vertraut.
+vertraut. Die Kalibrierung und ihre bereits verarbeiteten Tage gehören zum konfigurierten
+AC-Zähler einschließlich seiner Vorzeichenkonvention. Wird er ersetzt oder entfernt,
+gelten die Gruppenwirkungsgrade aus der Konfiguration. Einen älteren Lernstand ohne
+gespeicherte Quellkennung übernimmt die Integration nur, wenn die HA-Eintragshistorie
+eine unveränderte Konfiguration belegt. Bei unklarer Herkunft sichert der erste neue
+Lernschritt den bisherigen Wert, die Stichprobenzahl und den begrenzten Datumsring
+gemeinsam unter `inverter_cal_unverified_legacy`.
 
 Es ist **nie load-bearing**: kein AC-Zähler, zu wenige Samples oder ein
 out-of-band-Verhältnis fallen alle auf das konfigurierte bzw. Default-η zurück;
@@ -1055,6 +1061,8 @@ Rollback-Ring (selbst-gatend).
   (§12.2); sie ist regressionsgetestet (§21).
 - Jeder Teilschritt ist so gekapselt, dass ein einzelner Fehlschlag weder den
   Rest abbricht noch Home Assistant beeinträchtigt.
+
+Der Nachtjob verwendet die effektive Ausgabezeit der eingefrorenen Kurve. Ausgaben nach 06:00 Uhr Ortszeit oder nach Beginn einer bereits produzierenden Zielstunde bleiben im Archiv. Sie sind für Day-ahead-Lerner, Quantile, Drift und Scoreboard ungeeignet. Das Kalibrieren des Wechselrichterwirkungsgrads verwendet ausschließlich gepaarte AC/DC-Messungen.
 
 ### §9.8 Schutzmechanismen
 
@@ -1212,7 +1220,9 @@ Repair-Karte neben der blockierenden verwässerte genau das Signal, das Handlung
 erfordert; ein fehlender AC-Zähler erscheint daher im Diagnose-Dump
 (`actual_channels.ac_missing`) und einmal im Log.
 
-**η-Plausibilitätswächter (`eta_out_of_band`).** Kein Repair-Issue ist der
+**η-Plausibilitätswächter (`eta_out_of_band`).** Die Folge auffälliger Tage gehört
+zur aktuellen Messquelle einschließlich ihrer Polarität. Ein Quellenwechsel oder das
+Entfernen des Zählers beendet die dazugehörige Warnung. Kein Repair-Issue ist der
 **fehlende** AC-Zähler — sehr wohl aber der **dauerhaft unplausibel messende**:
 liegt der nächtliche **Median der rohen AC/DC-Verhältnisse** eines Tages (vor
 dem Plausibilitätsband ausgewertet, §9.6) außerhalb von [`INVERTER_CAL_MIN`,
@@ -1297,6 +1307,8 @@ P10/P50/P90-**Multiplikatoren** des Bins (`QUANTILE_P_LOW` / `QUANTILE_P_HIGH`).
   eine Dämmerungsstunde nahe null keinen 100×-Multiplikator einschleust.
 - Das Verfahren ist eine **reine empirische historische Simulation**;
   ausdrücklich **keine** adaptive konforme Nachführung.
+
+Diagnose und Ausgabe filtern datierte Stichproben mit denselben beiden Fenstergrenzen. Das lokale Bezugsdatum ist die Obergrenze. Das Fenster schließt jüngere, aus Sicht dieses Datums zukünftige Stichproben aus.
 
 Trainiert wird nächtlich aus der **ausgelieferten korrigierten** Stundenkurve
 gegen die gemessene (§9.7); der Rahmen ist damit derselbe wie beim Servieren.
@@ -1616,23 +1628,7 @@ sein Fehlen weitet lediglich die Bänder nicht und ist nie ein Degradationsgrund
 Wechselrichtern). Dazu Diagnose-Sensoren für Baseline-MAE, Degradationsstatus
 und Lernstatus.
 
-Die **Heute-Headline ist eine stabile Day-ahead-Erwartung**: der transiente
-Intraday-Skalar wird aus den Slots des aktuellen Tages wieder herausgerechnet
-(die servierte `watts`/`wh_period`-Kurve behält ihn — ebenso ihre
-AC-Spiegelung `wh_period_ac`, §14.4).
-
-**Clamp-Interaktion.** Auf einem Slot, dessen hochkorrigierte Gruppenleistung
-die AC-Obergrenze trifft (der Re-Clamp greift, servierter Wert = Deckel), ist der
-skalarfreie Wert `min(prereclamp / Faktor, Deckel)`: `prereclamp`
-(`corrected_unclamped_watts` = erst-geklammert × Faktor) geteilt durch den Faktor
-ergibt exakt den skalarfreien servierten Wert, am physischen Deckel gekappt. So
-bleibt die Headline day-ahead-stabil — das bloße Behalten des servierten Deckels
-ließe sie unter großem Skalar um die volle Faktor-Reserve ballonieren, das
-Herausdividieren auf einem geklammerten Slot untertriebe sie. Klammert die
-Day-ahead-Kurve schon allein (`prereclamp / Faktor ≥ Deckel`, klarer Mittag),
-liefert der Slot weiter den Deckel. Fehlen `slot_ceilings` /
-`corrected_unclamped_watts` (alter Cache), bleibt der servierte Deckel
-unverändert.
+Die Heute-Headline summiert die Viertelstundenenergien mit Shademap und Day-ahead-Bias. Die Engine berechnet zu diesem Zweck die Leistung ohne transienten Intraday-Skalar und begrenzt jede Wechselrichtergruppe auf ihren eigenen Deckel. Die Summierung erfolgt getrennt auf DC- und AC-Basis. So bleibt die ungenutzte Kapazität eines zweiten Wechselrichters der eigenen Gruppe vorbehalten. Die servierte Momentanleistung und die `wh_period`-Kurven enthalten weiterhin die Intraday-Korrektur. Die Tages-P10-Anpassung aus §11.2 verwendet die zugehörige skalarfreie AC-Punktprognose.
 
 `power_production_now` trägt das je Gruppe konfigurierte η_inv sowie — sobald
 kalibriert — das gelernte η als Attribut.
@@ -1679,6 +1675,17 @@ ohne duplizierte Anlagenkonfiguration ausblenden kann.
 
 ### §14.4 Volle Kurve
 
+In der Antwort von `get_forecast` bezeichnet `issued_at` aus Gründen der
+Abwärtskompatibilität weiterhin den Berechnungszeitpunkt. `published_at` ist
+der zugehörige Ausgabezeitpunkt. `raw_hourly_wh` enthält die unveränderte
+DC-Referenz je UTC-Stunde. `invalid_weather_slots` kennzeichnet 15-Minuten-Slots
+mit unvollständigen Wetterdaten. Mit `include_capture_metadata: true` liefert der
+Dienst zusätzlich SHA-256-Kennungen für die aktuelle und die beim Rechnen verwendete
+Zuordnung der DC-Messkanäle zum Konfigurationseintrag. Damit kann eine Auswertung
+falsch gepaarte Messungen erkennen. `night_zero_slots` weist physikalisch bestätigte
+Nacht-Nullen aus. `band_evidence_by_slot` bezeichnet, soweit vorhanden, die Herkunft
+des zugehörigen Bandes je Viertelstunde.
+
 15-min-`watts`- und `wh_period`-Attribute auf den Energie-Sensoren (per
 `exclude_attributes` bzw. `_unrecorded_attributes` vom Recorder ausgeschlossen,
 weil sie bulkig und je Zyklus neu sind), dazu die P10/P90-Bandkurven als
@@ -1710,7 +1717,7 @@ Prüfgrößen vor. State: Anzahl signifikanter Revisionen (>
 AC-Tageswerte am laufenden lokalen Tag, Summe über die Tages-Offsets.
 Attribute: je lokalem Tag d0/d1/d2 die Kurvensummen beider Basen (`dc_wh` =
 Σ `wh_period`, `ac_wh` = Σ `wh_period_ac`) samt publiziertem `state_kwh`, das
-angewandte Standort-η mit Quelle (`eta_source`: `learned`/`config`), die
+angewandte Standort-η mit Quelle (`learned` oder `config`, bei unterschiedlichen Gruppenwerten `null` mit `mixed_config`), die
 Revisionszähler von heute und gestern je Offset sowie die letzte Revision mit
 Provenienz (`at`, `date`, `day_offset`, `old_kwh`, `new_kwh`,
 `payload_refreshed` — letzteres genau dann wahr, wenn der Zählzyklus zugleich
@@ -1910,11 +1917,8 @@ statt geraten.
 
 Neue Issued-Snapshots halten zusätzlich `corrected_ac_hourly_wh`, die exakte
 berechnete AC-Stundenkurve mit damaligen Gruppenwirkungsgraden und Clipping.
-`computed_at`/`issued_at` bezeichnen den ursprünglichen Berechnungszeitpunkt,
-`archived_at` die spätere Archivierung. Fehlgeschlagene Coordinator-Updates
-erzeugen keinen frischen Snapshot aus Altattributen. Ein während der
-asynchronen Rekonstruktion gewechseltes Berechnungsergebnis wird verworfen;
-die nächste Ausführung kann einen konsistenten Stand archivieren.
+`computed_at` bezeichnet den Berechnungszeitpunkt, `issued_at` die Ausgabe nach dem Rechenlauf und `archived_at` das spätere Speichern. Nach einem fehlgeschlagenen Coordinator-Update entsteht kein neuer Snapshot. Die Stundenwerte je Ebene, die Slow-only-Referenz und die Wolkenklasse stammen aus demselben veröffentlichten Rechenergebnis und seinen zugehörigen Eingaben. Ein zwischenzeitlicher Wetterabruf kann diese Referenzen nicht verändern. Fehlende Wetterintervalle werden im Snapshot als betroffene UTC-Stunden ausgewiesen.
+
 `provenance` hält begrenzte Modell-/Integrationskennung, SHA-256-Identitäten
 von Config, Lernzustand und Wetter sowie den bekannten Wetterabrufzeitpunkt.
 Diese Werte stammen aus dem Berechnungspayload; private Rohzustände und
@@ -2104,6 +2108,8 @@ Coordinator und Site-Config.
 Dashboard-Registry-Eintrag oder eine zweite `DashboardsCollection` (die beim
 späteren UI-Bearbeiten Einträge löschen könnte).
 
+Ein Benutzeraufruf des Dashboard-Installers erfordert die Admin-Berechtigung von Home Assistant. HA-interne Aufrufe folgen dem HA-eigenen Admin-Dienstvertrag. Ein explizites Überschreiben durch einen Benutzer unterliegt derselben Berechtigungsprüfung.
+
 **Marker und Safety-Gate:** jede geschriebene Konfig trägt oben
 `bsf_managed: <version>`. Ist das Ziel-Dashboard **nicht im Storage-Modus**, wird
 abgelehnt (YAML nicht schreibbar). Trägt eine bereits vorhandene, **nicht-leere**
@@ -2111,7 +2117,7 @@ Konfig den Marker **nicht** und ist `overwrite` nicht gesetzt, wird abgelehnt
 (kein Überschreiben fremd erstellter Dashboards). Eine leere oder
 marker-tragende Konfig wird frei überschrieben — das ist der **idempotente
 Refresh**. Die Antwort meldet `dashboard`, `views`, `cards` und die
-weggelassenen `missing_entities`.
+weggelassenen `missing_entities`. Als leer gelten ausschließlich erkannte leere Dashboardformen. Vorhandene Sections, Badges, Strategien und unbekannte Konfigurationsfelder bleiben ohne ausdrückliches Überschreiben geschützt.
 
 ### §18.3 Verschattungsprofil-Karte
 
@@ -2196,21 +2202,22 @@ Live-`wh_period`-Summe, Tage ohne Snapshot bleiben **ehrlich lückenhaft**.
 
 **Antwortvertrag `get_issued_forecast`** (gilt auch für §16.2 und §19):
 `hourly_wh` (bedient/korrigiert) und `raw_hourly_wh` sind **explizit DC**.
-Zusätzlich liefert die Aktion `hourly_wh_ac` aus der eingefrorenen exakten
-AC-Kurve (`ac_source: "snapshot"`). Bei Legacy-Ständen wird DC × `eta`
-rekonstruiert (`ac_source: "reconstructed"`), wobei `eta` die
-DC→AC-Effizienz **zum Ausgabezeitpunkt** ist (in den Snapshot eingefroren,
-`eta_source: "snapshot"`); ältere Snapshots ohne gespeichertes eta fallen auf das
-**aktuelle** gelernte eta zurück und weisen das über `eta_source: "current"` aus
-(eine Site-Skalare — Datenblatt-Default, bis die Kalibrierung vertraut ist;
-per-Gruppen-Overrides werden nicht abgebildet). `cloud_class_by_hour`
+Bei gespeicherter AC-Kurve liefert `hourly_wh_ac` die zum Ausgabezeitpunkt berechnete
+Energie einschließlich Gruppen-Clipping (`ac_source: "snapshot"`). Ein gemeinsames
+gespeichertes η hat die Quelle `snapshot`. Liegt die exakte AC-Kurve ohne einen
+gemeinsamen Wirkungsgrad vor, sind `eta: null` und `eta_source: "unavailable"`.
+Bei historischen Snapshots ohne AC-Kurve schätzt die Integration AC aus DC × η
+(`ac_source: "reconstructed"`). Fehlt auch das historische η, verwendet sie den
+aktuellen Standort-Schätzwert (`eta_source: "current"`). `cloud_class_by_hour`
 (Day-ahead-Wetterklasse je Stunde) und `applied_factor_by_hour`
 (`hourly_wh / raw_hourly_wh`, Stunden mit raw ≈ 0 ausgelassen) machen die
 angewandte Korrektur sichtbar. Ein Fehltreffer ist **kein Fehler**.
 
-**Kalender und Fehler.** Tagesgrenzen, Archivdatum und Buckets richten sich
+Bei einem v1-Snapshot liefert `hourly_wh` die erhaltene historische DC-Punktkurve mit `curve_source: "legacy"`. Die separate RAW-Referenz und daraus berechnete Korrekturfaktoren bleiben leer. Bei `include_planes: true` enthält `per_plane` je stabiler Ebenenkennung die tatsächlich archivierten DC-Stundenkurven `raw_wh`, `slow_wh` und `corrected_wh` des gewählten lokalen Tags, soweit vorhanden.
+
+**Kalender und Fehler.** Das ausgewählte historische Datum bleibt über Mitternacht erhalten. Die Liveansicht folgt dem aktuellen lokalen Tag. Tagesgrenzen, Archivdatum und Buckets richten sich
 nach `hass.config.time_zone`. Sommerzeitwechsel ergeben 23 bzw. 25 tatsächliche
-Stunden; doppelte Herbststunden sind mit UTC-Offset unterscheidbar. Der
+Stunden; doppelte Herbststunden sind mit UTC-Offset unterscheidbar.
 Leere oder beschädigte Archivkurven ergeben keine vollständige Tagessumme.
 Boolwerte, Leerstrings, negative und nichtendliche Energiewerte bleiben fehlend;
 explizite endliche Nullwerte sind gültig. Der

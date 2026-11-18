@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from math import isfinite
 
 from ..const import (
     ALBEDO_DEFAULT,
@@ -507,6 +508,17 @@ class WeatherSlot:
     visibility_m: float | None = None  # m
     snowfall_cm: float = 0.0  # cm (hourly)
     snow_depth_m: float = 0.0  # m
+    # A numeric zero may be a real observation of darkness. Preserve provider
+    # gaps separately from the dense numeric series used by readers of a slot.
+    radiation_complete: bool = True
+
+    @property
+    def usable(self) -> bool:
+        """Whether this slot has the complete radiation and temperature inputs."""
+        return self.radiation_complete and all(
+            value is not None and isfinite(value)
+            for value in (self.ghi, self.dni, self.dhi, self.temp_c)
+        )
 
     @property
     def midpoint(self) -> datetime:
@@ -689,6 +701,13 @@ class ForecastResult:
     # necessarily the empirical median and may lie outside the P10/P90 interval.
     ac_p10_hourly_wh: dict[str, float] = field(default_factory=dict)
     ac_p90_hourly_wh: dict[str, float] = field(default_factory=dict)
+    # The corrected curves with only shademap and day-ahead bias. Apply group
+    # limits before summing, since a site-wide ceiling cannot reverse clipping.
+    dayahead_watts: tuple[float, ...] = ()
+    ac_dayahead_watts: tuple[float, ...] = ()
+    # Gap positions stay aligned in the served curves but cannot supply labels.
+    invalid_weather_slots: frozenset[datetime] = frozenset()
+    night_zero_slots: frozenset[datetime] = frozenset()
 
 def default_albedo() -> float:
     """Convenience re-export of the default ground albedo."""
@@ -753,6 +772,14 @@ def _safe_float(v: object, default: float = 0.0, *, minimum: float | None = None
     if minimum is not None and f < minimum:
         return minimum
     return f
+
+
+def _finite_json_float(value: object) -> float | None:
+    """Accept finite JSON numbers, including integers representable as a float."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    number = _safe_float(value, default=float("nan"))
+    return number if isfinite(number) else None
 
 
 def _version_guard(name: str, d: dict, current: int) -> bool:
@@ -1060,11 +1087,12 @@ class InverterCalState:
     missing / garbage blob yields the NEUTRAL state
     (``eta = DEFAULT_INVERTER_EFFICIENCY``, ``n = 0``), never a raised exception.
     The eligibility gates + band clamp live in ``core/inverter_cal.py``; this type
-    only carries + (de)serialises the pair.
+    also stores a source fingerprint for trust across reloads.
     """
 
     eta: float = DEFAULT_INVERTER_EFFICIENCY
     n: int = 0
+    source: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> InverterCalState:
@@ -1077,10 +1105,14 @@ class InverterCalState:
                 minimum=0.0,
             ),
             n=_safe_int(d.get("n", 0), 0, minimum=0),
+            source=d.get("source") if isinstance(d.get("source"), str) else None,
         )
 
     def to_dict(self) -> dict:
-        return {"eta": self.eta, "n": self.n}
+        out: dict[str, float | str] = {"eta": self.eta, "n": self.n}
+        if self.source is not None:
+            out["source"] = self.source
+        return out
 
 
 # ---------------------------------------------------------------------------

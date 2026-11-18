@@ -144,18 +144,20 @@ def missing_entity_keys(entity_map: dict[str, str]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def config_has_cards(config: Any) -> bool:
-    """True if ``config`` is a Lovelace config with at least one card.
-
-    The safety gate uses this to distinguish an EMPTY dashboard (freely
-    overwritten) from one already carrying content.
-    """
-    if not isinstance(config, dict):
+def config_is_empty(config: Any) -> bool:
+    """Recognize plain empty Lovelace layouts before replacing foreign config."""
+    if not isinstance(config, dict) or config.keys() - {"title", "views"}:
         return False
-    views = config.get("views")
+    views = config.get("views", [])
     if not isinstance(views, list):
         return False
-    return any(isinstance(view, dict) and view.get("cards") for view in views)
+    return all(
+        isinstance(view, dict)
+        and not view.keys() - {"title", "path", "type", "cards", "sections", "badges"}
+        and view.get("type", "masonry") in ("masonry", "sections", "panel", "sidebar")
+        and all(view.get(key, []) == [] for key in ("cards", "sections", "badges"))
+        for view in views
+    )
 
 
 def is_managed(config: Any) -> bool:

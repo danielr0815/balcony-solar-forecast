@@ -1,5 +1,4 @@
 [
-  "custom_components/balcony_solar_forecast/coordinator.py::BalconySolarCoordinator._async_read_measured_total_stats._read [arg-type] Argument 1 to \"_measured_power_rows\" has incompatible type \"list[StatisticsRow] | None\"; expected \"list[dict[Any, Any]] | None\"",
   "custom_components/balcony_solar_forecast/coordinator.py::BalconySolarCoordinator._update_intraday_scalar [arg-type] Argument 1 to \"list\" has incompatible type \"deque[_IntradaySample]\"; expected \"Iterable[IntradaySample]\"",
   "custom_components/balcony_solar_forecast/core/bias.py::_parse_iso_hour [unreachable] Statement is unreachable",
   "custom_components/balcony_solar_forecast/core/bias.py::apply_intraday_scalar [unreachable] Statement is unreachable",

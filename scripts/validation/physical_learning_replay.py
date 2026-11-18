@@ -14,14 +14,21 @@ import json
 import math
 from collections import Counter
 from copy import deepcopy
-from datetime import UTC, datetime, timedelta
+from datetime import date, timedelta
 from functools import cache
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from .model_contract_impact import kernel
-from .replay_benchmark import compare, load_verified, number, timestamp
+from .replay_benchmark import (
+    compare,
+    load_verified,
+    local_day_bounds,
+    number,
+    timestamp,
+    validate_output_paths,
+)
 
 
 @cache
@@ -61,9 +68,21 @@ def _predict(core, site, weather, issue, tz, state, flags):
     classes = _classes(core, site, weather, tz)
     factors = {slot.start: core.bias.day_ahead_factor_solar(state['bias'], cloud_class=classes[slot.start],
                 hours_from_noon=core.solpos.hours_from_solar_noon(slot.start, site.longitude)) for slot in weather.slots}
-    bands = {slot.start: core.quantiles.bands_for_bin(state['quantile'], cloud_class=classes[slot.start],
-               day_part=core.bias.day_part_for_solar(core.solpos.hours_from_solar_noon(slot.start, site.longitude)),
-               as_of_date=issue.astimezone(tz).date().isoformat()) for slot in weather.slots} if quantile else None
+    bands = {}
+    trained_by_hour = Counter()
+    if quantile:
+        for slot in weather.slots:
+            band = core.quantiles.bands_for_bin(
+                state['quantile'], cloud_class=classes[slot.start],
+                day_part=core.bias.day_part_for_solar(
+                    core.solpos.hours_from_solar_noon(slot.start, site.longitude)),
+                as_of_date=issue.astimezone(tz).date().isoformat(),
+            )
+            if band.n:
+                hour = slot.start.replace(minute=0, second=0, microsecond=0).isoformat()
+                trained_by_hour[hour] += 1
+            if (band.p10, band.p50, band.p90) != (1.0, 1.0, 1.0):
+                bands[slot.start] = band
     hooks = core.engine.LearnerHooks(beam_tau=beam if slow else None,
                                     slot_factor=lambda t: factors[t] if bias else 1,
                                     band_by_slot=bands)
@@ -75,24 +94,51 @@ def _predict(core, site, weather, issue, tz, state, flags):
     cloud = {}
     for slot in weather.slots:
         cloud.setdefault(slot.start.replace(minute=0).isoformat(), classes[slot.start])
-    slow_result = core.engine.compute_forecast(site, weather, issue, tz=tz,
-        hooks=core.engine.LearnerHooks(beam_tau=beam if slow else None))
-    slow_curve = dict(slow_result.hourly_wh)
+    slow_curve = {}
+    plane_watts = zip(*(plane.slow_watts for plane in result.plane_results), strict=True)
+    for start, watts in zip(result.slot_starts, plane_watts, strict=True):
+        hour = start.replace(minute=0, second=0, microsecond=0).isoformat()
+        slow_curve[hour] = slow_curve.get(hour, 0.0) + sum(watts) * core.const.SLOT_HOURS
     # The engine omits zero-radiation night slots. This input axis was verified
     # complete and finite, so those omissions are confirmed zeros, not gaps.
     hours = {slot.start.replace(minute=0, second=0, microsecond=0).isoformat() for slot in weather.slots}
     def complete(curve):
         return {hour:curve.get(hour,0.0) for hour in sorted(hours)}
+    slot_bands = {
+        f'dc_{name}_slot_wh': {
+            start.isoformat(): watts * core.const.SLOT_HOURS
+            for start, watts in zip(result.slot_starts, values, strict=True)
+        }
+        for name, values in (('p10', result.p10_watts), ('p50', result.p50_watts),
+                             ('p90', result.p90_watts))
+        if values
+    }
     snapshot = core.types.IssuedSnapshot(issued_at=issue.isoformat(), status='offline_recomputed',
         raw_hourly_wh=complete(result.raw_hourly_wh), corrected_hourly_wh=complete(result.hourly_wh),
         slow_only_hourly_wh=complete(slow_curve), per_plane=per_plane, cloud_class_by_hour=cloud,
-        corrected_ac_hourly_wh=complete(result.ac_hourly_wh), computed_at=issue.isoformat())
-    return snapshot
+        corrected_ac_hourly_wh=complete(result.ac_hourly_wh), computed_at=issue.isoformat(),
+        bands=slot_bands or None)
+    # These emitted hourly energy bounds sum the corresponding 15-minute
+    # DC bounds. The replay pairs them with closed hourly recorder values.
+    hourly_bands = {name: curve for name, curve in (
+        ('p10', result.p10_hourly_wh), ('p50', result.p50_hourly_wh),
+        ('p90', result.p90_hourly_wh),
+    ) if curve}
+    band_status = {
+        hour: ('trained' if trained_by_hour[hour] == 4 else
+               'mixed' if trained_by_hour[hour] else 'neutral')
+        for hour in result.p10_hourly_wh
+    }
+    return snapshot, hourly_bands, band_status
 
 
 def _labels(core, site, row, start, end):
     metered = [p.name for p in site.planes if p.actual_entity]
-    expected = core.daylight.daylight_hour_keys(site.latitude, site.longitude, start, end)
+    hour = timedelta(hours=1)
+    expected = {
+        key for key in core.daylight.daylight_hour_keys(site.latitude, site.longitude, start, end)
+        if timestamp(key) + hour <= end
+    }
     needed = math.ceil(len(expected)*core.const.DAY_ACTUALS_MIN_DAYLIGHT_COVERAGE)
     actuals = {}
     ratings = {p.name:p.wp for p in site.planes}
@@ -103,7 +149,7 @@ def _labels(core, site, row, start, end):
         hours = {}
         for key, value in raw.items():
             at = timestamp(key)
-            if not start <= at < end:
+            if not (start <= at and at + hour <= end):
                 continue
             value = number(value)
             if value is not None and value > core.const.CHANNEL_PLAUSIBILITY_MAX_WP_FRAC*ratings[name]:
@@ -121,6 +167,8 @@ def _labels(core, site, row, start, end):
         actuals[name] = hours
     if not metered:
         return None, 'no_measured_channels'
+    if len(expected.intersection(*actuals.values())) < needed:
+        return None, 'missing_common_daylight_labels'
     return actuals, 'valid'
 
 
@@ -214,12 +262,14 @@ def replay_physical_days(bundle: dict) -> dict:
     pending, forecasts, seen, trained, skipped = [], [], set(), {name: [] for name in presets}, Counter()
     rows = sorted(deepcopy(bundle['days']), key=lambda r: timestamp(r['issued_at']))
     for row in rows:
-        iso = row['local_day']
+        local_day = date.fromisoformat(row['local_day'])
+        iso = local_day.isoformat()
         if iso in seen:
             raise ValueError('Duplicate local day identity')
         seen.add(iso)
-        start = datetime.fromisoformat(iso).replace(tzinfo=tz).astimezone(UTC)
-        end = (datetime.fromisoformat(iso).replace(tzinfo=tz)+timedelta(days=1)).astimezone(UTC)
+        start, end = local_day_bounds(local_day, tz)
+        if end <= start:
+            raise ValueError('Local day has no forecastable intervals')
         issue = timestamp(row['issued_at'])
         if row.get('weather_role') != 'issued_forecast' or not timestamp(row['weather_available_at']) <= issue <= start:
             raise ValueError('Original forecast weather must be available before a fully future day')
@@ -252,19 +302,33 @@ def replay_physical_days(bundle: dict) -> dict:
                     _train(core, sites[name], event['snapshots'][name], actuals, states[name], flags[name], event['iso'])
                     trained[name].append(event['iso'])
             pending.remove(event)
-        snapshots = {name: _predict(core, sites[name], weather_by_variant[name], issue, tz, deepcopy(states[name]), flags[name]) for name in presets}
-        forecasts.append({'local_day': iso, 'issued_at': issue.isoformat(),
-                          'forecasts': {name: snapshot.to_dict() for name, snapshot in snapshots.items()},
-                          'weather_sha256': {name:hashlib.sha256(json.dumps(overrides.get(name,row)['weather_slots'], sort_keys=True).encode()).hexdigest() for name in presets}})
+        predictions = {
+            name: _predict(core, sites[name], weather_by_variant[name], issue, tz,
+                           deepcopy(states[name]), flags[name])
+            for name in presets
+        }
+        snapshots = {name: output[0] for name, output in predictions.items()}
+        forecasts.append({
+            'local_day': iso, 'issued_at': issue.isoformat(),
+            'forecasts': {name: snapshot.to_dict() for name, snapshot in snapshots.items()},
+            'dc_hourly_bands': {name: hourly for name, (_, hourly, _) in predictions.items() if hourly},
+            'dc_hourly_band_status': {name: status for name, (_, _, status) in predictions.items() if status},
+            'weather_sha256': {name:hashlib.sha256(json.dumps(overrides.get(name,row)['weather_slots'], sort_keys=True).encode()).hexdigest() for name in presets},
+        })
         baseline = next((snapshots[name] for name in presets if sites[name] == site and name not in overrides), None)
         if baseline is None:
-            baseline = _predict(core, site, weather, issue, tz, deepcopy(states[presets[0]]), (False,False,False))
+            baseline, _, _ = _predict(core, site, weather, issue, tz, deepcopy(states[presets[0]]), (False,False,False))
         pending.append({'baseline':baseline, 'iso': iso, 'start': start, 'end': end, 'available': available, 'row': row, 'snapshots': snapshots})
     return {'kind': 'physical_persisted_learning_replay', 'basis':'DC', 'timezone':bundle['timezone'],
             'kernel_sha256':core.digest, 'initial_state':'cold' if all(origin['source']=='cold' for origin in origins.values()) else 'provided_or_cold',
             'state_origins':origins, 'state_load_contract':'production_validate_and_clamp',
             'variant_config_sha256':{name:hashlib.sha256(json.dumps(sites[name].to_dict(), sort_keys=True).encode()).hexdigest() for name in presets},
             'records': forecasts,
+            'measurement_scope': {
+                name: ('site' if all(plane.actual_entity for plane in sites[name].planes)
+                       else 'metered_planes')
+                for name in presets
+            },
             'states': {name:{key:value.to_dict() for key,value in state.items()} for name,state in states.items()},
             'trained_days':trained, 'training_day_semantics':'eligible consumed labels; raw never updates', 'skipped_days':dict(skipped), 'pending_days':len(pending),
             'excluded_layers':['intraday','drift_auto_disable','collapse_next_day_freeze','eta_calibration','ensemble'], 'activation':'never_automatic'}
@@ -275,30 +339,48 @@ def score_physical_replay(bundle: dict, replay: dict) -> dict:
     core, tz = _core(), ZoneInfo(bundle['timezone'])
     site = core.validate_site(deepcopy(bundle['site']))
     models = list(replay['states'])
-    inputs = {row['local_day']:row for row in bundle['days']}
+    definitions = bundle.get('variants')
+    variants = definitions if isinstance(definitions, dict) else {}
+    sites = {
+        name: core.validate_site(deepcopy(variants[name]['site']))
+        if name in variants and 'site' in variants[name] else site
+        for name in models
+    }
+    scope = {
+        name: ('site' if all(plane.actual_entity for plane in sites[name].planes)
+               else 'metered_planes')
+        for name in models
+    }
+    inputs = {date.fromisoformat(row['local_day']): row for row in bundle['days']}
+    if len(inputs) != len(bundle['days']):
+        raise ValueError('Duplicate local day identity')
     records = []
     invalid = Counter()
     for output in replay['records']:
-        row = inputs[output['local_day']]
-        local = datetime.fromisoformat(row['local_day']).replace(tzinfo=tz)
-        start, end = local.astimezone(UTC), (local+timedelta(days=1)).astimezone(UTC)
+        local_day = date.fromisoformat(output['local_day'])
+        row = inputs[local_day]
+        start, end = local_day_bounds(local_day, tz)
         actuals, reason = _labels(core, site, row, start, end)
         if actuals is None or row.get('quality', 'valid') != 'valid':
             invalid[reason if actuals is None else 'declared_bad_quality'] += 1
-            continue
-        common = set.intersection(*(set(hours) for hours in actuals.values()))
+            actuals = {}
+        common = set.intersection(*(set(hours) for hours in actuals.values())) if actuals else set()
         curves = {}
         for name in models:
             snapshot = core.types.IssuedSnapshot.from_dict(output['forecasts'][name])
-            curves[name] = core.learning_inputs.metered_modeled_hourly(site, snapshot, snapshot.corrected_hourly_wh, layer='corrected')
-        for hour in sorted(common):
-            target = timestamp(hour)
-            if target+timedelta(hours=1)>end:
-                continue
-            # RAW must carry explicit zero night slots; a missing curve remains
-            # unavailable. Exact per-plane metered subsets deliberately omit night
-            # storage, so restore zero only if the full engine total says zero.
-            values = {}
+            curves[name] = core.learning_inputs.metered_modeled_hourly(
+                sites[name], snapshot, snapshot.corrected_hourly_wh, layer='corrected'
+            )
+        # The planned axis derives from the local calendar, independent of
+        # recorder coverage. Partial hours at a local midnight have no label.
+        first_hour = start.replace(minute=0, second=0, microsecond=0)
+        step = timedelta(hours=1)
+        if first_hour < start:
+            first_hour += step
+        for i in range((end - first_hour) // step):
+            target = first_hour + i * step
+            hour = target.isoformat()
+            values, intervals, band_status = {}, {}, {}
             for name in models:
                 curve = curves[name]
                 snapshot = output['forecasts'][name]
@@ -306,13 +388,36 @@ def score_physical_replay(bundle: dict, replay: dict) -> dict:
                 if value is None and curve is not None and snapshot['corrected_hourly_wh'].get(hour) == 0:
                     value = 0.0
                 values[name] = value
+                # The engine publishes site-level bands. A subset point
+                # forecast can be rebuilt from planes, but not its interval.
+                hourly_bands = output.get('dc_hourly_bands', {}).get(name, {})
+                if scope[name] == 'site' and snapshot.get('issued_at') == output['issued_at']:
+                    interval = [hourly_bands.get(p, {}).get(hour) for p in ('p10', 'p50', 'p90')]
+                    if all(bound is not None for bound in interval):
+                        intervals[name] = interval
+                        status = output.get('dc_hourly_band_status', {}).get(name, {}).get(hour)
+                        if status is not None:
+                            band_status[name] = status
             records.append({'issued_at':output['issued_at'],'available_at':output['issued_at'],
                             'target_start':hour,'target_end':(target+timedelta(hours=1)).isoformat(),
                             'actual_available_at':row['actuals_available_at'],
-                            'actual_wh':sum(hours[hour] for hours in actuals.values()),'forecasts':values})
+                            'actual_wh':sum(hours[hour] for hours in actuals.values()) if hour in common else None,
+                            'forecasts':values, 'intervals':intervals, 'band_status':band_status})
     scored = compare({'schema_version':1,'basis':'DC','timezone':bundle['timezone'], 'models':models,
                       'development_end':bundle['development_end'],'selection_end':bundle['selection_end'],'records':records})
     scored['ablation'] = 'independent_physical_learning'
+    scored['measurement_scope'] = scope
+    scored['interval_scope'] = {
+        name: 'hourly_site_dc_sum_of_15min_bounds'
+        if scope[name] == 'site' else 'unavailable_for_metered_subset'
+        for name in models
+    }
+    scored['interval_evaluation'] = {
+        'basis': 'DC',
+        'target_minutes': 60,
+        'source_minutes': 15,
+        'bound_aggregation': 'sum_of_15min_bounds',
+    }
     scored['label_day_exclusions'] = dict(invalid)
     scored['activation'] = 'never_automatic'
     return scored
@@ -323,6 +428,10 @@ def main():
     parser.add_argument('manifest', type=Path)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
+    try:
+        validate_output_paths(args.manifest, args.output)
+    except ValueError as error:
+        parser.error(str(error))
     bundle = load_verified(args.manifest)
     result = replay_physical_days(bundle)
     result['input_sha256'] = json.loads(args.manifest.read_text())['input']['sha256']

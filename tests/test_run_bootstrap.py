@@ -126,7 +126,7 @@ def test_run_bootstrap_registered_response_only():
         def has_service(self, domain, service):
             return False
 
-        def async_register(self, domain, service, handler, *, schema, supports_response):
+        def async_register(self, domain, service, handler, schema, supports_response, **kwargs):
             registered[service] = supports_response
 
     class _Hass:

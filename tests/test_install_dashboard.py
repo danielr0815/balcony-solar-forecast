@@ -225,7 +225,7 @@ def test_build_omits_missing_entities():
     assert names == ["Forecast daily-kWh MAE", "Forecast hourly MAE"]
     # Still a valid, marker-bearing shape.
     assert d.is_managed(config)
-    assert d.config_has_cards(config)
+    assert not d.config_is_empty(config)
     assert set(d.missing_entity_keys(entity_map)) == {
         "drift_bias_corrected",
         "drift_mae_corrected",

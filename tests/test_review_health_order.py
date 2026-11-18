@@ -38,11 +38,11 @@ def test_late_eta_outlier_cannot_revive_cleared_watchdog():
     )
 
     health = {"eta_oob_streak": 0, "eta_oob_last_day": None,
-              "eta_last_checked_day": "2026-07-05"}
+              "eta_last_checked_day": "2026-07-05", "eta_source": "synthetic-meter"}
     writes = []
     coord = SimpleNamespace(_store=SimpleNamespace(
         get_learning_health=lambda: health, set_learning_health=writes.append,
         get_issued=lambda _: {"status": "fresh"}),
-        _delete_repair_issue=lambda _: None)
+        _delete_repair_issue=lambda _: None, _inverter_cal_source=lambda: "synthetic-meter")
     _record_eta_calibration_outcome(coord, date(2026, 7, 3), median_ratio=0.5)
     assert writes == [], "historical catch-up must not revive a newer cleared eta warning"

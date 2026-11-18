@@ -83,18 +83,6 @@ async def test_archive_roundtrip_preserves_bands_and_bounded_provenance():
                                    'weather_sha256': 'a'*64}
 
 
-async def test_refresh_during_archive_cannot_mix_computations(monkeypatch):
-    store = _FakeStore()
-    coord = _make_coordinator(store)
-    coord.data = {'status': 'fresh'}
-    async def overtaken(day):
-        coord.data = {'status': 'fresh', 'computed_at': '2026-06-21T00:30:00+00:00'}
-        return {}
-    monkeypatch.setattr(coord, '_slow_only_hourly', overtaken)
-    await _nightly.snapshot_issued(coord, date(2026, 6, 21))
-    assert not store.issued
-
-
 async def test_computation_identity_is_captured_before_executor_state_change(monkeypatch):
     from datetime import UTC, datetime, timedelta
 

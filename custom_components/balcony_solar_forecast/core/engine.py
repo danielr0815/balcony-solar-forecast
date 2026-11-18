@@ -191,6 +191,10 @@ class LearnerHooks:
     # the DEFAULT), so a build without a trusted calibration is bit-identical.
     # NEVER touches the DC path — only the served-AC transform reads it.
     inverter_efficiency: float | None = None
+    # Day-ahead part of slot_factor, without the transient intraday correction.
+    # Required when the caller wants the scalar-free curve alongside a composite
+    # slot_factor. The engine applies the same group clamps to both curves.
+    dayahead_factor: SlotFactorHook | None = None
 
 
 # Module-level identity hooks so the raw pass and a learner-free corrected pass
@@ -210,22 +214,6 @@ def _slot_albedo(slot: WeatherSlot, base_albedo: float = ALBEDO_DEFAULT) -> floa
     if depth is not None and depth > SNOW_DEPTH_THRESHOLD_M:
         return ALBEDO_SNOW
     return base_albedo
-
-
-def _slot_is_usable(slot: WeatherSlot) -> bool:
-    """True when the core irradiance / temperature inputs are all present.
-
-    A None in any of GHI / DNI / DHI / temperature means the weather image is
-    incomplete for this slot (fetcher gap, provider hole). Rather than guess,
-    the engine treats the slot as zero-production (SPEC degradation ethos:
-    never silently fabricate). Returns False so the caller emits zeros.
-    """
-    return (
-        slot.ghi is not None
-        and slot.dni is not None
-        and slot.dhi is not None
-        and slot.temp_c is not None
-    )
 
 
 def _plane_poa_components(
@@ -328,6 +316,8 @@ def compute_forecast(
     hk = hooks if hooks is not None else _NEUTRAL_HOOKS
     beam_tau_hook = hk.beam_tau
     slot_factor_hook = hk.slot_factor
+    dayahead_factor_hook = hk.dayahead_factor
+    have_dayahead_curve = dayahead_factor_hook is not None or slot_factor_hook is None
 
     lat = site.latitude
     lon = site.longitude
@@ -348,11 +338,8 @@ def compute_forecast(
 
     # Sky-view factor is a per-plane, per-day-of-year property (the horizon is
     # semi-transparent to the diffuse, so a seasonal foliage row ramps the SVF
-    # with the day). It is memoized at MODULE level inside
-    # ``horizon.sky_view_factor`` (keyed on the plane geometry + doy), so the
-    # O(360) quadrature runs at most once per plane per day for the WHOLE process
-    # and survives across the 15-min recompute cycles — no per-call memo here
-    # (audit #9b).
+    # with the day). The module-level memo in ``horizon.sky_view_factor`` shares
+    # repeated calculations across the 15-min recompute cycles (audit #9b).
 
     # Static AC ceiling ingredients for the per-slot band cap (SPEC §11.2). The
     # most DC the site can serve in a slot is the sum of every group's
@@ -441,12 +428,18 @@ def compute_forecast(
     # limits + the AC of any ceiling-free (ungrouped) planes. Used only to cap the
     # AC quantile band curves after the main loop (mirrors ``slot_ceilings`` for DC).
     ac_slot_ceilings: list[float] = []
+    dayahead_watts: list[float] = []
+    ac_dayahead_watts: list[float] = []
+    invalid_weather_slots: set[datetime] = set()
+    night_zero_slots: set[datetime] = set()
 
     def _append_zero_slot() -> None:
         raw_total_watts.append(0.0)
         total_watts.append(0.0)
         corrected_unclamped_watts.append(0.0)
         ac_watts.append(0.0)
+        dayahead_watts.append(0.0)
+        ac_dayahead_watts.append(0.0)
         # No production => no pre-clamp AC and no ungrouped AC contribution; the
         # group ceiling is the slot's AC ceiling (band watts are zero here anyway).
         ac_corrected_unclamped_watts.append(0.0)
@@ -469,17 +462,11 @@ def compute_forecast(
         start = slot.start
         slot_starts.append(start)
 
-        if not _slot_is_usable(slot):
-            # Missing weather -> zero production for this slot, but keep the
-            # slot present so downstream alignment / hourly bucketing is dense.
-            _append_zero_slot()
-            continue
-
-        # _slot_is_usable just gated a None temperature; the local re-check
-        # keeps the narrowing explicit (WeatherSlot.temp_c is Optional since
-        # the fetcher stopped fabricating 0 °C for provider gaps).
         temp_c = slot.temp_c
-        if temp_c is None:  # pragma: no cover - gated above, defensive only
+        if temp_c is None or not slot.usable:
+            # Keep slot alignment without treating a provider gap as an
+            # observation of zero production.
+            invalid_weather_slots.add(start)
             _append_zero_slot()
             continue
 
@@ -494,6 +481,7 @@ def compute_forecast(
         # there is no diffuse/global irradiance to transpose at all — never
         # silently clip real twilight diffuse (SPEC E4).
         if sun_el <= 0.0 and slot.dhi <= 0.0 and slot.ghi <= 0.0:
+            night_zero_slots.add(start)
             _append_zero_slot()
             continue
 
@@ -652,6 +640,20 @@ def compute_forecast(
         ac_slot_total = sum(ac_by_plane.values())
         ac_watts.append(ac_slot_total)
         ac_energy.add(start, ac_slot_total)
+        if have_dayahead_curve:
+            day_factor = dayahead_factor_hook(start) if dayahead_factor_hook else 1.0
+            if day_factor == factor:
+                dayahead_watts.append(cor_slot_total)
+                ac_dayahead_watts.append(ac_slot_total)
+            else:
+                dayahead_dc = electrical.correct_groups(
+                    cor_clamped, groups, factor=day_factor,
+                ).served
+                _, dayahead_ac = electrical.clamp_groups_ac(
+                    dayahead_dc, ac_groups, ungrouped_eta=_ungrouped_eta,
+                )
+                dayahead_watts.append(sum(dayahead_dc.get(p.name, 0.0) for p in planes))
+                ac_dayahead_watts.append(sum(dayahead_ac.values()))
         # Pre-AC-clamp AC total (AC analogue of corrected_unclamped_watts): the
         # eta-weighted factored DC per plane summed BEFORE the inverter AC clamp.
         # On a clipped slot this exceeds ``ac_slot_total`` (the served, clamped AC);
@@ -802,4 +804,8 @@ def compute_forecast(
         p10_hourly_wh=p10_hourly_wh,
         p50_hourly_wh=p50_hourly_wh,
         p90_hourly_wh=p90_hourly_wh,
+        dayahead_watts=tuple(dayahead_watts) if have_dayahead_curve else (),
+        ac_dayahead_watts=tuple(ac_dayahead_watts) if have_dayahead_curve else (),
+        invalid_weather_slots=frozenset(invalid_weather_slots),
+        night_zero_slots=frozenset(night_zero_slots),
     )

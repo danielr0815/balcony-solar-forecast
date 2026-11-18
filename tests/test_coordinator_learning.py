@@ -1860,6 +1860,7 @@ def test_build_learner_hooks_caches_day_factor(monkeypatch):
     class _Slot:
         start = slot_start
         ghi = 500.0
+        usable = True
         cloud_low = cloud_mid = cloud_high = 0.0
         visibility_m = 20000.0
 
@@ -3149,7 +3150,8 @@ def _complete_dc_hours(hours: dict[str, float]) -> dict[str, dict[str, float]]:
 
 def test_hooks_carry_learned_eta_when_trusted():
     c = _make_coordinator()
-    c._inverter_cal_state = InverterCalState(eta=0.93, n=INVERTER_CAL_MIN_SAMPLES)
+    c._site = _ac_meter_site()
+    c._inverter_cal_state = InverterCalState(eta=0.93, n=INVERTER_CAL_MIN_SAMPLES, source=c._inverter_cal_source())
 
     class _W:
         slots = ()
@@ -3161,8 +3163,9 @@ def test_hooks_carry_learned_eta_when_trusted():
 
 def test_hooks_no_learned_eta_when_untrusted():
     c = _make_coordinator()
+    c._site = _ac_meter_site()
     c._inverter_cal_state = InverterCalState(
-        eta=0.93, n=INVERTER_CAL_MIN_SAMPLES - 1
+        eta=0.93, n=INVERTER_CAL_MIN_SAMPLES - 1, source=c._inverter_cal_source()
     )
 
     class _W:
@@ -3441,13 +3444,14 @@ def test_measured_ac_sensor_keeps_sign_when_not_inverted():
 
 def test_inverter_efficiency_learned_summary():
     c = _make_coordinator()
+    c._site = _ac_meter_site()
     # Untrusted -> effective is None.
-    c._inverter_cal_state = InverterCalState(eta=0.94, n=5)
+    c._inverter_cal_state = InverterCalState(eta=0.94, n=5, source=c._inverter_cal_source())
     summ = c.inverter_efficiency_learned()
     assert summ == {"eta": 0.94, "n": 5, "effective": None}
     # Trusted -> effective is the clamped eta.
     c._inverter_cal_state = InverterCalState(
-        eta=0.94, n=INVERTER_CAL_MIN_SAMPLES
+        eta=0.94, n=INVERTER_CAL_MIN_SAMPLES, source=c._inverter_cal_source()
     )
     summ = c.inverter_efficiency_learned()
     assert summ["effective"] == pytest.approx(0.94)

@@ -21,6 +21,7 @@ import pytest
 pytest.importorskip("homeassistant")
 pytest.importorskip("voluptuous")
 
+from homeassistant.core import Context, ServiceCall  # noqa: E402
 from homeassistant.exceptions import ServiceValidationError  # noqa: E402
 
 from custom_components.balcony_solar_forecast import _services as svc  # noqa: E402
@@ -48,7 +49,7 @@ class _ServicesRegistry:
     def has_service(self, domain: str, service: str) -> bool:
         return service in self.handlers
 
-    def async_register(self, domain, service, handler, **kwargs) -> None:
+    def async_register(self, domain, service, handler, *args, **kwargs) -> None:
         self.handlers[service] = handler
 
 
@@ -56,6 +57,9 @@ class _WiredHass(_FakeHass):
     def __init__(self, store, *, allowed=True) -> None:
         super().__init__(store, allowed=allowed)
         self.services = _ServicesRegistry()
+
+    def async_run_hass_job(self, job, call):
+        return job.target(call)
 
 
 def _wired(store) -> _WiredHass:
@@ -160,7 +164,8 @@ async def test_registered_install_dashboard_requires_a_config_entry():
     handler surfaces that as a user error, not a traceback."""
     hass = _wired({"e1": _FakeCoordinator()})
     with pytest.raises(ServiceValidationError, match="no config entry"):
-        await hass.services.handlers["install_dashboard"](_Call({}))
+        call = ServiceCall(hass, svc.DOMAIN, "install_dashboard", context=Context())
+        await hass.services.handlers["install_dashboard"](call)
 
 
 async def test_registered_suggest_shade_groups_handler():

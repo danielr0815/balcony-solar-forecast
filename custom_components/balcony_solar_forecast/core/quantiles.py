@@ -66,6 +66,7 @@ __all__ = [
     "empirical_percentile",
     "bands_for_bin",
     "ring_evidence",
+    "windowed_samples",
     "quantile_bin_key",
     "train_quantiles",
     "apply_bands",
@@ -107,18 +108,45 @@ def _entry_date_relerr(entry: object) -> tuple[str, float] | None:
     if isinstance(entry, (list, tuple)):
         if len(entry) != 2:
             return None
-        rv = _finite(entry[1])
+        rv = None if isinstance(entry[1], bool) else _finite(entry[1])
         if rv is None:
             return None
         iso = entry[0] if isinstance(entry[0], str) else ""
         return (iso, rv)
-    rv = _finite(entry)
+    rv = None if isinstance(entry, bool) else _finite(entry)
     if rv is None:
         return None
     return ("", rv)
 
 
-def ring_evidence(ring: object) -> tuple[int, int]:
+def windowed_samples(ring: object, *, as_of_date: str = "") -> list[tuple[str, float]]:
+    """Select the usable samples at the local issue date, including both endpoints."""
+    if not isinstance(ring, (list, tuple)):
+        return []
+    samples = [parsed for entry in ring if (parsed := _entry_date_relerr(entry)) is not None]
+    cutoff = _window_cutoff(as_of_date)
+    if not cutoff:
+        return samples
+    upper = date.fromisoformat(as_of_date).isoformat()
+    valid_samples = []
+    for stamp, value in samples:
+        if stamp:
+            try:
+                stamp = date.fromisoformat(stamp).isoformat()
+            except ValueError:
+                continue
+            if not cutoff <= stamp <= upper:
+                continue
+        valid_samples.append((stamp, value))
+    return _trim_ring(valid_samples, cutoff="")
+
+
+def ring_evidence(ring: object, *, as_of_date: str = "") -> tuple[int, int]:
+    """Return sample and effective-day counts within the same window as serving."""
+    return _sample_evidence(windowed_samples(ring, as_of_date=as_of_date))
+
+
+def _sample_evidence(samples: list[tuple[str, float]]) -> tuple[int, int]:
     """``(n, effective_days)`` for one bin ring — the trained-gate evidence.
 
     ``n`` is the count of parseable relerr samples; ``effective_days`` is the
@@ -129,17 +157,10 @@ def ring_evidence(ring: object) -> tuple[int, int]:
     the coordinator's diagnostics summary (SPEC §11.1), so the two can never
     diverge. A non-sequence / empty ring yields ``(0, 0)``. Never raises.
     """
-    if not isinstance(ring, (list, tuple)):
-        return (0, 0)
-    n = 0
+    n = len(samples)
     distinct_dates: set[str] = set()
     undated = 0
-    for entry in ring:
-        parsed = _entry_date_relerr(entry)
-        if parsed is None:
-            continue
-        iso, _relerr = parsed
-        n += 1
+    for iso, _relerr in samples:
         if iso:
             distinct_dates.add(iso)
         else:
@@ -153,7 +174,7 @@ def ring_evidence(ring: object) -> tuple[int, int]:
 
 
 def _window_cutoff(training_date: str) -> str:
-    """Exclusive lower-bound ISO date of the ring window, or "" if no date.
+    """Inclusive lower-bound ISO date of the ring window, or "" if no date.
 
     A DATED sample strictly older than ``training_date - QUANTILE_RING_DAYS`` is
     outside the window. Returns "" (disable the date trim) when the training date
@@ -317,32 +338,9 @@ def bands_for_bin(
         return QuantileBands.neutral()
 
     key = QuantileState.bin_key(cloud_class, day_part)
-    ring = state.bins.get(key)
-    if not ring:
-        return QuantileBands.neutral()
-    if as_of_date:
-        normalised = [
-            [parsed[0], parsed[1]]
-            for entry in ring
-            if (parsed := _entry_date_relerr(entry)) is not None
-        ]
-        ring = _trim_ring(
-            normalised, cutoff=_window_cutoff(as_of_date)
-        )
-        if not ring:
-            return QuantileBands.neutral()
-
-    # Extract relerr VALUES, tolerating both the dated-pair and the legacy
-    # bare-number entry shapes (the loader normalises, but a directly constructed
-    # QuantileState may carry either). Junk entries are dropped. The sample count
-    # and the effective-days evidence come from the SHARED ``ring_evidence`` gate
-    # (SPEC §11.1) so this reader and the diagnostics summary cannot diverge.
-    vals: list[float] = [
-        parsed[1]
-        for entry in ring
-        if (parsed := _entry_date_relerr(entry)) is not None
-    ]
-    n, effective_days = ring_evidence(ring)
+    samples = windowed_samples(state.bins.get(key), as_of_date=as_of_date)
+    vals = [relerr for _iso, relerr in samples]
+    n, effective_days = _sample_evidence(samples)
     if n == 0:
         return QuantileBands.neutral()
 

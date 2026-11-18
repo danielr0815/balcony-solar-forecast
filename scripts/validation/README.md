@@ -24,6 +24,37 @@ a separate audit axis and must have its own reference provenance. No category
 is inferred from the error of the forecast being evaluated. All strata retain
 the same paired-target mask; small subsets do not establish improvement.
 
+Individual-target metrics retain multiple issues for a target. Targets must
+belong wholly to one local calendar day and may end at its midnight. The
+benchmark rejects overlapping targets from the same issue. For daily totals
+and peaks, it selects one issue per day and issue period by the longest
+planned target duration, with ties going to the latest issue. Selection uses
+the planned intervals, independent of measurements and model availability.
+Coverage reports planned, eligible, paired and calendar hours.
+
+Issue periods use the site clock. Previous evening starts at 18:00 on the
+prior day, early morning runs until 06:00 on the target day, and intraday
+starts at 06:00. Other earlier issues form their own group. Within each
+phase, pairwise comparisons select the latest planned issue for each target.
+This includes rolling intraday captures with one issue per hour. The
+comparison keeps identical targets with available models and the same
+measured Wh. Conflicting measurements and days with overlapping shared
+targets are counted and excluded. Phase energy and peak mean power describe
+the shared rolling target set. The single-issue daily report keeps its
+separate selection. Band and P50 comparisons use the shared targets with
+each corresponding bound available in both phases.
+
+The P10–P90 report gives width, coverage, and P50 availability by issue period
+and lead-time group. Optional per-model `band_status` records group bounds as
+`neutral`, `trained`, `mixed` or `ensemble`. For `served`, the benchmark
+also accepts `regime.band_learning_state` from a capture. Missing status stays
+`unknown`, even when width is zero.
+
+An optional `references.previous_day` record supplies Wh for the same local
+interval on the prior day with its original availability time. It and every
+model are compared on the same subset where the reference was already known
+at issue. The ordinary model comparison retains its original target set.
+
 Persistence experiments require frozen `candidate_inputs` per target:
 `feature_end`, `feature_available_at`, `sum_ratio`, `panel_ratio`, and optional
 `forecast_class`. The original `theta` curve is the common starting point, and
@@ -81,8 +112,11 @@ start), `weather_role: issued_forecast`, `weather_available_at`, original ordere
 15-minute `weather_slots`, `actuals_available_at` (after day end) and
 `actuals_hourly: {stable_module_id: {UTC_hour_start: Wh}}`. An hourly mean W is
 Wh for its complete one-hour interval; `actual_unit`, when provided, must be
-`Wh`. Complete weather axes include local 23/24/25-hour days. Corrupt, stuck,
-implausible, missing or collapsed training labels cannot seed a learner.
+`Wh`. Complete weather axes include local 23/24/25-hour days. Equivalent
+ISO dates identify the same day. In zones with a fractional UTC offset,
+training and scoring use only complete UTC recorder hours inside the local
+day. Corrupt, stuck, implausible, missing or collapsed training labels
+cannot seed a learner.
 
 Default presets are `raw`, `bias`, `slow` and `full` (persistent shading, bias
 and quantiles). A `variants` object can name separate candidates with
@@ -108,6 +142,14 @@ metering never silently compares measured ports against all panels. Collapsed
 but otherwise valid zero measurements remain scoreable, even though they cannot
 train. RAW's consumed-day count describes shared label eligibility, never a RAW
 state update. End-of-run labels still unavailable at the last issue remain pending.
+
+The interval report pairs each closed hourly site DC measurement in Wh with
+the engine's sums of the four 15-minute DC P10/P50/P90 energy bounds. It
+reports empirical P10–P90 coverage, width, one-sided misses and P50 point
+error at that hourly resolution. Summing bounds does not establish calibrated
+hourly quantiles or measure live 15-minute coverage. For a variant with
+unmetered planes, the report gives point errors on the measured subset and
+leaves site interval coverage unavailable.
 
 Scope is the persistent day-ahead learning experiment, **not** a complete HA
 simulator: intraday, automatic drift disabling, next-day collapse freeze,
@@ -138,6 +180,82 @@ reject nonfinite, boolean or negative power labels. Without geometry, a fixed
 European daylight window cannot establish complete days. Captures remain
 private until the owner reviews, anonymizes and explicitly releases them.
 They are not the same schema as frozen benchmark input bundles.
+
+## Prospective lead-time captures
+
+Use a private capture directory and define the target hours, site timezone,
+DC sources and split dates before collection. Make one plan per stable site
+configuration. For example, this fictional plan targets one hour.
+
+```json
+{
+  "timezone": "Europe/Berlin",
+  "entry_id": "fictional_site",
+  "dc_sources": {"Module A": "sensor.dc_a", "Module B": "sensor.dc_b"},
+  "targets": ["2026-12-01T10:00:00Z"],
+  "development_end": "2026-11-15",
+  "selection_end": "2026-11-30",
+  "licence": "Private, no redistribution"
+}
+```
+
+Set `BSF_HA_URL` and `BSF_HA_TOKEN` in the process environment. Capture
+requires a release whose `get_forecast` accepts `include_capture_metadata`.
+Run each capture at its actual time. The script verifies the plan's DC sensors
+against the selected HA config entry and stores only the binding fingerprint.
+The raw entity IDs and entry ID stay in the private plan. The tool reads forecast and Recorder data and
+writes local files exclusively. It creates no jobs in HA.
+
+```bash
+# Optional previous-day benchmark. Collect closed reference hours before the next HA publication.
+uv run --no-sync python -m scripts.validation.capture_lead_time plan.json capture reference 2026-12-01 previous_evening
+# Previous day from 18:00 to midnight in the site timezone, after that publication
+uv run --no-sync python -m scripts.validation.capture_lead_time plan.json capture issue 2026-12-01 previous_evening
+# Target day before 06:00 local
+uv run --no-sync python -m scripts.validation.capture_lead_time plan.json capture issue 2026-12-01 early_morning
+# At most 30 minutes before the target start, from 06:00 local onward
+uv run --no-sync python -m scripts.validation.capture_lead_time plan.json capture issue 2026-12-01 intraday --target 2026-12-01T10:00:00Z
+# After all target intervals finish and Recorder has written their final bucket
+uv run --no-sync python -m scripts.validation.capture_lead_time plan.json capture actual 2026-12-01
+# Offline, also repeatable with a new output directory
+uv run --no-sync python -m scripts.validation.capture_lead_time plan.json capture export replay
+uv run --no-sync python scripts/validation/replay_benchmark.py replay/manifest.json --output replay-report.json
+```
+
+The tool records HA's calculation/publication timestamps and the client receipt
+time. Both publication and receipt must precede the target and fall within its
+phase. Synchronize the HA and capture-host clocks. The bundle hashes identify the
+frozen input files and plan. They do not independently attest either clock.
+Use one UTC start for each target hour, including the repeated hour at DST change.
+Evening and morning collect every planned target for the specified local day.
+Near-term collection selects exactly one planned target per call.
+Choose targets that can be observed in all three phases.
+
+Each closed target requires all twelve five-minute Recorder means in W from
+each planned DC module. Recorder metadata must identify a power statistic
+stored in W or kW, which Recorder converts to the requested W. An
+unverified, incompatible or changed channel remains in the bundle as
+an explicit missing label. Partial forecast hours also stay missing. Four
+valid slot markers must confirm a wholly dark hour before an absent hour
+becomes a forecast zero. The advance plan and `missing_forecast_captures` expose absent issue times.
+Use the same target-hour intersection for direct comparisons between lead phases.
+The RAW and served forecasts come from the same published DC model generation.
+When all slots have bands, their sums are hourly aggregates of marginal
+15-minute bands. Their evidence is recorded as neutral, trained, ensemble,
+mixed, or unknown. Coverage of those sums is an empirical result.
+
+Run `reference TARGET_DAY PHASE` separately for each phase where a previous-day
+comparison is needed. It captures closed five-minute Recorder buckets for the
+same local clock hour on the previous day. Use a later HA publication for
+the subsequent `issue` command. Ambiguous, still open, or missing source
+intervals leave the optional reference empty. References are frozen into the
+issue file before offline export and do not reduce the RAW/served sample.
+
+Optional `export --observations weather.json` adds a separate observation stratum.
+The input object has a `source` description and `records` containing
+`target_start`, `available_at` at or after interval close, and
+`observed_weather` (`clear`, `mixed` or `overcast`). Use an independent reference,
+such as a local irradiance observation. Without it the stratum stays unknown.
 
 The following C1–C8 runbook is historical, specific to the reference installation
 and July 2026 intervention. Its thresholds are not community release gates.

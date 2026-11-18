@@ -58,7 +58,9 @@ those channels resolve, so a streak with a genuinely different cause surfaces.
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import UTC, date, datetime
+
+from homeassistant.util import dt as dt_util
 
 from .const import (
     INVERTER_CAL_MAX,
@@ -329,6 +331,49 @@ def _day_was_ours(coord, iso: str) -> bool:
     return coord._store.get_issued(iso) is not None
 
 
+def reconcile_eta_source(coord, source: str | None) -> None:
+    """Clear an obsolete η warning at setup, even when no labels are available."""
+    try:
+        _reconcile_eta_source(coord, source, dict(coord._store.get_learning_health()))
+    except Exception:
+        _LOGGER.warning("Could not reconcile the η warning with the AC source", exc_info=True)
+
+
+def _reconcile_eta_source(coord, source: str | None, health: dict) -> None:
+    previous = health.get("eta_source")
+    legacy = previous is None and any(health.get(key) for key in (
+        "eta_oob_streak", "eta_oob_last_day", "eta_last_checked_day",
+    ))
+    if source == previous and not legacy:
+        return
+    if source is not None and legacy and coord._inverter_config_unchanged():
+        health["eta_source"] = source
+        coord._store.set_learning_health(health)
+        return
+
+    health.update(eta_oob_streak=0, eta_oob_last_day=None,
+                  eta_oob_last_median=None, eta_last_checked_day=None)
+    health.pop("eta_source", None)
+    health.pop("eta_source_changed_day", None)
+    if source is not None:
+        health["eta_source"] = source
+        modified = getattr(getattr(coord, "entry", None), "modified_at", None)
+        now = dt_util.utcnow()
+        has_timestamp = (
+            isinstance(modified, datetime) and modified.tzinfo is not None
+            and datetime(1970, 1, 1, tzinfo=UTC) < modified <= now
+        )
+        if previous is not None or legacy or (has_timestamp and not coord._inverter_config_unchanged()):
+            # A mixed local day may contain evidence recorded under the old
+            # meter or polarity. With unknown history, wait for a full day
+            # after the source is first reconciled.
+            changed = modified if has_timestamp else now
+            health["eta_source_changed_day"] = dt_util.as_local(changed).date().isoformat()
+    coord._store.set_learning_health(health)
+    if previous is not None or legacy:
+        coord._delete_repair_issue(ISSUE_ETA_OUT_OF_BAND)
+
+
 def record_eta_calibration_outcome(
     coord, day: date, *, median_ratio: float
 ) -> None:
@@ -359,9 +404,16 @@ def record_eta_calibration_outcome(
 def _record_eta_calibration_outcome(
     coord, day: date, *, median_ratio: float
 ) -> None:
+    source = coord._inverter_cal_source()
+    if source is None:
+        return
     store = coord._store
     health = dict(store.get_learning_health())
+    _reconcile_eta_source(coord, source, health)
     iso = day.isoformat()
+    changed = health.get("eta_source_changed_day")
+    if isinstance(changed, str) and iso <= changed:
+        return
 
     last_checked = health.get("eta_last_checked_day") or health.get("eta_oob_last_day")
     if isinstance(last_checked, str) and iso < last_checked:
@@ -432,6 +484,8 @@ def learning_health_summary(coord) -> dict[str, object]:
         # Honest unknown WITH the cause, never a bare ``available: False`` that
         # reads like "the feature is off" when the accessor is actually broken.
         return {"available": False, "error": repr(err)}
+    health.pop("eta_source", None)
+    health.pop("eta_source_changed_day", None)
     health["available"] = True
     health["streak_threshold"] = LEARNING_STALLED_STREAK_DAYS
     return health

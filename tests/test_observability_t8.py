@@ -16,6 +16,8 @@ plain-core path. The methods under test are pure state readers, so a bare
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 pytest.importorskip("homeassistant")
@@ -55,7 +57,14 @@ def _bare_coordinator() -> BalconySolarCoordinator:
 # ---------------------------------------------------------------------------
 
 
-def test_quantile_trained_needs_enough_days_not_just_samples():
+@pytest.fixture
+def july_quantile_window(monkeypatch):
+    from homeassistant.util import dt as dt_util
+
+    monkeypatch.setattr(dt_util, "utcnow", lambda: datetime(2026, 7, 15, 12, tzinfo=UTC))
+
+
+def test_quantile_trained_needs_enough_days_not_just_samples(july_quantile_window):
     """20 samples from only 3 distinct days -> not trained (QRC-4)."""
     assert QUANTILE_MIN_SAMPLES <= 20
     assert QUANTILE_MIN_DAYS > 3
@@ -76,7 +85,7 @@ def test_quantile_trained_needs_enough_days_not_just_samples():
     assert bin_stat["trained"] is False
 
 
-def test_quantile_trained_true_with_enough_days():
+def test_quantile_trained_true_with_enough_days(july_quantile_window):
     key = QuantileState.bin_key("clear", DAY_PART_MIDDAY)
     n = max(QUANTILE_MIN_SAMPLES, QUANTILE_MIN_DAYS)
     ring = [[f"2026-07-{(i % QUANTILE_MIN_DAYS) + 1:02d}", 1.0] for i in range(n)]

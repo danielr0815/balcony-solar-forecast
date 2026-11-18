@@ -96,7 +96,7 @@ class _FakeServices:
     def has_service(self, domain: str, service: str) -> bool:
         return service in self.registered
 
-    def async_register(self, domain, service, handler, **kwargs):
+    def async_register(self, domain, service, handler, *args, **kwargs):
         self.registered.append(service)
 
 

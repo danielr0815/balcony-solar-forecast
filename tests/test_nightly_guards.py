@@ -130,7 +130,7 @@ def _weather_series(day: date = _DAY, n_slots: int = 20):
 
 def test_cloud_class_by_hour_maps_every_slot_hour_once():
     c = _make_coordinator()
-    c._cached_weather = lambda: _weather_series()
+    c._result_reference_context = (c._last_result, {}, _weather_series())
     out = c._cloud_class_by_hour(_ISO)
     # 20 slots across the hours 08..12 (UTC == local in the test harness),
     # four slots per hour -> five hour keys, one class each (setdefault:
@@ -874,32 +874,3 @@ async def test_async_read_actuals_delegates_to_actuals_module(monkeypatch):
 async def test_async_read_ac_actuals_without_meter_is_empty():
     c = _make_coordinator()  # the learning-test site has no AC meter
     assert await c._async_read_ac_actuals(_DAY) == {}
-
-
-async def test_slow_only_hourly_runs_the_engine_without_day_ahead():
-    """The nightly attribution pass returns the shademap-only curve sliced to
-    the snapshot's local day (slow-only == raw when the layer is inactive is
-    handled by the caller; here the layer IS active)."""
-    c = _make_coordinator()
-    c._shademap_state = ShademapState(
-        channels={"M1": {"1:2:0": ShademapBin(tau=0.5, n=10)}}
-    )
-    c._cached_weather = lambda: _weather_series()
-    out = await c._slow_only_hourly(_ISO)
-    assert out  # hours of the local day came back
-    assert all(k.startswith(_ISO) for k in out)
-    assert all(v >= 0.0 for v in out.values())
-    # Daylight hours carry real energy (the fixture is bright at mid-day).
-    assert max(out.values()) > 0.0
-
-
-async def test_slow_only_hourly_inactive_layer_or_no_weather_is_empty():
-    c = _make_coordinator()
-    c._cached_weather = lambda: _weather_series()
-    assert await c._slow_only_hourly(_ISO) == {}  # no shademap channels
-
-    c._shademap_state = ShademapState(
-        channels={"M1": {"1:2:0": ShademapBin(tau=0.5, n=10)}}
-    )
-    c._cached_weather = lambda: None
-    assert await c._slow_only_hourly(_ISO) == {}

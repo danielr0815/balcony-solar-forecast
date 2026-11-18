@@ -152,6 +152,9 @@ class _Coord:
         self.deleted.append(issue_id)
 
     # Delegates, exactly as the real coordinator wires them.
+    def _inverter_cal_source(self) -> str:
+        return "synthetic-meter"
+
     def _record_actuals_outcome(self, day, *, accepted) -> None:
         _channel_health.record_actuals_outcome(self, day, accepted=accepted)
 

@@ -182,18 +182,39 @@ async def score_scoreboard_day(coord, day: date) -> None:
 def issued_after_cutoff(coord, snap: IssuedSnapshot, day: date) -> bool:
     """True when the snapshot was issued after the day-ahead cutoff of ``day``.
 
-    The cutoff is ``_SCOREBOARD_ISSUE_CUTOFF_HOUR`` local time of ``day``.
+    The cutoff is 06:00 local time of the target day or the start of an
+    earlier hour with positive forecast or measured energy.
     A snapshot with an unparseable / empty ``issued_at`` is treated as valid
     (not after cutoff) — a legacy/v0.1 snapshot pre-dates the catch-up
     recompute path this guard defends against.
     """
-    issued_at = dt_util.parse_datetime(snap.issued_at or "")
-    if issued_at is None:
+    # The archive write time can legitimately be much later than publication.
+    # But an issued timestamp must never antedate the computation it refers to.
+    stamps = [
+        dt_util.as_utc(parsed)
+        for value in (snap.issued_at, snap.computed_at)
+        if (parsed := dt_util.parse_datetime(value or "")) is not None
+    ]
+    if not stamps:
         return False
-    cutoff = dt_util.start_of_local_day(
-        datetime(day.year, day.month, day.day)
-    ) + timedelta(hours=_SCOREBOARD_ISSUE_CUTOFF_HOUR)
-    return dt_util.as_utc(issued_at) > dt_util.as_utc(cutoff)
+    issued_at = max(stamps)
+    start = dt_util.start_of_local_day(datetime(day.year, day.month, day.day))
+    if issued_at <= dt_util.as_utc(start):
+        return False
+    cutoff = start + timedelta(hours=_SCOREBOARD_ISSUE_CUTOFF_HOUR)
+    if issued_at > dt_util.as_utc(cutoff):
+        return True
+    # An early hour can have real production even when the model missed it.
+    # One positive metered channel is enough to establish that the hour counts.
+    actuals = coord._store_hourly_actuals(day.isoformat()) or {}
+    for curve in (snap.raw_hourly_wh, snap.corrected_hourly_wh, *actuals.values()):
+        for key, wh in curve.items():
+            if not dc_power(wh):
+                continue
+            target = dt_util.parse_datetime(key)
+            if target is not None and dt_util.as_local(target).date() == day and dt_util.as_utc(target) < issued_at:
+                return True
+    return False
 
 
 def dominant_weather_class(coord, snap: IssuedSnapshot, iso: str) -> str:

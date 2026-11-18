@@ -117,6 +117,7 @@ const I18N = {
     // caption names the line's ORIGIN (SPEC §18.4), never a unit basis.
     forecastLive: "Forecast (live)",
     forecastIssued: "Forecast (archived issue)",
+    forecastLegacy: "Forecast (legacy archive)",
     // Under-plot notes when NO past-day line is drawn ({d} = the date).
     forecastError: "Forecast lookup failed",
     forecastMissing:
@@ -154,6 +155,7 @@ const I18N = {
     // Einheiten-Basis.
     forecastLive: "Prognose (live)",
     forecastIssued: "Prognose (archivierter Stand)",
+    forecastLegacy: "Prognose (älteres Archiv)",
     // Under-plot notes when NO past-day line is drawn ({d} = the date).
     forecastError: "Prognose-Abruf fehlgeschlagen",
     forecastMissing:
@@ -245,11 +247,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
     this._config = {};
     this._hass = null;
     this._rendered = false;
-    // Card-LOCAL selection (never persisted): the view and the navigation offset
-    // in DAYS from today (0 = today / current week, negative = past). In week mode
-    // the offset addresses the 7-day window's LAST day and steps by 7.
+    // History is pinned to an absolute site-local date (the last day in week
+    // mode). A null date follows the live day as the site crosses midnight.
     this._view = "day"; // "day" | "week"
-    this._offset = 0;
+    this._selectedDate = null;
     // Last-seen forecast state object + module signature — identity/equality gate
     // the re-render on a real change (the async stats fetch re-renders itself).
     this._lastForecast = undefined;
@@ -347,7 +348,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     const ids = this._resolveIds(hass);
     const total = hass.states[ids.total_sensor];
     const forecast = hass.states[ids.forecast_sensor];
-    const liveDay = this._view === "day" && this._offset === 0;
+    const liveDay = this._view === "day" && this._isLive();
     // The module list rarely changes; compute a cheap signature so a plain
     // measured-power tick does NOT re-render a static past/week view.
     this._rebuildModules(total);
@@ -372,7 +373,16 @@ class BalconyPowerHistoryCard extends HTMLElement {
 
   /** True while the selection addresses the live window (today / current week). */
   _isLive() {
-    return this._offset === 0;
+    return this._selectedDate === null;
+  }
+
+  _dateAt(offset = 0) {
+    const calendar = this._calendar();
+    return calendar.shift(this._selectedDate ?? calendar.key(), offset);
+  }
+
+  _dayAt(offset = 0) {
+    return this._calendar().start(this._dateAt(offset));
   }
 
   /** Days per navigation step: a week view moves the whole 7-day window. */
@@ -380,12 +390,13 @@ class BalconyPowerHistoryCard extends HTMLElement {
     return this._view === "week" ? 7 : 1;
   }
 
-  /** ◀ / ▶ handler: shift the offset into the past / toward today, then reload. */
+  /** ◀ / ▶ handler: move the selected site-local date and reload. */
   _navigate(dir) {
-    const next = this._offset + dir * this._step();
-    if (next > 0) return; // ▶ never advances past today (its button is disabled)
-    if (next === this._offset) return;
-    this._offset = next;
+    const today = this._calendar().key();
+    const next = this._dateAt(dir * this._step());
+    const selection = next < today ? next : null;
+    if (selection === this._selectedDate) return;
+    this._selectedDate = selection;
     this._reload();
   }
 
@@ -393,7 +404,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
   _setView(view) {
     if (view === this._view) return;
     this._view = view;
-    this._offset = 0;
+    this._selectedDate = null;
     this._reload();
   }
 
@@ -435,7 +446,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
 
   _dayHours() {
     const calendar = this._calendar();
-    const start = calendar.dayAt(this._offset);
+    const start = this._dayAt();
     const key = `${calendar.timeZone}/${start.toISOString()}`;
     if (this._dayHoursKey !== key) {
       this._dayHoursKey = key;
@@ -443,7 +454,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     }
     return this._dayHoursCache;
   }
-  _hourIndex(value) { return this._calendar().hourIndex(value, this._calendar().dayAt(this._offset)); }
+  _hourIndex(value) { return this._calendar().hourIndex(value, this._dayAt()); }
 
   _resolveIds(hass) {
     return resolveEntities(this._config, this._registryList, hass, [
@@ -563,12 +574,12 @@ class BalconyPowerHistoryCard extends HTMLElement {
 
   /** Day view: hourly means over [selected 00:00, next 00:00) → Wh, +line. */
   async _fetchDay(hass, sources, seq) {
-    const start = this._calendar().dayAt(this._offset);
-    const end = this._calendar().dayAt(this._offset + 1); // next LOCAL midnight (DST-exact)
+    const start = this._dayAt();
+    const end = this._dayAt(1); // next LOCAL midnight (DST-exact)
     const now = new Date();
     // Today stops at "now" (matches the original live behaviour); a past day
     // spans the whole local day.
-    const endTime = (this._offset === 0 ? now : end).toISOString();
+    const endTime = (this._isLive() ? now : end).toISOString();
     let result;
     try {
       result = await hass.callWS({
@@ -590,7 +601,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     this._ingestDay(result, sources);
     // Forecast line: TODAY uses the live wh_period curve; a PAST day reads the
     // archived issued curve via the read-only service (awaited below).
-    if (this._offset === 0) {
+    if (this._isLive()) {
       const ids = this._resolveIds(hass);
       this._recomputeForecast(hass.states[ids.forecast_sensor]);
       this._render();
@@ -606,9 +617,9 @@ class BalconyPowerHistoryCard extends HTMLElement {
     // The window ENDS at the selected day; step back 6 days for its start. The
     // seven local-midnight day starts drive both the query and the bucketing.
     const days = [];
-    for (let i = 0; i < 7; i++) days.push(this._calendar().dayAt(this._offset - 6 + i));
+    for (let i = 0; i < 7; i++) days.push(this._dayAt(-6 + i));
     const start = days[0];
-    const end = this._offset === 0 ? new Date() : this._calendar().dayAt(this._offset + 1);
+    const end = this._isLive() ? new Date() : this._dayAt(1);
     let result;
     try {
       result = await hass.callWS({
@@ -771,7 +782,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
       }
     }
     this._dayForecast = arr;
-    this._forecastState = "issued";
+    this._forecastState = result.curve_source === "legacy" ? "legacy" : "issued";
   }
 
   /** {stat_id: [{start, mean}]} → per-source number[23/24/25] hourly Wh (mean W×1h). */
@@ -898,13 +909,13 @@ class BalconyPowerHistoryCard extends HTMLElement {
   }
 
   _learningNote(t) {
-    if (this._offset !== 0 || this._view === "week") return null;
+    if (!this._isLive() || this._view === "week") return null;
     const ids = this._resolveIds(this._hass || {});
     const sensor = this._hass?.states?.[ids.forecast_sensor];
     if (!sensor || ["unknown", "unavailable"].includes(sensor.state)) return null;
     const readiness = sensor.attributes?.quantile_readiness;
     if (!readiness?.enabled) return null;
-    const key = this._calendar().key(this._calendar().dayAt(this._offset));
+    const key = this._dateAt();
     const day = readiness.by_day?.[key];
     if (!day) return null;
     const label = day.state === "trained" ? t.learningTrained : day.state === "partial" ? t.learningPartial : t.learningCold;
@@ -927,7 +938,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     const forecast = week ? this._weekForecast : this._dayForecast;
     const count = week ? 7 : this._dayHours().length;
     const rows = Array.from({ length: count }, (_, i) => {
-      const date = week ? this._calendar().dayAt(this._offset - 6 + i) : this._dayHours()[i];
+      const date = week ? this._dayAt(-6 + i) : this._dayHours()[i];
       const values = this._modules.map((m) => bars[m.id]?.[i] ?? null);
       const expected = week ? this._calendar().hours(date).length : 1;
       const partial = week && this._modules.some((mod) => (this._weekCoverage?.[mod.id]?.[i] || 0) < expected);
@@ -945,10 +956,11 @@ class BalconyPowerHistoryCard extends HTMLElement {
     let text = null;
     if (this._forecastState === "live") text = t.forecastLive;
     else if (this._forecastState === "issued") text = t.forecastIssued;
+    else if (this._forecastState === "legacy") text = t.forecastLegacy;
     if (!text) return null;
     const div = document.createElement("div");
     div.className = "provenance";
-    if (this._forecastState === "issued" && this._issuedAt) {
+    if (this._forecastState !== "live" && this._issuedAt) {
       const stamp = new Date(this._issuedAt);
       if (Number.isFinite(stamp.getTime())) text += ` · ${stamp.toLocaleString(this._hass?.language || "en", { timeZone: this._calendar().timeZone })}`;
     }
@@ -958,7 +970,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
 
   /** The day view's under-plot forecast note (or null): missing vs error. */
   _forecastNote(t) {
-    if (this._offset === 0) return null;
+    if (this._isLive()) return null;
     let text = null;
     if (this._forecastState === "error") {
       text = t.forecastError;
@@ -966,7 +978,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     } else if (this._forecastState === "missing") {
       text = t.forecastMissing.replace(
         "{d}",
-        this._calendar().shortDate(this._calendar().dayAt(this._offset), true),
+        this._calendar().shortDate(this._dayAt(), true),
       );
       if (this._oldestIssued) {
         text += t.archiveSince.replace(
@@ -1006,7 +1018,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     next.textContent = "▶";
     next.title = t.next;
     next.setAttribute("aria-label", t.next);
-    next.disabled = this._offset >= 0;
+    next.disabled = this._isLive();
     next.addEventListener("click", () => this._navigate(1));
     nav.appendChild(prev);
     nav.appendChild(label);
@@ -1036,14 +1048,14 @@ class BalconyPowerHistoryCard extends HTMLElement {
   /** The nav label: Today/Yesterday/date (day) or the 7-day window (week). */
   _navLabel(t) {
     if (this._view === "week") {
-      const end = this._calendar().dayAt(this._offset);
-      const start = this._calendar().dayAt(this._offset - 6);
+      const end = this._dayAt();
+      const start = this._dayAt(-6);
       return `${this._calendar().shortDate(start)}–${this._calendar().shortDate(end, true)}`;
     }
-    if (this._offset === 0) return t.today;
-    if (this._offset === -1) return t.yesterday;
+    if (this._isLive()) return t.today;
+    if (this._selectedDate === this._calendar().shift(this._calendar().key(), -1)) return t.yesterday;
     const lang = ((this._hass && this._hass.language) || "en").replace("_", "-");
-    const d = this._calendar().dayAt(this._offset);
+    const d = this._dayAt();
     try {
       return d.toLocaleDateString(lang, { timeZone: this._calendar().timeZone });
     } catch (_e) {
@@ -1220,7 +1232,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
     if (this._loadState !== "ok") {
       // A PAST day with no bars is "no statistics for this range" (the recorder
       // may not have covered that day); today with none is "not yet".
-      const empty = this._offset === 0 ? t.noStats : t.noStatsRange;
+      const empty = this._isLive() ? t.noStats : t.noStatsRange;
       const note = this._loadState === "loading" ? t.loading
         : this._loadState === "error" ? this._statisticsError(t) : empty;
       const text = svg("text", {
@@ -1277,7 +1289,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
   _weekPlot(t) {
     const COLS = 7;
     const days = [];
-    for (let i = 0; i < COLS; i++) days.push(this._calendar().dayAt(this._offset - 6 + i));
+    for (let i = 0; i < COLS; i++) days.push(this._dayAt(-6 + i));
 
     // --- domain: max stacked daily total across the 7 days ---------------
     let dataMax = 0;
