@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-11-18
+
 ### Fixed
 
 - Keep incomplete provider radiation out of the last-good cache and learner references. Calculate scalar-free DC and AC energy with each inverter's own limit. Reuse static sky-view factors across days.
