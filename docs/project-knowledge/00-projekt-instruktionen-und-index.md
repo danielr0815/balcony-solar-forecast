@@ -1,6 +1,6 @@
 # Projekt-Instruktionen & Index
 
-**Stand: `Arbeitsstand` auf v0.27.2 (2026-09-26).** Diese Datei ist der Einstieg in die
+**Die Wissensbasis dokumentiert den Projektstand vom 26. September 2026 (v0.27.2).** Für das aktuelle Verhalten gelten die [Spezifikation](../SPEC.md) und das [Integrationsmanifest](../../custom_components/balcony_solar_forecast/manifest.json). Diese Datei ist der Einstieg in die
 Wissensbasis zum Repository **`danielr0815/balcony-solar-forecast`**
 (<https://github.com/danielr0815/balcony-solar-forecast>). Sie erklärt, was das
 Projekt ist, welches der sieben Wissensdokumente wofür zuständig ist, über welchen
@@ -30,7 +30,7 @@ Technische Eckdaten (alle am Code geprüft):
 
 | Punkt | Wert |
 |---|---|
-| Aktueller Stand | **v0.27.2**, `manifest.json` / `pyproject.toml` / `const.INTEGRATION_VERSION` synchron |
+| Softwareversion | Im [Manifest](../../custom_components/balcony_solar_forecast/manifest.json) angegeben. Der Kopf der [SPEC](../SPEC.md) nennt die zugehörige Vertragsversion. |
 | Laufzeit-Abhängigkeiten | **keine** (`manifest.json` → `requirements: []`) — reine stdlib, kein numpy/pandas/pvlib |
 | Architekturgrenze | `custom_components/balcony_solar_forecast/core/` importiert **nichts** aus `homeassistant`; genau eine dokumentierte Netz-Ausnahme (`core/openmeteo_backfill.py`, lazy `aiohttp`, injizierte Session) |
 | Vertrag | `docs/SPEC.md` (deutsch, Ist-Stand), Herleitung/Historie in `docs/HISTORIE.md`, Designentscheide in `docs/adr/`, Release-Chronik in `CHANGELOG.md` |
@@ -293,7 +293,7 @@ heutigen Zustand.
 
 ## 5. Aktualität & Pflege
 
-**Stand dieser Wissensbasis:** **v0.27.2**, geprüft am **2026-08-26**.
+**Historischer Stand dieser Wissensbasis:** v0.27.2. Für die aktuelle Version siehe [SPEC](../SPEC.md).
 Alle Code-Aussagen sind gegen diesen Stand geprüft; Betriebs- und Messzahlen
 stammen aus Live-Abzügen vom 16.–25.07.2026 und sind **Momentaufnahmen**.
 

@@ -249,7 +249,7 @@ async def test_update_data_serves_cached_curve_on_fetch_failure(monkeypatch):
     import custom_components.balcony_solar_forecast.coordinator as coord_mod
 
     store = _PayloadStore()
-    store.set_last_payload(_om_payload(), "irrelevant")
+    store.set_last_payload(_om_payload(start_iso="2026-07-05T12:15"), "irrelevant")
     c = _coord(store)
     c._fetcher = _FakeFetcher([FetchError("down", retryable=True)])
     c._last_fetched_at = NOW - timedelta(hours=3)  # within the 24h cache window

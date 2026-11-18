@@ -13,6 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-11-18
+
+### Fixed
+
+- Keep incomplete provider radiation out of the last-good cache and learner references. Calculate scalar-free DC and AC energy with each inverter's own limit. Reuse static sky-view factors across days.
+- Bind archived weather classes and slow-only references to the published forecast. Check issue times before scoring or learning, account for missed producing hours in drift and use the same dated quantile window for serving and diagnostics.
+- Keep inverter calibration and processed dates tied to their AC meter and polarity. Preserve unverified legacy evidence across recalibration.
+- Compare one preselected issue per day and lead period for energy and peaks. Preserve DC band curves in the physical replay, report their hourly aggregation and protect its source files.
+- Protect dashboard installation with Home Assistant admin authorization and preserve foreign Sections dashboards. Keep historical card navigation on its selected calendar date, read original v1 archive curves and tolerate oversized numeric store values.
+
+### Added
+
+- Expose published and raw DC forecast values and optional archived per-module DC curves. Operators can capture prospective issues and match them to closed DC measurements with the validation tools.
+
 ## [0.29.0] - 2026-10-03
 
 Panel/weather evidence is observational only and does not modify forecasts or

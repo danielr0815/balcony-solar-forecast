@@ -73,7 +73,7 @@ function makeCard(hass) {
   const card = Object.create(CardClass.prototype);
   card._config = { total_sensor: "sensor.t", forecast_sensor: "sensor.f" };
   card._view = "day";
-  card._offset = 0;
+  card._selectedDate = null;
   card._fetchSeq = 0;
   card._liveDayKey = undefined;
   card._modules = [];
@@ -159,7 +159,7 @@ const STATES = {
   };
   const card = makeCard(hass);
   card._view = "week";
-  card._offset = 0; // live window: today + 6 past days
+  card._selectedDate = null; // live window: today + 6 past days
 
   await card._fetch();
 
@@ -249,7 +249,7 @@ const STATES = {
     },
   };
   const card = makeCard(hass);
-  card._offset = -1;
+  card._selectedDate = card._calendar().shift(card._calendar().key(), -1);
   // Pretend yesterday's issued line is on screen…
   card._dayForecast = new Array(24).fill(100);
   card._forecastState = "issued";
@@ -293,7 +293,7 @@ const STATES = {
     },
   };
   const card = makeCard(hass);
-  card._offset = 0;
+  card._selectedDate = null;
 
   card._navigate(-1); // → yesterday; the issued lookup will throw
   await settle();
@@ -348,7 +348,7 @@ const STATES = {
   };
   const card = makeCard(hass);
   card._view = "week";
-  card._offset = 0;
+  card._selectedDate = null;
 
   await card._fetch();
 

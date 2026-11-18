@@ -15,6 +15,15 @@ get_forecast:
       required: false
       selector:
         text:
+    include_capture_metadata:
+      name: Include prospective evaluation metadata
+      description: >-
+        Include fingerprints for configured and issued DC sensor bindings,
+        confirmed dark slots and per-slot band evidence when available.
+      required: false
+      default: false
+      selector:
+        boolean:
 
 import_bootstrap:
   name: Import learner bootstrap
@@ -298,8 +307,9 @@ get_issued_forecast:
     a date with no archived snapshot returns "available: false". A hit returns the
     DC curves (hourly_wh, raw_hourly_wh) plus hourly_wh_ac (= DC x the issue-time
     eta; eta_source flags "snapshot" vs. a "current"-eta fallback for legacy
-    snapshots), cloud_class_by_hour and applied_factor_by_hour. Returns a response
-    (SPEC §18.4).
+    snapshots), cloud_class_by_hour and applied_factor_by_hour. Legacy snapshots
+    expose their original DC point curve with curve_source set to "legacy".
+    Returns a response (SPEC §18.4).
   fields:
     entry_id:
       name: Config entry
@@ -317,3 +327,12 @@ get_issued_forecast:
       required: true
       selector:
         text:
+    include_planes:
+      name: Include per-module curves
+      description: >-
+        Include only the archived DC hourly raw, slow-only and corrected curves
+        available for each module, keyed by its stable identifier.
+      required: false
+      default: false
+      selector:
+        boolean:

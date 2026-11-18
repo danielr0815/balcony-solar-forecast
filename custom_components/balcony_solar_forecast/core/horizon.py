@@ -62,50 +62,39 @@ def _sorted_rows(rows: tuple[HorizonRow, ...]) -> tuple[HorizonRow, ...]:
     return tuple(sorted(rows, key=lambda r: _wrap360(r.azimuth_deg)))
 
 
-def _interp_rows(rows, sun_az, value):  # noqa: ANN001 - internal
-    """Linear interpolation of a per-row scalar over the 360 azimuth circle.
-
-    ``rows`` are the plane's horizon rows, assumed sorted by ascending
-    ``azimuth_deg`` in [0, 360) (validated at the config boundary). ``value``
-    is a closure ``HorizonRow -> float`` extracting the scalar to interpolate
-    (elevation, or the seasonally-resolved tau). Interpolation wraps across
-    360 -> 0 so the segment between the last and first row is continuous.
-
-    Returns ``None`` for an empty table so callers can pick a sensible neutral
-    default (0 deg horizon / tau 1.0).
-    """
-    n = len(rows)
-    if n == 0:
-        return None
-    if n == 1:
-        return value(rows[0])
+def _azimuth_bracket(
+    rows: tuple[HorizonRow, ...], sun_az: float,
+) -> tuple[HorizonRow, HorizonRow, float]:
+    """Return the neighboring rows and interpolation fraction on the circle."""
+    if len(rows) == 1:
+        return rows[0], rows[0], 0.0
 
     az = _wrap360(sun_az)
     first_az = _wrap360(rows[0].azimuth_deg)
     last_az = _wrap360(rows[-1].azimuth_deg)
-
     if az < first_az or az >= last_az:
-        # Wrap segment: [last_az, 360) U [0, first_az), from rows[-1]->rows[0].
-        lo, hi = rows[-1], rows[0]
+        # Wrap segment: [last_az, 360) U [0, first_az).
         span = (first_az - last_az) % 360.0
         if span == 0.0:
-            return value(lo)
-        frac = ((az - last_az) % 360.0) / span
-        return value(lo) + (value(hi) - value(lo)) * frac
+            return rows[-1], rows[-1], 0.0
+        return rows[-1], rows[0], ((az - last_az) % 360.0) / span
 
-    # Normal (non-wrap) bracketing.
-    for i in range(n - 1):
+    for i in range(len(rows) - 1):
         a0 = _wrap360(rows[i].azimuth_deg)
         a1 = _wrap360(rows[i + 1].azimuth_deg)
         if a0 <= az < a1:
-            span = a1 - a0
-            if span == 0.0:
-                return value(rows[i])
-            frac = (az - a0) / span
-            return value(rows[i]) + (value(rows[i + 1]) - value(rows[i])) * frac
+            return rows[i], rows[i + 1], (az - a0) / (a1 - a0)
 
-    # Exactly on the last breakpoint.
-    return value(rows[-1])
+    return rows[-1], rows[-1], 0.0  # pragma: no cover - defensive
+
+
+def _interp_rows(rows, sun_az, value):  # noqa: ANN001 - internal
+    """Interpolate the row scalar on the 360-degree circle."""
+    if not rows:
+        return None
+    lo, hi, frac = _azimuth_bracket(rows, sun_az)
+    low = value(lo)
+    return low if lo is hi else low + (value(hi) - low) * frac
 
 
 # ---------------------------------------------------------------------------
@@ -442,8 +431,9 @@ def _profile_knot_elevations(
 
 
 def _band_column(
-    h_deg: float, az_deg: float, az_rad: float, az_p_rad: float, beta_rad: float,
-    rows: tuple[HorizonRow, ...], doy: int | None, knot_els: tuple[float, ...],
+    az_rad: float, az_p_rad: float, beta_rad: float,
+    bracket: tuple[HorizonRow, HorizonRow, float],
+    doy: int | None, knot_els: tuple[float, ...],
 ) -> float:
     """Per-azimuth visible-sky contribution with an ELEVATION-PROFILED horizon.
 
@@ -457,6 +447,8 @@ def _band_column(
     opaque path use, so a uniform tau=1 profile yields SVF == 1 and a uniform
     tau=0 profile reproduces the opaque reduction bit-exactly (the ADR extremes).
     """
+    lo, hi, frac = bracket
+    h_deg = lo.elevation_deg + (hi.elevation_deg - lo.elevation_deg) * frac
     above = _inner_elevation_integral(h_deg, az_rad, az_p_rad, beta_rad)
     if h_deg <= 0.0:
         return above  # no wedge below the line (== the flat/open column)
@@ -470,21 +462,18 @@ def _band_column(
     wedge = 0.0
     all_zero = True
     all_one = True
-    for i in range(len(bounds) - 1):
-        e0 = bounds[i]
-        e1 = bounds[i + 1]
-        if e1 <= e0:
-            continue
+    full = _inner_elevation_integral(0.0, az_rad, az_p_rad, beta_rad)
+    lower_integral = full
+    for e0, e1 in zip(bounds[:-1], bounds[1:], strict=True):
         el_mid = 0.5 * (e0 + e1)
-        # Diffuse wedge: a row's ``diffuse_tau`` (v0.22 D2) overrides its beam tau
-        # here; a row without it keeps the beam ``tau_points`` profile unchanged,
-        # so a profile-only config is bit-identical to the pre-D2 band integral.
-        tau_mid = _interp_rows(
-            rows, az_deg, lambda r, _el=el_mid: _row_diffuse_tau_at(r, _el, doy)
+        # Only the adjacent rows influence tau throughout this column. Keep
+        # the full table's knot elevations to preserve the midpoint quadrature.
+        tau_lo = _row_diffuse_tau_at(lo, el_mid, doy)
+        tau_mid = (
+            tau_lo if lo is hi
+            else tau_lo + (_row_diffuse_tau_at(hi, el_mid, doy) - tau_lo) * frac
         )
-        if tau_mid is None:
-            tau_mid = 1.0
-        elif tau_mid < 0.0:
+        if tau_mid < 0.0:
             tau_mid = 0.0
         elif tau_mid > 1.0:
             tau_mid = 1.0
@@ -492,16 +481,17 @@ def _band_column(
             all_zero = False
         if tau_mid != 1.0:
             all_one = False
-        band = (
-            _inner_elevation_integral(e0, az_rad, az_p_rad, beta_rad)
-            - _inner_elevation_integral(e1, az_rad, az_p_rad, beta_rad)
+        upper_integral = (
+            above if e1 == h_deg
+            else _inner_elevation_integral(e1, az_rad, az_p_rad, beta_rad)
         )
-        wedge += tau_mid * band
+        wedge += tau_mid * (lower_integral - upper_integral)
+        lower_integral = upper_integral
     if all_zero:
         return above  # opaque wedge, bit-identical to the fully-opaque column
     if all_one:
         # fully-open column, computed like the flat normaliser so SVF == 1 exactly
-        return _inner_elevation_integral(0.0, az_rad, az_p_rad, beta_rad)
+        return full
     return above + wedge
 
 
@@ -537,12 +527,12 @@ def _diffuse_view_integral(
         if not use_horizon:
             acc += _inner_elevation_integral(0.0, az_rad, az_p, beta)
         elif profiled:
-            h = interp_elevation(plane, az_deg)
-            acc += _band_column(h, az_deg, az_rad, az_p, beta, rows, doy, knot_els)
+            bracket = _azimuth_bracket(rows, az_deg)
+            acc += _band_column(az_rad, az_p, beta, bracket, doy, knot_els)
         else:
-            h = interp_elevation(plane, az_deg)
+            h = _interp_rows(rows, az_deg, lambda r: r.elevation_deg)
             tau = _interp_diffuse_tau(rows, az_deg, doy)
-            acc += _semi_transparent_column(h, tau, az_rad, az_p, beta)
+            acc += _semi_transparent_column(0.0 if h is None else h, tau, az_rad, az_p, beta)
     return acc * daz / math.pi
 
 
@@ -553,7 +543,7 @@ def _sky_view_factor_cached(
     azimuth_deg: float,
     doy: int | None,
 ) -> float:
-    """SVF for one plane GEOMETRY on one day-of-year (module-level memo).
+    """SVF for one plane geometry, with day-of-year for seasonal diffuse only.
 
     Keyed on the hashable geometry the quadrature actually depends on — the
     horizon rows tuple (frozen ``HorizonRow`` => hashable), tilt, azimuth and doy
@@ -587,6 +577,11 @@ def _sky_view_factor_cached(
     return svf
 
 
+@lru_cache(maxsize=256)
+def _has_seasonal_diffuse(rows: tuple[HorizonRow, ...]) -> bool:
+    return any(row.seasonal and row.diffuse_tau is None for row in rows)
+
+
 def sky_view_factor(plane: PlaneConfig, doy: int | None = None) -> float:
     """Isotropic-diffuse sky-view factor in (0, 1] for this plane.
 
@@ -612,5 +607,6 @@ def sky_view_factor(plane: PlaneConfig, doy: int | None = None) -> float:
     rather than exactly zero.
     """
     return _sky_view_factor_cached(
-        plane.horizon, plane.tilt_deg, plane.azimuth_deg, doy
+        plane.horizon, plane.tilt_deg, plane.azimuth_deg,
+        doy if doy is not None and _has_seasonal_diffuse(plane.horizon) else None,
     )

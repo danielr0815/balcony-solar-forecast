@@ -165,6 +165,10 @@
         "entry_id": {
           "name": "Konfigurationseintrag",
           "description": "Beschränkt die Antwort auf einen einzelnen Konfigurationseintrag. Leer lassen, um alle Anlagen zurückzugeben."
+        },
+        "include_capture_metadata": {
+          "name": "Metadaten für Vorlaufvergleich einbeziehen",
+          "description": "Fingerabdrücke der DC-Zuordnung, bestätigte Nachtintervalle und verfügbare Evidenz der Prognosebänder ausgeben."
         }
       }
     },
@@ -307,6 +311,10 @@
         "date": {
           "name": "Datum",
           "description": "Das lokale Datum, dessen ausgegebene Prognose geliefert werden soll, im ISO-Format JJJJ-MM-TT."
+        },
+        "include_planes": {
+          "name": "Kurven je Modul einbeziehen",
+          "description": "Die archivierten stündlichen DC-Kurven je Modul ausgeben, soweit für RAW, Slow-only oder korrigiert vorhanden."
         }
       }
     }

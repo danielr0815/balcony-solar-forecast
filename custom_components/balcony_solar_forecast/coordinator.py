@@ -31,8 +31,8 @@ from __future__ import annotations
 import logging
 import math
 from collections import deque
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -76,7 +76,7 @@ from ._glue_util import (
 )
 from ._nightly import _NIGHTLY_HOUR, _NIGHTLY_MINUTE
 from ._operations import LearnerOperations, owned_operation
-from ._weather_cache import WeatherCache
+from ._weather_cache import WeatherCache, future_coverage
 from .const import (
     BAND_SLOT_BIN,
     BAND_SLOT_ENSEMBLE,
@@ -119,6 +119,7 @@ from .const import (
     DAY_AHEAD_BIAS_NEUTRAL,
     DAY_AHEAD_BIAS_RESEED_N,
     DEFAULT_ENSEMBLE_ENABLED,
+    DEFAULT_INVERTER_EFFICIENCY,
     DEFAULT_QUANTILES_ENABLED,
     DEFAULT_SCOREBOARD_ENABLED,
     DEFAULT_SCOREBOARD_WINDOW_DAYS,
@@ -176,6 +177,7 @@ from .core import (
     WeatherSeries,
     clearsky,
     compute_forecast,
+    electrical,
     solpos,
 )
 from .core import bias as bias_mod
@@ -232,7 +234,7 @@ class _IntradaySample:
     modeled_wh: float
 
 
-def _measured_power_rows(rows: list[dict] | None) -> list[tuple[datetime, float]]:
+def _measured_power_rows(rows: Iterable[Mapping[str, Any]] | None) -> list[tuple[datetime, float]]:
     """Reduce one entity's short-term stat rows to ``[(utc_time, mean_w)]`` (pure).
 
     Used by the A7 intraday ring re-arm: ``start`` is disambiguated via
@@ -503,6 +505,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         (transient, re-init 1.0).
         """
         self._load_learner_states()
+        _channel_health.reconcile_eta_source(self, self._inverter_cal_source())
         # A user who re-enabled a drift-auto-disabled layer via the options flow
         # triggers a full reload; clearing the stale disable flag is gated on a
         # real OFF->ON option transition inside rebuild_learner_config (a plain
@@ -560,6 +563,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # a pre-Phase-3 store has no getter -> stay on the neutral in-memory state).
         try:
             self._inverter_cal_state = self._store.get_inverter_cal_state()
+            self._bind_legacy_inverter_calibration()
         except AttributeError:
             _LOGGER.debug("Store has no inverter-cal getter; using neutral state")
         except Exception:  # pragma: no cover - defensive, never crash setup
@@ -1108,6 +1112,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             raise UpdateFailed(
                 f"Weather image too old ({age}); no forecast issued"
             )
+        if not future_coverage(weather, now):
+            # A restored image may predate the component validity check, and
+            # even a once-good truncated horizon can expire before its age limit.
+            raise UpdateFailed(
+                "Cached weather has no usable future intervals; no forecast issued"
+            )
 
         # Ensemble-weather uncertainty (v0.16, SPEC §11.3): opt-in. Runs AFTER the
         # main fetch/weather is confirmed, in its OWN guard — any failure/absence
@@ -1148,17 +1158,40 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         except Exception:  # pragma: no cover - learner never breaks the ladder
             _LOGGER.warning("Intraday-scalar tick failed; serving previous", exc_info=True)
 
+        previous_context = {
+            name: getattr(self, name, None)
+            for name in ("_result_provenance", "_result_inverter_eta",
+                         "_result_reference_context", "_result_capture_context")
+        }
         try:
             result = await self._compute(weather, now)
         except Exception as err:  # pragma: no cover - engine owns correctness
             _LOGGER.exception("Forecast engine failed")
             raise UpdateFailed(f"Forecast engine error: {err}") from err
 
-        # Hold the last good result so the nightly job can snapshot the current
-        # per-plane modeled breakdown (beam/diffuse/kc) for the shademap trainer.
+        try:
+            data = self._build_data(result, dict(result.hourly_wh), now, status, age, track_revisions=False)
+            # Fetch, executor work and data assembly can straddle the end of
+            # the last usable interval. Check against the same clock we publish.
+            issued_at = dt_util.utcnow()
+            if not future_coverage(weather, issued_at):
+                raise UpdateFailed(
+                    "Cached weather has no usable future intervals at publication; no forecast issued"
+                )
+            self._track_headline_revisions(data, now)
+            data[DATA_KEY_CURVE_AUDIT] = self._curve_audit_summary(data, now, result)
+        except Exception:
+            # _compute binds the candidate context for data assembly. Restore
+            # the last publication's references if this candidate is discarded.
+            for name, context in previous_context.items():
+                setattr(self, name, context)
+            raise
+
         self._last_result = result
         self._correction_source = result.correction_source
-        return self._build_data(result, dict(result.hourly_wh), now, status, age)
+        data[DATA_KEY_CORRECTION_SOURCE] = result.correction_source
+        data["issued_at"] = _iso(issued_at)
+        return data
 
     async def _compute(self, weather, now: datetime) -> ForecastResult:
         """Run the engine with the learner hooks bound over the persisted state.
@@ -1177,7 +1210,15 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         hooks = self._build_learner_hooks(weather, now)
         site = self._site
         provenance = self._calculation_provenance(weather)
+        inverter_eta = (
+            (hooks.inverter_efficiency, "learned")
+            if hooks.inverter_efficiency is not None else self._configured_inverter_eta()
+        )
         day_factor = dict(self._day_factor)
+        from .core.provenance import dc_bindings_digest
+
+        dc_bindings = dc_bindings_digest(self.entry.entry_id, site)
+        band_evidence = dict(getattr(self, "_band_evidence_by_slot", {}))
 
         def _run() -> ForecastResult:
             return compute_forecast(site, weather, now, tz=tz, hooks=hooks)
@@ -1186,7 +1227,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Bind identity before yielding to the executor. A later state/cache
         # change must not relabel this result with a different training history.
         self._result_provenance = (result, provenance)
+        self._result_inverter_eta = (result, inverter_eta)
         self._result_reference_context = (result, day_factor, weather)
+        self._result_capture_context = (result, dc_bindings, band_evidence)
         return result
 
     def _calculation_provenance(self, weather: WeatherSeries | None) -> dict[str, str]:
@@ -1246,6 +1289,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             lon = self._site.longitude
             lat = self._site.latitude
             for slot in weather.slots:
+                if not slot.usable:
+                    continue
                 local = dt_util.as_local(slot.start)
                 # Clear-sky-index classification (A5): pass the slot GHI and the
                 # sun elevation (at slot start, same convention as the
@@ -1300,6 +1345,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # per-slot map hitting the Recorder.
         band_source_by_day: dict[str, dict[str, int]] = {}
         self._quantile_ready_slots: dict[datetime, bool] = {}
+        self._band_evidence_by_slot: dict[datetime, str] = {}
         band_by_slot: dict[datetime, QuantileBands] | None = None
         ens_factors = (
             getattr(self, "_ensemble_factors", None)
@@ -1315,6 +1361,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             lon = self._site.longitude
             lat = self._site.latitude
             for slot in weather.slots:
+                if not slot.usable:
+                    continue
                 local = dt_util.as_local(slot.start)
                 if have_bins:
                     # Same clear-sky-index classification as the day-ahead loop
@@ -1355,6 +1403,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 # Omit a neutral (identity) band so the engine's `if band:` path
                 # short-circuits an all-1.0 multiply.
                 neutral_band = b.p10 == 1.0 and b.p50 == 1.0 and b.p90 == 1.0
+                if learned.n > 0:
+                    evidence = "trained" if b == learned else "mixed"
+                else:
+                    evidence = "neutral" if neutral_band else "ensemble"
+                self._band_evidence_by_slot[slot.start] = evidence
                 if not neutral_band:
                     bands[slot.start] = b
                 # Per-slot provenance -> per-day counts (same taxonomy as the
@@ -1427,19 +1480,15 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # the engine falls back to the per-group config eta. Never load-bearing;
         # reshapes only the AC curve. ``getattr`` keeps a bare __new__-built
         # coordinator (tests) working with the neutral (untrusted) default.
-        cal_state = getattr(self, "_inverter_cal_state", None) or InverterCalState()
-        inverter_efficiency = inverter_cal_mod.effective_eta(cal_state)
+        inverter_efficiency = self._trusted_inverter_eta()
         return LearnerHooks(beam_tau=beam_tau, slot_factor=slot_factor,
                             correction_source=source, band_by_slot=band_by_slot,
+                            dayahead_factor=lambda start: day_factor.get(start, 1.0),
                             inverter_efficiency=inverter_efficiency)
 
     def _bind_beam_tau(self):
         """Bind ``shademap.effective_tau_pooled`` over the current ShademapState
         into the engine's ``beam_tau`` hook.
-
-        Factored out so BOTH the served-curve pass (:meth:`_build_learner_hooks`)
-        and the nightly slow-only attribution pass (:meth:`_slow_only_hourly`)
-        build the closure identically — the binding can never diverge.
 
         The engine calls the hook per PLANE (channel == plane name). Storage is
         per plane, so pooling happens HERE at read time (SPEC §9.2): each plane
@@ -1461,47 +1510,6 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
 
         return beam_tau
-
-    async def _slow_only_hourly(self, iso: str) -> dict[str, float]:
-        """Slow-only (shademap ∘ physics, NO day-ahead factor) hourly Wh for the
-        local day ``iso`` — the drift monitor's per-layer attribution reference
-        (audit #13b).
-
-        Returns {} when the slow layer is not currently active (the same gate as
-        :meth:`_build_learner_hooks`, via :meth:`_slow_active`): callers then
-        treat slow-only == raw and blame only the fast layer, so the raw curve is
-        NOT duplicated into the store. Also {} when no weather is cached or the
-        engine pass raises — the nightly snapshot must never fail on this. Runs
-        ONCE per nightly snapshot, so the extra engine pass is cheap. The engine
-        pass itself runs in the executor (same snapshot-safety argument as
-        :meth:`_compute`: the shademap state is copy-on-write, so the bind-time
-        ``beam_tau`` closure reads an immutable reference).
-        """
-        if not self._slow_active():
-            return {}
-        weather = self._cached_weather()
-        if weather is None:
-            return {}
-        try:
-            tz = dt_util.get_time_zone(self.hass.config.time_zone)
-            hooks = LearnerHooks(
-                beam_tau=self._bind_beam_tau(),
-                slot_factor=None,
-                correction_source=CORRECTION_SOURCE_SHADEMAP,
-                band_by_slot=None,
-            )
-            now = dt_util.utcnow()
-
-            def _run() -> ForecastResult:
-                return compute_forecast(self._site, weather, now, tz=tz, hooks=hooks)
-
-            result = await self.hass.async_add_executor_job(_run)
-            return _filter_hourly_to_local_day(result.hourly_wh, iso)
-        except Exception:  # pragma: no cover - never fail the nightly snapshot
-            _LOGGER.debug(
-                "Slow-only hourly compute failed for %s", iso, exc_info=True
-            )
-            return {}
 
     def _due_for_fetch(self, now: datetime) -> bool:
         return self._weather.due(now)
@@ -1608,6 +1616,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         sums: dict[str, float] = {}
         counts: dict[str, int] = {}
         for slot in weather.slots:
+            if not slot.usable:
+                continue
             key = (
                 dt_util.as_utc(slot.start)
                 .replace(minute=0, second=0, microsecond=0)
@@ -2027,57 +2037,24 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         big hours are now in the frozen past) — a spurious intraday hump of the
         headline even though the underlying forecast has not changed.
 
-        We keep the scalar in the served 15-min ``watts`` / ``wh_period`` curve
-        (battery_manager integrates its FORWARD part as the live nowcast) but
-        strip it from the headline. The shademap ``beam_tau`` and the day-ahead
-        RLS bias stay — those are stable within a day. Each slot's applied
-        intraday factor is reconstructed exactly as the ``slot_factor`` closure
-        applies it, then divided out; the factor is clamped >= INTRADAY_SCALAR_MIN
-        so the divide is always safe. Only the current local day is affected —
-        tomorrow/d2 slots lie beyond the apply horizon and already carry factor
-        1.0, so they equal the plain ``daily_kwh`` roll-up.
-
-        CLAMP INTERACTION (MED-1): the served ``total_watts`` is POST second AC
-        clamp. On a slot where the up-corrected grouped power hit the inverter
-        ceiling, that second clamp bit and the scalar had NO effect on the served
-        value — dividing the scalar back out there removes a correction that was
-        never applied and understates the headline (up to the full factor). We
-        detect such a slot from ``result.corrected_unclamped_watts`` (the
-        pre-re-clamp corrected total): ``prereclamp - watts > 1e-6`` means the
-        re-clamp bit. On a clamped slot the SCALAR-FREE served value is
-        ``prereclamp[i] / factor`` (``corrected_unclamped == first-clamped *
-        factor``, engine.py:723-726 — the factor divides out EXACTLY), capped at
-        the physical ``slot_ceilings[i]`` so a day-ahead curve that clamps on its
-        own still contributes the ceiling (the typical clear-midday case). Keeping
-        the served ceiling instead (the pre-IRC-4 code) ballooned the headline by
-        the full factor headroom under a large intraday scalar (20.07.: +3.27 kWh
-        at scalar 2.355). On an unclamped slot we divide the factor out as before.
-        A site with NO inverter groups never clamps (prereclamp == watts every
-        slot) so its headline is bit-identical to the divide-always path. When
-        ``corrected_unclamped_watts`` or ``slot_ceilings`` is empty (a v0.1 /
-        older cached result) a clamped slot keeps the served ceiling unchanged
-        (SPEC §14.1).
+        The engine supplies a second curve with the shademap and day-ahead
+        bias and applies physical clipping by inverter group before summing.
+        The served watts and Wh curves retain their transient correction.
         """
         return self._dayahead_today_kwh_over(
             now, result.slot_starts, result.total_watts,
             result.corrected_unclamped_watts, result.slot_ceilings,
+            result.dayahead_watts,
         )
 
     def _dayahead_today_kwh_ac(
         self, result: ForecastResult, now: datetime
     ) -> float | None:
-        """AC-side analogue of :meth:`_dayahead_today_kwh` over the served AC curve.
-
-        Identical day-ahead headline logic — strip the transient intraday factor,
-        and on a CLAMPED slot cap the scalar-free value at the physical AC ceiling
-        (``ac_slot_ceilings``) — applied to ``ac_watts`` with the AC re-clamp
-        detected from ``ac_corrected_unclamped_watts``. See
-        :meth:`_dayahead_today_kwh` for the full rationale; the only change is
-        DC->AC on all three series.
-        """
+        """Today's day-ahead kWh on the AC basis."""
         return self._dayahead_today_kwh_over(
             now, result.slot_starts, result.ac_watts,
             result.ac_corrected_unclamped_watts, result.ac_slot_ceilings,
+            result.ac_dayahead_watts,
         )
 
     def _dayahead_slot_strips(
@@ -2087,21 +2064,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         watts_series,
         prereclamp,
         ceilings,
+        dayahead_watts=(),
     ):
-        """Yield ``(index, served_watts, scalar_free_watts)`` per local-today slot.
+        """Yield ``(index, served_watts, dayahead_watts)`` per local-today slot.
 
-        ``scalar_free_watts`` is the day-ahead-stable served value with the
-        transient intraday factor removed: divided out on an UNclamped slot; on a
-        re-clamped slot (``prereclamp[i] - served > 1e-6``) the pre-factor served
-        value ``prereclamp[i] / factor`` capped at the physical ``ceilings[i]``
-        (``corrected_unclamped == first-clamped * factor``, so ``prereclamp/factor``
-        is EXACTLY scalar-free; the cap keeps a day-ahead curve that clamps on its
-        own at the ceiling). When ``prereclamp`` or ``ceilings`` is unavailable
-        (older cached result) a clamped slot keeps the served ceiling unchanged
-        (legacy divide-else path). The per-slot factor is reconstructed by
-        :meth:`_intraday_factor_for_slot` so every strip shares ONE copy of the
-        factor math.
+        Prefer the engine's independently group-clipped day-ahead series.
+        For results that lack it, retain the legacy aggregate estimator.
         """
+        have_dayahead = len(dayahead_watts) == len(watts_series)
         have_prereclamp = len(prereclamp) == len(watts_series)
         have_ceilings = len(ceilings) == len(watts_series)
         local_today = dt_util.as_local(now).date()
@@ -2110,6 +2080,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         ):
             start_utc = dt_util.as_utc(start)
             if dt_util.as_local(start_utc).date() != local_today:
+                continue
+            if have_dayahead:
+                yield i, watts, dayahead_watts[i]
                 continue
             factor = self._intraday_factor_for_slot(start_utc, now)
             if have_prereclamp and prereclamp[i] - watts > 1e-6:
@@ -2131,6 +2104,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         watts_series,
         prereclamp,
         ceilings,
+        dayahead_watts=(),
     ) -> float | None:
         """Shared scalar-stripping headline roll-up for one served curve.
 
@@ -2141,7 +2115,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         total_wh = 0.0
         seen = False
         for _i, _served, scalar_free in self._dayahead_slot_strips(
-            now, slot_starts, watts_series, prereclamp, ceilings
+            now, slot_starts, watts_series, prereclamp, ceilings,
+            dayahead_watts,
         ):
             seen = True
             total_wh += scalar_free * SLOT_HOURS
@@ -2170,6 +2145,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         for i, served, scalar_free in self._dayahead_slot_strips(
             now, result.slot_starts, result.ac_watts,
             result.ac_corrected_unclamped_watts, result.ac_slot_ceilings,
+            result.ac_dayahead_watts,
         ):
             if i >= len(p10w):
                 continue
@@ -2209,6 +2185,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         now: datetime,
         status: str,
         age: timedelta,
+        *,
+        track_revisions: bool = True,
     ) -> dict[str, Any]:
         """Shape the coordinator payload consumed by the platforms.
 
@@ -2277,6 +2255,15 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         }
         # --- v0.2/v0.3 additive learner keys ---
         data[DATA_KEY_RAW_HOURLY_WH] = dict(raw_hourly)
+        data["invalid_weather_slots"] = [_iso(slot) for slot in sorted(result.invalid_weather_slots)]
+        data["night_zero_slots"] = [_iso(slot) for slot in sorted(result.night_zero_slots)]
+        capture_context = getattr(self, "_result_capture_context", None)
+        if capture_context is not None and capture_context[0] is result:
+            data["forecast_dc_bindings_sha256"] = capture_context[1]
+            if result.p10_watts:
+                data["band_evidence_by_slot"] = {
+                    _iso(slot): label for slot, label in capture_context[2].items()
+                }
         data[DATA_KEY_CORRECTED_HOURLY_WH] = dict(corrected_hourly)
         data[DATA_KEY_INTRADAY_SCALAR] = round(self._intraday_scalar, 4)
         data[DATA_KEY_CORRECTION_SOURCE] = self._correction_source
@@ -2377,8 +2364,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # AC headlines, counted per target calendar date, plus the compact
         # recorded day-scalar block. Runs off the FINISHED payload: the
         # revision comparison reads only the three headline values.
-        self._track_headline_revisions(data, now)
-        data[DATA_KEY_CURVE_AUDIT] = self._curve_audit_summary(data, now)
+        if track_revisions:
+            self._track_headline_revisions(data, now)
+            data[DATA_KEY_CURVE_AUDIT] = self._curve_audit_summary(data, now, result)
         return data
 
     def _quantile_curves(self, result: ForecastResult) -> dict[str, dict[str, float]]:
@@ -2525,7 +2513,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._store.set_curve_audit(audit)
 
     def _curve_audit_summary(
-        self, data: dict[str, Any], now: datetime
+        self, data: dict[str, Any], now: datetime, result: ForecastResult
     ) -> dict[str, Any]:
         """The compact, recorder-friendly audit block for ``self.data``.
 
@@ -2534,9 +2522,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         curve sums the bulky — and recorder-excluded — attributes carry) plus
         the published AC state, so a consumer can cross-check
         Σ(wh_period_ac) == state without history access. The eta fields carry
-        the site scalar actually applied (the trusted learned eta, else the
-        datasheet default — observability only, see ``_effective_inverter_eta``)
-        with its source; the implicit per-day eta stays directly visible as
+        the shared configured or learned scalar actually applied, if any.
+        The implicit per-day eta stays directly visible as
         ac_wh / dc_wh. Revision counters come from ``_track_headline_revisions``.
         """
         local_today = dt_util.as_local(now).date()
@@ -2565,13 +2552,12 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     ),
                 }
             )
-        learned = self.inverter_efficiency_learned()
-        effective = learned.get("effective") if isinstance(learned, dict) else None
+        effective, source = self._forecast_inverter_eta(result)
         audit = self._curve_audit_state()
         last = audit.get("last_revision")
         return {
-            "eta_effective": round(self._effective_inverter_eta(), 4),
-            "eta_source": "learned" if effective is not None else "config",
+            "eta_effective": round(effective, 4) if effective is not None else None,
+            "eta_source": source,
             "days": days,
             "revisions_today": dict(audit["revisions_today"]),
             "revisions_yesterday": dict(audit["revisions_yesterday"]),
@@ -2813,32 +2799,103 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         cal = getattr(self, "_inverter_cal_state", None)
         if cal is None:
             return None
+        source = self._inverter_cal_source()
+        source_status = None
+        if source is None or cal.source != source:
+            if cal.n > 0 and source is not None:
+                source_status = "unverified_legacy" if cal.source is None else "source_changed"
+            cal = InverterCalState()
         eff = inverter_cal_mod.effective_eta(cal)
         out: dict[str, Any] = {
             "eta": round(float(cal.eta), 4),
             "n": int(cal.n),
             "effective": None if eff is None else round(eff, 4),
         }
+        if source_status is not None:
+            out["source_status"] = source_status
+        getter = getattr(self._store, "get_unverified_inverter_calibration", None)
+        legacy = getter() if getter is not None else None
+        if legacy is not None:
+            retained, dates = legacy
+            out["unverified_legacy_saved"] = {
+                "eta": round(retained.eta, 4), "n": retained.n, "trained_days": len(dates),
+            }
         raw = getattr(self, "_inverter_cal_raw", None)
-        if isinstance(raw, dict) and raw:
+        if isinstance(raw, dict) and raw and getattr(self, "_inverter_cal_raw_source", None) == source:
             out["raw"] = dict(raw)
         return out
 
     def _effective_inverter_eta(self) -> float:
         """The site DC->AC efficiency scalar to convert a DC curve to AC now.
 
-        The TRUSTED learned eta when the calibration has folded enough eligible
-        hours, else the datasheet DEFAULT_INVERTER_EFFICIENCY (a single site
-        scalar for the operator's identical inverters; per-group config overrides
-        are not reflected — observability only, IRC-5). Stored into each fresh
-        issued snapshot so the issued AC curve can be reconstructed without
-        hindsight, and reused as the fallback for legacy snapshots that lack it.
+        Use the trusted learned or common configured eta. Legacy archives without
+        a recorded AC curve can only estimate with the datasheet default when
+        different efficiencies are in use.
         """
-        from .const import DEFAULT_INVERTER_EFFICIENCY
+        eta = self._trusted_inverter_eta()
+        if eta is not None:
+            return eta
+        configured, _ = self._configured_inverter_eta()
+        return configured if configured is not None else DEFAULT_INVERTER_EFFICIENCY
 
-        cal = getattr(self, "_inverter_cal_state", None) or InverterCalState()
-        eta = inverter_cal_mod.effective_eta(cal)
-        return float(eta) if eta is not None else DEFAULT_INVERTER_EFFICIENCY
+    def _inverter_cal_source(self) -> str | None:
+        """Private stable identity for the whole-site AC meter and its polarity."""
+        from .core.provenance import digest
+
+        entity = self._site.ac_actual_entity
+        return digest((entity, self._site.ac_actual_invert)) if entity else None
+
+    def _bind_legacy_inverter_calibration(self) -> None:
+        """Bind pre-source evidence only when the entry has never changed."""
+        previous = self._inverter_cal_state
+        source = self._inverter_cal_source()
+        if previous.source is not None or previous.n <= 0 or source is None:
+            return
+        if not self._inverter_config_unchanged():
+            return
+        self._inverter_cal_state = replace(previous, source=source)
+        self._persist_inverter_cal_state()
+
+    def _inverter_config_unchanged(self) -> bool:
+        """Whether HA timestamps establish an unchanged config-entry history."""
+        created = getattr(self.entry, "created_at", None)
+        modified = getattr(self.entry, "modified_at", None)
+        # Legacy EMA predates the trained-day ring and may include earlier
+        # meters. Epoch timestamps in older HA migrations prove no history.
+        return (
+            isinstance(created, datetime)
+            and created.tzinfo is not None
+            and created == modified
+            and datetime(1970, 1, 1, tzinfo=UTC) < created <= dt_util.utcnow()
+        )
+
+    def _trusted_inverter_eta(self) -> float | None:
+        source = self._inverter_cal_source()
+        cal = getattr(self, "_inverter_cal_state", None)
+        if source is None or cal is None or cal.source != source:
+            return None
+        return inverter_cal_mod.effective_eta(cal)
+
+    def _configured_inverter_eta(self) -> tuple[float | None, str]:
+        """Return a shared scalar only if the engine uses one eta on every plane."""
+        by_plane = {
+            name: electrical._clamp_eta(group.inverter_efficiency)
+            for group in self._site.groups
+            for name in group.plane_names
+        }
+        values = {
+            by_plane.get(plane.name, DEFAULT_INVERTER_EFFICIENCY)
+            for plane in self._site.planes
+        }
+        if len(values) > 1:
+            return None, "mixed_config"
+        return next(iter(values), DEFAULT_INVERTER_EFFICIENCY), "config"
+
+    def _forecast_inverter_eta(self, result: ForecastResult | None) -> tuple[float | None, str]:
+        captured = getattr(self, "_result_inverter_eta", None)
+        if captured is not None and captured[0] is result:
+            return captured[1]
+        return self._configured_inverter_eta()
 
     def _train_quantiles_day(self, day: date) -> None:
         """Sample one closed ``day`` into the quantile relative-error ring."""
@@ -2863,8 +2920,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         from .const import QUANTILE_MIN_DAYS, QUANTILE_MIN_SAMPLES
 
         bins: dict[str, dict[str, Any]] = {}
+        as_of = dt_util.as_local(dt_util.utcnow()).date()
         for key, ring in self._quantile_state.bins.items():
-            n, days = quantiles_mod.ring_evidence(ring)
+            n, days = quantiles_mod.ring_evidence(ring, as_of_date=as_of.isoformat())
             bins[key] = {
                 "n": n,
                 "days": days,
@@ -2877,7 +2935,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return {
             "available": True,
             "enabled": self._quantiles_enabled,
-            "dated_days": dated_evidence_days(self._quantile_state, dt_util.as_local(dt_util.utcnow()).date()),
+            "dated_days": dated_evidence_days(self._quantile_state, as_of),
             "bins": bins,
         }
 

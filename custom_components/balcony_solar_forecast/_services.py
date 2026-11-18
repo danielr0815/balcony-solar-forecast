@@ -87,11 +87,12 @@ from homeassistant.core import (
     callback,
 )
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers.service import async_register_admin_service
 
 from ._dashboard import (
     build_dashboard_config,
     collect_entity_map,
-    config_has_cards,
+    config_is_empty,
     is_managed,
     missing_entity_keys,
 )
@@ -123,6 +124,8 @@ ATTR_PATH = "path"
 ATTR_SNAPSHOTS_BACK = "snapshots_back"
 ATTR_DASHBOARD = "dashboard"
 ATTR_OVERWRITE = "overwrite"
+ATTR_INCLUDE_PLANES = "include_planes"
+ATTR_INCLUDE_CAPTURE_METADATA = "include_capture_metadata"
 ATTR_MAX_DIFF = "max_diff"
 ATTR_MIN_COMMON_BINS = "min_common_bins"
 ATTR_MODULE = "module"
@@ -161,7 +164,10 @@ SUGGEST_SHADE_GROUPS_SCHEMA = vol.Schema(
     }
 )
 
-GET_FORECAST_SCHEMA = vol.Schema({vol.Optional(ATTR_ENTRY_ID): str})
+GET_FORECAST_SCHEMA = vol.Schema({
+    vol.Optional(ATTR_ENTRY_ID): str,
+    vol.Optional(ATTR_INCLUDE_CAPTURE_METADATA, default=False): bool,
+})
 
 GET_SHADE_PROFILE_SCHEMA = vol.Schema(
     {
@@ -179,6 +185,7 @@ GET_ISSUED_FORECAST_SCHEMA = vol.Schema(
         # Local date (ISO YYYY-MM-DD) whose ISSUED day-ahead curve to return;
         # required (there is no meaningful default — the card always names a day).
         vol.Required(ATTR_DATE): str,
+        vol.Optional(ATTR_INCLUDE_PLANES, default=False): bool,
     }
 )
 
@@ -235,7 +242,10 @@ def async_register_services(hass: HomeAssistant) -> None:
             # whole sensor platform in before HA needs it.
             from ._forecast_presenter import _build_forecast_response
 
-            return _build_forecast_response(hass, call.data.get(ATTR_ENTRY_ID))
+            return _build_forecast_response(
+                hass, call.data.get(ATTR_ENTRY_ID),
+                include_capture_metadata=call.data.get(ATTR_INCLUDE_CAPTURE_METADATA, False),
+            )
 
         hass.services.async_register(
             DOMAIN,
@@ -320,7 +330,8 @@ def async_register_services(hass: HomeAssistant) -> None:
         async def _install_dashboard(call: ServiceCall) -> ServiceResponse:
             return await _handle_install_dashboard(hass, call)
 
-        hass.services.async_register(
+        async_register_admin_service(
+            hass,
             DOMAIN,
             SERVICE_INSTALL_DASHBOARD,
             _install_dashboard,
@@ -564,14 +575,10 @@ async def _handle_install_dashboard(
     try:
         existing = await dash.async_load(False)
     except ConfigNotFound:
-        existing = None
-    if (
-        config_has_cards(existing)
-        and not is_managed(existing)
-        and not overwrite
-    ):
+        existing = {}
+    if not overwrite and not is_managed(existing) and not config_is_empty(existing):
         raise ServiceValidationError(
-            f"Dashboard '{url_path}' already contains cards this integration did "
+            f"Dashboard '{url_path}' contains content or settings this integration did "
             "not create; refusing to overwrite it. Pass 'overwrite: true' to "
             "replace it, or target a freshly created empty dashboard."
         )
@@ -822,14 +829,9 @@ def _handle_get_issued_forecast(
     "archive since <date>" hint instead of a bare emptiness the operator would
     misread as "the forecast stopped updating".
 
-    A HIT also carries the AC-side + metadata block (IRC-5/SCT-4, SPEC §18.4):
-    ``hourly_wh``/``raw_hourly_wh`` are explicitly DC; ``hourly_wh_ac`` is the
-    served DC curve times ``eta`` (the DC->AC efficiency FROZEN into the snapshot
-    at issue time, ``eta_source == "snapshot"`` — or, for a legacy snapshot that
-    predates the field, the CURRENT learned eta with ``eta_source == "current"``);
-    ``cloud_class_by_hour`` is the day-ahead forecast weather class per hour; and
-    ``applied_factor_by_hour`` is the served/raw ratio (the shademap ∘ day-ahead
-    correction) per hour.
+    DC curves are explicit. Use the archived AC curve when present, otherwise
+    reconstruct it using the archived efficiency or the labelled current estimate.
+    Cloud classes and hourly served/raw ratios describe the issued correction.
     """
     # Lazy imports: ``_glue_util`` pulls in ``.core.types`` (DriftState /
     # ForecastResult), which would create an import cycle if done at module load —
@@ -874,25 +876,31 @@ def _handle_get_issued_forecast(
         }
 
     snap = IssuedSnapshot.from_dict(stored)
-    # corrected == the ISSUED (served) curve; fall back to raw exactly like the
-    # nightly scorer (``snap.corrected_hourly_wh or snap.raw_hourly_wh``). Both are
-    # re-sliced to the local day so a legacy full-horizon v1 entry is trimmed too.
+    legacy = snap.version == 1
     corrected = _filter_hourly_to_local_day(
-        snap.corrected_hourly_wh or snap.raw_hourly_wh, iso
+        snap.legacy_hourly_wh if legacy else snap.corrected_hourly_wh or snap.raw_hourly_wh,
+        iso,
     )
-    raw = _filter_hourly_to_local_day(
-        snap.raw_hourly_wh or snap.corrected_hourly_wh, iso
-    )
+    raw = _filter_hourly_to_local_day(snap.raw_hourly_wh, iso) if not legacy else {}
     # DC->AC efficiency: the eta frozen INTO the snapshot at issue time (no
     # hindsight). A legacy snapshot lacks it — fall back to the CURRENT learned
     # eta and flag the substitution so a reader never mistakes it for the issued
     # value (IRC-5/SCT-4).
+    stored_ac = snap.corrected_ac_hourly_wh
     if snap.eta is not None:
         eta = snap.eta
         eta_source = "snapshot"
+    elif stored_ac is not None:
+        # A multi-inverter snapshot can have exact AC without a common eta.
+        eta = None
+        eta_source = "unavailable"
     else:
         eta = coordinator._effective_inverter_eta()
         eta_source = "current"
+    if stored_ac is not None:
+        ac = _filter_hourly_to_local_day(stored_ac, iso)
+    else:
+        ac = {key: value * eta for key, value in corrected.items()} if eta is not None else {}
     # Applied day-ahead factor per hour (corrected / raw), i.e. the shademap ∘
     # day-ahead correction the served curve carried over the pure physics
     # (SCT-4). Omitted for an hour whose raw is ~0 (undefined ratio).
@@ -901,30 +909,39 @@ def _handle_get_issued_forecast(
         for k in corrected
         if k in raw and raw[k] > 0.0
     }
+    include_planes = call.data.get(ATTR_INCLUDE_PLANES, False)
+    planes = {}
+    if include_planes and not legacy:
+        for name, plane in snap.per_plane.items():
+            curves = {}
+            for key in ("raw_wh", "slow_wh", "corrected_wh"):
+                curve = _filter_hourly_to_local_day(getattr(plane, key), iso)
+                if curve:
+                    curves[key] = {hour: _round3(value) for hour, value in curve.items()}
+            if curves:
+                planes[name] = curves
+
     return {
         "result": {
             "date": iso,
             "available": True,
+            "curve_source": "legacy" if legacy else "snapshot",
             "issued_at": snap.issued_at,
             "oldest_available": oldest,
             "hourly_wh": {k: _round3(v) for k, v in corrected.items()},
             "raw_hourly_wh": {k: _round3(v) for k, v in raw.items()},
-            # The served (corrected) DC curve converted to AC with the issue-time
-            # eta — the DC curves above are explicitly DC (SPEC §18.4).
-            "hourly_wh_ac": ({k: _round3(v) for k, v in
-                              _filter_hourly_to_local_day(snap.corrected_ac_hourly_wh, iso).items()}
-                             if snap.corrected_ac_hourly_wh is not None else
-                             {k: _round3(v * eta) for k, v in corrected.items()}),
-            "ac_source": "snapshot" if snap.corrected_ac_hourly_wh is not None else "reconstructed",
+            "hourly_wh_ac": {key: _round3(value) for key, value in ac.items()},
+            "ac_source": "snapshot" if stored_ac is not None else "reconstructed",
             "computed_at": snap.computed_at,
             "archived_at": snap.archived_at,
             "provenance": snap.provenance,
             "bands": snap.bands,
             "band_aggregation": "marginal_slot_curves" if snap.bands is not None else None,
-            "eta": round(eta, 4),
+            "eta": round(eta, 4) if eta is not None else None,
             "eta_source": eta_source,
             "cloud_class_by_hour": dict(snap.cloud_class_by_hour),
             "applied_factor_by_hour": applied_factor,
+            **({"per_plane": planes} if include_planes else {}),
         }
     }
 

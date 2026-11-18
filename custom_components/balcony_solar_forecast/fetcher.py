@@ -259,10 +259,10 @@ def parse_weather(payload: dict) -> WeatherSeries:
     is carried onto each 15-min slot by flooring the slot start to its hour;
     ``snowfall`` is already centimetres in the Open-Meteo hourly block
     (``hourly_units.snowfall == "cm"``) and is passed through unchanged onto
-    the slot; ``snow_depth`` is metres. Missing radiation values default to 0
-    (night / gap); a missing temperature or visibility stays None (unknown) —
-    the engine treats a temperature-less slot as unusable, and an unknown
-    visibility never reads as fog (no fabricated sentinels, SPEC §8).
+    the slot; ``snow_depth`` is metres. Missing radiation marks a slot unusable
+    even though the numeric radiation fields have zero placeholders. Missing
+    temperature or visibility stays None, so a gap cannot be used for physics
+    or mistaken for fog (SPEC §8).
     """
     validate_payload(payload)  # defensive: parse never trusts an unchecked body
 
@@ -288,13 +288,19 @@ def parse_weather(payload: dict) -> WeatherSeries:
         # Stamp = interval end (backward-averaged); slot start = stamp − 15 min.
         start = stamp - timedelta(minutes=SLOT_MINUTES)
         hour_key = start.replace(minute=0, second=0, microsecond=0)
+        ghi_value = _to_float(ghi[i])
+        dni_value = _to_float(dni[i])
+        dhi_value = _to_float(dhi[i])
         # snowfall is already cm (hourly); snow_depth stays metres.
         slots.append(
             WeatherSlot(
                 start=start,
-                ghi=max(0.0, _to_float(ghi[i]) or 0.0),
-                dni=max(0.0, _to_float(dni[i]) or 0.0),
-                dhi=max(0.0, _to_float(dhi[i]) or 0.0),
+                ghi=max(0.0, ghi_value or 0.0),
+                dni=max(0.0, dni_value or 0.0),
+                dhi=max(0.0, dhi_value or 0.0),
+                radiation_complete=(
+                    ghi_value is not None and dni_value is not None and dhi_value is not None
+                ),
                 temp_c=_to_float(temp[i]),
                 cloud_low=cloud_low.get(hour_key) or 0.0,
                 cloud_mid=cloud_mid.get(hour_key) or 0.0,

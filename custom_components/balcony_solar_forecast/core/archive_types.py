@@ -5,7 +5,6 @@ archive imports free of initialization cycles.
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 
@@ -36,12 +35,14 @@ class PlaneHourlyModeled:
         if not isinstance(d, dict):
             return cls()
 
+        from .types import _finite_json_float
+
         def _fd(key: str) -> dict[str, float]:
             v = d.get(key, {})
             if not isinstance(v, dict):
                 return {}
-            return {k: float(x) for k, x in v.items()
-                    if isinstance(k, str) and isinstance(x, (int, float))}
+            return {k: number for k, x in v.items()
+                    if isinstance(k, str) and (number := _finite_json_float(x)) is not None}
 
         return cls(
             beam_wh=_fd("beam_wh"),
@@ -121,6 +122,9 @@ class IssuedSnapshot:
     archived_at: str | None = None
     provenance: dict[str, str] | None = None
     bands: dict[str, dict[str, float]] | None = None
+    invalid_weather_hours: tuple[str, ...] = ()
+    # The v1 archive carried one display curve without a separate RAW basis.
+    legacy_hourly_wh: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: object) -> IssuedSnapshot:
@@ -128,15 +132,17 @@ class IssuedSnapshot:
             return cls(issued_at="", status="")
 
         from .provenance import bounded_provenance
-        from .types import _safe_int
+        from .types import _finite_json_float, _safe_int
+
+        version = _safe_int(d.get("version", 1 if "hourly_wh" in d else 2), 2)
 
         def _fd(key: str) -> dict[str, float]:
             v = d.get(key, {})
             if not isinstance(v, dict):
                 return {}
-            return {k: float(x) for k, x in v.items()
-                    if isinstance(k, str) and isinstance(x, (int, float))
-                    and not isinstance(x, bool) and math.isfinite(x) and x >= 0}
+            return {k: number for k, x in v.items()
+                    if isinstance(k, str)
+                    and (number := _finite_json_float(x)) is not None and number >= 0}
 
         per_plane_raw = d.get("per_plane", {})
         per_plane: dict[str, PlaneHourlyModeled] = {}
@@ -153,22 +159,18 @@ class IssuedSnapshot:
                 if isinstance(k, str) and isinstance(v, str)
             }
 
-        eta_raw = d.get("eta")
-        eta = (
-            float(eta_raw)
-            if isinstance(eta_raw, (int, float)) and math.isfinite(float(eta_raw))
-            else None
-        )
+        eta = _finite_json_float(d.get("eta"))
 
         bands_raw = d.get("bands")
         bands: dict[str, dict[str, float]] | None = None
         if isinstance(bands_raw, dict):
             allowed = {"dc_p10_slot_wh", "dc_p50_slot_wh", "dc_p90_slot_wh",
                        "ac_p10_slot_wh", "ac_p90_slot_wh"}
-            bands = {key: {stamp: float(v) for stamp, v in curve.items()
-                          if isinstance(stamp, str) and isinstance(v, (int, float))
-                          and not isinstance(v, bool) and math.isfinite(v) and v >= 0}
+            bands = {key: {stamp: number for stamp, v in curve.items()
+                          if isinstance(stamp, str)
+                          and (number := _finite_json_float(v)) is not None and number >= 0}
                      for key, curve in bands_raw.items() if key in allowed and isinstance(curve, dict)}
+        invalid = d.get("invalid_weather_hours")
         return cls(
             issued_at=str(d.get("issued_at", "")),
             status=str(d.get("status", "")),
@@ -180,7 +182,8 @@ class IssuedSnapshot:
             cloud_class_by_hour=cloud_class_by_hour,
             slow_only_hourly_wh=_fd("slow_only_hourly_wh"),
             eta=eta,
-            version=_safe_int(d.get("version", 2), 2),
+            version=version,
+            legacy_hourly_wh=_fd("hourly_wh") if version == 1 else {},
             corrected_ac_hourly_wh=(
                 _fd("corrected_ac_hourly_wh")
                 if isinstance(d.get("corrected_ac_hourly_wh"), dict) else None
@@ -189,6 +192,8 @@ class IssuedSnapshot:
             archived_at=d.get("archived_at") if isinstance(d.get("archived_at"), str) else None,
             provenance=bounded_provenance(d.get("provenance")),
             bands=bands,
+            invalid_weather_hours=tuple(h for h in invalid if isinstance(h, str))
+            if isinstance(invalid, (tuple, list)) else (),
         )
 
     def to_dict(self) -> dict:
@@ -224,4 +229,8 @@ class IssuedSnapshot:
             out["provenance"] = dict(self.provenance)
         if self.bands is not None:
             out["bands"] = {key: dict(curve) for key, curve in self.bands.items()}
+        if self.invalid_weather_hours:
+            out["invalid_weather_hours"] = list(self.invalid_weather_hours)
+        if self.legacy_hourly_wh:
+            out["hourly_wh"] = dict(self.legacy_hourly_wh)
         return out

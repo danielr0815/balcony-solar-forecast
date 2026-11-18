@@ -7,7 +7,7 @@ und ein Diagnose-Kochbuch für die fünf häufigsten Symptome — gebraucht, wen
 am laufenden System etwas änderst oder ein Verhalten einordnen musst. Das *Warum*
 der Physik steht in `02-physik-und-horizontmodell.md`, das der Korrekturen in
 `03-lernschichten-und-korrekturen.md`, die Entity-/Service-Referenz in
-`04-ha-integration-entities-services.md`. Stand: **v0.27.2**.
+`04-ha-integration-entities-services.md`. Die Anlagenbeispiele und Bedienwege stammen aus **v0.27.2**. Aktuelle Anlagenwerte liefert die Config-Entry-Diagnose. Den Softwarevertrag beschreibt die [SPEC](../SPEC.md).
 
 ## 1. Die reale Anlage
 

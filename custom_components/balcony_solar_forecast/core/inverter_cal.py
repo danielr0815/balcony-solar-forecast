@@ -139,7 +139,7 @@ def update(
 
     if folded == 0:
         return state
-    return InverterCalState(eta=eta, n=n)
+    return InverterCalState(eta=eta, n=n, source=state.source)
 
 
 def effective_eta(state: InverterCalState) -> float | None:

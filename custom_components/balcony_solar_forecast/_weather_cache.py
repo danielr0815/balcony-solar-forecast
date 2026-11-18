@@ -10,7 +10,6 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from math import isfinite
 
 from .const import (
     FAILED_FETCH_MIN_INTERVAL_SECONDS,
@@ -37,19 +36,10 @@ class WeatherCandidate:
     retain_prior: bool
 
 
-def future_coverage(payload: dict, weather: WeatherSeries, now: datetime) -> int:
-    """Count usable radiation intervals whose end is still in the future."""
-    values = payload["minutely_15"]["shortwave_radiation"]
+def future_coverage(weather: WeatherSeries, now: datetime) -> int:
+    """Count physically usable intervals whose end is still in the future."""
     duration = timedelta(minutes=SLOT_MINUTES)
-    count = 0
-    for slot, value in zip(weather.slots, values, strict=True):
-        try:
-            usable = value is not None and isfinite(float(value))
-        except (TypeError, ValueError, OverflowError):
-            usable = False
-        if usable and slot.temp_c is not None and slot.start + duration > now:
-            count += 1
-    return count
+    return sum(slot.usable and slot.start + duration > now for slot in weather.slots)
 
 
 def prepare_candidate(payload: dict, prior: dict | None,
@@ -62,7 +52,7 @@ def prepare_candidate(payload: dict, prior: dict | None,
     usable replacement.
     """
     weather = parse_weather(payload)
-    coverage = future_coverage(payload, weather, now)
+    coverage = future_coverage(weather, now)
     if coverage == 0:
         raise FetchError("Payload has no usable future weather intervals")
     retain = False
@@ -70,7 +60,7 @@ def prepare_candidate(payload: dict, prior: dict | None,
             and prior_age <= timedelta(hours=MAX_PAYLOAD_AGE_HOURS)):
         try:
             previous = parse_weather(prior)
-            retain = future_coverage(prior, previous, now) > coverage
+            retain = future_coverage(previous, now) > coverage
         except FetchError:
             pass
     return WeatherCandidate(weather, retain)

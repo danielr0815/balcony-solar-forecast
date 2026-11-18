@@ -26,7 +26,10 @@ import urllib.request
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from bsf_data import UTC
+if __package__:
+    from .bsf_data import UTC
+else:
+    from bsf_data import UTC
 
 DOMAIN = "balcony_solar_forecast"
 
@@ -73,14 +76,39 @@ class FetchError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+def _origin(url: str) -> tuple[str, str, int]:
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None):
+        raise FetchError("HA URL must have a valid HTTP(S) origin without credentials")
+    port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+    return parsed.scheme, parsed.hostname, port
+
+
+class _OriginRedirect(urllib.request.HTTPRedirectHandler):
+    """Keep the bearer header within the explicitly selected HA origin."""
+
+    def __init__(self, origin: tuple[str, str, int]):
+        self.origin = origin
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _origin(newurl) != self.origin:
+            raise FetchError("HA redirect would leave the configured origin")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class Rest:
     def __init__(self, base_url: str, token: str, timeout: float = 60.0):
         self.base = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        self._origin = _origin(self.base)
+        self._opener = urllib.request.build_opener(_OriginRedirect(self._origin))
 
     def _req(self, method: str, path: str, body: Any | None = None) -> Any:
         url = self.base + path
+        if _origin(url) != self._origin:
+            raise FetchError("REST request would leave the configured HA origin")
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(
             url,
@@ -92,7 +120,7 @@ class Rest:
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with self._opener.open(req, timeout=self.timeout) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as e:
             detail = ""

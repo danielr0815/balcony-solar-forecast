@@ -15,15 +15,13 @@ be installed (the whole module is skipped otherwise).
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 pytest.importorskip("homeassistant")
 
 from custom_components.balcony_solar_forecast.const import (  # noqa: E402
-    DATA_KEY_CORRECTED_HOURLY_WH,
-    DATA_KEY_RAW_HOURLY_WH,
     DRIFT_LOSS_STREAK_DAYS,
     ISSUE_FAST_LEARNER_DISABLED,
     ISSUE_SLOW_LEARNER_DISABLED,
@@ -31,9 +29,6 @@ from custom_components.balcony_solar_forecast.const import (  # noqa: E402
 from custom_components.balcony_solar_forecast.core.types import (  # noqa: E402
     DriftState,
     IssuedSnapshot,
-    LearnerConfig,
-    ShademapBin,
-    ShademapState,
 )
 from tests.test_coordinator_learning import _make_coordinator  # noqa: E402
 
@@ -176,51 +171,6 @@ def test_auto_disable_after_streak_only_guilty_layer(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Snapshot side: _slow_only_hourly gate + snapshot_issued wiring
-# ---------------------------------------------------------------------------
-
-
-async def test_slow_only_hourly_empty_when_slow_inactive():
-    """No learned shademap channels -> slow layer inactive -> {} (callers treat
-    it as slow-only == raw; the raw curve is never duplicated into the store)."""
-    c = _make_coordinator()  # default: empty ShademapState -> slow inactive
-    assert await c._slow_only_hourly("2026-05-01") == {}
-
-
-async def test_slow_only_hourly_empty_when_no_weather():
-    """Slow layer active but no cached weather -> {} (the snapshot never fails
-    on the extra engine pass)."""
-    c = _make_coordinator()
-    c._learner_config = LearnerConfig(slow_enabled=True)
-    c._shademap_state = ShademapState(
-        channels={"M1": {"10:15:1": ShademapBin(tau=0.3, n=20)}}
-    )
-    # _FakeStore.get_last_payload() -> None -> _cached_weather() is None.
-    assert await c._slow_only_hourly("2026-05-01") == {}
-
-
-async def test_snapshot_issued_stores_slow_only_curve(monkeypatch):
-    """snapshot_issued persists the slow-only curve returned by
-    _slow_only_hourly (the real engine pass is covered by the {}-on-no-weather
-    gate above)."""
-    c = _make_coordinator()
-    h = "2026-07-01" + _HOUR
-    c.data = {
-        DATA_KEY_RAW_HOURLY_WH: {h: 1000.0},
-        DATA_KEY_CORRECTED_HOURLY_WH: {h: 1000.0},
-        "status": "fresh",
-    }
-
-    async def _fake_slow_only(iso):
-        return {h: 900.0}
-
-    monkeypatch.setattr(c, "_slow_only_hourly", _fake_slow_only)
-    await c._snapshot_issued(date(2026, 7, 1))
-    stored = IssuedSnapshot.from_dict(c._store.get_issued("2026-07-01"))
-    assert stored.slow_only_hourly_wh == {h: 900.0}
-
-
-# ---------------------------------------------------------------------------
 # IssuedSnapshot round-trip with / without the slow-only curve
 # ---------------------------------------------------------------------------
 
@@ -267,18 +217,3 @@ def test_issued_snapshot_roundtrip_without_eta_is_none():
     assert IssuedSnapshot.from_dict(d).eta is None
     # A NaN in the stored dict degrades to None (validate-and-clamp).
     assert IssuedSnapshot.from_dict({"eta": float("nan")}).eta is None
-
-
-async def test_snapshot_issued_stores_current_eta(monkeypatch):
-    """snapshot_issued freezes the coordinator's current eta into the snapshot."""
-    c = _make_coordinator()
-    h = "2026-07-01" + _HOUR
-    c.data = {
-        DATA_KEY_RAW_HOURLY_WH: {h: 1000.0},
-        DATA_KEY_CORRECTED_HOURLY_WH: {h: 1000.0},
-        "status": "fresh",
-    }
-    monkeypatch.setattr(c, "_effective_inverter_eta", lambda: 0.93)
-    await c._snapshot_issued(date(2026, 7, 1))
-    stored = IssuedSnapshot.from_dict(c._store.get_issued("2026-07-01"))
-    assert stored.eta == 0.93

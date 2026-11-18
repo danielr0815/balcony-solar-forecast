@@ -165,6 +165,10 @@
         "entry_id": {
           "name": "Config entry",
           "description": "Restrict the response to a single config entry. Omit to return every configured site."
+        },
+        "include_capture_metadata": {
+          "name": "Include prospective evaluation metadata",
+          "description": "Include DC binding fingerprints, confirmed night intervals and available forecast band evidence."
         }
       }
     },
@@ -307,6 +311,10 @@
         "date": {
           "name": "Date",
           "description": "The local date whose issued forecast to return, ISO format YYYY-MM-DD."
+        },
+        "include_planes": {
+          "name": "Include per-module curves",
+          "description": "Read the archived DC hourly raw, slow-only and corrected curves available for each module."
         }
       }
     }

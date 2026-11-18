@@ -182,6 +182,15 @@ class _FakeStore:
     def record_hourly_actuals(self, iso, per_channel):
         self.hourly_actuals[iso] = {c: dict(h) for c, h in per_channel.items()}
 
+    def inverter_trained_dates(self):
+        return tuple(sorted(getattr(self, "inverter_trained_days", ())))
+
+    def record_inverter_training(self, iso, state):
+        if self.get_inverter_cal_state().source != state.source:
+            self.inverter_trained_days = set()
+        self.set_inverter_cal_state(state)
+        self.mark_inverter_day_trained(iso)
+
     def is_inverter_day_trained(self, iso):
         return iso in getattr(self, "inverter_trained_days", set())
 

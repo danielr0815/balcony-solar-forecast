@@ -33,6 +33,10 @@ from ._glue_util import (
 )
 from .const import (
     CLOUD_CLASS_CLEAR,
+    CORRECTION_SOURCE_ALL,
+    CORRECTION_SOURCE_BOTH,
+    CORRECTION_SOURCE_SHADEMAP,
+    CORRECTION_SOURCE_SHADEMAP_DAY_AHEAD,
     DATA_KEY_CORRECTED_HOURLY_WH,
     DATA_KEY_RAW_HOURLY_WH,
     DAY_AHEAD_BIAS_RESEED_N,
@@ -50,8 +54,11 @@ from .const import (
     LEARNER_LAYER_SLOW,
     NIGHTLY_CATCHUP_MAX_DAYS,
     SHADEMAP_MEASURED_CLEAR_MIN_FRAC,
+    SLOT_HOURS,
+    SLOT_MINUTES,
 )
 from .core import (
+    InverterCalState,
     IssuedSnapshot,
     LearnerSnapshot,
     PlaneHourlyModeled,
@@ -186,11 +193,16 @@ async def snapshot_issued(coord, today: date) -> None:
         data.get(DATA_KEY_RAW_HOURLY_WH, {}), iso)
     corrected_hourly = _filter_hourly_to_local_day(
         data.get(DATA_KEY_CORRECTED_HOURLY_WH, {}), iso)
-    # Freeze synchronous provenance before the executor await. If a refresh
-    # overtakes this pass, retry later rather than archiving mixed generations.
+    # Consume the published generation synchronously. The weather cache and
+    # learner states can already have advanced while its successor is computing.
     per_plane = coord._per_plane_modeled(iso)
     cloud_classes = coord._cloud_class_by_hour(iso)
-    eta = coord._effective_inverter_eta()
+    eta, _eta_source = coord._forecast_inverter_eta(generation)
+    invalid_weather_hours = tuple(sorted({
+        _hour_key(start)
+        for start in getattr(generation, "invalid_weather_slots", ())
+        if dt_util.as_local(start).date().isoformat() == iso
+    }))
     from .core.provenance import bounded_provenance
 
     provenance = bounded_provenance(data.get("provenance"))
@@ -202,14 +214,11 @@ async def snapshot_issued(coord, today: date) -> None:
     for key in ("p10", "p90"):
         if isinstance(data.get(f"wh_period_ac_{key}"), dict):
             bands[f"ac_{key}_slot_wh"] = _filter_hourly_to_local_day(data[f"wh_period_ac_{key}"], iso)
-    slow_only = await coord._slow_only_hourly(iso)
-    if (coord.data is not data or getattr(coord, "_last_result", None) is not generation
-            or not getattr(coord, "last_update_success", True)):
-        return
     computed = data.get("computed_at")
+    issued = data.get("issued_at", computed)
     archived = dt_util.utcnow().isoformat()
     snapshot = IssuedSnapshot(
-        issued_at=computed if isinstance(computed, str) else archived,
+        issued_at=issued if isinstance(issued, str) else archived,
         computed_at=computed if isinstance(computed, str) else None,
         archived_at=archived,
         corrected_ac_hourly_wh=(
@@ -226,32 +235,45 @@ async def snapshot_issued(coord, today: date) -> None:
         # Slow-only (shademap ∘ physics, no day-ahead) curve for the drift
         # monitor's per-layer attribution (audit #13b); {} when the slow layer
         # is inactive (slow-only == raw, so nothing extra is stored).
-        slow_only_hourly_wh=slow_only,
+        slow_only_hourly_wh=_slow_only_hourly(generation, raw_hourly),
         # Site DC->AC efficiency in effect right now, so the issued AC curve can be
         # reconstructed later without hindsight (IRC-5/SCT-4).
         eta=eta,
         provenance=provenance,
         bands=bands or None,
+        invalid_weather_hours=invalid_weather_hours,
     )
     coord._store.record_issued(iso, snapshot.to_dict())
 
 
-def cloud_class_by_hour(coord, iso: str) -> dict[str, str]:
-    """Per-ISO-hour forecast cloud class for ``iso`` (day-ahead RLS input).
-
-    Derived from the cached weather series so the nightly RLS trains the
-    real (cloud class x day part) cell rather than a fixed "clear" label
-    (SPEC §8). A cloudy/fog/overcast day therefore trains the correct cell,
-    and a genuinely clear day is never routed to a fog-poisoned one. Best
-    effort: an unparseable weather image yields an empty map.
-    """
-    weather = coord._cached_weather()
-    if weather is None:
+def _slow_only_hourly(result, raw_hourly: dict[str, float]) -> dict[str, float]:
+    """Aggregate the engine's shademap-only DC, before any scalar correction."""
+    if result is None or result.correction_source not in {
+        CORRECTION_SOURCE_SHADEMAP, CORRECTION_SOURCE_BOTH,
+        CORRECTION_SOURCE_SHADEMAP_DAY_AHEAD, CORRECTION_SOURCE_ALL,
+    }:
         return {}
+    series = [plane.slow_watts for plane in result.plane_results]
+    out: dict[str, float] = {}
+    for start, planes in zip(result.slot_starts, zip(*series, strict=False), strict=False):
+        hour = _hour_key(start)
+        if hour in raw_hourly:
+            out[hour] = out.get(hour, 0.0) + sum(planes) * SLOT_HOURS
+    return out
+
+
+def cloud_class_by_hour(coord, iso: str) -> dict[str, str]:
+    """Per-hour forecast cloud classes of the published weather generation."""
+    context = getattr(coord, "_result_reference_context", None)
+    if context is None or context[0] is not getattr(coord, "_last_result", None):
+        return {}
+    weather = context[2]
     lat = coord._site.latitude
     lon = coord._site.longitude
     out: dict[str, str] = {}
     for slot in weather.slots:
+        if not getattr(slot, "usable", True):
+            continue
         start = dt_util.as_utc(slot.start)
         if dt_util.as_local(start).date().isoformat() != iso:
             continue
@@ -295,6 +317,11 @@ async def train_and_guard(coord, day: date) -> None:
 
     issued = coord._store.get_issued(iso)
     actuals = coord._store.get_actuals(iso)
+
+    # A late startup can archive today's nowcast. Preserve it for inspection,
+    # but keep retrospective targets out of all whole-day learner decisions.
+    if issued and coord._issued_after_cutoff(IssuedSnapshot.from_dict(issued), day):
+        return
 
     from .core.training_plan import TrainingContext, plan_training
 
@@ -359,6 +386,8 @@ def train_quantiles_day(coord, day: date) -> None:
     if not issued:
         return
     snap = IssuedSnapshot.from_dict(issued)
+    if coord._issued_after_cutoff(snap, day):
+        return
     corrected_hourly = _filter_hourly_to_local_day(
         snap.corrected_hourly_wh or snap.raw_hourly_wh, iso
     )
@@ -379,7 +408,7 @@ def train_quantiles_day(coord, day: date) -> None:
 
     samples: list[quantiles_mod.QuantileSample] = []
     for hkey, corrected_wh in corrected_hourly.items():
-        if hkey not in measured_hourly:
+        if hkey not in measured_hourly or hkey in snap.invalid_weather_hours:
             continue
         part = coord._day_part_for_hourkey(hkey)
         if part is None:
@@ -425,11 +454,13 @@ async def train_inverter_cal(coord, day: date) -> None:
     (or only out-of-band) hours leaves the calibration untouched.
     """
     site = coord._site
-    ac_entity = getattr(site, "ac_actual_entity", None)
-    if not ac_entity:
+    source = coord._inverter_cal_source()
+    if source is None:
+        _channel_health.reconcile_eta_source(coord, source)
         return  # no whole-site AC meter -> calibration is a pure no-op
     iso = day.isoformat()
-    if coord._store.is_inverter_day_trained(iso):
+    if (coord._inverter_cal_state.source == source
+            and coord._store.is_inverter_day_trained(iso)):
         return
     # Summed per-module DC hourly actuals (already read + stored for the DC
     # learners earlier in the sweep): {iso_hour: wh}. Absent -> nothing to
@@ -462,7 +493,11 @@ async def train_inverter_cal(coord, day: date) -> None:
             iso, exc_info=True,
         )
         return
-    if not ac_by_hour:
+    if not ac_by_hour or coord._inverter_cal_source() != source:
+        return
+    # An overlapping invocation may have folded this date during the meter read.
+    if (coord._inverter_cal_state.source == source
+            and coord._store.is_inverter_day_trained(iso)):
         return
 
     ratios: list[float] = []
@@ -512,6 +547,7 @@ async def train_inverter_cal(coord, day: date) -> None:
     in_band = sum(
         1 for r in ratios if INVERTER_CAL_MIN <= r <= INVERTER_CAL_MAX
     )
+    coord._inverter_cal_raw_source = source
     coord._inverter_cal_raw = {
         "date": iso,
         "median_ratio": round(raw_median, 4),
@@ -525,12 +561,27 @@ async def train_inverter_cal(coord, day: date) -> None:
     _channel_health.record_eta_calibration_outcome(
         coord, day, median_ratio=raw_median
     )
-    new_state = inverter_cal_mod.update(coord._inverter_cal_state, ratios)
-    if new_state is coord._inverter_cal_state:
+    previous = coord._inverter_cal_state
+    baseline = previous if previous.source == source else InverterCalState(source=source)
+    new_state = inverter_cal_mod.update(baseline, ratios)
+    if new_state is baseline:
         return  # every ratio was out of band -> nothing folded, state unchanged
     coord._inverter_cal_state = new_state
-    coord._persist_inverter_cal_state()
-    coord._store.mark_inverter_day_trained(iso)
+    coord._store.record_inverter_training(iso, new_state)
+
+
+def _has_daylight_weather_gap(coord, snap: IssuedSnapshot) -> bool:
+    """An unknown daylight hour invalidates whole-day geometric learning."""
+    for key in snap.invalid_weather_hours:
+        hour = dt_util.parse_datetime(key)
+        if hour is None:
+            continue
+        for minute in range(0, 60, SLOT_MINUTES):
+            midpoint = hour + timedelta(minutes=minute + SLOT_MINUTES / 2)
+            _, elevation = solpos.sun_position(midpoint, coord._site.latitude, coord._site.longitude)
+            if elevation > -6:  # include civil twilight, when diffuse yield is possible
+                return True
+    return False
 
 
 def train_day_ahead(
@@ -556,6 +607,8 @@ def train_day_ahead(
     if not issued or not actuals:
         return
     snap = IssuedSnapshot.from_dict(issued)
+    if coord._issued_after_cutoff(snap, date.fromisoformat(iso)) or _has_daylight_weather_gap(coord, snap):
+        return
     # The modeled side of the day-ahead RLS is the SLOW-ONLY curve (shademap ∘
     # physics, no day-ahead factor) rather than pure raw (B2/SCT-3): theta is
     # APPLIED on top of the shademap-corrected curve, so training it against pure
@@ -707,6 +760,8 @@ def train_shademap(
     if not issued:
         return
     snap = IssuedSnapshot.from_dict(issued)
+    if coord._issued_after_cutoff(snap, date.fromisoformat(iso)) or _has_daylight_weather_gap(coord, snap):
+        return
     if not snap.per_plane:
         return  # v0.1 issued or engine breakdown absent: nothing to train
     hourly_actuals = coord._store_hourly_actuals(iso)
@@ -851,6 +906,8 @@ def update_drift(
     if not issued or not actuals:
         return
     snap = IssuedSnapshot.from_dict(issued)
+    if coord._issued_after_cutoff(snap, date.fromisoformat(iso)):
+        return
     measured_wh = sum(
         float(v) for v in actuals.values() if isinstance(v, (int, float))
     )
@@ -896,44 +953,35 @@ def update_drift(
         # coarser metric that can hide the recorder gap.
         return
 
-    def _mae(curve: dict[str, float]) -> float | None:
-        if not measured_hourly:
-            return None
-        keys = [
-            hkey
-            for hkey in measured_hourly
-            if hkey in curve and (
-                curve.get(hkey, 0.0) > 0.0
-                or raw_hourly.get(hkey, 0.0) > 0.0
-                or measured_hourly.get(hkey, 0.0) > 0.0
+    # Compare every layer on the same measured daylight hours. An absent
+    # modeled hour contributes its full measured error, while lack of a
+    # measurement gives no evidence about that target.
+    slow_curve = slow_hourly or raw_hourly
+    if measured_hourly:
+        pairs = {
+            hour: wh
+            for hour, wh in measured_hourly.items()
+            if wh > 0.0 or any(
+                curve.get(hour, 0.0) > 0.0
+                for curve in (raw_hourly, slow_curve, corrected_hourly)
             )
-        ]
-        if not keys:
-            return None
-        return sum(
-            abs(float(curve[h]) - float(measured_hourly[h])) for h in keys
-        ) / len(keys)
+        }
+        if not pairs:
+            return
 
-    # Current stores always carry hourly actuals. A legacy store without them
-    # degrades to the old daily absolute-energy error rather than fabricating an
-    # hourly shape; diagnostics expose that fallback via ``hourly_basis``.
-    raw_hourly_mae = _mae(raw_hourly)
-    corrected_hourly_mae = _mae(corrected_hourly)
-    slow_hourly_mae = _mae(slow_hourly) if has_slow else raw_hourly_mae
-    hourly_basis = raw_hourly_mae is not None and corrected_hourly_mae is not None
-    raw_mae = (
-        raw_hourly_mae if hourly_basis else abs(raw_total - measured_wh)
-    )
-    corrected_mae = (
-        corrected_hourly_mae
-        if hourly_basis
-        else abs(corrected_total - measured_wh)
-    )
-    slow_mae = (
-        slow_hourly_mae
-        if hourly_basis and slow_hourly_mae is not None
-        else abs(slow_total - measured_wh)
-    )
+        def _mae(curve: dict[str, float]) -> float:
+            return sum(abs(curve.get(h, 0.0) - wh) for h, wh in pairs.items()) / len(pairs)
+
+        raw_mae = _mae(raw_hourly)
+        corrected_mae = _mae(corrected_hourly)
+        slow_mae = _mae(slow_curve)
+        hourly_basis = True
+    else:
+        # A genuinely daily-only legacy store has no hourly shape.
+        raw_mae = abs(raw_total - measured_wh)
+        corrected_mae = abs(corrected_total - measured_wh)
+        slow_mae = abs(slow_total - measured_wh)
+        hourly_basis = False
     baseline_mae = raw_mae  # pure physics is the baseline comparison here
 
     entry = {
