@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-11-19
+
 ### Fixed
 
 - Report unknown power and incomplete energy intervals accurately. Preserve the full local forecast day across UTC midnight and bind restored weather to the original site and model. Archived daily totals require evidence covering the local day.
