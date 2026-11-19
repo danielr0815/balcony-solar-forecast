@@ -938,6 +938,7 @@ def test_nightly_records_the_outcome_of_every_actuals_read(monkeypatch):
     class _Coordinator:
         def __init__(self) -> None:
             self._store = _NightlyStore()
+            self._site = _site(entities=("sensor.m1", None))
             self.data = None
 
         def _load_learner_states(self):
@@ -969,14 +970,24 @@ def test_nightly_records_the_outcome_of_every_actuals_read(monkeypatch):
             self.actuals: dict[str, dict] = {}
             self.hourly: dict[str, dict] = {}
 
-        def has_actuals(self, iso):
+        def has_verified_actuals(self, iso):
             return iso in self.actuals
 
-        def record_actuals(self, iso, daily):
-            self.actuals[iso] = daily
+        def is_day_trained(self, iso):
+            return False
 
-        def record_hourly_actuals(self, iso, hourly):
+        def record_verified_actuals(self, iso, daily, hourly, **_evidence):
+            self.actuals[iso] = daily
             self.hourly[iso] = hourly
+
+        def actuals_bindings(self, iso):
+            return None
+
+        def get_actuals(self, iso):
+            return self.actuals.get(iso)
+
+        def get_issued(self, iso):
+            return None
 
     import asyncio
     from datetime import UTC, datetime
@@ -1230,8 +1241,12 @@ def _patch_recorder_statistics(monkeypatch, stats_by_entity: dict[str, list[dict
 
 
 def _full_day_rows(value: float = 100.0) -> list[dict]:
-    """24 varying hourly rows: clears the coverage gate whatever the season."""
-    return _rows(24, value, start_hour=0)
+    """Five-minute means for 24 hours, with a varying hourly signal."""
+    return [
+        {"start": row["start"] + slot * 300, "min": row["mean"], "mean": row["mean"], "max": row["mean"]}
+        for row in _rows(24, value, start_hour=0)
+        for slot in range(12)
+    ]
 
 
 def test_async_read_actuals_publishes_the_dropout_to_the_coordinator(monkeypatch):

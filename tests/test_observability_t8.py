@@ -104,7 +104,9 @@ def test_quantile_trained_true_with_enough_days(july_quantile_window):
 
 
 def test_bias_cells_summary_flags_clamped_at_band_edge():
-    c = _bare_coordinator()
+    from tests.helpers.coordinator import _make_coordinator
+
+    c = _make_coordinator()
     # One cell pinned to the ceiling (theta above MAX clamps to MAX), one well
     # inside the band, one at the floor.
     c._bias_state = BiasState(

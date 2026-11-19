@@ -40,9 +40,8 @@ _RADIATION_VARS = (
     "diffuse_radiation",         # DHI
     "temperature_2m",
 )
-# Cloud / visibility / snow context for the cloud classifier. Best-effort:
-# absent variables degrade the cloud class to "mixed" for that hour rather than
-# aborting (the shademap does not need them; only the day-ahead bias does).
+# Hour-start cloud, visibility and snow inputs. Missing fields are recorded
+# alongside the physical inputs used for historical reconstruction.
 _CONTEXT_VARS = (
     "cloud_cover_low",
     "cloud_cover_mid",
@@ -82,16 +81,15 @@ def parse_hourly_payload(
     payload: dict,
     *,
     var_suffix: str = "",
+    context_suffix: str | None = None,
 ) -> list[HourlyWeather]:
     """Parse an Open-Meteo hourly payload into HourlyWeather records (pure).
 
     ``var_suffix`` is appended to each radiation variable name when reading the
     Previous-Runs API (e.g. "_previous_day1"); the Historical Forecast API uses
-    an empty suffix. Context variables (cloud/visibility/snow) are read
-    UNSUFFIXED best-effort — the Previous-Runs API exposes forecast-as-issued
-    radiation, while cloud context is taken from the same call's plain hourly
-    block when present. Hours missing any of GHI/DNI/DHI/temp are dropped
-    (the engine cannot transpose them); the caller sees a shorter list.
+    an empty suffix. Radiation is the preceding interval mean. Cloud layers,
+    visibility and snow depth use the context at that interval's start. An
+    explicit context_suffix identifies a degraded provider request.
 
     Raises ``ValueError`` on a structurally broken payload (missing hourly
     block or time array) — the network layer maps that to a skipped range.
@@ -112,19 +110,19 @@ def parse_hourly_payload(
     dhi_c = _col(f"{_RADIATION_VARS[2]}{var_suffix}")
     temp_c = _col(f"{_RADIATION_VARS[3]}{var_suffix}")
 
-    cl_low = _col("cloud_cover_low")
-    cl_mid = _col("cloud_cover_mid")
-    cl_high = _col("cloud_cover_high")
-    vis = _col("visibility")
-    snow = _col("snow_depth")
+    context_suffix = var_suffix if context_suffix is None else context_suffix
+    columns = {name: _col(name + context_suffix) for name in _CONTEXT_VARS}
 
     def _at(col: list, i: int) -> float | None:
-        return _num(col[i]) if i < len(col) else None
+        return _num(col[i]) if 0 <= i < len(col) else None
 
+    indices = {_as_utc_hour(stamp): i for i, stamp in enumerate(times) if isinstance(stamp, str)}
     out: list[HourlyWeather] = []
-    for i, stamp in enumerate(times):
-        if not isinstance(stamp, str):
-            continue
+    for end, i in indices.items():
+        start = end - timedelta(hours=1)
+        context_index = indices.get(start, -1)
+        context = {name: _at(col, context_index) for name, col in columns.items()}
+        missing = tuple(name for name, value in context.items() if value is None)
         ghi = _at(ghi_c, i)
         dni = _at(dni_c, i)
         dhi = _at(dhi_c, i)
@@ -136,16 +134,20 @@ def parse_hourly_payload(
             HourlyWeather(
                 # Radiation is the preceding-hour mean, while recorder keys
                 # identify the beginning of that interval (also at midnight).
-                start=_as_utc_hour(stamp) - timedelta(hours=1),
+                start=start,
                 ghi=max(0.0, ghi),
                 dni=max(0.0, dni),
                 dhi=max(0.0, dhi),
                 temp_c=temp,
-                cloud_low=_at(cl_low, i) or 0.0,
-                cloud_mid=_at(cl_mid, i) or 0.0,
-                cloud_high=_at(cl_high, i) or 0.0,
-                visibility_m=_at(vis, i),
-                snow_depth_m=_at(snow, i) or 0.0,
+                cloud_low=context["cloud_cover_low"] or 0.0,
+                cloud_mid=context["cloud_cover_mid"] or 0.0,
+                cloud_high=context["cloud_cover_high"] or 0.0,
+                visibility_m=context["visibility"],
+                snow_depth_m=context["snow_depth"] or 0.0,
+                weather_source=("analysis_fallback" if not var_suffix else
+                                "day1_radiation_unverified_context" if context_suffix != var_suffix else
+                                "day1_partial_context" if missing else "as_issued"),
+                missing_context=missing,
             )
         )
     return out
@@ -154,6 +156,10 @@ def parse_hourly_payload(
 # ===========================================================================
 # Network layer (aiohttp, lazy) — Previous-Runs weather with degrade.
 # ===========================================================================
+
+
+class _UnsupportedRequest(ValueError):
+    """The provider rejected a variable combination before returning weather."""
 
 
 async def fetch_weather_range(
@@ -184,7 +190,7 @@ async def fetch_weather_range(
 
     suffix = f"_previous_day{PREVIOUS_RUN_LEAD_DAY}"
     prev_vars = [f"{v}{suffix}" for v in _RADIATION_VARS]
-    hourly_vars = ",".join([*prev_vars, *_CONTEXT_VARS])
+    hourly_vars = ",".join([*prev_vars, *(v + suffix for v in _CONTEXT_VARS)])
     params = {
         "latitude": f"{latitude:.6f}",
         "longitude": f"{longitude:.6f}",
@@ -195,10 +201,18 @@ async def fetch_weather_range(
         "timezone": "UTC",
     }
     try:
-        payload = await _get_json(session, PREVIOUS_RUNS_URL, params)
-        records = within(parse_hourly_payload(payload, var_suffix=suffix))
+        context_suffix = suffix
+        try:
+            payload = await _get_json(session, PREVIOUS_RUNS_URL, params)
+        except _UnsupportedRequest:
+            # Some models archive only the four physical inputs at day-1 lead.
+            # Retain them and label the context explicitly in the export.
+            context_suffix = ""
+            params["hourly"] = ",".join([*prev_vars, *_CONTEXT_VARS])
+            payload = await _get_json(session, PREVIOUS_RUNS_URL, params)
+        records = within(parse_hourly_payload(payload, var_suffix=suffix, context_suffix=context_suffix))
         if records:
-            return records, True
+            return records, all(rec.weather_source == "as_issued" for rec in records)
         _LOGGER.warning(
             "Previous-Runs API returned no as-issued radiation for %s..%s; "
             "falling back to the Historical Forecast API (analysis, NOT "
@@ -227,5 +241,7 @@ async def _get_json(session, url: str, params: dict) -> dict:
     async with session.get(url, params=params, timeout=timeout) as resp:
         if resp.status >= 400:
             text = await resp.text()
+            if resp.status == 400:
+                raise _UnsupportedRequest(f"HTTP 400 from {url}: {text[:200]}")
             raise RuntimeError(f"HTTP {resp.status} from {url}: {text[:200]}")
         return await resp.json()

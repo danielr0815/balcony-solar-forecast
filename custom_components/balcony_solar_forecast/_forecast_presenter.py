@@ -4,6 +4,8 @@ Historical sensor imports remain reexports; registration belongs to services.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from math import isfinite
 from typing import Any
 
 from homeassistant.core import HomeAssistant, ServiceResponse
@@ -22,6 +24,7 @@ from .const import (
     FORECAST_RESP_KEY_P90,
 )
 from .core.provenance import dc_bindings_digest
+from .core.time_axis import UTC_HOUR_SLOT_OFFSETS, complete_utc_hours
 
 _KEY_SLOT_STARTS = "slot_starts"
 _KEY_PLANE_WATTS = "plane_watts"
@@ -133,20 +136,17 @@ def _band_blocks(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _hourly_from_slots(slot_wh: dict[str, float]) -> dict[str, float]:
-    """Roll a 15-min ``{iso_slot: Wh}`` curve up to ``{iso_hour: Wh}``.
-
-    Buckets each slot's Wh into its containing UTC hour (truncating the slot
-    start to the hour). Malformed keys/values are skipped so a diagnostic curve
-    can never crash the response.
-    """
-    hourly: dict[str, float] = {}
+    """Roll valid 15-minute values into complete UTC hours (Wh)."""
+    values: dict[datetime, float] = {}
     for iso, wh in slot_wh.items():
         parsed = dt_util.parse_datetime(iso) if isinstance(iso, str) else None
-        if parsed is None or not isinstance(wh, (int, float)):
-            continue
-        hour_key = parsed.replace(minute=0, second=0, microsecond=0).isoformat()
-        hourly[hour_key] = round(hourly.get(hour_key, 0.0) + float(wh), 2)
-    return hourly
+        if parsed is not None and isinstance(wh, (int, float)) and isfinite(wh):
+            stamp = parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+            values[stamp] = float(wh)
+    return {
+        hour.isoformat(): round(sum(values[hour + offset] for offset in UTC_HOUR_SLOT_OFFSETS), 2)
+        for hour in sorted(complete_utc_hours(values))
+    }
 
 
 def _empty_forecast_entry() -> dict[str, Any]:
@@ -169,7 +169,6 @@ def _iter_curve(data: dict[str, Any]):
     starts = data.get(_KEY_SLOT_STARTS)
     if starts:
         for iso in starts:
-            if iso in watts:
-                yield iso, watts[iso]
+            yield iso, watts.get(iso)
     else:
         yield from watts.items()

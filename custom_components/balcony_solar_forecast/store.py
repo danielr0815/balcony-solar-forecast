@@ -44,7 +44,7 @@ v0.4 additions):
     {
       "schema_version": 3,                       # _SCHEMA_KEY == STORAGE_DATA_VERSION_V3
       # --- v1 rings (carried through EVERY migration untouched) ---
-      "last_payload":        {"fetched_at": iso, "payload": {...}} | None,
+      "last_payload":        {"fetched_at": iso, "payload": {...}, "request_key"?: {...}} | None,
       "forecast_issued_log": {iso_date: snapshot(v1|v2 dict)},      # 90-day ring
       "daily_actuals_log":   {iso_date: {module: wh}},              # 90-day ring
       # --- v2 learner sections (carried through v2->v3 BYTE-FAITHFUL) ---
@@ -140,6 +140,10 @@ from .core.types import (
 
 _INVERTER_TRAINED_DAYS = "inverter_cal_trained_days"
 _UNVERIFIED_INVERTER_CAL = "inverter_cal_unverified_legacy"
+_VERIFIED_ACTUALS = "verified_five_minute_actuals"
+_VERIFIED_LOCAL_EDGES = "verified_local_day_edges"
+_ACTUALS_CONTEXT = "verified_actuals_context"
+_LATE_ISSUED = "confirmed_late_issued"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -350,7 +354,10 @@ def _coerce_last_payload(last: Any) -> dict[str, Any] | None:
         and isinstance(last.get("payload"), dict)
         and isinstance(last.get("fetched_at"), str)
     ):
-        return {"fetched_at": last["fetched_at"], "payload": last["payload"]}
+        result = {"fetched_at": last["fetched_at"], "payload": last["payload"]}
+        if isinstance(request_key := last.get("request_key"), dict):
+            result["request_key"] = request_key
+        return result
     return None
 
 
@@ -515,12 +522,48 @@ def _validate_learner_sections(
         raw.get(STORE_KEY_LAST_PAYLOAD)
     )
     state[STORE_KEY_ISSUED_LOG] = _coerce_issued_ring(raw.get(STORE_KEY_ISSUED_LOG))
+    late = raw.get(_LATE_ISSUED)
+    if isinstance(late, dict):
+        retained_late = {day: stamp for day, stamp in late.items()
+                         if day in state[STORE_KEY_ISSUED_LOG] and isinstance(stamp, str)}
+        if retained_late:
+            state[_LATE_ISSUED] = retained_late
     state[STORE_KEY_ACTUALS_LOG] = _coerce_actuals_ring(
         raw.get(STORE_KEY_ACTUALS_LOG)
     )
     state[STORE_KEY_HOURLY_ACTUALS] = _coerce_hourly_actuals(
         raw.get(STORE_KEY_HOURLY_ACTUALS)
     )
+    verified = raw.get(_VERIFIED_ACTUALS)
+    if isinstance(verified, list):
+        dates = sorted(
+            {day for day in verified if isinstance(day, str)
+             and day in state[STORE_KEY_ACTUALS_LOG] and day in state[STORE_KEY_HOURLY_ACTUALS]}
+        )
+        if dates:
+            state[_VERIFIED_ACTUALS] = dates
+            local_edges = raw.get(_VERIFIED_LOCAL_EDGES)
+            if isinstance(local_edges, list):
+                state[_VERIFIED_LOCAL_EDGES] = sorted({day for day in local_edges if isinstance(day, str) and day in dates})
+            context = raw.get(_ACTUALS_CONTEXT)
+            if isinstance(context, dict):
+                retained = {}
+                for day in dates:
+                    evidence = context.get(day)
+                    if not isinstance(evidence, dict):
+                        continue
+                    bindings = evidence.get("bindings")
+                    first = evidence.get("first_edge_production")
+                    entry: dict[str, object] = {}
+                    if (isinstance(bindings, dict) and bindings.keys() == state[STORE_KEY_ACTUALS_LOG][day].keys()
+                            and all(isinstance(value, str) and value for value in bindings.values())):
+                        entry["bindings"] = dict(bindings)
+                    if isinstance(first, str):
+                        entry["first_edge_production"] = first
+                    if entry:
+                        retained[day] = entry
+                if retained:
+                    state[_ACTUALS_CONTEXT] = retained
     state[STORE_KEY_BIAS_STATE] = BiasState.from_dict(
         raw.get(STORE_KEY_BIAS_STATE, {})
     ).to_dict()
@@ -753,6 +796,7 @@ class ForecastStore:
         # scheduled for disk write; None until the first payload persist.
         # Used to time-gate payload writes (eMMC-wear budget, SPEC §16.3).
         self._last_payload_save_at: float | None = None
+        self._scheduled_since_flush = False
 
     # ------------------------------------------------------------------
     # Load / persist
@@ -776,7 +820,13 @@ class ForecastStore:
 
     def _schedule_save(self) -> None:
         """Bundle a delayed write (eMMC-friendly)."""
+        self._scheduled_since_flush = True
         self._store.async_delay_save(lambda: self._data, STORAGE_SAVE_DELAY_SECONDS)
+
+    async def async_flush_pending(self) -> None:
+        """Join a writer created by this setup attempt before a retry or removal."""
+        if self._scheduled_since_flush:
+            await self.async_flush()
 
     async def async_flush(self) -> None:
         """Write immediately, cancelling any pending delayed save.
@@ -785,7 +835,13 @@ class ForecastStore:
         and read back a stale last-good cache (cf. battery_manager review).
         Resets the payload write-gate: the in-memory payload is now on disk.
         """
-        await self._store.async_save(self._data)
+        # Clear before the await so a new writer scheduled during I/O stays visible.
+        self._scheduled_since_flush = False
+        try:
+            await self._store.async_save(self._data)
+        except BaseException:
+            self._scheduled_since_flush = True
+            raise
         self._last_payload_save_at = time.monotonic()
 
     async def async_remove(self) -> None:
@@ -796,7 +852,9 @@ class ForecastStore:
     # Last-good payload
     # ------------------------------------------------------------------
 
-    def set_last_payload(self, payload: dict[str, Any], fetched_at: str) -> None:
+    def set_last_payload(
+        self, payload: dict[str, Any], fetched_at: str, *, request_key: dict | None = None,
+    ) -> None:
         """Record the freshest good Open-Meteo payload and its fetch time.
 
         The in-memory copy is always updated (so the degradation ladder and a
@@ -809,6 +867,8 @@ class ForecastStore:
             "fetched_at": fetched_at,
             "payload": payload,
         }
+        if request_key is not None:
+            self._data[STORE_KEY_LAST_PAYLOAD]["request_key"] = request_key
         now = time.monotonic()
         if (
             self._last_payload_save_at is not None
@@ -822,7 +882,7 @@ class ForecastStore:
         self._schedule_save()
 
     def get_last_payload(self) -> dict[str, Any] | None:
-        """Return ``{"fetched_at": iso, "payload": {...}}`` or None."""
+        """Return the weather payload, its fetch time and optional request key."""
         return self._data.get(STORE_KEY_LAST_PAYLOAD)
 
     # ------------------------------------------------------------------
@@ -845,6 +905,19 @@ class ForecastStore:
     def get_issued(self, iso_date: str) -> dict[str, Any] | None:
         return self._data[STORE_KEY_ISSUED_LOG].get(iso_date)
 
+    def confirmed_late_issued(self, iso_date: str) -> str | None:
+        """Previously confirmed effective issue timestamp for this local date."""
+        return self._data.get(_LATE_ISSUED, {}).get(iso_date)
+
+    def record_late_issued(self, iso_date: str, issue_stamp: str) -> None:
+        """Persist issue evidence independently of replaceable Recorder labels."""
+        if not self.get_issued(iso_date) or self.confirmed_late_issued(iso_date) == issue_stamp:
+            return
+        saved = self._data.setdefault(_LATE_ISSUED, {})
+        saved[iso_date] = issue_stamp
+        _trim_ring(saved, _ISSUED_RING_DAYS)
+        self._schedule_save()
+
     def issued_dates(self) -> list[str]:
         return sorted(self._data[STORE_KEY_ISSUED_LOG])
 
@@ -854,6 +927,7 @@ class ForecastStore:
 
     def record_actuals(self, iso_date: str, per_module_wh: dict[str, float]) -> None:
         """Store measured per-module DC energy for ``iso_date`` (idempotent)."""
+        self._forget_actuals_verification(iso_date)
         ring = self._data[STORE_KEY_ACTUALS_LOG]
         ring[iso_date] = dict(per_module_wh)
         _trim_ring(ring, _ACTUALS_RING_DAYS)
@@ -890,12 +964,97 @@ class ForecastStore:
         HOURLY_ACTUALS_RING_DAYS window (SPEC §16.3 eMMC budget). The shademap
         trainer consumes it via :meth:`get_hourly_actuals`.
         """
+        self._forget_actuals_verification(iso_date)
         ring = self._data.setdefault(STORE_KEY_HOURLY_ACTUALS, {})
         ring[iso_date] = {
             chan: dict(hours) for chan, hours in per_channel.items()
         }
         _trim_ring(ring, HOURLY_ACTUALS_RING_DAYS)
         self._schedule_save()
+
+    def _forget_actuals_verification(self, iso_date: str) -> None:
+        for key in (_VERIFIED_ACTUALS, _VERIFIED_LOCAL_EDGES):
+            dates = self._data.get(key, [])
+            if iso_date in dates:
+                dates.remove(iso_date)
+        self._data.get(_ACTUALS_CONTEXT, {}).pop(iso_date, None)
+
+    def has_verified_actuals(self, iso_date: str) -> bool:
+        """Whether the stored hourly labels came from twelve-slot evidence."""
+        return (iso_date in self._data.get(_VERIFIED_ACTUALS, ())
+                and bool(self.get_actuals(iso_date)) and bool(self.get_hourly_actuals(iso_date)))
+
+    def has_verified_local_day_edges(self, iso_date: str) -> bool:
+        """Whether the two local midnight fragments carry adequate evidence."""
+        return iso_date in self._data.get(_VERIFIED_LOCAL_EDGES, ()) and self.has_verified_actuals(iso_date)
+
+    def actuals_bindings(self, iso_date: str) -> dict[str, str] | None:
+        return self._data.get(_ACTUALS_CONTEXT, {}).get(iso_date, {}).get("bindings")
+
+    def first_actuals_edge_production(self, iso_date: str) -> str | None:
+        return self._data.get(_ACTUALS_CONTEXT, {}).get(iso_date, {}).get("first_edge_production")
+
+    def record_verified_actuals(
+        self, iso_date: str, daily: dict[str, float], hourly: dict[str, dict[str, float]],
+        *, local_day_edges_complete: bool = False, bindings: dict[str, str] | None = None,
+        first_edge_production: str | None = None, replace_binding: bool = False,
+    ) -> bool:
+        """Store fresh recorder evidence when it retains all verified targets."""
+        if bindings is not None and (bindings.keys() != daily.keys() or bindings.keys() != hourly.keys()):
+            return False
+        previous = self.get_hourly_actuals(iso_date) if self.has_verified_actuals(iso_date) else None
+        previous_edges = self.has_verified_local_day_edges(iso_date)
+        previous_bindings = self.actuals_bindings(iso_date)
+        old_first = self.first_actuals_edge_production(iso_date)
+        if previous is not None and not replace_binding:
+            if previous_bindings is not None and bindings is not None and previous_bindings != bindings:
+                return False
+            bindings = bindings if bindings is not None else previous_bindings
+            first_edge_production = min(
+                (slot for slot in (first_edge_production, old_first) if slot is not None), default=None,
+            )
+            if previous.keys() != hourly.keys() or any(
+                not hours.keys() <= hourly[channel].keys() for channel, hours in previous.items()
+            ) or (previous_edges and not local_day_edges_complete):
+                # A temporary recorder outage or expiry cannot erase evidence
+                # that earlier runs already proved. An independently valid
+                # positive edge interval can still establish issue leakage.
+                if first_edge_production != old_first:
+                    self._data.setdefault(_ACTUALS_CONTEXT, {}).setdefault(iso_date, {})[
+                        "first_edge_production"
+                    ] = first_edge_production
+                    self._schedule_save()
+                return False
+            if (previous == hourly and daily == self.get_actuals(iso_date)
+                    and previous_edges == local_day_edges_complete and previous_bindings == bindings
+                    and first_edge_production == old_first):
+                return False
+        self.record_actuals(iso_date, daily)
+        self.record_hourly_actuals(iso_date, hourly)
+        retained = self._data[STORE_KEY_HOURLY_ACTUALS]
+        dates = self._data.get(_VERIFIED_ACTUALS, [])
+        self._data[_VERIFIED_ACTUALS] = sorted(
+            {day for day in (*dates, iso_date) if day in retained and self.get_actuals(day)}
+        )
+        edges = self._data.get(_VERIFIED_LOCAL_EDGES, [])
+        if local_day_edges_complete:
+            edges = [*edges, iso_date]
+        if edges:
+            self._data[_VERIFIED_LOCAL_EDGES] = sorted(set(edges).intersection(self._data[_VERIFIED_ACTUALS]))
+        context = self._data.get(_ACTUALS_CONTEXT, {})
+        evidence: dict[str, object] = {}
+        if bindings is not None:
+            evidence["bindings"] = dict(bindings)
+        if first_edge_production is not None:
+            evidence["first_edge_production"] = first_edge_production
+        if evidence:
+            context[iso_date] = evidence
+        if context:
+            self._data[_ACTUALS_CONTEXT] = {
+                day: context[day] for day in self._data[_VERIFIED_ACTUALS] if day in context
+            }
+        self._schedule_save()
+        return True
 
     def get_hourly_actuals(
         self, iso_date: str
@@ -1093,6 +1252,11 @@ class ForecastStore:
         """
         days = self._data.get(STORE_KEY_TRAINED_DAYS, [])
         return isinstance(days, list) and iso_date in days
+
+    def latest_trained_day(self) -> str | None:
+        """Latest consumed target date, independent of processing order."""
+        days = self._data.get(STORE_KEY_TRAINED_DAYS, [])
+        return days[-1] if days else None
 
     def mark_day_trained(self, iso_date: str) -> None:
         """Record a completed training/guard pass for ``iso_date`` (trimmed)."""

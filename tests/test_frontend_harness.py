@@ -52,3 +52,21 @@ def test_review_card_quality_contracts():
     proc = subprocess.run([shutil.which("node"), str(Path(__file__).parent / "harness" / "review_quality_harness.mjs")],
                           capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_nov19_dashboard_harness():
+    harness = Path(__file__).parent / "harness" / "nov19_dashboard_harness.mjs"
+    proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        [shutil.which("node"), str(harness)], capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_history_authorization_harness():
+    harness = Path(__file__).parent / "harness" / "nov19_history_authorization.mjs"
+    proc = subprocess.run(  # noqa: S603 -- fixed script, no shell
+        [shutil.which("node"), str(harness)], capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr

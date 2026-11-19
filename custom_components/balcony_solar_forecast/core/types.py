@@ -511,6 +511,8 @@ class WeatherSlot:
     # A numeric zero may be a real observation of darkness. Preserve provider
     # gaps separately from the dense numeric series used by readers of a slot.
     radiation_complete: bool = True
+    # The ensemble denominator needs GHI even when other inputs are missing.
+    ghi_present: bool = True
 
     @property
     def usable(self) -> bool:
@@ -1159,6 +1161,9 @@ class DriftState:
     # (snow / total dropout). Persisted so a mid-day restart keeps the freeze.
     collapse_frozen_date: str | None = None
     version: int = 2
+    # Per-date loss verdicts from eligible paired evidence. An absent leg is
+    # unknown, which interrupts a streak; the legacy counters have no dates.
+    loss_evidence: dict[str, dict[str, bool]] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict) -> DriftState:
@@ -1184,8 +1189,18 @@ class DriftState:
             if d.get("fast_option_seen") is None
             else bool(d.get("fast_option_seen"))
         )
+        evidence_raw = d.get("loss_evidence")
+        loss_evidence = {}
+        if isinstance(evidence_raw, dict):
+            for day, legs in evidence_raw.items():
+                if isinstance(day, str) and isinstance(legs, dict):
+                    loss_evidence[day] = {
+                        layer: lost for layer, lost in legs.items()
+                        if layer in ("day_ahead", "slow") and isinstance(lost, bool)
+                    }
         return cls(
             daily_mae=daily_mae,
+            loss_evidence=loss_evidence,
             fast_loss_streak=legacy_fast_streak,
             slow_loss_streak=_safe_int(d.get("slow_loss_streak", 0), 0, minimum=0),
             fast_disabled=legacy_fast_disabled,
@@ -1234,6 +1249,8 @@ class DriftState:
                 day_ahead_disabled=self.day_ahead_disabled,
                 day_ahead_option_seen=self.day_ahead_option_seen,
             )
+        if self.loss_evidence:
+            out["loss_evidence"] = {day: dict(legs) for day, legs in self.loss_evidence.items()}
         return out
 
 
@@ -1256,6 +1273,9 @@ class LearnerSnapshot:
     bias: BiasState
     shademap: ShademapState
     quantile: QuantileState = field(default_factory=lambda: QuantileState())
+    # Nightly evidence: no target on or after this local date had been
+    # consumed when this pre-training snapshot was taken.
+    training_before_day: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> LearnerSnapshot:
@@ -1266,6 +1286,9 @@ class LearnerSnapshot:
             bias=BiasState.from_dict(d.get("bias", {})),
             shademap=ShademapState.from_dict(d.get("shademap", {})),
             quantile=QuantileState.from_dict(d.get("quantile", {})),
+            training_before_day=(
+                d["training_before_day"] if isinstance(d.get("training_before_day"), str) else None
+            ),
         )
 
     def to_dict(self) -> dict:
@@ -1281,6 +1304,8 @@ class LearnerSnapshot:
         # (SPEC §16.2). A restored empty section is the pre-quantile behaviour.
         if self.quantile.bins:
             out["quantile"] = self.quantile.to_dict()
+        if self.training_before_day is not None:
+            out["training_before_day"] = self.training_before_day
         return out
 
 

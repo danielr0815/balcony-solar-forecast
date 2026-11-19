@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import UTC, date, datetime, timedelta, tzinfo
+from typing import NamedTuple
 
 from homeassistant.util import dt as dt_util
 
@@ -29,8 +30,8 @@ from .const import (
     DROPOUT_REASON_IMPLAUSIBLE_CHANNEL,
     DROPOUT_REASON_LOW_COVERAGE,
 )
-from .core import SiteConfig
-from .core.measurement_quality import dc_power, frozen_nonzero
+from .core import SiteConfig, solpos
+from .core.measurement_quality import dc_power, frozen_nonzero, power_watts
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -40,9 +41,8 @@ async def async_read_actuals(
 ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
     """Per-module measured DC energy for ``day``: (daily totals, hourly).
 
-    Reads the hourly ``mean`` rows once and returns BOTH the per-module daily
-    Wh totals AND the per-module ``{iso_hour: wh}`` buckets (the shademap
-    trainer needs hourly resolution).
+    Reads the five-minute ``min``, ``mean`` and ``max`` rows once and uses
+    only complete plausible UTC hours for daily Wh totals and hourly buckets.
 
     Label gates (SPEC §9.8, all delegated to :func:`_actuals_from_stats`):
     a frozen channel, a configured channel with NO usable rows (dead DTU
@@ -59,6 +59,8 @@ async def async_read_actuals(
     WHICH gate fired — the three cases have different remedies.
     """
     coord._last_actuals_dropout = None
+    coord._last_actuals_local_edges_complete = False
+    coord._last_actuals_first_edge_production = None
     entity_by_module = {
         p.name: p.actual_entity
         for p in coord._site.planes
@@ -79,31 +81,42 @@ async def async_read_actuals(
     from homeassistant.components.recorder import get_instance
 
     def _read() -> tuple[
-        dict[str, float], dict[str, dict[str, float]], dict[str, object] | None
+        dict[str, float], dict[str, dict[str, float]], dict[str, object] | None, bool, str | None
     ]:
         from homeassistant.components.recorder.statistics import (
             statistics_during_period,
         )
 
         stat_ids = set(entity_by_module.values())
+        utc_start = dt_util.as_utc(start)
+        first_bucket = utc_start.replace(
+            minute=utc_start.minute - utc_start.minute % 5, second=0, microsecond=0,
+        )
         stats = statistics_during_period(
             coord.hass,
-            start,
-            end,
+            first_bucket,
+            _next_utc_hour_boundary(end),
             stat_ids,
-            "hour",
+            "5minute",
             {"power": "W"},
-            {"mean", "state"},
+            {"min", "mean", "max"},
         )
         daylight_keys = _daylight_hour_keys_in_local_day(
             coord._site, start, end
         )
+        utc_end = dt_util.as_utc(end)
+        if utc_end != _next_utc_hour_boundary(utc_end):
+            # That local fragment is measured separately. Its full UTC hour
+            # requires data from the next day and must not gate this day's read.
+            daylight_keys.discard(utc_end.replace(minute=0, second=0, microsecond=0).isoformat())
         expected = len(daylight_keys)
         # Wp per module for the SPEC §10 plausibility gate (kW-instead-of-W).
         wp_by_module = {
             p.name: p.wp for p in coord._site.planes if p.actual_entity
         }
         dropout: dict[str, object] = {}
+        edge_proof: dict[str, bool] = {}
+        edge_production: list[datetime] = []
         daily, hourly = _actuals_from_stats(
             stats,
             entity_by_module,
@@ -112,13 +125,20 @@ async def async_read_actuals(
             day=day,
             dropout_out=dropout,
             wp_by_module=wp_by_module,
+            local_day_bounds=(utc_start, utc_end),
+            local_edge_site=coord._site,
+            edge_proof_out=edge_proof,
+            edge_production_out=edge_production,
         )
-        return daily, hourly, (dropout or None)
+        first = min(edge_production).isoformat() if edge_production and daily else None
+        return daily, hourly, (dropout or None), bool(daily) and all(edge_proof.values()), first
 
-    daily, hourly, dropout = await get_instance(coord.hass).async_add_executor_job(
+    daily, hourly, dropout, local_edges_complete, first = await get_instance(coord.hass).async_add_executor_job(
         _read
     )
     coord._last_actuals_dropout = dropout
+    coord._last_actuals_local_edges_complete = local_edges_complete
+    coord._last_actuals_first_edge_production = first
     return daily, hourly
 
 
@@ -132,8 +152,8 @@ async def async_read_ac_actuals(
 ) -> dict[str, float]:
     """Hourly measured TOTAL-AC energy for ``day`` from the single site meter.
 
-    Reads the whole-site AC meter (SiteConfig.ac_actual_entity) hourly ``mean``
-    long-term-statistics rows over the LOCAL calendar ``day`` and returns
+    Reads the whole-site AC meter (SiteConfig.ac_actual_entity) five-minute
+    means over the LOCAL calendar ``day`` and returns
     ``{iso_utc_hour: wh}`` (a mean-W row over one hour == Wh) — the AC-side
     calibration ground truth (AC-side Phase 3). Mirrors the per-module DC reader
     for a SINGLE entity and keys hours by the SAME ISO-UTC hour as
@@ -165,9 +185,11 @@ async def async_read_ac_actuals(
         )
 
         stats = statistics_during_period(
-            hass, start, end, {ac_entity}, "hour", {"power": "W"}, {"mean", "state"},
+            hass, _next_utc_hour_boundary(start), _next_utc_hour_boundary(end),
+            {ac_entity}, "5minute", {"power": "W"}, {"min", "mean", "max"},
         )
-        return _ac_hourly_from_stats(stats.get(ac_entity), invert=invert)
+        rows = _complete_hourly_rows(_five_minute_buckets(stats.get(ac_entity), signed=True))
+        return _ac_hourly_from_stats(rows, invert=invert)
 
     return await get_instance(hass).async_add_executor_job(_read)
 
@@ -194,6 +216,108 @@ def _ac_hourly_from_stats(
             continue
         hourly[hkey] = hourly.get(hkey, 0.0) + sign * float(mean)  # W*1h == Wh
     return hourly
+
+
+_FiveMinuteBuckets = dict[datetime, dict[int, tuple[float, float] | None]]
+
+
+def _five_minute_buckets(rows: list[dict] | None, *, signed: bool = False) -> _FiveMinuteBuckets:
+    """Index valid five-minute means and maxima by UTC hour and offset."""
+    buckets: _FiveMinuteBuckets = {}
+    for row in rows or ():
+        start = _stat_row_datetime(row.get("start"))
+        if start is None or start.minute % 5 or start.second or start.microsecond:
+            continue
+        hour = start.replace(minute=0)
+        samples = buckets.setdefault(hour, {})
+        # A duplicate timestamp makes this bucket ambiguous even if its first
+        # value was a valid number.
+        low = power_watts(row.get("min"), signed=signed)
+        mean = power_watts(row.get("mean"), signed=signed)
+        high = power_watts(row.get("max"), signed=signed)
+        if (start.minute not in samples and low is not None and mean is not None
+                and high is not None and low <= mean <= high):
+            samples[start.minute] = mean, high
+        else:
+            samples[start.minute] = None
+    return buckets
+
+
+def _complete_hourly_rows(buckets: _FiveMinuteBuckets) -> list[dict]:
+    """Integrate twelve distinct five-minute means with ordered finite extrema."""
+    hourly = []
+    for hour, samples in sorted(buckets.items()):
+        usable = [sample for sample in samples.values() if sample is not None]
+        if len(usable) == 12:
+            hourly.append({
+                "start": hour,
+                "mean": math.fsum(mean / 12 for mean, _ in usable),
+                "max": max(high for _, high in usable),
+            })
+    return hourly
+
+
+def _next_utc_hour_boundary(local_bound: datetime) -> datetime:
+    """Query all bins of the UTC hours whose starts belong to the local day."""
+    instant = dt_util.as_utc(local_bound)
+    hour = instant.replace(minute=0, second=0, microsecond=0)
+    return hour if hour == instant else hour + timedelta(hours=1)
+
+
+class _EdgeBucket(NamedTuple):
+    hour: datetime
+    minute: int
+    hours_in_day: float
+    daylight: bool
+
+
+def _local_edge_buckets(start: datetime, end: datetime, site: SiteConfig | None) -> list[_EdgeBucket]:
+    """Expected five-minute fragments of the two UTC hours crossing local midnight."""
+    leading_hour = start.replace(minute=0, second=0, microsecond=0)
+    trailing_hour = end.replace(minute=0, second=0, microsecond=0)
+    expected = []
+    for hour, first, last in (
+        (leading_hour, start, _next_utc_hour_boundary(start)),
+        (trailing_hour, trailing_hour, end),
+    ):
+        if first >= last:
+            continue
+        for minute in range(0, 60, 5):
+            bucket_start = hour + timedelta(minutes=minute)
+            inside_start = max(first, bucket_start)
+            duration = min(last, bucket_start + timedelta(minutes=5)) - inside_start
+            if duration <= timedelta(0):
+                continue
+            daylight = site is None or solpos.sun_position(
+                inside_start + duration / 2, site.latitude, site.longitude,
+            )[1] > -6
+            expected.append(_EdgeBucket(hour, minute, duration.total_seconds() / 3600.0, daylight))
+    return expected
+
+
+def _local_edge_energy(
+    buckets: _FiveMinuteBuckets, edges: list[_EdgeBucket], max_w: float | None,
+) -> tuple[float, bool, datetime | None]:
+    """Integrate the local fragments and verify coverage wherever yield is possible."""
+    wh = 0.0
+    incomplete_hours = set()
+    positive_hours = set()
+    missing_daylight = False
+    first_production = None
+    for hour, minute, hours_in_day, daylight in edges:
+        sample = buckets.get(hour, {}).get(minute)
+        if sample is None or (max_w is not None and sample[1] > max_w):
+            incomplete_hours.add(hour)
+            missing_daylight |= daylight
+        else:
+            if sample[0] > 0:
+                positive_hours.add(hour)
+                if first_production is None:
+                    first_production = hour + timedelta(minutes=minute)
+            wh += sample[0] * hours_in_day
+    # Unobserved dark pieces are tolerated while the observed edge is
+    # consistent with night. Positive edge production needs complete evidence.
+    return wh, not missing_daylight and incomplete_hours.isdisjoint(positive_hours), first_production
 
 
 def _daylight_hours_in_local_day(
@@ -229,6 +353,10 @@ def _actuals_from_stats(
     expected_daylight_hour_keys: set[str] | None = None,
     dropout_out: dict[str, object] | None = None,
     wp_by_module: dict[str, float] | None = None,
+    local_day_bounds: tuple[datetime, datetime] | None = None,
+    local_edge_site: SiteConfig | None = None,
+    edge_proof_out: dict[str, bool] | None = None,
+    edge_production_out: list[datetime] | None = None,
 ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
     """Pure post-processing of LTS rows into per-module (daily, hourly) actuals.
 
@@ -277,9 +405,23 @@ def _actuals_from_stats(
     daily: dict[str, float] = {}
     hourly: dict[str, dict[str, float]] = {}
     covered_hours: dict[str, int] = {}
+    edges = _local_edge_buckets(*local_day_bounds, local_edge_site) if local_day_bounds else []
     for module, entity_id in entity_by_module.items():
         rows = stats.get(entity_id)
+        wp = (wp_by_module or {}).get(module)
+        max_w = CHANNEL_PLAUSIBILITY_MAX_WP_FRAC * wp if wp is not None and wp > 0.0 else None
+        edge_wh = 0.0
+        if local_day_bounds is not None:
+            start, end = local_day_bounds
+            buckets = _five_minute_buckets(rows)
+            edge_wh, edge_complete, first_production = _local_edge_energy(buckets, edges, max_w)
+            if edge_proof_out is not None:
+                edge_proof_out[module] = edge_complete
+            if edge_production_out is not None and first_production is not None:
+                edge_production_out.append(max(start, first_production))
+            rows = [row for row in _complete_hourly_rows(buckets) if start <= row["start"] < end]
         means: list[float] = []
+        local_hour_means: list[float] = []
         hkeys: list[str] = []
         for row in rows or ():
             mean = row.get("mean")
@@ -293,8 +435,16 @@ def _actuals_from_stats(
                 _LOGGER.warning("Invalid DC statistics for %s (%s) on %s; "
                                 "discarding the whole day", module, entity_id, day)
                 return _dropout(DROPOUT_REASON_IMPLAUSIBLE_CHANNEL, module)
+            # A peak above the channel limit invalidates this hour. Keep a
+            # sustained hour above the same limit for the whole-day diagnosis.
+            overlaps_next_day = local_day_bounds is not None and row["start"] + timedelta(hours=1) > end
+            if (local_day_bounds is not None and max_w is not None and row["max"] > max_w
+                    and (overlaps_next_day or watts <= max_w)):
+                continue
             means.append(watts)
             hkeys.append(hkey)
+            if not overlaps_next_day:
+                local_hour_means.append(watts)
         if not means:
             _LOGGER.warning(
                 "Channel %s (%s) has no usable LTS rows on %s (dead/unavailable "
@@ -303,7 +453,7 @@ def _actuals_from_stats(
                 module, entity_id, day,
             )
             return _dropout(DROPOUT_REASON_DEAD_CHANNEL, module)
-        if _is_frozen_channel(means):
+        if _is_frozen_channel(local_hour_means):
             _LOGGER.warning(
                 "Channel %s (%s) looks frozen on %s (byte-identical "
                 "hourly means during daylight); discarding the whole day "
@@ -311,27 +461,31 @@ def _actuals_from_stats(
                 module, entity_id, day,
             )
             return _dropout(DROPOUT_REASON_FROZEN_CHANNEL, module)
-        if wp_by_module is not None:
-            wp = wp_by_module.get(module)
-            if wp is not None and wp > 0.0:
-                worst = max(means)
-                if worst > CHANNEL_PLAUSIBILITY_MAX_WP_FRAC * wp:
-                    _LOGGER.warning(
-                        "Channel %s (%s) measured a sustained %.0f W in an "
-                        "hour on %s — above %.2f x its configured %.0f Wp, "
-                        "which is physically impossible; the sensor is likely "
-                        "mis-scaled (kW instead of W?). Discarding the whole "
-                        "day for learning and scoring (SPEC §10); fix the "
-                        "entity's unit/scaling and the day trains again.",
-                        module, entity_id, worst, day,
-                        CHANNEL_PLAUSIBILITY_MAX_WP_FRAC, wp,
-                    )
-                    return _dropout(DROPOUT_REASON_IMPLAUSIBLE_CHANNEL, module)
+        worst = max(local_hour_means, default=0.0)
+        if max_w is not None and worst > max_w:
+            _LOGGER.warning(
+                "Channel %s (%s) measured a sustained %.0f W in an "
+                "hour on %s — above %.2f x its configured %.0f Wp, "
+                "which is physically impossible; the sensor is likely "
+                "mis-scaled (kW instead of W?). Discarding the whole "
+                "day for learning and scoring (SPEC §10); fix the "
+                "entity's unit/scaling and the day trains again.",
+                module, entity_id, worst, day,
+                CHANNEL_PLAUSIBILITY_MAX_WP_FRAC, wp,
+            )
+            return _dropout(DROPOUT_REASON_IMPLAUSIBLE_CHANNEL, module)
         per_hour: dict[str, float] = {}
-        wh = 0.0
         for hkey, m in zip(hkeys, means, strict=False):
             per_hour[hkey] = per_hour.get(hkey, 0.0) + m  # W*1h = Wh
-            wh += m
+        if local_day_bounds is None:
+            wh = sum(per_hour.values())
+        else:
+            # Full UTC target hours may cross the end boundary. Its in-day
+            # share was integrated from the actual five-minute means above.
+            last_full_hour_end = end.replace(minute=0, second=0, microsecond=0)
+            wh = edge_wh + sum(
+                mean for hour, mean in per_hour.items() if datetime.fromisoformat(hour) < last_full_hour_end
+            )
         daily[module] = round(wh, 1)
         hourly[module] = per_hour
         observed = set(hkeys)
@@ -398,11 +552,14 @@ def _stat_row_datetime(start: object) -> datetime | None:
     """
     if isinstance(start, datetime):
         return dt_util.as_utc(start)
-    if isinstance(start, (int, float)):
+    if isinstance(start, (int, float)) and not isinstance(start, bool):
         ts = float(start)
         if ts > _EPOCH_MS_THRESHOLD:
             ts /= 1000.0
-        return datetime.fromtimestamp(ts, tz=UTC)
+        try:
+            return datetime.fromtimestamp(ts, tz=UTC)
+        except (OSError, OverflowError, ValueError):
+            return None
     if isinstance(start, str):
         dt = dt_util.parse_datetime(start)
         if dt is None:

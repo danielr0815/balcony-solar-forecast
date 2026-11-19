@@ -114,18 +114,19 @@ class _FakeSession:
 
 def _payload(times, *, suffix: str, ghi) -> dict:
     """Hourly payload with all four physics variables (suffixed or plain)."""
-    n = len(times)
-    return {
-        "hourly": {
-            "time": times,
-            f"shortwave_radiation{suffix}": ghi,
-            f"direct_normal_irradiance{suffix}": [800.0] * n,
-            f"diffuse_radiation{suffix}": [110.0] * n,
-            f"temperature_2m{suffix}": [22.0] * n,
-            "cloud_cover_low": [5.0] * n,
-            "visibility": [24000.0] * n,
-        }
-    }
+    # Include a context timestamp for the leading radiation interval. Its own
+    # preceding radiation is deliberately absent.
+    from datetime import timedelta
+    before = (datetime.fromisoformat(times[0]) - timedelta(hours=1)).isoformat()
+    n = len(times) + 1
+    return {"hourly": {
+        "time": [before, *times],
+        f"shortwave_radiation{suffix}": [None, *ghi],
+        f"direct_normal_irradiance{suffix}": [800.0] * n,
+        f"diffuse_radiation{suffix}": [110.0] * n,
+        f"temperature_2m{suffix}": [22.0] * n,
+        **{field + suffix: [5.0] * n for field in omb._CONTEXT_VARS},
+    }}
 
 
 async def test_get_json_returns_payload_with_timeout(aiohttp_mod):
@@ -253,3 +254,32 @@ async def test_fetch_local_dst_day_includes_final_radiation_interval(aiohttp_mod
     assert records[-1].start + timedelta(hours=1) == upper
     assert session.calls[0][1]["start_date"] == lower.date().isoformat()
     assert session.calls[0][1]["end_date"] == upper.date().isoformat()
+
+
+async def test_partial_or_mixed_context_is_reported_at_reconstruction(aiohttp_mod):
+    from balcony_solar_forecast.core.bootstrap_build import weather_provenance
+
+    suffix = "_previous_day1"
+    times = ["2025-06-21T11:00", "2025-06-21T12:00"]
+    payload = _payload(times, suffix=suffix, ghi=[150, 200])
+    hourly = payload["hourly"]
+    hourly["visibility"] = [100, 200, 300]
+    del hourly["visibility" + suffix]
+    # A provider hole in the day-1 image cannot borrow plain visibility.
+    session = _FakeSession([_FakeResponse(payload)])
+    kwargs = dict(latitude=51, longitude=10, start=date(2025, 6, 21), end=date(2025, 6, 21))
+    records, issued = await omb.fetch_weather_range(session, **kwargs)
+    assert not issued
+    assert all(rec.visibility_m is None for rec in records)
+    assert weather_provenance(records) == {
+        "weather_source": "day1_partial_context",
+        "hours_by_weather_source": {"day1_partial_context": 2},
+        "hours_missing_context": {"visibility": 2},
+    }
+    # Models rejecting these variables retain day-1 physics with an explicit
+    # historical-context tag instead of declaring the mixed training sample day-1.
+    session = _FakeSession([_FakeResponse(None, status=400), _FakeResponse(payload)])
+    records, issued = await omb.fetch_weather_range(session, **kwargs)
+    assert not issued and len(session.calls) == 2
+    assert [rec.visibility_m for rec in records] == [100, 200]
+    assert weather_provenance(records)["weather_source"] == "day1_radiation_unverified_context"

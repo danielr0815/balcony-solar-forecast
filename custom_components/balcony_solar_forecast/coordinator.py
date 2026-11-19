@@ -59,6 +59,7 @@ from ._actuals import (
 # surface the tests rely on keeps resolving (# noqa: F401 = re-export only).
 from ._glue_util import (
     _UNUSABLE_STATES,  # noqa: F401
+    _complete_local_days,
     _daily_kwh_from_hourly,  # noqa: F401
     _filter_hourly_to_local_day,  # noqa: F401
     _hour_key,  # noqa: F401
@@ -66,8 +67,8 @@ from ._glue_util import (
     _local_daily_kwh,
     _local_daily_kwh_ac,
     _power_at,  # noqa: F401
-    _power_now,
-    _power_now_ac,
+    _power_now,  # noqa: F401
+    _power_now_ac,  # noqa: F401
     _raw_power_now,
     _replace_drift,
     _round3,
@@ -151,6 +152,7 @@ from .const import (
     LEARNER_STATUS_DISABLED_BY_DRIFT,
     LEARNER_STATUS_FROZEN,
     LEARNER_STATUS_OFF,
+    OPEN_METEO_URL,
     RECOMPUTE_INTERVAL_SECONDS,
     RLS_MIN_SAMPLES,
     SENSOR_MEASURED_DC_TOTAL,
@@ -158,6 +160,7 @@ from .const import (
     SLOT_MINUTES,
     STATUS_CACHED,
     STATUS_FRESH,
+    STATUS_PHYSICS_FALLBACK,
     STATUS_UNAVAILABLE,
 )
 from .core import (
@@ -198,9 +201,11 @@ from .core import (
     shadeprofile as shadeprofile_mod,
 )
 from .core.intraday import censored_sample, reference_power
+from .core.time_axis import UTC_HOUR_SLOT_OFFSETS, complete_utc_hours
 from .fetcher import (
     FetchError,
     OpenMeteoFetcher,
+    build_params,
     parse_ensemble,
 )
 from .store import ForecastStore, _empty_curve_audit
@@ -331,6 +336,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._ensemble_factors: dict[str, tuple[float, float]] | None = None
         self._result_provenance: tuple[ForecastResult, dict[str, str]] | None = None
         self._result_reference_context: tuple[ForecastResult, dict[datetime, float], WeatherSeries] | None = None
+        self._result_correction_context: tuple[ForecastResult, ShademapState | None, dict[str, Any]] | None = None
         # Which source shaped TODAY's band slots (const BAND_SOURCE_*), for the
         # P10/P90 sensors' ``band_source`` attribute. Recomputed per hooks build.
         self._band_source: str = BAND_SOURCE_LEARNED
@@ -517,7 +523,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # (both re-enter this method); a first start just records the fingerprint.
         self._reconcile_config_fingerprint()
 
-        self._weather.restore(self._store.get_last_payload())
+        self._weather.restore(
+            self._store.get_last_payload(), request_key=self._weather_request_key(),
+        )
         if self._weather.fetched_at is not None:
             _LOGGER.debug(
                 "Primed forecast from stored payload fetched at %s", self._weather.fetched_at,
@@ -644,6 +652,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 slow_loss_streak=0,
                 day_ahead_loss_streak=0,
                 fast_loss_streak=0,
+                loss_evidence={},
             )
             changed = True
         elif day_ahead_basis_changed:
@@ -651,6 +660,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 drift,
                 day_ahead_loss_streak=0,
                 fast_loss_streak=0,
+                loss_evidence=_nightly.without_loss_evidence(drift.loss_evidence, LEARNER_LAYER_DAY_AHEAD),
             )
             changed = True
 
@@ -796,21 +806,34 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._shade_profile_date = day
         self.async_update_listeners()
 
-    def _slow_active(self) -> bool:
-        """Whether the SLOW learner (shademap) is currently shaping the forecast.
-
-        Mirrors the ``slow_active`` gate in :meth:`_build_learner_hooks`: the
-        shademap only attenuates the served beam when the layer is enabled, not
-        drift-auto-disabled, not collapse-frozen for today, and has learned bins.
-        The shade-profile diagram consults the SAME gate so it never paints
-        learned shading the forecast is not applying (SPEC §17.2).
-        """
+    def _slow_active(self, *, frozen: bool) -> bool:
         return (
             self._learner_config.slow_enabled
             and not self._drift_state.slow_disabled
-            and not self._slow_frozen()
+            and not frozen
             and any(self._shademap_state.channels.values())
         )
+
+    def _day_ahead_active(self, *, frozen: bool) -> bool:
+        return (
+            self._learner_config.day_ahead_enabled
+            and not self._drift_state.day_ahead_disabled
+            and not self._drift_state.fast_disabled  # legacy v1 alias
+            and not frozen
+            and bool(self._bias_state.cells)
+        )
+
+    def _profile_shademap(self) -> ShademapState | None:
+        """Learned shade state actually bound to the issued forecast."""
+        if not getattr(self, "last_update_success", True) or (getattr(self, "data", None) or {}).get("status") in (
+            STATUS_PHYSICS_FALLBACK, STATUS_UNAVAILABLE,
+        ):
+            return None
+        context = getattr(self, "_result_correction_context", None)
+        if context is not None and context[0] is self._last_result:
+            return context[1]
+        # A geometry preview can be requested before a forecast generation.
+        return self._shademap_state if self._slow_active(frozen=self._slow_frozen()) else None
 
     def build_shade_profile(self) -> dict[str, Any]:
         """Sun-path + learned-shade profile for the current module/date selection.
@@ -821,25 +844,22 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         has vanished (renamed away).
 
         The learned shademap is blended in ONLY when the slow learner is active
-        (:meth:`_slow_active`) — matching what the served forecast actually
-        applies (engine ``_plane_poa_components``). When it is off / drift-disabled /
-        collapse-frozen the diagram shows the static config shading alone, exactly
-        as the forecast does. The result is memoised on
-        ``(module, date, slow_active, id(shademap))`` so the O(azimuth×elevation)
-        horizon scan runs once per real change, not on every coordinator tick.
+        during the published forecast generation. The diagram uses static
+        shading when the layer is off, frozen or the forecast is unavailable.
+        The memo key includes the issued shademap object.
         """
         module = self.shade_profile_module
         plane = self._site.plane_by_name(module)
         if plane is None:
             return {}
         self._load_learner_states()
-        slow_active = self._slow_active()
+        shademap = self._profile_shademap()
         day = self.shade_profile_date
-        key = (module, day.isoformat(), slow_active, id(self._shademap_state))
+        key = (module, day.isoformat(), id(shademap))
         cache = self._shade_profile_cache
         if cache is not None and cache[0] == key:
             return cache[1]
-        result = self._compute_shade_profile(module, plane, day, slow_active)
+        result = self._compute_shade_profile(module, plane, day, shademap)
         self._shade_profile_cache = (key, result)
         return result
 
@@ -859,24 +879,24 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if plane is None:
             return {}
         self._load_learner_states()
-        return self._compute_shade_profile(module, plane, day, self._slow_active())
+        return self._compute_shade_profile(module, plane, day, self._profile_shademap())
 
     def _compute_shade_profile(
-        self, module: str, plane: Any, day: date, slow_active: bool
+        self, module: str, plane: Any, day: date, shademap: ShademapState | None
     ) -> dict[str, Any]:
         """Pure (unmemoised) shade-profile compute for one module/date/plane.
 
         Shared by :meth:`build_shade_profile` (memoised, current selection) and
         :meth:`build_shade_profile_for` (uncached, ad-hoc query) so the two can
         never diverge. The learned shademap is blended in only when the slow
-        learner is active (``slow_active``, computed by the caller); otherwise an
-        empty state yields the static-only shading the forecast applies. Storage
-        is per plane: the module's OWN channel is its name; the read POOL adds its
+        learner is active in the served generation. An empty state yields
+        the static-only shading. Storage is per plane: the module's OWN channel is its name; the read POOL adds its
         group siblings (+ any legacy group channel), so the main curve is the
         pooled tau the forecast applies and the individual channel rides along as
         a comparison view (SPEC §9.2).
         """
-        shademap = self._shademap_state if slow_active else ShademapState()
+        if shademap is None:
+            shademap = ShademapState()
         pool = self._build_shade_pool_map(shademap).get(module, (module,))
         tz = dt_util.get_time_zone(self.hass.config.time_zone) or UTC
         profile = shadeprofile_mod.compute_shade_profile(
@@ -954,6 +974,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             slow_loss_streak=0,
             day_ahead_loss_streak=0,
             fast_loss_streak=0,
+            loss_evidence={},
             version=2,
         )
         self._persist_drift_state()
@@ -1083,11 +1104,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._intraday_scalar = INTRADAY_NEUTRAL
         self._intraday_samples.clear()
 
-    async def async_stop(self) -> None:
+    async def async_stop(self, *, failed_setup: bool = False) -> None:
         """Join entry work before the final write; no task may outlive its store."""
         self.async_shutdown_extra()
         await self._operations.close()
-        await self._store.async_flush()
+        if failed_setup:
+            await self._store.async_flush_pending()
+        else:
+            await self._store.async_flush()
 
     # ------------------------------------------------------------------
     # Update cycle (recompute every tick; fetch on the slower timer)
@@ -1125,7 +1149,8 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # NEVER touched by ensemble state. OFF => factors stay None so the hooks
         # path is bit-identical to the pre-v0.16 build. ``getattr`` keeps a bare
         # (__new__-built) coordinator working.
-        if getattr(self, "_ensemble_enabled", False):
+        physics_only = status == STATUS_PHYSICS_FALLBACK
+        if not physics_only and getattr(self, "_ensemble_enabled", False):
             await self._async_update_ensemble(now, weather)
         else:
             self._ensemble_factors = None
@@ -1153,18 +1178,20 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # FAST learner: refresh the intraday scalar from live actuals BEFORE the
         # engine pass; the engine applies it via hooks.slot_factor so the 15-min,
         # hourly and daily curves stay mutually consistent. Never fatal.
-        try:
-            self._update_intraday_scalar(now)
-        except Exception:  # pragma: no cover - learner never breaks the ladder
-            _LOGGER.warning("Intraday-scalar tick failed; serving previous", exc_info=True)
+        if not physics_only:
+            try:
+                self._update_intraday_scalar(now)
+            except Exception:  # pragma: no cover - learner never breaks the ladder
+                _LOGGER.warning("Intraday-scalar tick failed; serving previous", exc_info=True)
 
         previous_context = {
             name: getattr(self, name, None)
             for name in ("_result_provenance", "_result_inverter_eta",
-                         "_result_reference_context", "_result_capture_context")
+                         "_result_reference_context", "_result_capture_context",
+                         "_result_correction_context")
         }
         try:
-            result = await self._compute(weather, now)
+            result = await self._compute(weather, now, physics_only=physics_only)
         except Exception as err:  # pragma: no cover - engine owns correctness
             _LOGGER.exception("Forecast engine failed")
             raise UpdateFailed(f"Forecast engine error: {err}") from err
@@ -1193,7 +1220,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         data["issued_at"] = _iso(issued_at)
         return data
 
-    async def _compute(self, weather, now: datetime) -> ForecastResult:
+    async def _compute(
+        self, weather, now: datetime, *, physics_only: bool = False,
+    ) -> ForecastResult:
         """Run the engine with the learner hooks bound over the persisted state.
 
         The hook BINDING stays on the event loop (``_build_learner_hooks``
@@ -1207,9 +1236,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         event-loop callback can mutate in place.
         """
         tz = dt_util.get_time_zone(self.hass.config.time_zone)
-        hooks = self._build_learner_hooks(weather, now)
+        hooks = self._build_learner_hooks(weather, now, physics_only=physics_only)
+        shademap = self._shademap_state if hooks.beam_tau is not None else None
+        correction_diagnostics = self._correction_diagnostics(physics_only=physics_only)
         site = self._site
-        provenance = self._calculation_provenance(weather)
+        provenance = self._calculation_provenance(weather, physics_only=physics_only)
         inverter_eta = (
             (hooks.inverter_efficiency, "learned")
             if hooks.inverter_efficiency is not None else self._configured_inverter_eta()
@@ -1230,16 +1261,19 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._result_inverter_eta = (result, inverter_eta)
         self._result_reference_context = (result, day_factor, weather)
         self._result_capture_context = (result, dc_bindings, band_evidence)
+        self._result_correction_context = (result, shademap, correction_diagnostics)
         return result
 
-    def _calculation_provenance(self, weather: WeatherSeries | None) -> dict[str, str]:
+    def _calculation_provenance(
+        self, weather: WeatherSeries | None, *, physics_only: bool = False,
+    ) -> dict[str, str]:
         from .const import INTEGRATION_VERSION
         from .core.provenance import MODEL_CONTRACT, digest
 
         provenance = {
             "model_contract": MODEL_CONTRACT, "integration_version": INTEGRATION_VERSION,
             "basis": "DC", "config_sha256": digest(self._config_fingerprint()),
-            "learner_sha256": digest({
+            "learner_sha256": digest({} if physics_only else {
                 "bias": self._bias_state.to_dict(), "shade": self._shademap_state.to_dict(),
                 "quantiles": self._quantile_state.to_dict(), "intraday": self._intraday_scalar,
                 "eta": self._effective_inverter_eta(), "gates": self._learner_config.to_dict(),
@@ -1254,28 +1288,18 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             provenance["weather_fetched_at"] = _iso(fetched)
         return provenance
 
-    def _build_learner_hooks(self, weather, now: datetime) -> LearnerHooks:
+    def _build_learner_hooks(
+        self, weather, now: datetime, *, physics_only: bool = False,
+    ) -> LearnerHooks:
         """Bind shademap.effective_tau into beam_tau and compose the intraday
         decay + day-ahead RLS bias into one per-slot factor (engine contract,
         engine.py LearnerHooks docstring)."""
-        frozen = self._slow_frozen()
-        slow_active = (
-            self._learner_config.slow_enabled
-            and not self._drift_state.slow_disabled     # honor drift flag
-            and not frozen
-            and any(self._shademap_state.channels.values())
-        )
-        # Day-ahead is persisted and therefore owns its own drift guard.
-        # Intraday is transient and independent of this switch.
-        day_ahead_active = (
-            self._learner_config.day_ahead_enabled
-            and not self._drift_state.day_ahead_disabled
-            and not self._drift_state.fast_disabled  # legacy v1 alias
-            and not frozen
-            and bool(self._bias_state.cells)
-        )
+        frozen = physics_only or self._slow_frozen()
+        slow_active = self._slow_active(frozen=frozen)
+        day_ahead_active = self._day_ahead_active(frozen=frozen)
         fast_active = (
-            self._learner_config.fast_enabled
+            not physics_only
+            and self._learner_config.fast_enabled
             and self._intraday_scalar != INTRADAY_NEUTRAL
         )
 
@@ -1353,7 +1377,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             else None
         )
         have_bins = self._quantiles_enabled and bool(self._quantile_state.bins)
-        if self._quantiles_enabled and (have_bins or ens_factors):
+        if not physics_only and self._quantiles_enabled and (have_bins or ens_factors):
             bands: dict[datetime, QuantileBands] = {}
             today = dt_util.as_local(now).date()
             ens_today = False           # ensemble covered >= 1 of today's slots
@@ -1480,7 +1504,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # the engine falls back to the per-group config eta. Never load-bearing;
         # reshapes only the AC curve. ``getattr`` keeps a bare __new__-built
         # coordinator (tests) working with the neutral (untrusted) default.
-        inverter_efficiency = self._trusted_inverter_eta()
+        inverter_efficiency = None if physics_only else self._trusted_inverter_eta()
         return LearnerHooks(beam_tau=beam_tau, slot_factor=slot_factor,
                             correction_source=source, band_by_slot=band_by_slot,
                             dayahead_factor=lambda start: day_factor.get(start, 1.0),
@@ -1514,14 +1538,22 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     def _due_for_fetch(self, now: datetime) -> bool:
         return self._weather.due(now)
 
+    def _weather_request_key(self) -> dict:
+        return {
+            "url": getattr(getattr(self, "_fetcher", None), "_url", OPEN_METEO_URL),
+            "params": build_params(self._site.latitude, self._site.longitude, FORECAST_DAYS),
+        }
+
     async def _async_try_fetch(self, now: datetime) -> None:
         """Supply transport/storage ports; WeatherCache owns every transition."""
+        latitude, longitude = self._site.latitude, self._site.longitude
+        request_key = self._weather_request_key()
         await self._weather.async_refresh(
             now,
-            fetch=lambda: self._fetcher.async_fetch_raw(
-                self._site.latitude, self._site.longitude, FORECAST_DAYS,
+            fetch=lambda: self._fetcher.async_fetch_raw(latitude, longitude, FORECAST_DAYS),
+            persist=lambda payload, fetched_at: self._store.set_last_payload(
+                payload, fetched_at, request_key=request_key,
             ),
-            persist=self._store.set_last_payload,
         )
 
     # ------------------------------------------------------------------
@@ -1613,19 +1645,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         line up per hour (all four 15-min slots of an hour share that hour's
         factors downstream). Cheap pure aggregation; never raises.
         """
-        sums: dict[str, float] = {}
-        counts: dict[str, int] = {}
-        for slot in weather.slots:
-            if not slot.usable:
-                continue
-            key = (
-                dt_util.as_utc(slot.start)
-                .replace(minute=0, second=0, microsecond=0)
-                .isoformat()
-            )
-            sums[key] = sums.get(key, 0.0) + slot.ghi
-            counts[key] = counts.get(key, 0) + 1
-        return {k: sums[k] / counts[k] for k in sums}
+        ghi = {
+            dt_util.as_utc(slot.start): slot.ghi for slot in weather.slots
+            if slot.ghi_present and math.isfinite(slot.ghi)
+        }
+        return {
+            _iso(hour): sum(ghi[hour + offset] for offset in UTC_HOUR_SLOT_OFFSETS) / len(UTC_HOUR_SLOT_OFFSETS)
+            for hour in complete_utc_hours(ghi)
+        }
 
     def ensemble_state_summary(self) -> dict[str, Any]:
         """Compact ensemble diagnostics block (v0.16, SPEC §11.3).
@@ -2195,29 +2222,35 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         the intraday scalar, the learner status and the rolling drift MAE (see
         const DATA_KEY_*).
         """
-        local_today = dt_util.as_local(now).date()
-        daily = _local_daily_kwh(result)
-        # AC-side (Phase 2): the served AC local-day roll-up, mirroring ``daily``.
-        daily_ac = _local_daily_kwh_ac(result)
+        local_now = dt_util.as_local(now)
+        local_today = local_now.date()
+        invalid = result.invalid_weather_slots
+        hours = sorted(_iso(hour) for hour in complete_utc_hours(result.slot_starts, invalid))
+        days = _complete_local_days(result.slot_starts, invalid, local_now.tzinfo or UTC)
+        today_complete = local_today.isoformat() in days
+        daily = {day: value for day, value in _local_daily_kwh(result).items() if day in days}
+        daily_ac = {day: value for day, value in _local_daily_kwh_ac(result).items() if day in days}
 
-        watts = {
-            _iso(start): round(w, 1)
-            for start, w in zip(result.slot_starts, result.total_watts, strict=False)
-        }
-        wh_period = {
-            _iso(start): round(w * SLOT_HOURS, 2)
-            for start, w in zip(result.slot_starts, result.total_watts, strict=False)
-        }
-        # AC-side 15-min curves, mirroring ``watts`` / ``wh_period`` on ac_watts.
-        watts_ac = {
-            _iso(start): round(w, 1)
-            for start, w in zip(result.slot_starts, result.ac_watts, strict=False)
-        }
-        wh_period_ac = {
-            _iso(start): round(w * SLOT_HOURS, 2)
-            for start, w in zip(result.slot_starts, result.ac_watts, strict=False)
-        }
+        def slot_curve(values, scale: float, digits: int) -> dict[str, float]:
+            return {
+                _iso(start): round(value * scale, digits)
+                for start, value in zip(result.slot_starts, values, strict=False)
+                if start not in invalid
+            }
 
+        now_idx = _slot_index_at(result.slot_starts, now)
+
+        def current_power(values) -> float | None:
+            if now_idx is None or now_idx >= len(values) or result.slot_starts[now_idx] in invalid:
+                return None
+            return round(values[now_idx], 1)
+
+        def complete_hourly(values: dict[str, float]) -> dict[str, float]:
+            # Engine rollups omit all-dark hours. Four valid zero slots still
+            # establish a known zero in a public hourly curve.
+            return {hour: values.get(hour, 0.0) for hour in hours}
+
+        corrected_complete = complete_hourly(corrected_hourly)
         raw_hourly = result.raw_hourly_wh or result.hourly_wh
 
         captured = getattr(self, "_result_provenance", None)
@@ -2228,33 +2261,36 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "degraded": status != STATUS_FRESH,
             "weather_age_seconds": int(age.total_seconds()),
             "last_error": self._last_error,
-            "power_now_w": round(_power_now(result, now), 1),
+            "power_now_w": current_power(result.total_watts),
             # Day-ahead (scalar-free) headline: stable across the day. The live
             # intraday nowcast stays in the watts/wh_period curve below, so on
             # the current day energy_today_kwh != sum(today's wh_period) by
             # design (they still match exactly for tomorrow/d2). See
             # _dayahead_today_kwh for why.
-            "energy_today_kwh": self._dayahead_today_kwh(result, now),
+            "energy_today_kwh": self._dayahead_today_kwh(result, now) if today_complete else None,
             "energy_tomorrow_kwh": _round3(
                 daily.get((local_today + timedelta(days=1)).isoformat())
             ),
             "energy_d2_kwh": _round3(
                 daily.get((local_today + timedelta(days=2)).isoformat())
             ),
-            "watts": watts,
-            "wh_period": wh_period,
-            "hourly_wh": dict(corrected_hourly),
+            "watts": slot_curve(result.total_watts, 1.0, 1),
+            "wh_period": slot_curve(result.total_watts, SLOT_HOURS, 2),
+            "hourly_wh": corrected_complete,
             "daily_kwh": dict(daily),
             "slot_starts": [_iso(s) for s in result.slot_starts],
             "plane_watts": {
-                pr.name: [round(w, 1) for w in pr.watts]
+                pr.name: [
+                    None if start in invalid else round(watts, 1)
+                    for start, watts in zip(result.slot_starts, pr.watts, strict=False)
+                ]
                 for pr in result.plane_results
             },
             "computed_at": _iso(now),
             "provenance": provenance,
         }
         # --- v0.2/v0.3 additive learner keys ---
-        data[DATA_KEY_RAW_HOURLY_WH] = dict(raw_hourly)
+        data[DATA_KEY_RAW_HOURLY_WH] = complete_hourly(raw_hourly)
         data["invalid_weather_slots"] = [_iso(slot) for slot in sorted(result.invalid_weather_slots)]
         data["night_zero_slots"] = [_iso(slot) for slot in sorted(result.night_zero_slots)]
         capture_context = getattr(self, "_result_capture_context", None)
@@ -2264,9 +2300,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 data["band_evidence_by_slot"] = {
                     _iso(slot): label for slot, label in capture_context[2].items()
                 }
-        data[DATA_KEY_CORRECTED_HOURLY_WH] = dict(corrected_hourly)
-        data[DATA_KEY_INTRADAY_SCALAR] = round(self._intraday_scalar, 4)
-        data[DATA_KEY_CORRECTION_SOURCE] = self._correction_source
+        data[DATA_KEY_CORRECTED_HOURLY_WH] = corrected_complete
+        physics_only = status == STATUS_PHYSICS_FALLBACK
+        data[DATA_KEY_CORRECTION_SOURCE] = result.correction_source if physics_only else self._correction_source
         # v0.16 ensemble bands: which source shaped today's band slots (learned /
         # ensemble / envelope). Always present; "learned" when the ensemble is off
         # or contributed nothing today. ``getattr`` default keeps a bare
@@ -2297,8 +2333,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                  zip(result.slot_starts, result.total_watts, strict=False)),
                 tz=dt_util.get_time_zone(self.hass.config.time_zone) or UTC),
         }
-        data[DATA_KEY_LEARNER_STATUS] = self._learner_status()
-        data[DATA_KEY_BIAS_CELLS] = self._bias_cells_summary()
+        correction_context = getattr(self, "_result_correction_context", None)
+        data.update(
+            correction_context[2] if correction_context is not None and correction_context[0] is result
+            else self._correction_diagnostics(physics_only=physics_only)
+        )
         data[DATA_KEY_DRIFT_MAE] = self._latest_drift_mae()
         # --- v0.4 additive scoreboard keys (SPEC §15) ---
         # The rolling-window aggregate view, derived from the persisted
@@ -2318,40 +2357,30 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # operator-facing standard); the DC keys stay for the new *_dc diagnostic
         # sensors + the learner/scoreboard truth. Each is its DC sibling recomputed
         # from the ac_* result fields; the DC keys above are byte-unchanged.
-        data["power_now_w_ac"] = round(_power_now_ac(result, now), 1)
-        data["energy_today_kwh_ac"] = self._dayahead_today_kwh_ac(result, now)
+        data["power_now_w_ac"] = current_power(result.ac_watts)
+        data["energy_today_kwh_ac"] = self._dayahead_today_kwh_ac(result, now) if today_complete else None
         data["energy_tomorrow_kwh_ac"] = _round3(
             daily_ac.get((local_today + timedelta(days=1)).isoformat())
         )
         data["energy_d2_kwh_ac"] = _round3(
             daily_ac.get((local_today + timedelta(days=2)).isoformat())
         )
-        data["watts_ac"] = watts_ac
-        data["wh_period_ac"] = wh_period_ac
+        data["watts_ac"] = slot_curve(result.ac_watts, 1.0, 1)
+        data["wh_period_ac"] = slot_curve(result.ac_watts, SLOT_HOURS, 2)
         # Served 15-min AC BAND curves (SPEC §14.4): the wh_period_p10/p90
         # siblings on the AC base, from the engine's per-slot AC band watts.
         # Only when bands were issued this cycle — omitted otherwise (quantiles
         # off / cold start), mirroring DATA_KEY_QUANTILE_CURVES above.
         if result.ac_p10_watts:
-            data["wh_period_ac_p10"] = {
-                _iso(start): round(w * SLOT_HOURS, 2)
-                for start, w in zip(
-                    result.slot_starts, result.ac_p10_watts, strict=False
-                )
-            }
+            data["wh_period_ac_p10"] = slot_curve(result.ac_p10_watts, SLOT_HOURS, 2)
         if result.ac_p90_watts:
-            data["wh_period_ac_p90"] = {
-                _iso(start): round(w * SLOT_HOURS, 2)
-                for start, w in zip(
-                    result.slot_starts, result.ac_p90_watts, strict=False
-                )
-            }
-        data["hourly_wh_ac"] = dict(result.ac_hourly_wh)
+            data["wh_period_ac_p90"] = slot_curve(result.ac_p90_watts, SLOT_HOURS, 2)
+        data["hourly_wh_ac"] = complete_hourly(result.ac_hourly_wh) if result.ac_watts else {}
         data["daily_kwh_ac"] = dict(daily_ac)
         # AC band curves (Phase 2): {p10/p90: {iso_hour: Wh}} HOURLY, only present
         # when the engine issued AC bands this cycle (bands active); absent
         # otherwise so the AC band sensors degrade to unknown (no fake spread).
-        quantile_curves_ac = self._quantile_curves_ac(result)
+        quantile_curves_ac = self._quantile_curves_ac(result, hours)
         if quantile_curves_ac:
             data[DATA_KEY_QUANTILE_CURVES_AC] = quantile_curves_ac
         # Daily AC P10 headline with the intraday scalar stripped asymmetrically
@@ -2359,7 +2388,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # aggregate must not balloon under a spike. None when no AC band issued.
         data[DATA_KEY_ENERGY_TODAY_AC_P10] = self._dayahead_today_kwh_ac_p10(
             result, now
-        )
+        ) if today_complete else None
         # --- Curve audit (SPEC §14.4): significant revisions of the published
         # AC headlines, counted per target calendar date, plus the compact
         # recorded day-scalar block. Runs off the FINISHED payload: the
@@ -2389,6 +2418,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return {
                 _iso(start): round(w * SLOT_HOURS, 2)
                 for start, w in zip(starts, watts, strict=False)
+                if start not in result.invalid_weather_slots
             }
 
         return {
@@ -2397,7 +2427,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             FORECAST_RESP_KEY_P90: _curve(p90w),
         }
 
-    def _quantile_curves_ac(self, result: ForecastResult) -> dict[str, dict[str, float]]:
+    def _quantile_curves_ac(
+        self, result: ForecastResult, hours: list[str],
+    ) -> dict[str, dict[str, float]]:
         """Build ``{p10/p90: {iso_hour: Wh}}`` AC band curves from result.
 
         The engine populates ``ac_p10_hourly_wh`` / ``ac_p90_hourly_wh`` (HOURLY
@@ -2409,11 +2441,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """
         p10 = result.ac_p10_hourly_wh
         p90 = result.ac_p90_hourly_wh
-        if not p10 and not p90:
+        if not result.ac_p10_watts and not result.ac_p90_watts:
             return {}
         return {
-            FORECAST_RESP_KEY_P10: {k: round(v, 2) for k, v in p10.items()},
-            FORECAST_RESP_KEY_P90: {k: round(v, 2) for k, v in p90.items()},
+            FORECAST_RESP_KEY_P10: {hour: round(p10.get(hour, 0.0), 2) for hour in hours},
+            FORECAST_RESP_KEY_P90: {hour: round(p90.get(hour, 0.0), 2) for hour in hours},
         }
 
     # ------------------------------------------------------------------
@@ -2564,7 +2596,15 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "last_revision": dict(last) if isinstance(last, dict) else None,
         }
 
-    def _learner_status(self) -> dict[str, Any]:
+    def _correction_diagnostics(self, *, physics_only: bool) -> dict[str, Any]:
+        intraday_active = self._learner_config.fast_enabled and not physics_only
+        return {
+            DATA_KEY_INTRADAY_SCALAR: round(self._intraday_scalar, 4) if intraday_active else INTRADAY_NEUTRAL,
+            DATA_KEY_LEARNER_STATUS: self._learner_status(physics_only=physics_only),
+            DATA_KEY_BIAS_CELLS: self._bias_cells_summary(physics_only=physics_only),
+        }
+
+    def _learner_status(self, *, physics_only: bool = False) -> dict[str, Any]:
         """Per-layer learner status for the diagnostic entities (SPEC §14.7).
 
         Returns the three layer keys ``fast`` / ``slow`` / ``day_ahead`` mapped
@@ -2574,13 +2614,15 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         flags + loss streaks ride along under ``*_enabled`` / ``*_disabled`` /
         ``*_loss_streak`` keys for diagnostics and the coordinator tests.
         """
-        frozen = self._slow_frozen()
+        frozen = physics_only or self._slow_frozen()
         cfg = self._learner_config
         drift = self._drift_state
 
         def _fast_status() -> str:
             if not cfg.fast_enabled:
                 return LEARNER_STATUS_OFF
+            if physics_only:
+                return LEARNER_STATUS_FROZEN
             if (
                 not self._intraday_samples
                 and self._intraday_scalar == INTRADAY_NEUTRAL
@@ -2666,15 +2708,14 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
         return out
 
-    def _bias_cells_summary(self) -> dict[str, Any]:
+    def _bias_cells_summary(self, *, physics_only: bool = False) -> dict[str, Any]:
         """Current day-ahead RLS bias cells, for the diagnostic sensor (v0.19).
 
         One entry per learned ``cloud_class|day_part`` cell:
           ``theta``   – the raw learned multiplier (clamped to the bias band),
           ``n``       – trained days,
-          ``applied`` – the factor actually served for that cell right now
-                        (== ``theta`` once ``n >= RLS_MIN_SAMPLES``, else 1.0
-                        while the cell is still cold-starting and stays neutral),
+          ``applied`` – the cell's enabled serving factor before solar-time
+                        blending. Disabled, frozen and cold cells stay neutral.
           ``clamped`` – True when the clamped theta sits AT the day-ahead band
                         edge (``<= DAY_AHEAD_BIAS_MIN`` or ``>= DAY_AHEAD_BIAS_MAX``):
                         the RLS wants to correct further than the band allows, an
@@ -2688,6 +2729,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         from .const import DAY_AHEAD_BIAS_MAX, DAY_AHEAD_BIAS_MIN
 
         state = self._bias_state
+        active = self._day_ahead_active(frozen=physics_only or self._slow_frozen())
         out: dict[str, dict[str, Any]] = {}
         for key, cell in sorted(state.cells.items()):
             cc, _, part = key.partition("|")
@@ -2697,7 +2739,7 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 "day_part": part,
                 "theta": round(theta, 4),
                 "n": int(cell.n),
-                "applied": round(state.get_bias(cc, part), 4),
+                "applied": round(state.get_bias(cc, part), 4) if active else DAY_AHEAD_BIAS_NEUTRAL,
                 "clamped": (
                     theta <= DAY_AHEAD_BIAS_MIN or theta >= DAY_AHEAD_BIAS_MAX
                 ),
@@ -2732,9 +2774,11 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Per-ISO-hour forecast cloud class for ``iso`` (day-ahead RLS input)."""
         return _nightly.cloud_class_by_hour(self, iso)
 
-    def _per_plane_modeled(self, iso: str) -> dict[str, PlaneHourlyModeled]:
-        """Per-plane hourly modeled beam/diffuse/ghi/kc for the shademap trainer."""
-        return _nightly.per_plane_modeled(self, iso)
+    def _per_plane_modeled(
+        self, iso: str, *, covered_hours: set[str] | None = None,
+    ) -> dict[str, PlaneHourlyModeled]:
+        """Per-plane hourly beam/diffuse/ghi/kc for the shademap trainer."""
+        return _nightly.per_plane_modeled(self, iso, covered_hours=covered_hours)
 
     async def _read_actuals_safe(
         self, day: date
@@ -3106,9 +3150,9 @@ class BalconySolarCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Rolling daylight-MAE drift monitor with auto-disable (SPEC §9.8)."""
         return _nightly.update_drift(self, iso, issued, actuals)
 
-    def _restore_layer_snapshot(self, layer: str) -> str | None:
+    def _restore_layer_snapshot(self, layer: str, first_loss: date) -> str | None:
         """Roll the auto-disabled layer back to its pre-streak state (SPEC §9.8)."""
-        return _nightly.restore_layer_snapshot(self, layer)
+        return _nightly.restore_layer_snapshot(self, layer, first_loss)
 
     @owned_operation(mutate=True)
     async def async_rollback_learners(

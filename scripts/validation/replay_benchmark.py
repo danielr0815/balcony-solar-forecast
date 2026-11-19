@@ -123,17 +123,21 @@ def _selected_day_axes(selected, eligible_axes, paired_axes, *, split, period):
 
 
 def _day_metrics(axes, *, model, tz):
-    totals, peaks, timings = [], [], []
+    totals, full_totals, peaks, timings = [], [], [], []
     paired_seconds = eligible_seconds = planned_seconds = calendar_seconds = 0.0
     for day, seconds, eligible_targets, rows in axes:
         planned_seconds += seconds
         eligible_seconds += _axis_seconds(eligible_targets)
-        paired_seconds += _axis_seconds(rows)
+        covered = _axis_seconds(rows)
+        paired_seconds += covered
         start, end = local_day_bounds(date.fromisoformat(day), tz)
-        calendar_seconds += (end-start).total_seconds()
+        calendar = (end-start).total_seconds()
+        calendar_seconds += calendar
         if not rows:
             continue
         totals.append((sum(row[2][model] for row in rows), sum(row[3] for row in rows)))
+        if covered == calendar:
+            full_totals.append(totals[-1])
         # Convert interval energies to mean W so different target durations are
         # comparable. Tied peaks choose the earliest covered interval.
         power = sorted(
@@ -148,6 +152,7 @@ def _day_metrics(axes, *, model, tz):
                 timings.append(abs((forecast_peak[0] - actual_peak[0]).total_seconds()) / 60)
     return {
         'covered_day_totals': metrics(totals),
+        'complete_calendar_day_totals': metrics(full_totals),
         'day_coverage': {'paired_hours': paired_seconds/3600, 'eligible_hours': eligible_seconds/3600,
                          'planned_hours': planned_seconds/3600, 'calendar_hours': calendar_seconds/3600},
         'covered_day_peaks': {'n': len(peaks), 'mae_w': sum(peaks)/len(peaks) if peaks else None,
@@ -220,15 +225,61 @@ def _previous_day_reference(row, issue, start, end, tz):
     return wh
 
 
-def _phase_comparisons(planned_axes, eligible_axes, paired_axes, models, tz):
-    """Compare issue periods on the same targets, including rolling issues."""
+def _plan_by_phase(planned_axes, missing, tz, development_end, selection_end):
+    """Attach planned but uncaptured hours without inventing an issue timestamp."""
     planned_by_phase = defaultdict(lambda: defaultdict(dict))
     for (split, day, issue), targets in planned_axes.items():
         phase = issue_period(issue, targets[0][0], tz)
         by_target = planned_by_phase[(split, day)][phase]
         for target in targets:
+            if missing is not None and target in by_target:
+                raise ValueError('Duplicate forecast for a prospective phase and target')
             if target not in by_target or issue > by_target[target]:
                 by_target[target] = issue
+    if missing is not None:
+        phases = ('previous_evening', 'early_morning', 'intraday')
+        if not isinstance(missing, dict) or set(missing) != set(phases):
+            raise ValueError('Incomplete prospective plan phase metadata')
+        for phase, stamps in missing.items():
+            for stamp in stamps:
+                start = timestamp(stamp)
+                day = start.astimezone(tz).date().isoformat()
+                split = 'development' if day <= development_end else 'selection' if day <= selection_end else 'test'
+                by_target = planned_by_phase[split, day][phase]
+                target = (start, start + timedelta(hours=1))
+                if target in by_target:
+                    raise ValueError('A planned target cannot be missing twice or already captured')
+                by_target[target] = None
+        for axes in planned_by_phase.values():
+            if any(axes[phase].keys() != axes[phases[0]].keys() for phase in phases):
+                raise ValueError('Prospective plan phases must cover identical target hours')
+    return planned_by_phase
+
+
+def _capture_counts(plan, paired_axes):
+    paired = {key: {row[:2] for row in rows} for key, rows in paired_axes.items()}
+    counts = defaultdict(dict)
+    complete_days = defaultdict(set)
+    for (split, day), phases in plan.items():
+        complete = True
+        for phase, targets in phases.items():
+            captured = sum(issue is not None for issue in targets.values())
+            matched = sum(target in paired.get((split, day, issue), ())
+                          for target, issue in targets.items() if issue is not None)
+            totals = counts[split].setdefault(phase, dict(planned_targets=0, captured_targets=0,
+                                                          paired_targets=0, complete_planned_days=0))
+            totals['planned_targets'] += len(targets)
+            totals['captured_targets'] += captured
+            totals['paired_targets'] += matched
+            totals['complete_planned_days'] += matched == len(targets)
+            complete = complete and matched == len(targets)
+        if complete:
+            complete_days[split].add(day)
+    return dict(counts), complete_days
+
+
+def _phase_comparisons(planned_by_phase, eligible_axes, paired_axes, models, tz):
+    """Compare issue periods on the same targets, including rolling issues."""
     eligible = {key: set(targets) for key, targets in eligible_axes.items()}
     paired = {key: {row[:2]: row for row in rows} for key, rows in paired_axes.items()}
     output = {}
@@ -414,14 +465,6 @@ def compare(bundle: dict) -> dict:
         from .comparison_decision import paired_day_decision
     else:
         from comparison_decision import paired_day_decision
-    report['test_comparisons'] = {
-        model: paired_day_decision(paired_days[('test', model)],
-                                  baseline_available=availability[('test', models[0])],
-                                  candidate_available=availability[('test', model)],
-                                  minimum_days=bundle.get('minimum_test_days', 30),
-                                  minimum_relative_gain=bundle.get('minimum_relative_gain', .05))
-        for model in models[1:]
-    }
     report['comparison_baseline'] = models[0]
     report['strata'] = {}
     for key, values in sorted(stratified.items()):
@@ -444,9 +487,36 @@ def compare(bundle: dict) -> dict:
                 'models': {model: metrics([(forecasts[model], actual) for _, forecasts, actual in rows])
                            for model in models},
             }
-    report['phase_comparisons'] = _phase_comparisons(
-        planned_axes, eligible_axes, paired_axes, models, tz
-    )
+    missing = bundle.get('missing_forecast_captures')
+    plan = _plan_by_phase(planned_axes, missing, tz, development_end, selection_end)
+    report['phase_comparisons'] = _phase_comparisons(plan, eligible_axes, paired_axes, models, tz)
+    complete_test_days = None
+    if missing is not None:
+        counts, complete_days = _capture_counts(plan, paired_axes)
+        complete_test_days = complete_days['test']
+        report['capture_plan'] = counts
+        for split, phases in counts.items():
+            planned = sum(phase['planned_targets'] for phase in phases.values())
+            captured = sum(phase['captured_targets'] for phase in phases.values())
+            for model in models:
+                report['splits'][split][model].update(planned_targets=planned, captured_targets=captured)
+    report['test_comparisons'] = {}
+    for model in models[1:]:
+        all_days = paired_days['test', model]
+        days = all_days if complete_test_days is None else {
+            day: errors for day, errors in all_days.items() if day in complete_test_days
+        }
+        decision = paired_day_decision(
+            days, baseline_available=availability['test', models[0]],
+            candidate_available=availability['test', model],
+            minimum_days=bundle.get('minimum_test_days', 30),
+            minimum_relative_gain=bundle.get('minimum_relative_gain', .05),
+        )
+        if complete_test_days is not None:
+            decision['complete_planned_days'] = len(complete_test_days)
+            if len(days) < decision['minimum_days'] <= len(all_days):
+                decision['status'] = 'insufficient_planned_coverage'
+        report['test_comparisons'][model] = decision
     return report
 
 
@@ -504,13 +574,22 @@ def main() -> None:
     if args.report:
         lines = [f"# Frozen forecast comparison ({report['basis']})", "",
                  "Synthetic examples prove scoring arithmetic, not predictive improvement.", "",
-                 "| Split | Model | Targets | Days | MAE Wh | WAPE | Available / eligible |",
+                 "| Split | Model | Targets | Days | MAE Wh | WAPE | Available / planned or eligible |",
                  "|---|---|---:|---:|---:|---:|---:|"]
         for split, models in report['splits'].items():
             for model, values in models.items():
                 lines.append(f"| {split} | {model} | {values['n']} | {values['distinct_local_days']} | "
                              f"{values['mae_wh']} | {values['wape']} | "
-                             f"{values['available_targets']} / {values['eligible_targets']} |")
+                             f"{values['available_targets']} / {values.get('planned_targets', values['eligible_targets'])} |")
+        if 'capture_plan' in report:
+            lines.extend(["", "## Prospective capture plan", "",
+                          "| Split | Phase | Planned | Captured | Paired | Complete planned days |",
+                          "|---|---|---:|---:|---:|---:|"])
+            for split, phases in report['capture_plan'].items():
+                for phase, counts in sorted(phases.items()):
+                    lines.append(f"| {split} | {phase} | {counts['planned_targets']} | "
+                                 f"{counts['captured_targets']} | {counts['paired_targets']} | "
+                                 f"{counts['complete_planned_days']} |")
         lines.extend(["", "## Test comparisons", ""])
         for model, decision in report['test_comparisons'].items():
             lines.append(f"- {model}: {decision['status']}; day-cluster 95% gain interval: {decision['gain_ci95_wh']} Wh.")

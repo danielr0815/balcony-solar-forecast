@@ -95,6 +95,12 @@ const KEY_DATE = "shade_profile_date";
 const RE_SENSOR = /^sensor\..*shade_profile$/;
 const RE_SELECT = /^select\..*shade_profile_module$/;
 const RE_DATE = /^date\..*shade_profile_date$/;
+const ENTITY_DEFINITIONS = [
+  ["sensor", KEY_SENSOR, RE_SENSOR],
+  ["module_select", KEY_SELECT, RE_SELECT],
+  ["date_entity", KEY_DATE, RE_DATE],
+];
+const LEGACY_INSTALLER_TITLE = "Shade profile diagram";
 
 // Tiny i18n dict keyed off the two-letter `hass.language`; English fallback.
 const I18N = {
@@ -266,7 +272,7 @@ class BalconyShadeProfileCard extends HTMLElement {
 
   setConfig(config) {
     // All keys optional; auto-discovery fills the rest at render time.
-    this._config = config || {};
+    this._config = { ...config };
     this._compareSeq += 1;
     this._compareData = null;
     this._compareModule = null;
@@ -321,11 +327,7 @@ class BalconyShadeProfileCard extends HTMLElement {
   }
 
   _resolveIds(hass) {
-    return resolveEntities(this._config, this._registryList, hass, [
-      ["sensor", KEY_SENSOR, RE_SENSOR],
-      ["module_select", KEY_SELECT, RE_SELECT],
-      ["date_entity", KEY_DATE, RE_DATE],
-    ]);
+    return resolveEntities(this._config, this._registryList, hass, ENTITY_DEFINITIONS, LEGACY_INSTALLER_TITLE);
   }
 
   _ensureRegistry(hass) {

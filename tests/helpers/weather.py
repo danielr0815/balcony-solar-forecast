@@ -68,8 +68,8 @@ class _PayloadStore(_FakeStore):
     def get_last_payload(self):
         return self.last_payload
 
-    def set_last_payload(self, payload, fetched_at_iso):
-        self.last_payload = {"payload": payload, "fetched_at": fetched_at_iso}
+    def set_last_payload(self, payload, fetched_at_iso, *, request_key=None):
+        self.last_payload = {"payload": payload, "fetched_at": fetched_at_iso, "request_key": request_key}
 
 
 class _FakeFetcher:

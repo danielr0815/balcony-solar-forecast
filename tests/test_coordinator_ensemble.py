@@ -315,20 +315,14 @@ async def test_stale_triggers_refetch_and_computes_factors():
 
 def test_det_ghi_by_hour_aggregates_slot_means():
     c = _make_coordinator(ensemble_enabled=True)
-    # Two slots in hour 12:00 (400, 600 -> mean 500), one in 13:00 (300).
-    weather = _weather(
-        [_NOW, _NOW + timedelta(minutes=15), _NOW + timedelta(hours=1)]
-    )
+    # Mean of the complete hour, followed by a truncated hour.
     weather = WeatherSeries(
-        slots=(
-            _slot(_NOW, 400.0),
-            _slot(_NOW + timedelta(minutes=15), 600.0),
-            _slot(_NOW + timedelta(hours=1), 300.0),
+        slots=tuple(
+            _slot(_NOW + timedelta(minutes=15 * i), ghi)
+            for i, ghi in enumerate((400.0, 600.0, 500.0, 500.0, 300.0))
         )
     )
-    det = c._det_ghi_by_hour(weather)
-    assert det[_hourkey(_NOW)] == pytest.approx(500.0)
-    assert det[_hourkey(_NOW + timedelta(hours=1))] == pytest.approx(300.0)
+    assert c._det_ghi_by_hour(weather) == {_hourkey(_NOW): pytest.approx(500.0)}
 
 
 def test_ensemble_state_summary_shape():

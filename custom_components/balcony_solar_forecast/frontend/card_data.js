@@ -27,14 +27,40 @@ function entryOf(row, key) {
   return row.config_entry_id || row.unique_id.slice(0, -(key.length + 1));
 }
 
+const registryIndexes = new WeakMap();
+function registryIndex(list) {
+  let index = registryIndexes.get(list);
+  if (!index) {
+    const byId = new Map(list.map((row) => [row?.entity_id, row]));
+    const rows = list.filter((row) => row?.platform === "balcony_solar_forecast"
+      && !row.disabled_by && typeof row.unique_id === "string");
+    index = { byId, rows };
+    registryIndexes.set(list, index);
+  }
+  return index;
+}
+
+const resolutions = new WeakMap();
+
+/** Legacy installed cards used a stable title/shape with transient entity IDs. */
+function legacyInstallerConfig(config, title, definitions) {
+  const fields = new Set(["entry_id", "type", "title", ...definitions.map(([field]) => field)]);
+  return config.entry_id && config.type?.startsWith("custom:balcony-")
+    && config.title === title && config[definitions[0][0]]
+    && Object.keys(config).every((field) => fields.has(field));
+}
+
 /** All implicit entities come from one entry, inferred from explicit entities.
- * Ambiguous multi-site defaults deliberately show setup guidance instead of
- * choosing an arbitrary site. Explicit mismatched controls are omitted too.
+ * Ambiguous multi-site defaults deliberately show setup guidance.
  */
-export function resolveEntities(config, list, hass, definitions) {
-  const rows = (list || []).filter((row) => row?.platform === "balcony_solar_forecast"
-    && !row.disabled_by && typeof row.unique_id === "string");
-  const matches = (row, key) => row.unique_id.endsWith(`_${key}`);
+export function resolveEntities(config, list, hass, definitions, legacyTitle) {
+  // A WS state push only changes hass, so it need not scan the registry again.
+  // The state-name fallback (no registry snapshot yet) is intentionally live.
+  const cached = resolutions.get(config);
+  if (list && cached?.list === list && cached.definitions === definitions) return cached.ids;
+  const { byId, rows } = list ? registryIndex(list) : { byId: new Map(), rows: [] };
+  const matches = (row, key) => typeof row?.unique_id === "string"
+    && row.unique_id === `${entryOf(row, key)}_${key}`;
   const entries = new Set();
   const explicitEntries = new Set();
   for (const [field, key] of definitions) {
@@ -46,19 +72,30 @@ export function resolveEntities(config, list, hass, definitions) {
   const entry = config.entry_id || (explicitEntries.size === 1 ? [...explicitEntries][0]
     : explicitEntries.size === 0 && entries.size === 1 ? [...entries][0] : undefined);
   const ids = { entry_id: entry };
+  const legacy = legacyInstallerConfig(config, legacyTitle, definitions);
   for (const [field, key, regex] of definitions) {
-    const candidates = rows.filter((r) => matches(r, key) && entryOf(r, key) === entry);
-    if (config[field]) {
-      const row = rows.find((r) => r.entity_id === config[field]);
-      ids[field] = !list || !row || (entry && matches(row, key) && entryOf(row, key) === entry)
-        ? config[field] : undefined;
+    const candidate = rows.find((r) => matches(r, key) && entryOf(r, key) === entry);
+    const explicit = config[field];
+    if (legacy) {
+      // This was an automatically selected ID. The old name may already be
+      // registered to a different entity, so use only this entry's binding.
+      ids[field] = candidate?.entity_id;
+    } else if (explicit) {
+      const row = byId.get(explicit);
+      if (row?.platform === "balcony_solar_forecast") {
+        ids[field] = entry && !row.disabled_by && matches(row, key) && entryOf(row, key) === entry
+          ? explicit : undefined;
+      } else {
+        ids[field] = explicit;
+      }
     } else if (entry) {
-      ids[field] = candidates[0]?.entity_id;
+      ids[field] = candidate?.entity_id;
     } else if (!list && !config.entry_id) {
       const fallback = Object.keys(hass?.states || {}).filter((id) => regex.test(id));
       ids[field] = fallback.length === 1 ? fallback[0] : undefined;
     }
   }
+  if (list) resolutions.set(config, { list, definitions, ids });
   return ids;
 }
 

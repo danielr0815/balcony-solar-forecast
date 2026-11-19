@@ -523,9 +523,7 @@ def test_measured_total_sums_numeric_sources():
     assert attrs == {
         "channels_total": 2,
         "channels_reporting": 2,
-        "sources": ["sensor.a", "sensor.b"],
-        # Plane names aligned index-for-index with ``sources``.
-        "source_names": ["M1", "M2"],
+        "channels_rejected": 0,
     }
 
 
@@ -574,8 +572,8 @@ def test_measured_total_rejects_one_impossible_source():
     assert s.native_value == pytest.approx(120.0)
     assert s.extra_state_attributes["channels_reporting"] == 1
     assert s.extra_state_attributes["channels_rejected"] == 1
-    assert s.extra_state_attributes["rejected_sources"] == ["sensor.b"]
-    assert s.extra_state_attributes["source_limits_w"] == [500.0, 462.5]
+    assert "rejected_sources" not in s.extra_state_attributes
+    assert "source_limits_w" not in s.extra_state_attributes
 
 
 def test_measured_total_all_dead_is_unavailable():
@@ -675,9 +673,8 @@ async def test_measured_total_added_only_when_sources_configured():
     measured = [e for e in added if isinstance(e, MeasuredDcTotalSensor)]
     assert len(measured) == 1
     assert measured[0]._source_ids == ["sensor.a", "sensor.b"]
-    # Plane names align with the de-duplicated ids; the duplicate "sensor.a"
-    # (plane M3) keeps M1's name (first-plane-wins, same order as the ids).
-    assert measured[0]._source_names == ["M1", "M2"]
+    # The server resolves the corresponding labels from the same config.
+    assert [name for _, name, _ in sensor_mod._measured_sources(coord)] == ["M1", "M2"]
 
 
 async def test_measured_total_omitted_when_no_sources():
@@ -690,8 +687,8 @@ async def test_measured_total_omitted_when_no_sources():
 
 def test_measured_total_entity_contract_pinned():
     coord = _FakeCoordinator(None)
-    s = MeasuredDcTotalSensor(coord, ["sensor.a", "sensor.b"], ["M1", "M2"])
-    assert s.extra_state_attributes["source_names"] == ["M1", "M2"]
+    s = MeasuredDcTotalSensor(coord, ["sensor.a", "sensor.b"])
+    assert set(s.extra_state_attributes) == {"channels_total", "channels_reporting", "channels_rejected"}
     assert s.unique_id == "abc123_measured_dc_power_total"
     assert s.translation_key == "measured_dc_power_total"
     assert s.device_class == SensorDeviceClass.POWER

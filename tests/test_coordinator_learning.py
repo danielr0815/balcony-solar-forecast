@@ -14,6 +14,7 @@ package), so HA must be installed; the whole module is skipped otherwise.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -1893,6 +1894,11 @@ def test_build_learner_hooks_day_factor_empty_when_inactive():
 def test_build_data_carries_learner_keys():
     c = _make_coordinator()
     result, start = _forecast_at_noon(400.0)
+    result = replace(
+        result, slot_starts=tuple(start + timedelta(minutes=i) for i in (0, 15, 30, 45)),
+        total_watts=(400.0,) * 4, raw_total_watts=(400.0,) * 4,
+        hourly_wh={start.isoformat(): 400.0}, raw_hourly_wh={start.isoformat(): 400.0},
+    )
     now = start + timedelta(minutes=1)
     c._intraday_scalar = 0.9
     c._correction_source = coord_mod.CORRECTION_SOURCE_INTRADAY
@@ -2180,16 +2186,15 @@ def test_build_data_carries_ac_keys():
         ac_corrected_unclamped_watts=(360.0,),
     )
     data = c._build_data(result, dict(result.hourly_wh), now, "fresh", timedelta(minutes=1))
-    # DC keys unchanged (the model-internal truth).
+    # A single slot yields valid instantaneous values and no hour/day totals.
     assert data["power_now_w"] == pytest.approx(400.0)
-    assert data["energy_today_kwh"] == pytest.approx(0.1)
-    # AC keys mirror them from the ac_* fields.
+    assert data["energy_today_kwh"] is None
     assert data["power_now_w_ac"] == pytest.approx(360.0)
-    assert data["energy_today_kwh_ac"] == pytest.approx(0.09)
+    assert data["energy_today_kwh_ac"] is None
     assert data["watts_ac"] == {start.isoformat(): 360.0}
     assert data["wh_period_ac"] == {start.isoformat(): 90.0}
-    assert data["hourly_wh_ac"] == {start.isoformat(): 90.0}
-    assert data["daily_kwh_ac"] == {start.date().isoformat(): pytest.approx(0.09)}
+    assert data["hourly_wh_ac"] == {}
+    assert data["daily_kwh_ac"] == {}
     # Tomorrow / d2 AC roll-ups: no slots there.
     assert data["energy_tomorrow_kwh_ac"] is None
     assert data["energy_d2_kwh_ac"] is None
@@ -2226,21 +2231,23 @@ def test_build_data_carries_ac_band_keys():
 
 
 def _two_day_result(*, today_ac_w: float, tomorrow_ac_w: float, start: datetime):
-    """Two single slots: ``start`` (today) and ``start`` + 1 day (tomorrow).
+    """Two complete days with production isolated to the supplied slot of each.
 
     DC stands in at 1/0.9 of the AC watts so the daily_kwh / daily_kwh_ac
     roll-ups differ (the audit block must report BOTH bases).
     """
-    slots = (start, start + timedelta(days=1))
-    ac = (today_ac_w, tomorrow_ac_w)
+    midnight = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    slots = tuple(midnight + timedelta(minutes=15 * i) for i in range(192))
+    production = {start: today_ac_w, start + timedelta(days=1): tomorrow_ac_w}
+    ac = tuple(production.get(slot, 0.0) for slot in slots)
     dc = tuple(w / 0.9 for w in ac)
     return ForecastResult(
         slot_starts=slots,
         total_watts=dc,
         plane_results=(PlaneResult(name="M1", watts=dc),),
-        hourly_wh={s.isoformat(): w * 0.25 for s, w in zip(slots, dc, strict=False)},
+        hourly_wh={s.isoformat(): w * 0.25 / 0.9 for s, w in production.items()},
         ac_watts=ac,
-        ac_hourly_wh={s.isoformat(): w * 0.25 for s, w in zip(slots, ac, strict=False)},
+        ac_hourly_wh={s.isoformat(): w * 0.25 for s, w in production.items()},
     )
 
 
@@ -2903,24 +2910,23 @@ def test_per_plane_modeled_trims_night_hours_and_rounds():
     c = _make_coordinator()
     day = datetime(2026, 6, 20, 12, 0, tzinfo=UTC)     # daylight hour
     night = datetime(2026, 6, 20, 22, 0, tzinfo=UTC)   # after sunset
-    starts = (day, night)
+    starts = tuple(hour + timedelta(minutes=15 * i) for hour in (day, night) for i in range(4))
     pr = PlaneResult(
         name="M1",
-        watts=(100.0, 0.0),
-        beam_ref_watts=(80.123456789, 0.0),
-        diffuse_ref_watts=(20.987654321, 0.0),
-        kc=(0.9123456789, 0.0),
+        watts=(100.0,) * 4 + (0.0,) * 4,
+        beam_ref_watts=(80.123456789,) * 4 + (0.0,) * 4,
+        diffuse_ref_watts=(20.987654321,) * 4 + (0.0,) * 4,
+        kc=(0.9123456789,) * 4 + (0.0,) * 4,
     )
     c._last_result = ForecastResult(
-        slot_starts=starts, total_watts=(100.0, 0.0),
-        plane_results=(pr,), hourly_wh={},
+        slot_starts=starts, total_watts=pr.watts, plane_results=(pr,), hourly_wh={},
     )
 
     modeled = c._per_plane_modeled("2026-06-20")["M1"]
     # The night hour is gone from every curve; the day hour is rounded.
     assert set(modeled.beam_wh) == {day.isoformat()}
     assert set(modeled.kc) == {day.isoformat()}
-    assert modeled.beam_wh[day.isoformat()] == round(80.123456789 * 0.25, 2)
+    assert modeled.beam_wh[day.isoformat()] == round(80.123456789, 2)
     # And the vestigial ghi dict no longer serializes at all.
     assert "ghi" not in modeled.to_dict()
 

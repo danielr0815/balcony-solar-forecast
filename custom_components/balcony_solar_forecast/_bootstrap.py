@@ -50,7 +50,11 @@ from .const import (
     BOOTSTRAP_WEATHER_CHUNK_DAYS,
 )
 from .core import horizon
-from .core.bootstrap_build import accumulate_days, build_bootstrap_json
+from .core.bootstrap_build import (
+    accumulate_days,
+    add_recorder_mean,
+    build_bootstrap_json,
+)
 from .core.openmeteo_backfill import fetch_weather_range
 
 _LOGGER = logging.getLogger(__name__)
@@ -342,16 +346,7 @@ def _reduce_stats(
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            mean = row.get("mean")
-            if mean is None:
-                continue
-            hkey = _stat_row_hour_key(row.get("start"))
-            if hkey is None:
-                continue
-            try:
-                bucket[hkey] = bucket.get(hkey, 0.0) + float(mean)  # W*1h == Wh
-            except (TypeError, ValueError):
-                continue
+            add_recorder_mean(bucket, _stat_row_hour_key(row.get("start")), row.get("mean"))
         if bucket:
             out[module] = bucket
     return out
@@ -391,6 +386,7 @@ def _summary(
         "days_skipped": acc.days_skipped,
         "date_range": {"start": start.isoformat(), "end": end.isoformat()},
         "weather_source": "as_issued" if as_issued else "analysis_fallback",
+        **bootstrap.get("weather_provenance", {}),
         "bias_cells": len(bias),
         "shademap_channels": len(channels),
         "shademap_bins": sum(len(b) for b in channels.values()),

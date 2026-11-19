@@ -109,7 +109,7 @@ await check("multi-site service and entity scope", async () => {
 await check("weekly service outage recovers without recreating card", async () => {
   let failing = true, calls = 0;
   const h = hass(async () => { calls++; if (failing) throw new Error("offline");
-    return { response: { result: { available: true, hourly_wh: { "2026-09-01T12:00Z": 123 } } } }; });
+    return { response: { result: { available: true, hourly_wh: { "2026-09-01T12:00Z": 123 }, daily_coverage: "complete", daily_wh: 123 } } }; });
   const card = make(Power); card.setConfig({ entry_id: "second" }); card._hass = h;
   const days = Array.from({ length: 7 }, (_, i) => new Date(`2026-09-0${i + 1}T12:00Z`));
   await card._fetchWeekForecast(h, days, card._fetchSeq);
@@ -120,7 +120,10 @@ await check("weekly service outage recovers without recreating card", async () =
   await card._fetchWeekForecast(h, days, card._fetchSeq);
   assert.equal(calls, 14, "confirmed archive results stay cached");
 });
-const dataHass = (callWS) => hass(callWS, { states: {
+const dataHass = (callWS) => hass(async (msg) => {
+  assert.equal(msg.type, "balcony_solar_forecast/measurement_history");
+  return { sources: ["sensor.m1"], source_names: ["M1"], statistics: await callWS(msg) };
+}, { states: {
   "sensor.total": { attributes: { sources: ["sensor.m1"], source_names: ["M1"] } },
   "sensor.forecast": { attributes: { wh_period: {} } },
 } });
@@ -139,7 +142,10 @@ for (const [instant, length, values] of [
     const h = dataHass(async () => ({ "sensor.m1": [
       { start: `${iso}T00:00Z`, mean: values[0] }, { start: `${iso}T01:00Z`, mean: values[1] },
     ] }));
-    h.states["sensor.forecast"].attributes.wh_period = { [`${iso}T00:00Z`]: 50, [`${iso}T01:00Z`]: 60 };
+    h.states["sensor.forecast"].attributes.wh_period = Object.fromEntries(
+      ["00", "01"].flatMap((hour, i) =>
+        ["00", "15", "30", "45"].map((min) => [`${iso}T${hour}:${min}Z`, (50 + i * 10) / 4])),
+    );
     const card = make(Power); card.setConfig({ entry_id: "second", total_sensor: "sensor.total", forecast_sensor: "sensor.forecast" }); card._hass = h;
     await card._fetch();
     assert.equal(card._dayBars["sensor.m1"].length, length);
@@ -155,21 +161,19 @@ await check("statistics success, error, recovery and empty data remain distingui
     return { "sensor.m1": state === "empty" ? [] : [{ start: "2026-09-26T10:00Z", mean: state === "recovered" ? 200 : 100 }] };
   });
   const card = make(Power, true); card.setConfig({ entry_id: "second", total_sensor: "sensor.total", forecast_sensor: "sensor.forecast" }); card._hass = h;
-  card._rebuildModules(h.states["sensor.total"]);
-  await card._fetchDay(h, ["sensor.m1"], card._fetchSeq);
+  card._rebuildModules(h.states["sensor.total"].attributes);
+  await card._fetchDay(h, card._fetchSeq);
   assert.equal(card._dayBars["sensor.m1"].reduce((a, b) => a + b, 0), 100);
   state = "error";
-  await card._fetchDay(h, ["sensor.m1"], card._fetchSeq);
+  await card._fetchDay(h, card._fetchSeq);
   assert.match(card.shadowRoot.textContent, /Statistik-Abruf fehlgeschlagen/);
-  assert.match(card.shadowRoot.textContent, /Letzte erfolgreiche Aktualisierung/);
-  assert.equal(card._dayBars["sensor.m1"].reduce((a, b) => a + b, 0), 100, "retain the marked stale bars");
-  assert.ok(elements(card.shadowRoot, (el) => el.tagName === "table").length);
+  assert.deepEqual(card._dayBars, {}, "unverified old bars clear after a failed authorized request");
   state = "recovered";
-  await card._fetchDay(h, ["sensor.m1"], card._fetchSeq);
+  await card._fetchDay(h, card._fetchSeq);
   assert.doesNotMatch(card.shadowRoot.textContent, /Statistik-Abruf fehlgeschlagen/);
   assert.equal(card._dayBars["sensor.m1"].reduce((a, b) => a + b, 0), 200);
   state = "empty";
-  await card._fetchDay(h, ["sensor.m1"], card._fetchSeq);
+  await card._fetchDay(h, card._fetchSeq);
   assert.equal(card._loadState, "empty");
   assert.doesNotMatch(card.shadowRoot.textContent, /Statistik-Abruf fehlgeschlagen/);
 }));

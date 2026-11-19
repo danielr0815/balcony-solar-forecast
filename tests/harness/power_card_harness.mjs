@@ -68,6 +68,10 @@ function assert(cond, msg) {
   if (!cond) fail(msg);
 }
 
+const resultWithBindings = (statistics) => ({
+  sources: ["sensor.m1"], source_names: ["M1"], source_limits_w: [500], statistics,
+});
+
 /** A bare card instance: constructor state minus DOM, render stubbed out. */
 function makeCard(hass) {
   const card = Object.create(CardClass.prototype);
@@ -124,9 +128,9 @@ const STATES = {
     language: "de",
     states: STATES,
     callWS: async (msg) => {
-      if (msg.type === "recorder/statistics_during_period") {
+      if (msg.type === "balcony_solar_forecast/measurement_history") {
         statCalls.push(msg);
-        return { "sensor.m1": [{ start: Date.now(), mean: 100 }] };
+        return resultWithBindings({ "sensor.m1": [{ start: Date.now(), mean: 100 }] });
       }
       if (msg.type === "call_service") {
         const iso = msg.service_data.date;
@@ -150,6 +154,7 @@ const STATES = {
               date: iso,
               available: true,
               hourly_wh: { [`${iso}T12:00:00+00:00`]: day * 1000 },
+              daily_coverage: "complete", daily_wh: day * 1000,
             },
           },
         };
@@ -168,8 +173,8 @@ const STATES = {
     `expected 1 hourly statistics call, got ${statCalls.length}`,
   );
   assert(
-    statCalls[0].period === "hour",
-    `week statistics period is ${statCalls[0].period}, want hour`,
+    !Object.hasOwn(statCalls[0], "statistic_ids"),
+    "the browser must not send Recorder statistic IDs",
   );
   assert(
     issuedDates.length === 6,
@@ -208,7 +213,7 @@ const STATES = {
 // ============================================================================
 {
   const card = makeCard({ language: "de", states: STATES });
-  card._sources(card._hass); // also reads the aligned plausibility limits
+  card._sourceLimits = { "sensor.m1": 500 };
   card._ingestDay(
     {
       "sensor.m1": [
@@ -231,8 +236,8 @@ const STATES = {
     language: "de",
     states: STATES,
     callWS: async (msg) => {
-      if (msg.type === "recorder/statistics_during_period") {
-        return { "sensor.m1": [{ start: Date.now(), mean: 100 }] };
+      if (msg.type === "balcony_solar_forecast/measurement_history") {
+        return resultWithBindings({ "sensor.m1": [{ start: Date.now(), mean: 100 }] });
       }
       if (msg.type === "call_service") {
         return {
@@ -283,8 +288,8 @@ const STATES = {
     language: "de",
     states: STATES,
     callWS: async (msg) => {
-      if (msg.type === "recorder/statistics_during_period") {
-        return { "sensor.m1": [{ start: Date.now(), mean: 100 }] };
+      if (msg.type === "balcony_solar_forecast/measurement_history") {
+        return resultWithBindings({ "sensor.m1": [{ start: Date.now(), mean: 100 }] });
       }
       if (msg.type === "call_service") {
         throw new Error("boom: service unavailable");
@@ -327,16 +332,16 @@ const STATES = {
     language: "de",
     states: STATES,
     callWS: async (msg) => {
-      if (msg.type === "recorder/statistics_during_period" && msg.period === "hour") {
+      if (msg.type === "balcony_solar_forecast/measurement_history") {
         // Six complete days at 24 × 400 Wh plus today's eight × 300 Wh.
-        return {
+        return resultWithBindings({
           "sensor.m1": [
             ...[-6, -5, -4, -3, -2, -1].flatMap((o) =>
               Array.from({ length: 24 }, () => ({ start: dayMs(o), mean: 400 })),
             ),
             ...Array.from({ length: 8 }, () => ({ start: dayMs(0), mean: 300 })),
           ],
-        };
+        });
       }
       if (msg.type === "call_service") {
         return {
@@ -413,8 +418,8 @@ const STATES = {
           },
         ];
       }
-      if (msg.type === "recorder/statistics_during_period") {
-        return { "sensor.m1": [{ start: Date.now(), mean: 100 }] };
+      if (msg.type === "balcony_solar_forecast/measurement_history") {
+        return resultWithBindings({ "sensor.m1": [{ start: Date.now(), mean: 100 }] });
       }
       throw new Error(`unexpected WS ${msg.type}`);
     },

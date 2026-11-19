@@ -597,7 +597,8 @@ async def test_empty_dashboard_saved_with_counts(monkeypatch):
     power_hist = next(
         c for c in cards if c["type"] == "custom:balcony-power-history-card"
     )
-    assert power_hist["total_sensor"] == "sensor.measured_dc_power_total"
+    assert power_hist["entry_id"] == "e1"
+    assert "total_sensor" not in power_hist
 
 
 async def test_empty_dashboard_reports_missing_keys(monkeypatch):
@@ -647,7 +648,7 @@ def _all_entity_ids(cards):
 
 
 async def test_generated_cards_bind_services_to_selected_entry(monkeypatch):
-    """Explicit sensor IDs alone cannot scope historical/comparison services."""
+    """Installed custom cards follow their selected entry through registry changes."""
     dash = _FakeDash(load_missing=True)
     hass = _FakeHass(
         {"e1": _FakeCoordinator(),
@@ -662,3 +663,5 @@ async def test_generated_cards_bind_services_to_selected_entry(monkeypatch):
              if c["type"].startswith("custom:balcony-")]
     assert len(cards) == 2
     assert all(c.get("entry_id") == "e2" for c in cards)
+    for card in cards:
+        assert not set(card) & {"total_sensor", "forecast_sensor", "sensor", "module_select", "date_entity"}

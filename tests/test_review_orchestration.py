@@ -7,7 +7,9 @@ from tests.helpers.coordinator import _FakeStore, _make_coordinator
 
 async def test_nightly_retries_older_gap_after_newer_actuals_were_recorded(monkeypatch):
     store = _FakeStore()
-    store.record_actuals("2026-03-11", {"M1": 1.0})
+    hours = {f"2026-03-11T{hour:02}:00:00+00:00": 1.0 for hour in range(24)}
+    store.record_verified_actuals("2026-03-11", {"M1": 24, "M2": 24}, {"M1": hours, "M2": hours})
+    store.record_issued("2026-03-10", {"complete_weather_hours": ["2026-03-10T12:00:00+00:00"]})
     coord = _make_coordinator(store)
     reads, trained = [], []
 
@@ -16,7 +18,8 @@ async def test_nightly_retries_older_gap_after_newer_actuals_were_recorded(monke
 
     async def read(day):
         reads.append(day)
-        return {"M1": 1.0}, {}
+        hour = f"{day.isoformat()}T12:00:00+00:00"
+        return {"M1": 1.0, "M2": 1.0}, {"M1": {hour: 1.0}, "M2": {hour: 1.0}}
 
     async def train(day):
         trained.append(day)

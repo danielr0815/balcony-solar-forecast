@@ -331,7 +331,11 @@ async def test_prime_from_warm_store_restores_fetch_provenance():
     entry = _entry()
     store1, backend1 = _real_store(hass)
     await store1.async_load()
-    store1.set_last_payload({"minutely_15": {}}, "2026-07-30T08:00:00+00:00")
+    initial = BalconySolarCoordinator(hass, entry, fetcher=object(), store=store1)
+    request_key = initial._weather_request_key()
+    store1.set_last_payload(
+        {"minutely_15": {}}, "2026-07-30T08:00:00+00:00", request_key=request_key,
+    )
     on_disk = backend1.pending_snapshot()
 
     # "Restart": a fresh store loads the flushed blob; a fresh coordinator
@@ -351,7 +355,7 @@ async def test_prime_from_warm_store_restores_fetch_provenance():
     # A corrupt fetched_at must NOT prime the ladder (stays cold).
     store3, _ = _real_store(hass)
     await store3.async_load()
-    store3.set_last_payload({"minutely_15": {}}, "not-a-date")
+    store3.set_last_payload({"minutely_15": {}}, "not-a-date", request_key=request_key)
     coordinator3 = BalconySolarCoordinator(
         hass, entry, fetcher=object(), store=store3  # type: ignore[arg-type]
     )

@@ -33,8 +33,8 @@ async def async_get_solar_forecast(
         return None
     data: dict[str, Any] = current_forecast(coordinator)
     # Served-AC hourly curve (Phase 2): the energy produced into the home. Already
-    # keyed by ISO-8601 UTC hour start (coordinator). Empty/absent (no forecast
-    # yet, or a v0.1 cached result) => no overlay rather than a stale curve.
+    # keyed by ISO-8601 UTC hour start (coordinator), with only complete hours.
+    # An empty curve leaves the forecast overlay absent.
     hourly = data.get("hourly_wh_ac")
     if not hourly:
         return None

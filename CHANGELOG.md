@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-11-19
+
+### Fixed
+
+- Report unknown power and incomplete energy intervals accurately. Preserve the full local forecast day across UTC midnight and bind restored weather to the original site and model. Archived daily totals require evidence covering the local day.
+- Use complete five-minute recordings and frozen weather coverage for nightly training, scoring and efficiency calibration. Recheck scores when missing readings arrive, compare measured and forecast DC for the same modules and local day, and restore the state preceding the dated loss streak.
+- Finish pending migration writes after a failed setup. Keep historical power charts accessible during measurement outages and resolve installed card entities across registry renames. Read module history with per-entity permissions.
+- Align historical snow and cloud context to the start of each radiation interval, record weather provenance and quarantine corrupt recorder days consistently in both bootstrap adapters.
+- Measure forecast availability against all planned targets, compare models on complete planned days, and restrict prediction callbacks to information available when the forecast was issued.
+
 ## [0.30.0] - 2026-11-18
 
 ### Fixed

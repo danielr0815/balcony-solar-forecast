@@ -88,7 +88,7 @@ def test_parse_previous_runs_suffix_reads_suffixed_radiation():
             "direct_normal_irradiance_previous_day1": [800.0, 810.0],
             "diffuse_radiation_previous_day1": [110.0, 120.0],
             "temperature_2m_previous_day1": [22.0, 24.0],
-            "cloud_cover_low": [5.0, 10.0],
+            "cloud_cover_low_previous_day1": [5.0, 10.0],
             "visibility": [24000.0, 24000.0],
         }
     }
@@ -96,19 +96,20 @@ def test_parse_previous_runs_suffix_reads_suffixed_radiation():
     assert len(recs) == 2
     assert recs[0].ghi == 700.0
     assert recs[1].temp_c == 24.0
-    assert recs[0].cloud_low == 5.0
+    assert recs[0].cloud_low == 0.0  # no context at the leading boundary
+    assert recs[1].cloud_low == 5.0
     assert recs[0].start == datetime(2025, 6, 21, 8, 0, tzinfo=UTC)
 
 
 def test_parse_historical_plain_variables():
     payload = {
         "hourly": {
-            "time": ["2025-01-05T12:00"],
-            "shortwave_radiation": [200.0],
-            "direct_normal_irradiance": [100.0],
-            "diffuse_radiation": [90.0],
-            "temperature_2m": [1.0],
-            "snow_depth": [0.05],
+            "time": ["2025-01-05T11:00", "2025-01-05T12:00"],
+            "shortwave_radiation": [None, 200.0],
+            "direct_normal_irradiance": [None, 100.0],
+            "diffuse_radiation": [None, 90.0],
+            "temperature_2m": [None, 1.0],
+            "snow_depth": [0.05, 0.0],
         }
     }
     recs = bf.parse_hourly_payload(payload, var_suffix="")
@@ -164,7 +165,7 @@ def test_parse_missing_visibility_is_none_not_fog_sentinel():
             "direct_normal_irradiance": [800.0, 810.0],
             "diffuse_radiation": [110.0, 120.0],
             "temperature_2m": [22.0, 24.0],
-            "visibility": [None, 24000.0],
+            "visibility": [24000.0, None],
         }
     }
     recs = bf.parse_hourly_payload(payload, var_suffix="")

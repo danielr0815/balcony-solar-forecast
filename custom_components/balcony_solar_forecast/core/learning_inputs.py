@@ -38,7 +38,10 @@ def _parse_hour(key: str) -> datetime | None:
 
 
 
-def per_plane_modeled(site: SiteConfig, result: ForecastResult | None, iso: str, tz: tzinfo) -> dict[str, PlaneHourlyModeled]:
+def per_plane_modeled(
+    site: SiteConfig, result: ForecastResult | None, iso: str, tz: tzinfo,
+    *, covered_hours: set[str] | None = None,
+) -> dict[str, PlaneHourlyModeled]:
     """Per-plane hourly modeled beam/diffuse/ghi/kc for the shademap trainer.
 
     Reconstructed from the last computed ForecastResult held on ``self`` via
@@ -56,6 +59,19 @@ def per_plane_modeled(site: SiteConfig, result: ForecastResult | None, iso: str,
     if result is None:
         return {}
 
+    # An issued UTC-hour value always integrates all four slots. In zones
+    # with fractional-hour offsets, the hour can straddle local midnight.
+    slots: list[tuple[int, datetime, str]] = []
+    for i, start in enumerate(result.slot_starts):
+        start_utc = start.astimezone(UTC)
+        key = _hour_key(start_utc)
+        if covered_hours is not None:
+            if key not in covered_hours:
+                continue
+        elif start_utc.astimezone(tz).date().isoformat() != iso:
+            continue
+        slots.append((i, start_utc, key))
+
     # Site-level hourly kc via THE shared reduction (clearsky.hourly_kc):
     # the clear-sky-energy-weighted mean over the hour's slots, the same
     # estimator the offline backfill applies to its hourly data. The
@@ -66,18 +82,15 @@ def per_plane_modeled(site: SiteConfig, result: ForecastResult | None, iso: str,
     # the engine's unclamped kc = ghi / haurwitz(midpoint elevation).
     kc_samples: dict[str, list[tuple[float, float]]] = {}
     site_kc = result.plane_results[0].kc if result.plane_results else ()
-    for i, start in enumerate(result.slot_starts):
+    for i, start_utc, hkey in slots:
         if i >= len(site_kc):
             break
-        start_utc = start.astimezone(UTC)
-        if start_utc.astimezone(tz).date().isoformat() != iso:
-            continue
         mid = start_utc + timedelta(minutes=SLOT_MINUTES / 2)
         _az, el = solpos.sun_position(
             mid, site.latitude, site.longitude
         )
         hw = clearsky.haurwitz_ghi(el)
-        kc_samples.setdefault(_hour_key(start), []).append(
+        kc_samples.setdefault(hkey, []).append(
             (site_kc[i] * hw, el)
         )
     kc_by_hour = {h: clearsky.hourly_kc(s) for h, s in kc_samples.items()}
@@ -94,10 +107,7 @@ def per_plane_modeled(site: SiteConfig, result: ForecastResult | None, iso: str,
         raw_series = getattr(pr, "raw_watts", ())
         slow_series = getattr(pr, "slow_watts", ()) or raw_series
         corrected_series = getattr(pr, "watts", ())
-        for i, start in enumerate(result.slot_starts):
-            if start.astimezone(tz).date().isoformat() != iso:
-                continue
-            hkey = _hour_key(start)
+        for i, _start, hkey in slots:
             if i < len(pr.beam_ref_watts):
                 beam_wh[hkey] = beam_wh.get(hkey, 0.0) + pr.beam_ref_watts[i] * SLOT_HOURS
             if i < len(pr.diffuse_ref_watts):
@@ -143,6 +153,11 @@ def per_plane_modeled(site: SiteConfig, result: ForecastResult | None, iso: str,
     return out
 
 
+def issued_plane_names(snap: IssuedSnapshot) -> set[str]:
+    """Names in the frozen forecast, including modules with only daily evidence."""
+    return snap.per_plane.keys() | (snap.per_plane_daily_wh or {}).keys()
+
+
 def metered_modeled_hourly(
     site: SiteConfig,
     snap: IssuedSnapshot,
@@ -162,16 +177,22 @@ def metered_modeled_hourly(
     matching the site curve. No beam-share approximation is allowed because
     group clipping and learned factors make that share layer-dependent.
 
-    Returns None when the comparison is impossible or meaningless: no metered
-    plane at all (no measured side exists), or unmetered planes present but
-    no per-plane breakdown to scale them out (legacy v0.1 snapshot) — the
-    caller then SKIPS the day rather than training the metering gap.
+    Returns None when there are no meters or the issued curves cannot isolate
+    their modules. Archived module names can differ from today's configured
+    site. A missing module hour in a positive site hour is not a zero label.
     """
     planes = site.planes
     metered = {p.name for p in planes if p.actual_entity}
     if not metered:
         return None
-    if len(metered) == len(planes):
+    archived = issued_plane_names(snap)
+    if metered == archived or (
+        not archived and snap.per_plane_daily_wh is None
+        and snap.weather_day_complete is None and len(metered) == len(planes)
+    ):
+        # Older archives could have weather-hour coverage but no module or
+        # local-day inventory. They retain the whole-site hourly comparison.
+        # Today's full meter set can be a subset of the issued site.
         return dict(modeled_hourly)
     if not snap.per_plane or layer not in {"raw", "slow", "corrected"}:
         return None
@@ -186,7 +207,13 @@ def metered_modeled_hourly(
             return None
         exact[name] = curve
     out: dict[str, float] = {}
-    for hkey in modeled_hourly:
+    for hkey, site_wh in modeled_hourly.items():
+        if (
+            (snap.complete_weather_hours is not None or snap.weather_day_complete is not None)
+            and site_wh > 0
+            and any(hkey not in curve for curve in exact.values())
+        ):
+            continue
         out[hkey] = sum(curve.get(hkey, 0.0) for curve in exact.values())
     return out
 

@@ -17,10 +17,9 @@
  * so this file carries no version string.
  *
  * DATA (all read live, never written):
- *   1. Module list      — the measured-total sensor's `sources` (statistic ids)
- *                         and `source_names` (plane names M1…M8) attributes.
- *   2. Measured bars    — `recorder/statistics_during_period` (period "hour",
- *                         types ["mean"]) for the sources, over the selected day's
+ *   1. Module list      — authorized configured channels, bound to the measured total.
+ *   2. Measured bars    — the same entry-scoped WebSocket returns authorized
+ *                         hourly Recorder means (W) over the selected day's
  *                         [local midnight, next local midnight) HA-time-zone window; hourly Wh per module =
  *                         mean W × 1 h. Refetched on connect, every 5 minutes, and
  *                         when the local day rolls — but ONLY while viewing today /
@@ -48,7 +47,7 @@
 
 // Propagate the resource cache-buster to every local dependency (SPEC §18.5).
 const dependency = (name) => new URL(`./${name}${new URL(import.meta.url).search}`, import.meta.url);
-const { ensureRegistry, stopRegistry, resolveEntities, callEntryService } = await import(dependency("card_data.js"));
+const { connectionKey, ensureRegistry, stopRegistry, resolveEntities, callEntryService } = await import(dependency("card_data.js"));
 const { preserveUiState, pressed, describeChart, dataTable } = await import(dependency("card_ui.js"));
 const { SiteCalendar } = await import(dependency("site_calendar.js"));
 
@@ -88,6 +87,11 @@ const KEY_TOTAL = "measured_dc_power_total";
 const KEY_FORECAST = "energy_production_today";
 const RE_TOTAL = /^sensor\..*measured_dc_power_total$/;
 const RE_FORECAST = /^sensor\..*energy_production_today$/;
+const ENTITY_DEFINITIONS = [
+  ["total_sensor", KEY_TOTAL, RE_TOTAL],
+  ["forecast_sensor", KEY_FORECAST, RE_FORECAST],
+];
+const LEGACY_INSTALLER_TITLE = "Production per module (measured DC · forecast DC)";
 
 // Measured-statistics refetch cadence (ms) — the recorder writes hourly LTS on
 // its own schedule, so 5 min is ample and cheap.
@@ -254,7 +258,6 @@ class BalconyPowerHistoryCard extends HTMLElement {
     // Last-seen forecast state object + module signature — identity/equality gate
     // the re-render on a real change (the async stats fetch re-renders itself).
     this._lastForecast = undefined;
-    this._moduleSig = "";
     // Derived render inputs.
     this._modules = []; // [{ id, name, color }]
     this._dayBars = {}; // stat_id -> number[23/24/25] hourly Wh (day mode)
@@ -294,12 +297,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
 
   setConfig(config) {
     // All keys optional; auto-discovery fills the rest at render time.
-    this._config = config || {};
+    this._config = { ...config };
     this._rendered = false;
     this._lastForecast = undefined;
-    this._moduleSig = "";
-    this._liveDayKey = undefined;
-    this._fetchSeq += 1;
+    this._clearMeasurementHistory();
     this._weekForecastCache = {};
   }
 
@@ -317,11 +318,8 @@ class BalconyPowerHistoryCard extends HTMLElement {
   connectedCallback() {
     if (this._hass) this.hass = this._hass;
     if (!this._timer) {
-      // The 5-min auto-refresh only fires while viewing the live window (today /
-      // current week); a past view is static, so it is never refetched on a tick.
-      this._timer = setInterval(() => {
-        if (this._isLive()) this._fetch();
-      }, REFETCH_MS);
+      // Even a past view must refresh source permissions on a long-lived tab.
+      this._timer = setInterval(() => this._fetch(), REFETCH_MS);
     }
     // A card added while hass is already present must fetch straight away.
     this._ensureFetch();
@@ -329,8 +327,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
 
   disconnectedCallback() {
     stopRegistry(this);
-    this._fetchSeq += 1;
-    this._liveDayKey = undefined;
+    this._clearMeasurementHistory();
     if (this._timer) {
       clearInterval(this._timer);
       this._timer = null;
@@ -338,23 +335,26 @@ class BalconyPowerHistoryCard extends HTMLElement {
   }
 
   set hass(hass) {
+    const previous = this._hass;
     this._hass = hass;
     if (!this._config) return;
-    // Kick the first (or, while live, a new-day) statistics fetch as hass arrives.
-    this._ensureFetch();
     // Start connection-scoped registry discovery; failed attempts may retry.
     this._ensureRegistry(hass);
-
     const ids = this._resolveIds(hass);
-    const total = hass.states[ids.total_sensor];
+    const switched = connectionKey(previous) !== connectionKey(hass) || previous?.user?.id !== hass.user?.id;
+    if (switched) {
+      this._lastForecast = undefined;
+      this._dayForecast = this._weekForecast = null;
+      this._weekForecastCache = {};
+    }
+    if (switched || [ids.total_sensor, ...this._modules.map((module) => module.id)]
+        .some((id) => previous?.states?.[id] && !hass.states[id])) {
+      this._clearMeasurementHistory();
+    }
     const forecast = hass.states[ids.forecast_sensor];
     const liveDay = this._view === "day" && this._isLive();
-    // The module list rarely changes; compute a cheap signature so a plain
-    // measured-power tick does NOT re-render a static past/week view.
-    this._rebuildModules(total);
-    const sig = this._modules.map((m) => `${m.id}|${m.name}`).join(",");
-    let needRender = !this._rendered || sig !== this._moduleSig;
-    this._moduleSig = sig;
+    let needRender = !this._rendered;
+    this._ensureFetch();
     // In the live today view the dashed line tracks the forecast sensor's curve;
     // in a past/week view the forecast comes from the service fetch (or none), so
     // a forecast-sensor push must not touch it.
@@ -457,19 +457,15 @@ class BalconyPowerHistoryCard extends HTMLElement {
   _hourIndex(value) { return this._calendar().hourIndex(value, this._dayAt()); }
 
   _resolveIds(hass) {
-    return resolveEntities(this._config, this._registryList, hass, [
-      ["total_sensor", KEY_TOTAL, RE_TOTAL],
-      ["forecast_sensor", KEY_FORECAST, RE_FORECAST],
-    ]);
+    return resolveEntities(this._config, this._registryList, hass, ENTITY_DEFINITIONS, LEGACY_INSTALLER_TITLE);
   }
 
   _ensureRegistry(hass) {
     return ensureRegistry(this, hass);
   }
 
-  /** Module list [{id, name, color}] from the total sensor's attributes. */
-  _rebuildModules(total) {
-    const a = (total && total.attributes) || {};
+  /** Module list [{id, name, color}] from entry bindings. */
+  _rebuildModules(a) {
     const sources = isArray(a[A_SOURCES]) ? a[A_SOURCES] : [];
     const names = isArray(a[A_SOURCE_NAMES]) ? a[A_SOURCE_NAMES] : [];
     this._modules = sources.map((id, i) => ({
@@ -481,7 +477,7 @@ class BalconyPowerHistoryCard extends HTMLElement {
 
   /** Forecast sensor's 15-min `wh_period` → the live TODAY line (number[23/24/25]). */
   _recomputeForecast(forecast) {
-    if (forecast && ["unknown", "unavailable"].includes(forecast.state)) {
+    if (forecast?.state === "unavailable") {
       this._dayForecast = null;
       this._forecastState = "unavailable";
       return;
@@ -499,16 +495,14 @@ class BalconyPowerHistoryCard extends HTMLElement {
       this._forecastState = "none";
       return;
     }
-    const arr = new Array(this._dayHours().length).fill(null);
-    let any = false;
-    for (const iso in wh) {
-      const h = this._hourIndex(iso);
-      if (h < 0) continue;
-      const v = energyValue(wh[iso]);
-      if (v === null) continue;
-      arr[h] = (arr[h] ?? 0) + v;
-      any = true;
-    }
+    const slots = new Map(Object.entries(wh).map(([iso, value]) => [Date.parse(iso), energyValue(value)]));
+    const quarterMs = 15 * 60 * 1000;
+    const arr = this._dayHours().map((hour) => {
+      const start = hour.getTime();
+      const quarters = [0, 1, 2, 3].map((i) => slots.get(start + i * quarterMs));
+      return quarters.every(Number.isFinite) ? quarters.reduce((sum, value) => sum + value, 0) : null;
+    });
+    const any = arr.some(Number.isFinite);
     this._dayForecast = any ? arr : null;
     this._forecastState = any ? "live" : "none";
   }
@@ -518,6 +512,8 @@ class BalconyPowerHistoryCard extends HTMLElement {
   /** Fetch on first hass, and — while live — once per new local day (day roll). */
   _ensureFetch() {
     if (!this._hass || !this.isConnected) return;
+    const { total_sensor: entityId } = this._resolveIds(this._hass);
+    if (!this._hass.states[entityId]) return;
     if (this._liveDayKey === undefined) {
       this._liveDayKey = this._calendar().key();
       this._fetch();
@@ -533,21 +529,54 @@ class BalconyPowerHistoryCard extends HTMLElement {
     }
   }
 
-  /** Sources (statistic ids) from the total sensor, or [] when unavailable. */
-  _sources(hass) {
-    const ids = this._resolveIds(hass);
-    const total = hass.states[ids.total_sensor];
-    const attrs = total && total.attributes;
-    const sources = attrs && isArray(attrs[A_SOURCES]) ? attrs[A_SOURCES] : [];
-    const limits = attrs && isArray(attrs[A_SOURCE_LIMITS])
-      ? attrs[A_SOURCE_LIMITS]
-      : [];
+  _clearMeasurementHistory() {
+    this._fetchSeq += 1;
+    this._liveDayKey = undefined;
+    this._dayBars = {};
+    this._weekBars = {};
+    this._weekCoverage = {};
+    this._modules = [];
+    this._sourceLimits = {};
+    this._lastSuccess = null;
+    this._loadState = "loading";
+    this._rendered = false;
+  }
+
+  /** Query authorized bindings and hourly means together. */
+  async _readHistory(hass, start, end, seq) {
+    const { total_sensor: entityId, entry_id: entryId } = this._resolveIds(hass);
+    if (!entityId) return null;
+    const current = () => seq === this._fetchSeq && connectionKey(this._hass) === connectionKey(hass)
+      && this._hass?.user?.id === hass.user?.id
+      && this._resolveIds(this._hass).total_sensor === entityId;
+    let reply;
+    try {
+      reply = await hass.callWS({
+        type: "balcony_solar_forecast/measurement_history", entity_id: entityId,
+        ...(entryId ? { entry_id: entryId } : {}),
+        start_time: start.toISOString(), end_time: end.toISOString(),
+      });
+      if (!isArray(reply?.[A_SOURCES]) || !reply.statistics) throw new Error("Invalid measurement history");
+    } catch (_error) {
+      if (current()) {
+        // No fresh authorization is available. Discard the previous scope's
+        // bindings and values, including a view kept open through a rights change.
+        this._clearMeasurementHistory();
+        this._liveDayKey = this._calendar().key();
+        this._loadState = "error";
+        this._render();
+      }
+      return null;
+    }
+    if (!current()) return null;
+    this._rebuildModules(reply);
+    const sources = reply[A_SOURCES];
     this._sourceLimits = {};
     for (let i = 0; i < sources.length; i++) {
-      const limit = Number(limits[i]);
+      const limit = Number(reply[A_SOURCE_LIMITS]?.[i]);
       if (Number.isFinite(limit) && limit > 0) this._sourceLimits[sources[i]] = limit;
     }
-    return sources;
+    return { statistics: reply.statistics, sources };
   }
 
   /** True for a physical hourly mean; false for corrupt/mis-scaled statistics. */
@@ -561,44 +590,23 @@ class BalconyPowerHistoryCard extends HTMLElement {
   async _fetch() {
     const hass = this._hass;
     if (!hass || typeof hass.callWS !== "function") return;
-    const sources = this._sources(hass);
-    if (!sources.length) return;
+    if (!hass.states[this._resolveIds(hass).total_sensor]) return;
     if (this._isLive()) this._liveDayKey = this._calendar().key();
     const seq = ++this._fetchSeq; // any newer fetch/selection supersedes this one
-    if (this._view === "week") {
-      await this._fetchWeek(hass, sources, seq);
-    } else {
-      await this._fetchDay(hass, sources, seq);
-    }
+    if (this._view === "week") await this._fetchWeek(hass, seq);
+    else await this._fetchDay(hass, seq);
   }
 
   /** Day view: hourly means over [selected 00:00, next 00:00) → Wh, +line. */
-  async _fetchDay(hass, sources, seq) {
+  async _fetchDay(hass, seq) {
     const start = this._dayAt();
     const end = this._dayAt(1); // next LOCAL midnight (DST-exact)
     const now = new Date();
     // Today stops at "now" (matches the original live behaviour); a past day
     // spans the whole local day.
-    const endTime = (this._isLive() ? now : end).toISOString();
-    let result;
-    try {
-      result = await hass.callWS({
-        type: "recorder/statistics_during_period",
-        start_time: start.toISOString(),
-        end_time: endTime,
-        statistic_ids: sources,
-        period: "hour",
-        types: ["mean"],
-        units: { power: "W" },
-      });
-    } catch (err) {
-      if (seq !== this._fetchSeq) return;
-      this._loadState = "error";
-      this._render();
-      return;
-    }
-    if (seq !== this._fetchSeq) return; // selection changed mid-flight
-    this._ingestDay(result, sources);
+    const result = await this._readHistory(hass, start, this._isLive() ? now : end, seq);
+    if (!result || seq !== this._fetchSeq) return;
+    this._ingestDay(result.statistics, result.sources);
     // Forecast line: TODAY uses the live wh_period curve; a PAST day reads the
     // archived issued curve via the read-only service (awaited below).
     if (this._isLive()) {
@@ -613,32 +621,16 @@ class BalconyPowerHistoryCard extends HTMLElement {
   }
 
   /** Week view: hourly means over the 7-day window → per-source daily Wh. */
-  async _fetchWeek(hass, sources, seq) {
+  async _fetchWeek(hass, seq) {
     // The window ENDS at the selected day; step back 6 days for its start. The
     // seven local-midnight day starts drive both the query and the bucketing.
     const days = [];
     for (let i = 0; i < 7; i++) days.push(this._dayAt(-6 + i));
     const start = days[0];
     const end = this._isLive() ? new Date() : this._dayAt(1);
-    let result;
-    try {
-      result = await hass.callWS({
-        type: "recorder/statistics_during_period",
-        start_time: start.toISOString(),
-        end_time: end.toISOString(),
-        statistic_ids: sources,
-        period: "hour",
-        types: ["mean"],
-        units: { power: "W" },
-      });
-    } catch (err) {
-      if (seq !== this._fetchSeq) return;
-      this._loadState = "error";
-      this._render();
-      return;
-    }
-    if (seq !== this._fetchSeq) return;
-    this._ingestWeek(result, sources, days);
+    const result = await this._readHistory(hass, start, end, seq);
+    if (!result || seq !== this._fetchSeq) return;
+    this._ingestWeek(result.statistics, result.sources, days);
     // Bars render straight away; the per-day forecast overlay follows once the
     // (cached / concurrent) issued lookups land.
     this._render();
@@ -699,16 +691,10 @@ class BalconyPowerHistoryCard extends HTMLElement {
       const result = await callEntryService(this, hass, "get_issued_forecast", { date: iso });
       if (!result || typeof result !== "object") throw new Error("Invalid forecast response");
       if (result.available === false) return { status: "missing", value: null };
-      const curve = result.hourly_wh;
-      if (!curve || typeof curve !== "object" || Array.isArray(curve)) {
-        return { status: "missing", value: null };
-      }
-      const values = Object.values(curve).map(energyValue);
-      if (!values.length || values.some((value) => value === null)) {
-        return { status: "missing", value: null };
-      }
-      const total = values.reduce((sum, value) => sum + value, 0);
-      return { status: "available", value: total };
+      // An older archive may have valid hourly values with unproven day
+      // coverage. Only a verified local-day total belongs in the week view.
+      const total = result.daily_coverage === "complete" ? energyValue(result.daily_wh) : null;
+      return total === null ? { status: "missing", value: null } : { status: "available", value: total };
     } catch (_error) {
       return { status: "error" };
     }
@@ -870,7 +856,9 @@ class BalconyPowerHistoryCard extends HTMLElement {
     const hasTotal =
       this._hass && this._hass.states && this._hass.states[ids.total_sensor];
     if (!hasTotal || !this._modules.length) {
-      body.appendChild(this._message(t.noEntities));
+      const message = hasTotal && this._loadState === "error"
+        ? this._statisticsError(t) : t.noEntities;
+      body.appendChild(this._message(message));
       return;
     }
 
