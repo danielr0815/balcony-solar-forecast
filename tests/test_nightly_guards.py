@@ -154,33 +154,29 @@ def test_cloud_class_by_hour_without_weather_is_empty():
 
 def test_per_plane_modeled_slices_to_day_and_skips_planes_without_ref():
     c = _make_coordinator()
-    starts = (
+    hours = (
         datetime(2026, 7, 1, 10, 0, tzinfo=UTC),
         datetime(2026, 7, 1, 11, 0, tzinfo=UTC),
-        datetime(2026, 7, 2, 10, 0, tzinfo=UTC),   # foreign day: sliced away
+        datetime(2026, 7, 2, 10, 0, tzinfo=UTC),
     )
+    starts = tuple(hour + timedelta(minutes=15 * i) for hour in hours for i in range(4))
     with_ref = PlaneResult(
-        name="M1",
-        watts=(400.0, 400.0, 400.0),
-        kc=(0.8, 0.8, 0.8),
-        beam_ref_watts=(400.0, 400.0, 400.0),
-        diffuse_ref_watts=(100.0, 100.0, 100.0),
+        name="M1", watts=(400.0,) * 12,
+        kc=(0.8,) * 12, beam_ref_watts=(400.0,) * 12, diffuse_ref_watts=(100.0,) * 12,
     )
-    no_ref = PlaneResult(name="M2", watts=(1.0, 1.0, 1.0))  # no reference export
+    no_ref = PlaneResult(name="M2", watts=(1.0,) * 12)
     c._last_result = ForecastResult(
-        slot_starts=starts,
-        total_watts=(401.0, 401.0, 401.0),
-        plane_results=(with_ref, no_ref),
-        hourly_wh={},
+        slot_starts=starts, total_watts=(401.0,) * 12,
+        plane_results=(with_ref, no_ref), hourly_wh={},
     )
     out = c._per_plane_modeled(_ISO)
     # The no-reference plane is NOT trained (no fallback to the gated series).
     assert list(out) == ["M1"]
     modeled = out["M1"]
-    # Only the two target-day slots survive; each contributes w * 0.25 Wh.
-    assert all(k.startswith(_ISO) for k in modeled.beam_wh)
-    assert all(v == pytest.approx(100.0) for v in modeled.beam_wh.values())
-    assert all(v == pytest.approx(25.0) for v in modeled.diffuse_wh.values())
+    # Only the two complete target-day hours survive.
+    assert set(modeled.beam_wh) == {_h(10), _h(11)}
+    assert all(v == pytest.approx(400.0) for v in modeled.beam_wh.values())
+    assert all(v == pytest.approx(100.0) for v in modeled.diffuse_wh.values())
     # kc recovered through the shared hourly reduction, sane and finite.
     assert all(0.0 < v < 1.5 for v in modeled.kc.values())
 
@@ -756,7 +752,10 @@ def test_update_drift_auto_disables_slow_layer_and_rolls_back():
     )
     c = _make_coordinator(store)
     c._drift_state = replace(
-        DriftState(), slow_loss_streak=DRIFT_LOSS_STREAK_DAYS - 1
+        DriftState(), loss_evidence={
+            (date.fromisoformat(_ISO) - timedelta(days=delta)).isoformat(): {"slow": True}
+            for delta in range(1, DRIFT_LOSS_STREAK_DAYS)
+        },
     )
     # Physics matches measured (raw_mae ~ 0); slow-only and corrected are
     # materially worse -> the SLOW layer owns the loss.

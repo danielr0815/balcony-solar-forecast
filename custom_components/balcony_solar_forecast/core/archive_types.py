@@ -123,8 +123,22 @@ class IssuedSnapshot:
     provenance: dict[str, str] | None = None
     bands: dict[str, dict[str, float]] | None = None
     invalid_weather_hours: tuple[str, ...] = ()
+    # None denotes a legacy archive without affirmative slot coverage.
+    complete_weather_hours: tuple[str, ...] | None = None
+    # Full local calendar day proven on the quarter-hour axis. UTC hour coverage
+    # cannot establish this when a local day starts inside a UTC hour.
+    weather_day_complete: bool | None = None
+    per_plane_daily_wh: dict[str, dict[str, float]] | None = None
+    first_local_edge_production: str | None = None
+    leading_edge_forecast_known: bool | None = None
     # The v1 archive carried one display curve without a separate RAW basis.
     legacy_hourly_wh: dict[str, float] = field(default_factory=dict)
+
+    def weather_hour_usable(self, hour: str) -> bool:
+        return (
+            hour not in self.invalid_weather_hours
+            and (self.complete_weather_hours is None or hour in self.complete_weather_hours)
+        )
 
     @classmethod
     def from_dict(cls, d: object) -> IssuedSnapshot:
@@ -171,6 +185,9 @@ class IssuedSnapshot:
                           and (number := _finite_json_float(v)) is not None and number >= 0}
                      for key, curve in bands_raw.items() if key in allowed and isinstance(curve, dict)}
         invalid = d.get("invalid_weather_hours")
+        complete = d.get("complete_weather_hours")
+        complete_day = d.get("weather_day_complete")
+        daily_planes = d.get("per_plane_daily_wh")
         return cls(
             issued_at=str(d.get("issued_at", "")),
             status=str(d.get("status", "")),
@@ -194,6 +211,26 @@ class IssuedSnapshot:
             bands=bands,
             invalid_weather_hours=tuple(h for h in invalid if isinstance(h, str))
             if isinstance(invalid, (tuple, list)) else (),
+            complete_weather_hours=(
+                tuple(h for h in complete if isinstance(h, str))
+                if isinstance(complete, (tuple, list)) else
+                () if "complete_weather_hours" in d else None
+            ),
+            weather_day_complete=complete_day if isinstance(complete_day, bool) else None,
+            first_local_edge_production=(
+                d["first_local_edge_production"] if isinstance(d.get("first_local_edge_production"), str) else None
+            ),
+            leading_edge_forecast_known=(
+                d["leading_edge_forecast_known"] if isinstance(d.get("leading_edge_forecast_known"), bool) else None
+            ),
+            per_plane_daily_wh=(
+                {name: {
+                    layer: value for layer in ("raw", "slow", "corrected")
+                    if (value := _finite_json_float(curves.get(layer))) is not None and value >= 0
+                } for name, curves in daily_planes.items()
+                  if isinstance(name, str) and isinstance(curves, dict)}
+                if isinstance(daily_planes, dict) else None
+            ),
         )
 
     def to_dict(self) -> dict:
@@ -231,6 +268,16 @@ class IssuedSnapshot:
             out["bands"] = {key: dict(curve) for key, curve in self.bands.items()}
         if self.invalid_weather_hours:
             out["invalid_weather_hours"] = list(self.invalid_weather_hours)
+        if self.complete_weather_hours is not None:
+            out["complete_weather_hours"] = list(self.complete_weather_hours)
+        if self.weather_day_complete is not None:
+            out["weather_day_complete"] = self.weather_day_complete
+        if self.first_local_edge_production is not None:
+            out["first_local_edge_production"] = self.first_local_edge_production
+        if self.leading_edge_forecast_known is not None:
+            out["leading_edge_forecast_known"] = self.leading_edge_forecast_known
+        if self.per_plane_daily_wh is not None:
+            out["per_plane_daily_wh"] = {name: dict(curves) for name, curves in self.per_plane_daily_wh.items()}
         if self.legacy_hourly_wh:
             out["hourly_wh"] = dict(self.legacy_hourly_wh)
         return out

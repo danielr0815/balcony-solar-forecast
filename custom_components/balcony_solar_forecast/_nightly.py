@@ -25,8 +25,9 @@ from datetime import UTC, date, datetime, timedelta
 from homeassistant.util import dt as dt_util
 
 from . import _channel_health
+from ._actuals import _daylight_hour_keys_in_local_day, _next_utc_hour_boundary
 from ._glue_util import (
-    _daily_kwh_from_hourly,
+    _complete_local_days,
     _filter_hourly_to_local_day,
     _hour_key,
     _replace_drift,
@@ -76,7 +77,8 @@ from .core import (
     quantiles as quantiles_mod,
 )
 from .core.learning_inputs import DayAheadSample as _DayAheadSample
-from .core.measurement_quality import production_collapsed
+from .core.measurement_quality import dc_power, production_collapsed
+from .core.time_axis import complete_utc_hours
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -121,16 +123,44 @@ async def async_nightly_job(coord, now: datetime | None = None) -> None:
     yesterday = today - timedelta(days=1)
     for day in coord._catchup_days(yesterday):
         iso = day.isoformat()
-        if not coord._store.has_actuals(iso):
+        verified = coord._store.has_verified_actuals(iso)
+        trained = coord._store.is_day_trained(iso)
+        if verified:
+            # Preserve the chronology established by the stored readings
+            # before a reread can replace them. Old verified labels can prove
+            # production even when their original entity IDs are unavailable.
+            from ._scoreboard_glue import (
+                discard_scoreboard_day,
+                remember_confirmed_late_issue,
+            )
+
+            previous_issue = coord._store.get_issued(iso)
+            if previous_issue and remember_confirmed_late_issue(coord, IssuedSnapshot.from_dict(previous_issue), day):
+                discard_scoreboard_day(coord, iso)
+                _discard_drift_day(coord, iso)
+        changed_binding = verified and not actuals_match_metering(coord, iso)
+        if verified and iso in coord._scoreboard_state.days and (
+            changed_binding or coord._store.actuals_bindings(iso) is None
+        ):
+            # Preserve a scored day's original common forecast/measurement basis.
+            continue
+        refreshed = False
+        if changed_binding or (verified and _actuals_need_refresh(coord, day)) or (not verified and not trained):
+            coord._last_actuals_local_edges_complete = False
+            coord._last_actuals_first_edge_production = None
             read = await coord._read_actuals_safe(day)
             if read is not None:
                 daily, hourly = read
                 # A day that failed the frozen-channel gate returns empty;
                 # do NOT record it, so a later manual re-run can fill it.
-                if daily:
-                    coord._store.record_actuals(iso, daily)
-                if hourly:
-                    coord._store.record_hourly_actuals(iso, hourly)
+                if daily and hourly:
+                    refreshed = coord._store.record_verified_actuals(
+                        iso, daily, hourly,
+                        local_day_edges_complete=coord._last_actuals_local_edges_complete,
+                        first_edge_production=coord._last_actuals_first_edge_production,
+                        bindings=actual_meter_bindings(coord),
+                        replace_binding=changed_binding,
+                    )
                 # Learning visibility (0.23.1): fold the outcome into the
                 # persisted discard streak so "we ran all week and learned
                 # NOTHING" becomes a repair issue naming the responsible gate,
@@ -138,34 +168,62 @@ async def async_nightly_job(coord, now: datetime | None = None) -> None:
                 # actually happened — an already-recorded day was counted when
                 # it was first read, and a recorder IO failure (read is None) is
                 # not a label-gate verdict.
-                coord._record_actuals_outcome(day, accepted=bool(daily))
-        try:
-            await coord._train_and_guard(day)
-        except Exception:  # pragma: no cover - never crash the scheduler
-            _LOGGER.warning(
-                "Nightly training/guard failed for %s", day, exc_info=True
-            )
-        # Skill scoreboard (SPEC §15.2): score this closed day's engine
-        # forecast-as-issued + each comparison AS IT STOOD that day against
-        # the measured site energy, and persist it into the rolling window.
-        # Independently guarded so a scoreboard failure never aborts the
-        # training sweep (and vice-versa).
-        try:
-            await coord._score_scoreboard_day(day)
-        except Exception:  # pragma: no cover - never crash the scheduler
-            _LOGGER.warning(
-                "Nightly scoreboard scoring failed for %s", day, exc_info=True
-            )
-        # Inverter DC->AC efficiency site calibration (AC-side Phase 3): fold this
-        # closed day's eligible AC/DC hours into the learned eta_inv. Independently
-        # guarded so an AC-meter read failure never aborts the DC nightly job (and
-        # vice-versa); a no-meter / no-eligible-hours day is a silent no-op.
+                if not verified:
+                    coord._record_actuals_outcome(day, accepted=bool(daily and hourly))
+        if not coord._store.has_verified_actuals(iso) or not actuals_match_metering(coord, iso):
+            continue
+        issued = coord._store.get_issued(iso)
+        # Older snapshots stay readable, but only an archive with affirmative
+        # slot evidence can authorize new training and quality scores.
+        if issued is not None and IssuedSnapshot.from_dict(issued).complete_weather_hours is None:
+            issued = None
+        if issued is not None:
+            await _train_and_score_day(coord, day, reevaluate_drift=trained and refreshed)
+        # Calibration compares the two meters directly, independent of the
+        # issued weather. Both sides need complete five-minute evidence.
         try:
             await coord._train_inverter_cal(day)
         except Exception:  # pragma: no cover - never crash the scheduler
             _LOGGER.warning(
                 "Nightly inverter calibration failed for %s", day, exc_info=True
             )
+
+
+def _actuals_need_refresh(coord, day: date) -> bool:
+    hourly = coord._store.get_hourly_actuals(day.isoformat()) or {}
+    expected = _local_day_hour_keys(day)
+    if has_fractional_utc_day_boundary(day):
+        # The leading local-day segment belongs to the previous UTC hour and
+        # can arrive independently of the hourly coverage map.
+        return True
+    return any(
+        plane.actual_entity and not expected.issubset(hourly.get(plane.name, {}))
+        for plane in coord._site.planes
+    )
+
+
+async def _train_and_score_day(coord, day: date, *, reevaluate_drift: bool = False) -> None:
+    """Apply independent learner and scoring steps to verified nightly inputs."""
+    try:
+        iso = day.isoformat()
+        issued = coord._store.get_issued(iso)
+        snap = IssuedSnapshot.from_dict(issued) if issued else None
+        if snap and coord._issued_after_cutoff(snap, day):
+            _withdraw_if_confirmed_late(coord, iso, snap, day)
+        elif reevaluate_drift:
+            # Model updates consume a date once. Scoring and drift are
+            # replaceable, date-keyed measurements of the issued generation.
+            actuals = coord._store.get_actuals(iso)
+            if not coord._is_collapse_day(iso, issued, actuals):
+                coord._update_drift(iso, issued, actuals)
+        else:
+            await coord._train_and_guard(day)
+    except Exception:  # pragma: no cover - never crash the scheduler
+        _LOGGER.warning("Nightly training/guard failed for %s", day, exc_info=True)
+    try:
+        await coord._score_scoreboard_day(day)
+    except Exception:  # pragma: no cover - never crash the scheduler
+        _LOGGER.warning("Nightly scoreboard scoring failed for %s", day, exc_info=True)
 
 
 def catchup_days(coord, latest: date) -> list[date]:
@@ -195,14 +253,41 @@ async def snapshot_issued(coord, today: date) -> None:
         data.get(DATA_KEY_CORRECTED_HOURLY_WH, {}), iso)
     # Consume the published generation synchronously. The weather cache and
     # learner states can already have advanced while its successor is computing.
-    per_plane = coord._per_plane_modeled(iso)
     cloud_classes = coord._cloud_class_by_hour(iso)
     eta, _eta_source = coord._forecast_inverter_eta(generation)
-    invalid_weather_hours = tuple(sorted({
-        _hour_key(start)
-        for start in getattr(generation, "invalid_weather_slots", ())
-        if dt_util.as_local(start).date().isoformat() == iso
-    }))
+    invalid_weather_hours: tuple[str, ...] = ()
+    hours = None
+    complete_hours = None
+    complete_day = None
+    raw_daily: dict[str, float] = {}
+    corrected_daily: dict[str, float] = {}
+    plane_daily = None
+    if generation is not None:
+        hours = _issued_weather_hours(generation, iso)
+        complete_hours = tuple(sorted(hours))
+        invalid_weather_hours = tuple(sorted(_local_day_hour_keys(today) - hours))
+        tz = dt_util.get_time_zone(coord.hass.config.time_zone) or UTC
+        complete_day = iso in _complete_local_days(
+            generation.slot_starts, generation.invalid_weather_slots, tz,
+        )
+        if complete_day:
+            # Core results integrate quarter-hours by local date before any
+            # UTC-hour grouping. A known all-dark day can have no energy bucket.
+            raw_daily[iso] = generation.raw_daily_kwh.get(iso, 0.0)
+            corrected_daily[iso] = generation.daily_kwh.get(iso, 0.0)
+            indices = [i for i, start in enumerate(generation.slot_starts)
+                       if start.astimezone(tz).date() == today]
+            plane_daily = {
+                plane.name: {
+                    layer: sum(values[i] for i in indices) * SLOT_HOURS
+                    for layer, values in (
+                        ("raw", plane.raw_watts), ("slow", plane.slow_watts), ("corrected", plane.watts),
+                    )
+                    if len(values) == len(generation.slot_starts)
+                }
+                for plane in generation.plane_results
+            }
+    per_plane = coord._per_plane_modeled(iso, covered_hours=hours)
     from .core.provenance import bounded_provenance
 
     provenance = bounded_provenance(data.get("provenance"))
@@ -228,8 +313,8 @@ async def snapshot_issued(coord, today: date) -> None:
         status=str(data.get("status", "")),
         raw_hourly_wh=raw_hourly,
         corrected_hourly_wh=corrected_hourly,
-        raw_daily_kwh=_daily_kwh_from_hourly(raw_hourly),
-        corrected_daily_kwh=_daily_kwh_from_hourly(corrected_hourly),
+        raw_daily_kwh=raw_daily,
+        corrected_daily_kwh=corrected_daily,
         per_plane=per_plane,
         cloud_class_by_hour=cloud_classes,
         # Slow-only (shademap ∘ physics, no day-ahead) curve for the drift
@@ -242,8 +327,40 @@ async def snapshot_issued(coord, today: date) -> None:
         provenance=provenance,
         bands=bands or None,
         invalid_weather_hours=invalid_weather_hours,
+        complete_weather_hours=complete_hours,
+        weather_day_complete=complete_day,
+        per_plane_daily_wh=plane_daily,
+        first_local_edge_production=_first_modeled_local_edge(generation, today),
+        leading_edge_forecast_known=True if complete_day else None,
     )
     coord._store.record_issued(iso, snapshot.to_dict())
+
+
+def _first_modeled_local_edge(generation, day: date) -> str | None:
+    if generation is None:
+        return None
+    start = dt_util.as_utc(_local_day_bounds(day)[0])
+    cutoff = _next_utc_hour_boundary(start)
+    if start == cutoff:
+        return None
+    invalid = set(generation.invalid_weather_slots)
+    for index, slot in enumerate(generation.slot_starts):
+        if slot >= cutoff:
+            break
+        if start <= slot and slot not in invalid and any(
+            index < len(curve) and curve[index] > 0.0
+            for curve in (generation.raw_total_watts, generation.total_watts)
+        ):
+            return dt_util.as_utc(slot).isoformat()
+    return None
+
+
+def _issued_weather_hours(generation, iso: str) -> set[str]:
+    return {
+        hour.isoformat()
+        for hour in complete_utc_hours(generation.slot_starts, generation.invalid_weather_slots)
+        if dt_util.as_local(hour).date().isoformat() == iso
+    }
 
 
 def _slow_only_hourly(result, raw_hourly: dict[str, float]) -> dict[str, float]:
@@ -268,14 +385,15 @@ def cloud_class_by_hour(coord, iso: str) -> dict[str, str]:
     if context is None or context[0] is not getattr(coord, "_last_result", None):
         return {}
     weather = context[2]
+    # Use only known UTC hours; partial weather must not be assigned a class.
+    hours = complete_utc_hours(slot.start for slot in weather.slots if slot.usable)
     lat = coord._site.latitude
     lon = coord._site.longitude
     out: dict[str, str] = {}
     for slot in weather.slots:
-        if not getattr(slot, "usable", True):
-            continue
         start = dt_util.as_utc(slot.start)
-        if dt_util.as_local(start).date().isoformat() != iso:
+        hour = start.replace(minute=0, second=0, microsecond=0)
+        if hour not in hours or dt_util.as_local(hour).date().isoformat() != iso:
             continue
         local = dt_util.as_local(start)
         # Clear-sky-index classification (A5), consistent with the live coordinator
@@ -287,16 +405,19 @@ def cloud_class_by_hour(coord, iso: str) -> dict[str, str]:
             visibility_m=slot.visibility_m, month=local.month,
             ghi=slot.ghi, elevation_deg=elev,
         )
-        hkey = _hour_key(start)
         # First writer per hour wins (slots within an hour share cloud data).
-        out.setdefault(hkey, cc)
+        out.setdefault(hour.isoformat(), cc)
     return out
 
 
-def per_plane_modeled(coord, iso: str) -> dict[str, PlaneHourlyModeled]:
-    """Bind HA timezone/result to the shared pure issued-reference reducer."""
+def per_plane_modeled(
+    coord, iso: str, *, covered_hours: set[str] | None = None,
+) -> dict[str, PlaneHourlyModeled]:
+    """Bind the timezone and the archive's optional UTC-hour coverage."""
     tz = dt_util.get_time_zone(coord.hass.config.time_zone) or UTC
-    return learning_inputs.per_plane_modeled(coord._site, getattr(coord, "_last_result", None), iso, tz)
+    return learning_inputs.per_plane_modeled(
+        coord._site, getattr(coord, "_last_result", None), iso, tz, covered_hours=covered_hours,
+    )
 
 
 async def train_and_guard(coord, day: date) -> None:
@@ -408,7 +529,7 @@ def train_quantiles_day(coord, day: date) -> None:
 
     samples: list[quantiles_mod.QuantileSample] = []
     for hkey, corrected_wh in corrected_hourly.items():
-        if hkey not in measured_hourly or hkey in snap.invalid_weather_hours:
+        if hkey not in measured_hourly or not snap.weather_hour_usable(hkey):
             continue
         part = coord._day_part_for_hourkey(hkey)
         if part is None:
@@ -570,9 +691,101 @@ async def train_inverter_cal(coord, day: date) -> None:
     coord._store.record_inverter_training(iso, new_state)
 
 
-def _has_daylight_weather_gap(coord, snap: IssuedSnapshot) -> bool:
-    """An unknown daylight hour invalidates whole-day geometric learning."""
-    for key in snap.invalid_weather_hours:
+def _local_day_bounds(day: date) -> tuple[datetime, datetime]:
+    start = dt_util.start_of_local_day(datetime.combine(day, datetime.min.time()))
+    end = dt_util.start_of_local_day(
+        datetime.combine(day + timedelta(days=1), datetime.min.time())
+    )
+    return start, end
+
+
+def _local_day_hour_keys(day: date) -> set[str]:
+    start, end = _local_day_bounds(day)
+    hour = _next_utc_hour_boundary(start)
+    last = _next_utc_hour_boundary(end)
+    keys: set[str] = set()
+    while hour < last:
+        keys.add(hour.isoformat())
+        hour += timedelta(hours=1)
+    return keys
+
+
+def has_fractional_utc_day_boundary(day: date) -> bool:
+    """Whether the local day starts or ends inside a UTC hour."""
+    return any(
+        dt_util.as_utc(bound) != _next_utc_hour_boundary(bound)
+        for bound in _local_day_bounds(day)
+    )
+
+
+def actual_meter_bindings(coord) -> dict[str, str]:
+    return {plane.name: plane.actual_entity for plane in coord._site.planes if plane.actual_entity}
+
+
+def actuals_match_metering(coord, iso: str) -> bool:
+    """Compare current bindings to retained Recorder evidence before reuse."""
+    if not coord._store.has_verified_actuals(iso):
+        return True  # historical, non-Recorder call paths retain their legacy contract
+    active = actual_meter_bindings(coord)
+    recorded = coord._store.actuals_bindings(iso)
+    return (
+        active.keys() == (coord._store.get_actuals(iso) or {}).keys()
+        and (recorded is None or recorded == active)
+    )
+
+
+def metered_local_day_wh(
+    coord, issued: dict, snap: IssuedSnapshot, iso: str, *, layer: str,
+) -> float | None:
+    """Use exact local-slot archive energy on the same DC metering basis."""
+    if issued.get("weather_day_complete") is not True:
+        return None
+    metered = {plane.name for plane in coord._site.planes if plane.actual_entity}
+    if not metered:
+        return None
+    if metered == learning_inputs.issued_plane_names(snap):
+        totals = snap.raw_daily_kwh if layer == "raw" else snap.corrected_daily_kwh
+        value = totals.get(iso)
+        if value is not None:
+            return dc_power(value * 1000)
+    per_plane = issued.get("per_plane_daily_wh")
+    if not isinstance(per_plane, dict):
+        return None
+    total = 0.0
+    for name in metered:
+        values = per_plane.get(name)
+        value = dc_power(values.get(layer)) if isinstance(values, dict) else None
+        if value is None:
+            return None
+        total += value
+    return dc_power(total)
+
+
+def expected_production_hours(
+    coord, day: date, modeled: dict[str, float], hourly_actuals: dict[str, dict[str, float]],
+) -> set[str]:
+    """Hours that must be present on both sides of a whole-day comparison."""
+    start, end = _local_day_bounds(day)
+    expected = (
+        _daylight_hour_keys_in_local_day(coord._site, start, end)
+        | {hour for curve in (modeled, *hourly_actuals.values()) for hour, wh in curve.items() if wh > 0}
+    )
+    utc_end = dt_util.as_utc(end)
+    if utc_end != _next_utc_hour_boundary(utc_end):
+        # Daily sums use only the in-day fraction. The next day's bins may
+        # complete a UTC hour for separate hourly comparisons (but not this gate).
+        expected.discard(utc_end.replace(minute=0, second=0, microsecond=0).isoformat())
+    return expected
+
+
+def has_daylight_weather_gap(coord, snap: IssuedSnapshot, day: date) -> bool:
+    """An unknown production hour invalidates a whole-day comparison."""
+    if snap.weather_day_complete is True:
+        return False
+    candidates = snap.invalid_weather_hours
+    if snap.complete_weather_hours is not None:
+        candidates = tuple(key for key in _local_day_hour_keys(day) if not snap.weather_hour_usable(key))
+    for key in candidates:
         hour = dt_util.parse_datetime(key)
         if hour is None:
             continue
@@ -607,7 +820,8 @@ def train_day_ahead(
     if not issued or not actuals:
         return
     snap = IssuedSnapshot.from_dict(issued)
-    if coord._issued_after_cutoff(snap, date.fromisoformat(iso)) or _has_daylight_weather_gap(coord, snap):
+    day = date.fromisoformat(iso)
+    if coord._issued_after_cutoff(snap, day) or has_daylight_weather_gap(coord, snap, day):
         return
     # The modeled side of the day-ahead RLS is the SLOW-ONLY curve (shademap ∘
     # physics, no day-ahead factor) rather than pure raw (B2/SCT-3): theta is
@@ -760,7 +974,8 @@ def train_shademap(
     if not issued:
         return
     snap = IssuedSnapshot.from_dict(issued)
-    if coord._issued_after_cutoff(snap, date.fromisoformat(iso)) or _has_daylight_weather_gap(coord, snap):
+    day = date.fromisoformat(iso)
+    if coord._issued_after_cutoff(snap, day) or has_daylight_weather_gap(coord, snap, day):
         return
     if not snap.per_plane:
         return  # v0.1 issued or engine breakdown absent: nothing to train
@@ -854,9 +1069,13 @@ def is_collapse_day(
     old 4-day snapshot cannot inflate the threshold (FIX-2). Absent either
     side, not a collapse (can't tell).
     """
-    if not issued or not actuals:
+    if not issued or not actuals or not actuals_match_metering(coord, iso):
         return False
     snap = IssuedSnapshot.from_dict(issued)
+    day = date.fromisoformat(iso)
+    fractional_day = has_fractional_utc_day_boundary(day)
+    if not fractional_day and has_daylight_weather_gap(coord, snap, day):
+        return False
     raw_hourly = _filter_hourly_to_local_day(
         snap.raw_hourly_wh or snap.corrected_hourly_wh, iso
     )
@@ -865,11 +1084,78 @@ def is_collapse_day(
     )
     if metered_hourly is None:
         return False
+    if snap.complete_weather_hours is not None:
+        hourly_actuals = coord._store_hourly_actuals(iso) or {}
+        measured_hourly = coord._site_measured_hourly(iso, hourly_actuals) or {}
+        expected = expected_production_hours(coord, day, metered_hourly, hourly_actuals)
+        if not expected.issubset(measured_hourly.keys() & metered_hourly.keys()):
+            return False
     forecast_wh = sum(metered_hourly.values())
+    if fractional_day:
+        if not coord._store.has_verified_local_day_edges(iso):
+            return False
+        forecast_wh = metered_local_day_wh(coord, issued, snap, iso, layer="raw")
+        if forecast_wh is None:
+            return False
     measured_wh = sum(
         float(v) for v in actuals.values() if isinstance(v, (int, float))
     )
     return production_collapsed(forecast_wh, measured_wh)
+
+
+def _loss_streak(evidence: dict[str, dict[str, bool]], layer: str) -> tuple[int, date | None]:
+    """Return the latest streak and the start of the first qualifying run."""
+    previous = None
+    streak = 0
+    first_loss = None
+    for iso, legs in sorted(evidence.items()):
+        try:
+            day = date.fromisoformat(iso)
+        except ValueError:
+            continue
+        if previous is None or (day - previous).days != 1:
+            streak = 0
+        streak = streak + 1 if legs.get(layer) else 0
+        if first_loss is None and streak == DRIFT_LOSS_STREAK_DAYS:
+            first_loss = day - timedelta(days=streak - 1)
+        previous = day
+    return streak, first_loss
+
+
+def without_loss_evidence(evidence: dict[str, dict[str, bool]], layer: str) -> dict[str, dict[str, bool]]:
+    """Keep a sibling layer's verdicts when one model basis changes."""
+    return {
+        day: {name: lost for name, lost in legs.items() if name != layer}
+        for day, legs in evidence.items()
+        if any(name != layer for name in legs)
+    }
+
+
+def _discard_drift_day(coord, iso: str) -> None:
+    """Withdraw a date later shown to have an ineligible issued forecast."""
+    state = coord._drift_state
+    if iso not in state.daily_mae and iso not in state.loss_evidence:
+        return
+    daily = {day: entry for day, entry in state.daily_mae.items() if day != iso}
+    evidence = {day: legs for day, legs in state.loss_evidence.items() if day != iso}
+    day_ahead, _ = _loss_streak(evidence, LEARNER_LAYER_DAY_AHEAD)
+    slow, _ = _loss_streak(evidence, LEARNER_LAYER_SLOW)
+    if state.day_ahead_disabled or state.fast_disabled:
+        day_ahead = 0
+    if state.slow_disabled:
+        slow = 0
+    coord._drift_state = _replace_drift(
+        state, daily_mae=daily, loss_evidence=evidence, day_ahead_loss_streak=day_ahead,
+        fast_loss_streak=day_ahead, slow_loss_streak=slow,
+    )
+    coord._persist_drift_state()
+
+
+def _withdraw_if_confirmed_late(coord, iso: str, snap: IssuedSnapshot, day: date) -> None:
+    from ._scoreboard_glue import remember_confirmed_late_issue
+
+    if remember_confirmed_late_issue(coord, snap, day):
+        _discard_drift_day(coord, iso)
 
 
 def update_drift(
@@ -903,10 +1189,12 @@ def update_drift(
     learners; the intraday scalar is transient, restart-neutral and clamped
     to [0.25, 2.5], so it needs no drift bound.
     """
-    if not issued or not actuals:
+    if not issued or not actuals or not actuals_match_metering(coord, iso):
         return
     snap = IssuedSnapshot.from_dict(issued)
-    if coord._issued_after_cutoff(snap, date.fromisoformat(iso)):
+    day = date.fromisoformat(iso)
+    if coord._issued_after_cutoff(snap, day):
+        _withdraw_if_confirmed_late(coord, iso, snap, day)
         return
     measured_wh = sum(
         float(v) for v in actuals.values() if isinstance(v, (int, float))
@@ -944,6 +1232,7 @@ def update_drift(
     )
     has_slow = bool(slow_hourly)
     slow_total = sum(slow_hourly.values()) if has_slow else raw_total
+    fractional_day = has_fractional_utc_day_boundary(day)
 
     hourly_actuals = coord._store_hourly_actuals(iso)
     measured_hourly = coord._site_measured_hourly(iso, hourly_actuals)
@@ -961,9 +1250,15 @@ def update_drift(
         pairs = {
             hour: wh
             for hour, wh in measured_hourly.items()
-            if wh > 0.0 or any(
-                curve.get(hour, 0.0) > 0.0
-                for curve in (raw_hourly, slow_curve, corrected_hourly)
+            if snap.weather_hour_usable(hour)
+            and (snap.complete_weather_hours is None or all(
+                hour in curve for curve in (raw_hourly, slow_curve, corrected_hourly)
+            ))
+            and (
+                wh > 0.0 or any(
+                    curve.get(hour, 0.0) > 0.0
+                    for curve in (raw_hourly, slow_curve, corrected_hourly)
+                )
             )
         }
         if not pairs:
@@ -977,7 +1272,10 @@ def update_drift(
         slow_mae = _mae(slow_curve)
         hourly_basis = True
     else:
-        # A genuinely daily-only legacy store has no hourly shape.
+        # A legacy daily-only label cannot be restricted to covered hours.
+        if (snap.complete_weather_hours is not None
+                or fractional_day or has_daylight_weather_gap(coord, snap, day)):
+            return
         raw_mae = abs(raw_total - measured_wh)
         corrected_mae = abs(corrected_total - measured_wh)
         slow_mae = abs(slow_total - measured_wh)
@@ -989,12 +1287,28 @@ def update_drift(
         "corrected": round(corrected_mae, 2),
         "baseline": round(baseline_mae, 2),
         "hourly_basis": 1.0 if hourly_basis else 0.0,
-        "raw_daily_abs": round(abs(raw_total - measured_wh), 2),
-        "corrected_daily_abs": round(
-            abs(corrected_total - measured_wh), 2
-        ),
-        "corrected_daily_bias": round(corrected_total - measured_wh, 2),
     }
+    whole_day = (
+        snap.weather_day_complete is True and coord._store.has_verified_local_day_edges(iso)
+        if fractional_day else not has_daylight_weather_gap(coord, snap, day)
+    )
+    if whole_day and snap.complete_weather_hours is not None:
+        expected = expected_production_hours(coord, day, corrected_hourly, hourly_actuals or {})
+        whole_day = expected.issubset(
+            (measured_hourly or {}).keys() & raw_hourly.keys() & corrected_hourly.keys() & slow_curve.keys()
+        ) and all(snap.weather_hour_usable(hour) for hour in expected)
+    if whole_day:
+        daily_raw = metered_local_day_wh(coord, issued, snap, iso, layer="raw") if fractional_day else raw_total
+        daily_corrected = (
+            metered_local_day_wh(coord, issued, snap, iso, layer="corrected")
+            if fractional_day else corrected_total
+        )
+        if daily_raw is not None and daily_corrected is not None:
+            entry.update(
+                raw_daily_abs=round(abs(daily_raw - measured_wh), 2),
+                corrected_daily_abs=round(abs(daily_corrected - measured_wh), 2),
+                corrected_daily_bias=round(daily_corrected - measured_wh, 2),
+            )
     # Record the slow-only leg's MAE only when the snapshot carried a slow-only
     # curve (keep the dict shape stable on legacy/slow-inactive days).
     if has_slow:
@@ -1013,34 +1327,25 @@ def update_drift(
             and (challenger_mae - reference_mae) > DRIFT_LOSS_MIN_ABS_WH
         )
 
-    day_ahead_streak = (
-        coord._drift_state.day_ahead_loss_streak
-        or coord._drift_state.fast_loss_streak
-    )
-    slow_streak = coord._drift_state.slow_loss_streak
     day_ahead_on = (
         coord._learner_config.day_ahead_enabled
         and not coord._drift_state.day_ahead_disabled
         and not coord._drift_state.fast_disabled
     )
     slow_on = coord._learner_config.slow_enabled and not coord._drift_state.slow_disabled
-    if has_slow:
-        # Per-layer decomposition (corrected = slow ∘ day-ahead): each active layer's
-        # streak advances or resets from ITS OWN leg — the slow layer on
-        # slow-only-vs-physics, Day-ahead on corrected-vs-slow-only.
-        slow_losing = _losing(slow_mae, raw_mae)
-        day_ahead_losing = _losing(corrected_mae, slow_mae)
-        if day_ahead_on:
-            day_ahead_streak = (
-                day_ahead_streak + 1 if day_ahead_losing else 0
-            )
-        if slow_on:
-            slow_streak = slow_streak + 1 if slow_losing else 0
-    else:
-        # Without slow-only attribution, only day-ahead can be judged safely.
-        losing = _losing(corrected_mae, raw_mae)
-        if day_ahead_on:
-            day_ahead_streak = day_ahead_streak + 1 if losing else 0
+    evidence = dict(coord._drift_state.loss_evidence)
+    # Keep enough evidence to join a delayed day at the oldest edge of the
+    # catch-up window with the preceding days. Display MAEs use a shorter ring.
+    max_evidence = DRIFT_WINDOW_DAYS + NIGHTLY_CATCHUP_MAX_DAYS - 1
+    verdict = {}
+    if day_ahead_on and whole_day:
+        verdict[LEARNER_LAYER_DAY_AHEAD] = _losing(corrected_mae, slow_mae)
+    if slow_on and has_slow and whole_day:
+        verdict[LEARNER_LAYER_SLOW] = _losing(slow_mae, raw_mae)
+    evidence[iso] = verdict
+    evidence = {day: evidence[day] for day in sorted(evidence)[-max_evidence:]}
+    day_ahead_streak, day_ahead_start = _loss_streak(evidence, LEARNER_LAYER_DAY_AHEAD)
+    slow_streak, slow_start = _loss_streak(evidence, LEARNER_LAYER_SLOW)
 
     day_ahead_disabled = (
         coord._drift_state.day_ahead_disabled
@@ -1049,21 +1354,25 @@ def update_drift(
     slow_disabled = coord._drift_state.slow_disabled
     day_ahead_just_disabled = False
     slow_just_disabled = False
-    if day_ahead_on and day_ahead_streak >= DRIFT_LOSS_STREAK_DAYS:
+    if day_ahead_on and day_ahead_start is not None:
         day_ahead_disabled = True
         day_ahead_just_disabled = True
         day_ahead_streak = 0
-        coord._restore_layer_snapshot(LEARNER_LAYER_DAY_AHEAD)
+        evidence = without_loss_evidence(evidence, LEARNER_LAYER_DAY_AHEAD)
+        coord._restore_layer_snapshot(LEARNER_LAYER_DAY_AHEAD, day_ahead_start)
         coord._raise_repair_issue(ISSUE_FAST_LEARNER_DISABLED)
         _LOGGER.warning(
             "Day-ahead learner auto-disabled after %d losing days",
             DRIFT_LOSS_STREAK_DAYS,
         )
-    if slow_on and slow_streak >= DRIFT_LOSS_STREAK_DAYS:
+    if slow_on and slow_start is not None:
         slow_disabled = True
         slow_just_disabled = True
         slow_streak = 0
-        coord._restore_layer_snapshot(LEARNER_LAYER_SLOW)
+        # Removing Slow also changes the Day-ahead reference curve.
+        evidence = {}
+        day_ahead_streak = 0
+        coord._restore_layer_snapshot(LEARNER_LAYER_SLOW, slow_start)
         coord._raise_repair_issue(ISSUE_SLOW_LEARNER_DISABLED)
         _LOGGER.warning("Slow learner auto-disabled after %d losing days", DRIFT_LOSS_STREAK_DAYS)
 
@@ -1086,6 +1395,7 @@ def update_drift(
     coord._drift_state = _replace_drift(
         coord._drift_state,
         daily_mae=daily,
+        loss_evidence=evidence,
         day_ahead_loss_streak=day_ahead_streak,
         # Keep v1 aliases synchronized for old dashboards/store readers.
         fast_loss_streak=day_ahead_streak,
@@ -1098,29 +1408,37 @@ def update_drift(
     coord._persist_drift_state()
 
 
-def restore_layer_snapshot(coord, layer: str) -> str | None:
+def restore_layer_snapshot(coord, layer: str, first_loss: date) -> str | None:
     """Roll the auto-disabled layer back to its pre-streak state (SPEC §9.8).
 
-    Picks the snapshot taken DRIFT_LOSS_STREAK_DAYS nightly runs ago: the
-    ring holds LEARNER_SNAPSHOT_RING (> streak) entries, so the state saved
-    BEFORE the first losing night is still present; on a shorter ring the
-    oldest snapshot is the best available approximation. Restores only the
-    named layer so a healthy sibling keeps its learning. Without this, the
-    ring would be write-only and a later manual re-enable would resume from
-    the exact poisoned state that caused the auto-disable.
-
-    Returns the restored snapshot's ``taken_at``, or None (empty ring).
+    A tagged pre-training snapshot proves which targets were absent even if
+    written after the first loss closed. An untagged snapshot is safe only
+    if taken before that first target could be trained. Keep the layer
+    disabled when no snapshot establishes a pre-streak state.
     """
     try:
         snaps = coord._store.get_snapshots()
     except Exception:  # pragma: no cover - defensive
         snaps = []
-    if not snaps:
+    cutoff = dt_util.as_utc(_local_day_bounds(first_loss)[1])
+    candidates = []
+    for snap in snaps:
+        taken_at = dt_util.parse_datetime(snap.taken_at)
+        if taken_at is None or taken_at.tzinfo is None:
+            continue
+        try:
+            training_before = date.fromisoformat(snap.training_before_day or "")
+        except ValueError:
+            training_before = None
+        if (training_before is not None and training_before <= first_loss) or taken_at < cutoff:
+            candidates.append((taken_at, snap))
+    if not candidates:
         _LOGGER.warning(
-            "No rollback snapshot available for %s layer restore", layer
+            "No pre-streak rollback snapshot for %s (losses started %s)",
+            layer, first_loss,
         )
         return None
-    snap = snaps[max(0, len(snaps) - DRIFT_LOSS_STREAK_DAYS)]
+    _, snap = max(candidates, key=lambda candidate: candidate[0])
     if layer in (LEARNER_LAYER_FAST, LEARNER_LAYER_DAY_AHEAD):
         coord._bias_state = snap.bias
         coord._persist_bias_state()
@@ -1155,11 +1473,20 @@ def maybe_push_rollback_snapshot(coord, iso: str) -> None:
     for snap in existing:
         if str(snap.taken_at).startswith(run_date):
             return
+    latest = coord._store.latest_trained_day()
+    try:
+        training_before = (
+            (date.fromisoformat(latest) + timedelta(days=1)).isoformat()
+            if latest is not None else date.min.isoformat()
+        )
+    except (ValueError, OverflowError):
+        training_before = None
     snapshot = LearnerSnapshot(
         taken_at=now.isoformat(),
         bias=coord._bias_state,
         shademap=coord._shademap_state,
         quantile=coord._quantile_state,
+        training_before_day=training_before,
     )
     try:
         coord._store.push_snapshot(snapshot)

@@ -87,7 +87,13 @@ learning replay and future targets must measure that consequence.
 
 `learning_replay.py` provides a separate callback boundary for learning trials:
 each `LearnerVariant` has its own copied initial state and availability time.
-Prediction callbacks receive issue inputs without target actuals; training uses
+Prediction callbacks receive timestamps, optional point forecasts, time-checked features
+and issue-time weather or learning metadata. Observed weather is retained for scoring.
+Prospective reports include planned, captured and jointly scoreable targets per phase.
+For prospective screening, both the gain and its confidence interval use only fully
+paired planned days across all phases. The predeclared minimum day count applies to
+that same set. The descriptive error tables also retain partial observations.
+JSON and Markdown show the three target counts for every planned phase. For learning trials, training uses
 only closed labels that have become available, plus the variant's own frozen
 training reference. The original inputs and live stores remain untouched.
 Adapters for a physical learner must supply its exact historical reference;

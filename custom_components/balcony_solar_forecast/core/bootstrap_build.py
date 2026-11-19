@@ -30,6 +30,7 @@ import hashlib
 import json
 import logging
 import math
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -78,6 +79,26 @@ class HourlyWeather:
     cloud_high: float = 0.0
     visibility_m: float | None = None  # None == unknown (never fog), NOT 0 m
     snow_depth_m: float = 0.0
+    weather_source: str = ""
+    missing_context: tuple[str, ...] = ()
+
+
+def weather_provenance(records: list[HourlyWeather]) -> dict:
+    """Summarize the origin of the weather actually supplied to reconstruction."""
+    sources = Counter(record.weather_source or "unknown" for record in records)
+    missing = Counter(field for record in records for field in record.missing_context)
+    return {"weather_source": next(iter(sources)) if len(sources) == 1 else ("mixed" if sources else "none"),
+            "hours_by_weather_source": dict(sources), "hours_missing_context": dict(missing)}
+
+
+def add_recorder_mean(bucket: dict[str, float], hour: str | None, mean: object) -> None:
+    """Keep a damaged reading visible to the whole-day quality gate."""
+    if hour is None or mean is None:
+        return
+    value = dc_power(mean)
+    # An internal NaN survives subsequent rows for this hour and is rejected
+    # before any learner mutates. None above is an absent recorder statistic.
+    bucket[hour] = math.nan if value is None else bucket.get(hour, 0.0) + value
 
 
 @dataclass(frozen=True)
@@ -140,6 +161,7 @@ class BootstrapAccumulator:
     shade_samples: int = 0
     bias_samples: int = 0
     quantile_samples: int = 0
+    weather_provenance: dict = field(default_factory=dict)
 
 
 # ===========================================================================
@@ -1040,6 +1062,7 @@ def accumulate_days(
     reconstruction interface for explicit interval studies.
     """
     acc = BootstrapAccumulator()
+    used_weather: list[HourlyWeather] = []
     by_day = _group_by_day(weather, tz)
     day_keys = sorted(by_day.keys())
     total = len(day_keys)
@@ -1066,11 +1089,13 @@ def accumulate_days(
                 svf_by_plane=svf_by_plane, tz=tz,
             )
             if used:
+                used_weather.extend(day_weather)
                 acc.days_used += 1
             else:
                 acc.days_skipped += 1
         if progress_cb is not None:
             progress_cb(done, total)
+    acc.weather_provenance = weather_provenance(used_weather)
     return acc
 
 
@@ -1129,6 +1154,7 @@ def build_bootstrap_json(
     return {
         const.BOOTSTRAP_KEY_SCHEMA: const.BOOTSTRAP_SCHEMA_VERSION,
         const.BOOTSTRAP_KEY_GENERATED_AT: gen.isoformat(),
+        **({"weather_provenance": acc.weather_provenance} if acc.weather_provenance else {}),
         const.BOOTSTRAP_KEY_SITE_SIGNATURE: site_signature(site),
         const.BOOTSTRAP_KEY_BIAS: bias_state.to_dict(),
         const.BOOTSTRAP_KEY_SHADEMAP: shade_state.to_dict(),

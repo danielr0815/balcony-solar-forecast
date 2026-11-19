@@ -102,6 +102,9 @@ def build_params(latitude: float, longitude: float, forecast_days: int) -> dict[
         "hourly": ",".join(OPEN_METEO_HOURLY),
         "models": OPEN_METEO_MODEL,
         "forecast_days": str(int(forecast_days)),
+        # UTC day rollover can precede local midnight. Include the preceding
+        # UTC day to retain the whole current local day after the response shifts.
+        "past_days": "1",
         "timezone": "UTC",
     }
 
@@ -301,6 +304,7 @@ def parse_weather(payload: dict) -> WeatherSeries:
                 radiation_complete=(
                     ghi_value is not None and dni_value is not None and dhi_value is not None
                 ),
+                ghi_present=ghi_value is not None,
                 temp_c=_to_float(temp[i]),
                 cloud_low=cloud_low.get(hour_key) or 0.0,
                 cloud_mid=cloud_mid.get(hour_key) or 0.0,

@@ -76,9 +76,25 @@ async def async_setup_entry(
     store = ForecastStore(hass, entry.entry_id)
     await store.async_load()
 
-    coordinator = BalconySolarCoordinator(
-        hass, entry, fetcher=fetcher, store=store
-    )
+    coordinator = None
+    try:
+        coordinator = BalconySolarCoordinator(hass, entry, fetcher=fetcher, store=store)
+        await _async_start_entry(hass, entry, coordinator)
+    except BaseException:
+        # Loading an old schema schedules a write on THIS store. Join it before
+        # HA can retry or remove the entry using a different Store instance.
+        if coordinator is None:
+            await store.async_flush_pending()
+        else:
+            hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+            await coordinator.async_stop(failed_setup=True)
+        raise
+    return True
+
+
+async def _async_start_entry(
+    hass: HomeAssistant, entry: BalconySolarConfigEntry, coordinator: BalconySolarCoordinator,
+) -> None:
     await coordinator.async_prime_from_store()
 
     # First refresh: the degradation ladder serves a cached/physics curve
@@ -127,7 +143,6 @@ async def async_setup_entry(
         )
     )
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
-    return True
 
 
 async def async_unload_entry(

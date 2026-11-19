@@ -160,7 +160,7 @@ Praktisch ist das doppelter Fetch- und Lernaufwand ohne Erkenntnisgewinn.
 **Ein Call je Zyklus** gegen `OPEN_METEO_URL`:
 `minutely_15=shortwave_radiation,direct_normal_irradiance,diffuse_radiation,temperature_2m`
 plus `hourly=cloud_cover_low,cloud_cover_mid,cloud_cover_high,visibility,snowfall,snow_depth`,
-`models=icon_seamless`, `forecast_days=4`. ICON-D2 liefert für Mitteleuropa
+`models=icon_seamless`, `past_days=1`, `forecast_days=4`. ICON-D2 liefert für Mitteleuropa
 native 15-min-Werte; die stündlichen Felder tragen den Wolken-/Sicht-/Schnee-
 Kontext für Klassifikation (§8) und Schnee-Albedo (§4.6).
 
@@ -168,7 +168,7 @@ Kontext für Klassifikation (§8) und Schnee-Albedo (§4.6).
 `timezone=UTC`, und `forecast_days` zählt **UTC-Tage ab dem aktuellen
 UTC-Datum**. Am lokalen Abend (UTC+2) läge der lokale d2 sonst teilweise
 jenseits eines Drei-UTC-Tage-Fensters — der Puffertag deckt den lokalen
-Drei-Tage-Horizont immer ab.
+Drei-Tage-Horizont immer ab. Der zusätzliche vergangene UTC-Tag deckt die bereits verstrichenen hellen Stunden des lokalen Heute westlich von UTC ab.
 
 **Schema-Validierung statt HTTP-Status.** `fetcher.validate_payload` prüft die
 **Form** der Antwort, nicht nur den Statuscode. Insbesondere die
@@ -181,7 +181,7 @@ beide Zeitachsen müssen parsebar, streng aufsteigend, lückenlos und auf ihrem
 weder den gespeicherten Last-Good-Payload noch seinen Altersanker.
 
 **Last-Good-Cache im Store.** Der zuletzt gültige Payload liegt im `Store`
-(§16.2) und **übersteht einen Neustart**. Sein Alter wird ehrlich fortgeschrieben
+(§16.2) und **übersteht einen Neustart**. Beim Laden müssen die gespeicherten Anfrageparameter zum Standort und Wettermodell passen. Bei fehlender oder abweichender Kennung wird frisches Wetter angefordert. Sein Alter wird ehrlich fortgeschrieben
 (§13) und nie auf ~0 zurückgesetzt, auch nicht, wenn ein ärmerer neuer Payload
 zugunsten des reicheren alten verworfen wird. „Reicher“ zählt ausschließlich
 Intervalle mit numerisch gültigem GHI, DNI, DHI und Temperatur, deren Ende noch in der Zukunft liegt. Ein expliziter Strahlungswert von 0 ist gültig. Fehlende Strahlung oder Temperatur kennzeichnet einen unbekannten Slot. Ohne einen solchen zukünftigen Slot ist die neue Antwort ein
@@ -802,7 +802,16 @@ des Prognosefehlers. Eine Anlage ganz ohne Messkanal lernt nicht. Die Regel
 gilt gleichermaßen im nächtlichen Live-Training und im Bootstrap (§12.4).
 Im Live-Nightly kommen die **exakten** RAW-, Slow-only- und korrigierten
 Stundenkurven der gemeterten Ebenen aus der per-Ebenen-Aufschlüsselung des
-Issued-Snapshots (§16.2). Eine Beam-/Diffus-Anteilsnäherung ist unzulässig:
+Issued-Snapshots (§16.2). Die im Archiv belegten Modulnamen bestimmen die
+Basis der Anlagensumme. Entfernt die Konfiguration ein Modul vor der ersten
+Wertung, gehen ausschließlich die archivierten Stundenwerte und gegebenenfalls
+die lokalen Tagesenergien der weiterhin gemessenen Module ein. Fehlen bei
+bekannter Teilmessung die benötigten Modulwerte, bleibt der Vergleich offen.
+Für Stunden aus Altarchiven ohne archivierte Modulnamen und Orts-Tagesbeleg
+gilt der bisherige Vergleich der Anlagensumme bei vollständig gemessener
+Konfiguration. Eine Angabe zur Abdeckung der Wetterstunden allein belegt
+keine historische Modulbasis für diesen Kompatibilitätspfad.
+Eine Beam-/Diffus-Anteilsnäherung ist unzulässig:
 Gruppen-Clipping und gelernte Faktoren verändern die Ebenenanteile je Schicht.
 Fehlt die benötigte exakte Kurve (Alt-Snapshot), wird der Tag nicht trainiert
 oder bewertet.
@@ -1028,8 +1037,8 @@ Rollback-Ring (selbst-gatend).
 
 ### §9.7 Nächtlicher Trainingsjob
 
-- **Quelle** sind die stündlichen **Langzeitstatistiken** des Recorders für die
-  `actual_entity` der Ebenen (im Recorder-Executor gelesen).
+- **Quelle** sind die Fünfminutenstatistiken des Recorders je Messkanal. Eine DC-Stunde braucht zwölf verschiedene Fünfminutenwerte auf dem erwarteten UTC-Raster je Port. In jedem Bucket müssen Minimum, Mittelwert und Maximum endlich und geordnet sein, bei DC innerhalb von 0 bis 1,25 × Modul-Wp. AC-Paare für die η-Kalibrierung benötigen denselben Nachweis am AC-Zähler. Die Stundenenergie in Wh ist die Summe der zwölf mittleren Leistungen in Watt geteilt durch zwölf. Bei gebrochenen UTC-Offsets zählen die Fünfminutenintervalle an beiden Ortsmitternachten anteilig zum tatsächlichen lokalen Messtag. Bei möglicher oder beobachteter Produktion am Ortsmitternachtsrand braucht die Tagesbewertung einen gesonderten Fünfminuten-Abdeckungsnachweis (`verified_local_day_edges`). Stundenvergleiche verwenden weiterhin vollständige UTC-Stunden.
+- Im Archiv belegt `complete_weather_hours` die Stunden mit vier bekannten Viertelstunden. Der Nachtjob unterscheidet fehlende Belege älterer Archive von einer ausdrücklich leeren Menge. Er bewahrt deren Verlauf. Neue Lerndaten benötigen die Positivnachweise der Ausgabe und der Messung (`verified_five_minute_actuals`).
 - **Stunden-Schnittmenge:** Eine Site-Stunde entsteht nur aus der Schnittmenge,
   in der **jeder konfigurierte Messkanal** einen Wert trägt. Einzelne fehlende
   Ports werden weder als partieller Site-Wert summiert noch als 0-Wh-Label
@@ -1043,7 +1052,7 @@ Rollback-Ring (selbst-gatend).
   lokalen Tage bis einschließlich gestern, ältester zuerst. Auch ältere
   Lücken vor einem neueren erfassten Tag werden erneut geprüft. Actuals,
   DC-Training und Inverterkalibrierung haben unabhängige Datumsmarker; eine
-  erfolgreiche Teilstufe bedeutet nicht, dass alle anderen erledigt sind.
+  erfolgreiche Teilstufe bedeutet nicht, dass alle anderen erledigt sind. Fehlende Messstunden werden innerhalb des Fensters erneut angefragt. Vor dem Recorder-Abgleich prüft der Nachtjob den vorhandenen verifizierten Messstand auf Produktion vor der effektiven Ausgabezeit. Diese Chronologie kann auch aus älteren Messstunden ohne gespeicherte Entitätsbindung folgen. Der bestätigte Beleg bleibt bei späterem Austausch der Messdaten erhalten. Ein vollständigerer Nachtrag kann Scoreboard und Drift berichtigen. Bereits vorgenommene Lern- und η-Schritte werden dadurch nicht wiederholt.
   Die Gesundheitsdiagnostik bleibt chronologisch: nachgelieferte ältere
   Ist-Werte überschreiben keinen bereits gespeicherten neueren Befund.
 - **Ausfall jenseits des Fensters bleibt ungelernt.** Für ältere fehlende
@@ -1062,7 +1071,7 @@ Rollback-Ring (selbst-gatend).
 - Jeder Teilschritt ist so gekapselt, dass ein einzelner Fehlschlag weder den
   Rest abbricht noch Home Assistant beeinträchtigt.
 
-Der Nachtjob verwendet die effektive Ausgabezeit der eingefrorenen Kurve. Ausgaben nach 06:00 Uhr Ortszeit oder nach Beginn einer bereits produzierenden Zielstunde bleiben im Archiv. Sie sind für Day-ahead-Lerner, Quantile, Drift und Scoreboard ungeeignet. Das Kalibrieren des Wechselrichterwirkungsgrads verwendet ausschließlich gepaarte AC/DC-Messungen.
+Der Nachtjob verwendet die effektive Ausgabezeit der eingefrorenen Kurve. Ausgaben nach 06:00 Uhr Ortszeit oder nach Beginn einer bereits produzierenden Zielstunde bleiben im Archiv. Bei gebrochenem UTC-Offset belegt auch der erste positive Mess- oder Prognosewert im führenden Ortsmitternachtsfragment den Produktionsbeginn. Diese Ausgaben sind für Day-ahead-Lerner, Quantile, Drift und Scoreboard ungeeignet. Belegt ein Messnachtrag eine verspätete Ausgabe, entfernt der Nachtjob Score, Drift-Messwerte und den datierten Verlustbeleg. Der Beleg bleibt an Datum und effektiven Ausgabezeitpunkt gebunden, auch wenn später eine andere Messquelle verwendet wird. Bei Altarchiven mit unentscheidbarem Produktionsbeginn im Ortsmitternachtsfragment bleiben neue Lern- und Score-Schritte zurückgestellt. Eine Ausgabe bis Ortsmitternacht oder mit nachweislich energiefreiem Prognoserand vor der Ausgabe kann weiterhin bewertet werden. Der Nachweis stammt aus der lückenlos archivierten Randprognose oder aus der Energiebilanz vollständig belegter Orts-Tages- und innerer UTC-Stundenwerte für RAW und korrigiert. Im älteren Archivformat belegen ein vollständig abgedeckter Ortstag und der erste positive Viertelstundenbeginn im führenden Fragment gemeinsam den Nullertrag davor. Sonnenhöhe, eine Zeitmarke ohne vollständige Abdeckung und Zeitmarken außerhalb des führenden Fragments liefern keinen solchen Nachweis. Ungeklärte Randprognosen erzeugen keinen bleibenden Verspätungsbeleg. Bereits gespeicherte Wertungen, verbrauchte Lernschritte und bestehende Abschaltungen bleiben bei unentscheidbarer Evidenz erhalten. Das Kalibrieren des Wechselrichterwirkungsgrads verwendet ausschließlich gepaarte AC/DC-Messungen.
 
 ### §9.8 Schutzmechanismen
 
@@ -1103,7 +1112,7 @@ Der Nachtjob verwendet die effektive Ausgabezeit der eingefrorenen Kurve. Ausgab
   (`fast_learner_auto_disabled` als historischer Issue-Key für **Day-ahead** /
   `slow_learner_auto_disabled`, je Config-Entry
   gescoped und **persistent**, damit die Warnung einen Neustart überlebt wie das
-  Abschalt-Flag). Ein Verlusttag wird der **schuldigen Schicht** zugeordnet —
+  Abschalt-Flag). Die Serie verwendet datierte Urteile für aufeinanderfolgende lokale Kalendertage. Nachgelieferte Messungen werden ihrem Zieltag zugeordnet. Eine Datumslücke unterbricht die Serie. Der Rollback richtet sich nach dem ersten tatsächlichen Verlusttag der belegten Serie. Ein alter undatierter Zähler allein löst keine Abschaltung aus. Ein Verlusttag wird der **schuldigen Schicht** zugeordnet —
   Slow: Schattenkarte vs. Physik; Day-ahead: korrigiert vs.
   Schattenkarten-Kurve — mit **unabhängigen Streaks**, sodass eine unschuldige
   Schicht nicht mitabgeschaltet wird. Alt-Snapshots ohne Schattenkarten-Kurve
@@ -1370,6 +1379,8 @@ Ensemble-Streuung die **Form** der Unsicherheit liefert, nicht eine absolute
 Kurve. Ehrlich benannte Näherung: der GHI-Faktor wird auf das DC-Leistungsband
 angewandt, als skaliere Leistung linear mit GHI — nur in erster Ordnung wahr.
 
+Der deterministische GHI-Nenner benötigt alle vier GHI-Werte der UTC-Stunde. Fehlende Temperatur, DNI oder DHI ändern diesen Nenner nicht.
+
 **Fusion per Envelope-Max (nie multipliziert).** Pro Slot gewinnt das breitere
 Band: `p10 = min(gelernt.p10, f10)`, `p90 = max(gelernt.p90, f90)`, `p50` bleibt
 der gelernte Median. **Warum nicht multiplizieren:** der gelernte Residuenring
@@ -1423,6 +1434,8 @@ die geometrische Shademap weiterhin nützlich — das Antwortfeld
 mit einem klaren Fehler (§12.2) statt mit Halbdaten — und die Integration selbst
 blockiert zu keinem Zeitpunkt: ohne Bootstrap läuft sie einfach kalt an.
 
+Der Abruf fragt Strahlung, Temperatur und Kontext zuerst mit `_previous_day1` an. Weist der Anbieter die Variablenkombination zurück, nutzt der Bootstrap Day-1-Strahlung mit separat gekennzeichnetem Kontext ohne bestätigten Vorlauf. Antwort und exportierte Bootstrap-Datei weisen die Herkunft und fehlende Werte je Kontextfeld für die Wetterstunden der tatsächlich zum Lernen verwendeten lokalen Tage aus. Vollständig verworfene Tage gehen in diese Herkunftsstatistik nicht ein. `as_issued` erfordert vollständig belegten Day-1-Kontext. `day1_partial_context`, `day1_radiation_unverified_context` und `analysis_fallback` kennzeichnen die jeweiligen Einschränkungen. Bei mehreren Herkünften enthält die Zusammenfassung `mixed` und die Stundenanzahlen.
+
 ### §12.2 Standardweg: die Aktion `run_bootstrap`
 
 `balcony_solar_forecast.run_bootstrap` läuft **in-process** in den
@@ -1457,7 +1470,7 @@ Refresh), sodass die importierte Shademap sofort die nächste servierte Kurve
 formt.
 
 **Antwort.** Die Aktion liefert **immer** die Summary
-`{days_used, days_skipped, date_range, weather_source, bias_cells,
+`{days_used, days_skipped, date_range, weather_source, hours_by_weather_source, hours_missing_context, bias_cells,
 shademap_channels, shademap_bins, shademap_samples, quantile_bins,
 quantile_samples, imported, duration_s}`; im Dry-Run zusätzlich ein `hint` auf
 `dry_run: false`.
@@ -1499,7 +1512,7 @@ HA-Box).
 
 Historische Open-Meteo-Strahlungswerte sind Mittel der vorausgehenden Stunde:
 `parse_hourly_payload` verschiebt ihren Endstempel um eine Stunde auf den
-UTC-Intervallstart. Sonnenpositionen werden am Mittelpunkt dieser Stunde
+UTC-Intervallstart. Wolkenschichten, Sichtweite und Schneehöhe werden am Anfang dieses Intervalls nachgeschlagen. Sonnenpositionen werden am Mittelpunkt dieser Stunde
 berechnet. Tagesgruppen, Ist-Zuordnung und Quantil-Evidenzdatum verwenden die
 übergebene lokale Zeitzone (ohne Angabe UTC); UTC-Stundenidentitäten bleiben
 auch bei Sommerzeitwechseln getrennt.
@@ -1611,6 +1624,8 @@ Die Prognose-Entitäten gehen ehrlich auf `unavailable`, statt
 stille Altwerte zu halten; Diagnose-Entitäten bleiben **immer** verfügbar, damit
 „wir sind degradiert" auch dann lesbar ist, wenn die Prognose selbst fehlt.
 
+Im Status `physics_fallback` verwendet die Prognose ausschließlich Anlagenphysik und konfigurierten Wechselrichterwirkungsgrad. Die Anzeige kennzeichnet zurückgehaltene Korrekturen als `frozen` und meldet die tatsächlich angewandten neutralen Faktoren. Gelernte Korrekturen und Ensemblebänder entfallen. Nach einem fehlgeschlagenen Update melden die DC-Diagnoseentitäten den numerischen Zustand `unknown`.
+
 **Alterung wird nie zurückgesetzt.** Behält der Coordinator einen reicheren
 gespeicherten Payload gegenüber einem ärmeren neuen, bleibt der Altersanker
 stehen und nur der Scheduler wird zurückgesetzt — sonst servierte eine anhaltende
@@ -1627,6 +1642,8 @@ sein Fehlen weitet lediglich die Bänder nicht und ist nie ein Degradationsgrund
 (W) melden die **AC**-Kurve (betreiberseitiger Standard hinter den
 Wechselrichtern). Dazu Diagnose-Sensoren für Baseline-MAE, Degradationsstatus
 und Lernstatus.
+
+Eine Leistung ist bei unbekanntem aktuellem Wetterslot unbekannt. Eine öffentliche Stundenenergie setzt bekannte Viertelstunden zu :00, :15, :30 und :45 UTC voraus. Eine vollständig bekannte Nachtstunde liefert 0 Wh. Ausgerichtete Servicereihen enthalten `null` an einzelnen Lücken. Zeitreihen mit Zeitstempeln als Schlüssel lassen unbekannte Werte aus. Ein Tagesgesamtwert erfordert alle Viertelstunden zwischen zwei lokalen Mitternachten, auch an Tagen der Zeitumstellung.
 
 Die Heute-Headline summiert die Viertelstundenenergien mit Shademap und Day-ahead-Bias. Die Engine berechnet zu diesem Zweck die Leistung ohne transienten Intraday-Skalar und begrenzt jede Wechselrichtergruppe auf ihren eigenen Deckel. Die Summierung erfolgt getrennt auf DC- und AC-Basis. So bleibt die ungenutzte Kapazität eines zweiten Wechselrichters der eigenen Gruppe vorbehalten. Die servierte Momentanleistung und die `wh_period`-Kurven enthalten weiterhin die Intraday-Korrektur. Die Tages-P10-Anpassung aus §11.2 verwendet die zugehörige skalarfreie AC-Punktprognose.
 
@@ -1659,19 +1676,14 @@ eine gesonderte Entscheidung (§9.8).
   weiterlaufen), und wird **nur erzeugt, wenn** mindestens eine Ebene eine
   `actual_entity` konfiguriert hat. Nicht-endliche, negative oder oberhalb der
   momentanen Kanalgrenze aus §9.8 liegende Quellen werden nicht summiert;
-  `channels_rejected` / `rejected_sources` machen den aktuellen Verwurf
-  sichtbar.
+  `channels_rejected` zählt die aktuell verworfenen Kanäle.
 - `measured_ac_power` (W, `MEASUREMENT`) ist die Live-Lesung des **einzelnen**
   Gesamt-AC-Zählers (`ac_actual_entity`, mit optionalem Vorzeichen-Invert) — das
   AC-Pendant zur DC-Summe und der zeittreue Partner der AC-Prognose; **nur
   erzeugt, wenn** ein AC-Zähler konfiguriert ist, sodass das Dashboard einen
   gleichwertigen **AC-gegen-AC**-Vergleich zeigen kann.
 
-Die Attribute `sources` / `source_names` von `measured_dc_power_total` sind die
-**Auto-Discovery-Quelle** der mitgelieferten Karten (§18.4).
-`source_limits_w` enthält indexgleich die Stunden-Plausibilitätsgrenze
-`1,25 × Wp`, damit die Karte bereits vorhandene korrupte Langzeitstatistiken
-ohne duplizierte Anlagenkonfiguration ausblenden kann.
+Die globalen Zustandsattribute des Summensensors melden Kanalzahlen. Die Karte erhält die lesbaren Einzelquellen mit ihren Namen und zugehörigen Plausibilitätsgrenzen (`1,25 × Wp`) über den benutzerspezifischen Lesezugriff in §18.4.
 
 ### §14.4 Volle Kurve
 
@@ -1798,7 +1810,8 @@ Ein Diagnose-Sensor behauptet nie eine Wirkung, die er nicht hat.
 
 - Die Lernstatus-Sensoren melden ausschließlich Werte aus
   `LEARNER_STATUS_VALUES`: `active` (schaltet **und** formt die Kurve gerade),
-  `off` (Kill-Switch), `disabled_by_drift`, `frozen` (Kollaps-Detektor) und
+  `off` (Kill-Switch), `disabled_by_drift`, `frozen` (Kollaps-Detektor oder
+  Physik-Fallback) und
   `cold_start` — aktiviert, aber **ohne** gelernten Zustand. `active` wäre dort
   eine Statuslüge.
 - Ein aktivierter Shademap-Kanal ohne **ein einziges Bin** und ein aktivierter
@@ -1809,8 +1822,13 @@ Ein Diagnose-Sensor behauptet nie eine Wirkung, die er nicht hat.
   oder `shademap+day_ahead+intraday`; eine konfigurierte, aber kalte Schicht
   erscheint dort nicht.
 - Unbekannte Werte melden `None`, nie einen erfundenen Status.
-- Das Attribut `bias_cells` bleibt bei leerem Lerner als `{}` mit `cells_n: 0`
-  bestehen (ein verschwindendes Attribut sah aus wie ein Defekt).
+- `bias_cells` zeigt je Zelle das gelernte `theta`, die Stützmenge `n` und
+  den für die ausgegebene Prognose freigegebenen Zellfaktor `applied` vor der
+  Mischung entlang der Sonnenzeit. Kalte Zellen und ausgeschaltete, durch Drift
+  abgeschaltete oder eingefrorene Bias-Korrekturen geben `applied: 1.0` aus.
+  Fehlt eine aktuelle Prognose, melden aktive Diagnosen und Intraday-Faktor
+  unbekannt. Die zuletzt angezeigten Lernwerte bleiben bei `applied: null`
+  sichtbar. Ohne gelernte Zellen stehen `bias_cells: {}` und `cells_n: 0`.
 - `band_source` erscheint **nur, solange ein Band existiert** (§11.3).
 - Scoreboard-Sensoren melden `None` statt einer fabrizierten Null, wenn das
   Fenster keine gewerteten Tage hat (§15).
@@ -1853,8 +1871,7 @@ Vortags (§8).
 - die **Ist**-Zahl ist die Summe der gemessenen Modulwerte aus dem
   Actuals-Ring. Ein aktueller Store wird nur gewertet, wenn jede vom Issued-
   Snapshot getragene geometrische Tageslichtstunde auf allen Messkanälen
-  vollständig vorliegt; eine Recorder-Lücke ist kein 0-Wh-Istwert. Nur ein
-  Legacy-Store ganz ohne Stundenring darf auf die Tagessumme zurückfallen.
+  vollständig vorliegt. Für Tageswerte bei gebrochenem UTC-Offset genügt für den über Ortsmitternacht reichenden Anteil der Fünfminutenbeleg innerhalb des Ortstags mit passender archivierter lokaler Prognoseenergie. Stunden-MAE verwendet dort die tatsächlich belegten gemeinsamen UTC-Stunden. Neue Recorder-Belege führen die Entitätsbindungen der Messung mit. Ein bereits gewerteter Tag bleibt bei geändertem Messsatz auf seiner ursprünglichen Basis. Gespeicherte Altwertungen ohne nachweisbare Entitätsbindung übernimmt der Nachtjob ohne erneuten Recorder-Abgleich. Für einen ausstehenden Score kann der Nachtjob im Nachholfenster einen neuen Messsatz belegen und mit der dazugehörigen Modellteilmenge vergleichen.
 
 Eine nicht-finite oder negative **Motor- oder Ist-Zahl** macht den Tag
 **ungewertet** (`score_day` verwirft ihn: kein Ring-Eintrag, keine
@@ -1972,7 +1989,7 @@ Payload-Writes sind zusätzlich **zeitgetaktet**
 höchstens alle sechs Stunden auf die Platte geht. Budget: **≤ 4 gebündelte
 Writes/Tag** (eMMC-Schonung). Der nächtliche Job und der Flush bei HA-Stop bzw.
 beim Unload garantieren eventuelle Persistenz. Vor dem finalen Flush endet
-alle vom Entry erfasste Arbeit; neue Schreiber werden nicht mehr zugelassen.
+alle vom Entry erfasste Arbeit; neue Schreiber werden nicht mehr zugelassen. Nach einem fehlgeschlagenen Setup werden vom Einrichtungsversuch ausgelöste Schreibvorgänge einschließlich Migrationen beendet. Ein unveränderter, bereits aktueller Store löst beim Retry keinen sofortigen Schreibvorgang aus.
 
 Nach einem **harten Crash** dürfen Last-Good-Cache und As-issued-Log bis zu
 einige Stunden verlieren — akzeptiert, weil die Degradationsleiter (§13) greift.
@@ -2052,15 +2069,17 @@ Die Transmittanz je Sonnenposition repliziert die Engine-Gate-Logik
 `horizon.transmittance_at` nur bei Sonne ≤ interpolierter Horizontlinie, sonst
 1,0; darüber blendet `shademap.effective_tau`.
 
-**Slow-Active-Kopplung:** die gelernte Shademap fließt **nur** ein, wenn der
-Slow-Learner aktiv ist (Kill-Switch an, nicht drift-deaktiviert, nicht
-kollaps-eingefroren, Bins vorhanden) — exakt das `slow_active`-Gate der
-Learner-Hooks. Ist er inaktiv, zeigt das Diagramm die rein statische
-Verschattung, genau wie die servierte Prognose.
+**Slow-Active-Kopplung:** Das Diagramm und die Vergleichsansicht verwenden die
+Shademap der ausgegebenen Prognose. Voraussetzung sind der aktive Kill-Switch,
+vorhandene Bins und eine freigegebene Slow-Schicht. Bei Driftabschaltung,
+Kollaps-Freeze, Physik-Fallback oder unverfügbarer Prognose zeigt das Profil die
+statische Verschattung. Vor der ersten Ausgabe kann das Profil als
+Geometrievorschau mit der konfigurierten Slow-Schicht berechnet werden. Die
+geladenen Lernwerte sind über `dump_shademap` einsehbar.
 
-Berechnet wird das Profil über `coordinator.build_shade_profile_for`; das
-Ergebnis wird auf `(Modul, Datum, slow_active, Shademap-Objekt)` memoisiert, sodass der O(Azimut × Elevation)-Scan je Änderung einmal läuft und
-nicht je 15-min-Tick.
+Die Hauptansicht wird für Modul, Datum und angewandte Shademap memoisiert.
+`coordinator.build_shade_profile_for` berechnet die Vergleichsansicht mit
+derselben Shademap für das angefragte Modul und Datum.
 
 ### §17.3 Berechnung und Tunables
 
@@ -2100,7 +2119,7 @@ an Stelle des per-Modul-History-Graphs die `custom:balcony-power-history-card`
 (§18.4) ein und **lässt Karten und Zeilen mit fehlenden Entitäten weg**, sodass
 eine Teilinstallation weiterhin rendert. Die IDs stammen aus der Entity-Registry
 (`{entry_id}_{key}` → reale `entity_id`), die gemessenen Modul-Sensoren aus
-Coordinator und Site-Config.
+Coordinator und Site-Config. Neu erzeugte Spezialkarten verwenden die Entry-ID als dauerhafte Zuordnung. Damit folgen sie über die Entity Registry auch späteren Umbenennungen.
 
 **Schreibweg (verbindlich):** ausschließlich über die vorhandene
 `LovelaceStorage.async_save(config)` des jeweiligen `url_path` aus
@@ -2126,7 +2145,7 @@ weggelassenen `missing_entities`. Als leer gelten ausschließlich erkannte leere
 UI-Bausteine in `card_ui.js`. Der Registry-Cache gehört zur Websocket-Verbindung,
 nicht zum kurzlebigen `hass`-Stateobjekt. Ein gemeinsames Abonnement für
 `entity_registry_updated` aktualisiert Umbenennungen und Entfernungen; die
-letzte entfernte Karte meldet es ab. Überholte Antworten ersetzen keinen
+letzte entfernte Karte meldet es ab. Eine unveränderte Kartenkonfiguration verwendet die bereits aufgelösten IDs bis zur nächsten Registry-Änderung erneut. Überholte Antworten ersetzen keinen
 neueren Registrystand. Fehlgeschlagene Erkennung ist erneut
 versuchbar. Optionales `entry_id` wählt die Anlage explizit, alternativ wird sie
 aus einem expliziten Integrationssensor abgeleitet. Bei mehreren Anlagen ohne
@@ -2170,9 +2189,7 @@ Stil des Energie-Dashboards **gestapelte stündliche Balken der gemessenen
 Produktion je Modul** (aus den Recorder-Stundenstatistiken der
 `actual_entity`-Sensoren), überlagert von einer **gestrichelten Prognoselinie**,
 mit einem **Hover-Panel** je Stunde (Werte je Modul, Gesamt, Prognose). Die
-Modulkanäle werden über `sources` / `source_names` von
-`measured_dc_power_total` **auto-discovered** (keine YAML-Konfiguration der
-Kanäle nötig). Sie aktualisiert sich alle **5 min**, aber **nur in der
+Modulkanäle werden auch bei einem aktuellen Zustand `unavailable` über die Entry-Zuordnung des Summensensors ermittelt. `balcony_solar_forecast/measurement_sources` liefert die lesbaren Kanäle. `balcony_solar_forecast/measurement_history` prüft das Leserecht des Benutzers auf den Summensensor und auf jede einzelne Quelle und beschränkt die angeforderte Historie auf die konfigurierte Anlage. Eine Abfrage umfasst höchstens acht Tage und enthält nur einzeln zugelassene Modulreihen. Sie aktualisiert sich alle **5 min**, aber **nur in der
 Live-Ansicht**; eine Vergangenheits-Ansicht ist statisch.
 
 **Tages-/Wochennavigation** (karten-lokal, nicht persistiert): eine Kopfzeile
@@ -2212,6 +2229,18 @@ aktuellen Standort-Schätzwert (`eta_source: "current"`). `cloud_class_by_hour`
 (Day-ahead-Wetterklasse je Stunde) und `applied_factor_by_hour`
 (`hourly_wh / raw_hourly_wh`, Stunden mit raw ≈ 0 ausgelassen) machen die
 angewandte Korrektur sichtbar. Ein Fehltreffer ist **kein Fehler**.
+
+Für neue Archive ist die Tagesabdeckung ausdrücklich gespeichert. Die Antwort
+enthält `daily_wh` auf DC-Basis und `daily_coverage` mit `complete`,
+`incomplete` oder `unknown`. Eine vollständige lokale Tagesenergie umfasst
+alle Viertelstunden zwischen den beiden Ortsmitternachten. Ein älteres Archiv
+liefert ebenfalls einen Tageswert, wenn jede zum Kalendertag gehörende UTC-Stunde
+einen positiven Abdeckungsnachweis und einen DC-Wert hat und die Stunden den
+ganzen Tag abgrenzen. Das gilt auch für 23- und 25-Stunden-Tage. Bei einer
+gebrochenen UTC-Stundengrenze braucht der Tageswert die Viertel an der
+Ortsmitternacht. Ohne bestätigte Abdeckung lässt die Wochenansicht diese
+Tagesprognose aus. Unvollständige Wetterstunden fehlen auch in den
+archivierten Modulkurven.
 
 Bei einem v1-Snapshot liefert `hourly_wh` die erhaltene historische DC-Punktkurve mit `curve_source: "legacy"`. Die separate RAW-Referenz und daraus berechnete Korrekturfaktoren bleiben leer. Bei `include_planes: true` enthält `per_plane` je stabiler Ebenenkennung die tatsächlich archivierten DC-Stundenkurven `raw_wh`, `slow_wh` und `corrected_wh` des gewählten lokalen Tags, soweit vorhanden.
 

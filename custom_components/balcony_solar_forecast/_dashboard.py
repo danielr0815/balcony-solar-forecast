@@ -210,6 +210,10 @@ def build_dashboard_config(
         for card in cards:
             if card["type"] in (_SHADE_PROFILE_CARD, _POWER_HISTORY_CARD):
                 card["entry_id"] = entry_id
+                # The cards resolve their stable unique_ids via the registry.
+                # Saved entity_ids would become stale on a registry rename.
+                for field in ("sensor", "module_select", "date_entity", "total_sensor", "forecast_sensor"):
+                    card.pop(field, None)
 
     view = {
         "title": "Forecast",

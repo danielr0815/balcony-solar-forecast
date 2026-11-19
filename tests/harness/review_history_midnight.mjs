@@ -19,7 +19,9 @@ card._hass = {
   config: { time_zone: "Europe/Berlin" },
   states: { "sensor.total": { attributes: { sources: ["sensor.module"] } } },
   callWS: async (msg) => {
-    if (msg.type === "recorder/statistics_during_period") return {};
+    if (msg.type === "balcony_solar_forecast/measurement_history") {
+      return { sources: ["sensor.module"], statistics: {} };
+    }
     assert.equal(msg.type, "call_service");
     queried.push(msg.service_data.date);
     return { response: { result: { available: true, curve_source: "legacy", hourly_wh: { [stamp]: 123 } } } };

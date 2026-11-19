@@ -63,11 +63,25 @@ class _FakeStore:
     def get_issued(self, iso):
         return self.issued.get(iso)
 
+    def confirmed_late_issued(self, iso):
+        return getattr(self, "late_issued", {}).get(iso)
+
+    def record_late_issued(self, iso, issue_stamp):
+        if not hasattr(self, "late_issued"):
+            self.late_issued = {}
+        self.late_issued[iso] = issue_stamp
+
     def get_actuals(self, iso):
         return self.actuals.get(iso)
 
     def get_hourly_actuals(self, iso):
         return self.hourly_actuals.get(iso)
+
+    def has_verified_actuals(self, iso):
+        return False
+
+    def first_actuals_edge_production(self, iso):
+        return None
 
     # v3 scoreboard state — matches the REAL store: takes a ScoreboardState.
     def get_scoreboard_state(self) -> ScoreboardState:

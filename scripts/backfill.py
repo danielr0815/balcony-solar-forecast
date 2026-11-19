@@ -121,6 +121,7 @@ from balcony_solar_forecast.core.bootstrap_build import (  # noqa: E402,F401
     _rls_step,
     _shade_update,
     accumulate_days,
+    add_recorder_mean,
     build_bootstrap_json,
     half_year_index,
     is_quasi_clear,
@@ -366,13 +367,7 @@ def _parse_lts_result(
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            mean = _num(row.get("mean"))
-            if mean is None:
-                continue
-            hkey = _stat_row_hour(row.get("start"))
-            if hkey is None:
-                continue
-            bucket[hkey] = bucket.get(hkey, 0.0) + mean  # W*1h = Wh
+            add_recorder_mean(bucket, _stat_row_hour(row.get("start")), row.get("mean"))
 
 
 def _stat_row_hour(start: object) -> str | None:
@@ -448,8 +443,7 @@ async def run_backfill(args: argparse.Namespace) -> int:
         _LOGGER.info(
             "Got %d hourly weather records (%s)",
             len(weather),
-            "as-issued forecast" if as_issued
-            else "ANALYSIS fallback (NOT as-issued)",
+            "complete day-1 forecast" if as_issued else "degraded weather coverage or source",
         )
 
         _LOGGER.info("Pulling per-module LTS from %s", args.ha_url)
@@ -471,7 +465,7 @@ async def run_backfill(args: argparse.Namespace) -> int:
         require_complete_day=True,
     )
 
-    _summarise(acc, as_issued)
+    _summarise(acc, acc.weather_provenance["weather_source"])
 
     if acc.days_used == 0:
         _LOGGER.error("No usable days — bootstrap would be empty; aborting")
@@ -511,7 +505,7 @@ def _entity_to_channel_actuals(
     return out
 
 
-def _summarise(acc, as_issued: bool) -> None:
+def _summarise(acc, weather_source: str) -> None:
     n_bins = sum(len(b) for b in acc.shade.values())
     _LOGGER.info(
         "Bootstrap summary: %d days used, %d skipped | shademap: %d channels, "
@@ -526,7 +520,7 @@ def _summarise(acc, as_issued: bool) -> None:
         acc.bias_samples,
         len(acc.quantile_state.bins),
         acc.quantile_samples,
-        "as-issued" if as_issued else "ANALYSIS (degraded)",
+        weather_source,
     )
 
 

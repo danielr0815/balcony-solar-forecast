@@ -16,24 +16,27 @@ from homeassistant.setup import async_setup_component
 
 
 def weather_payload() -> dict:
-    """Fresh deterministic three-day weather, including full parsing context."""
+    """Mirror the UTC provider request with past_days=1 and forecast_days=4."""
     start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    start -= timedelta(days=1)
+    hours = 5 * 24
+    quarters = hours * 4
     return {
         "minutely_15": {
-            "time": [(start + timedelta(minutes=15 * i)).isoformat() for i in range(288)],
-            "shortwave_radiation": [400.0] * 288,
-            "direct_normal_irradiance": [500.0] * 288,
-            "diffuse_radiation": [100.0] * 288,
-            "temperature_2m": [20.0] * 288,
+            "time": [(start + timedelta(minutes=15 * i)).isoformat() for i in range(quarters)],
+            "shortwave_radiation": [400.0] * quarters,
+            "direct_normal_irradiance": [500.0] * quarters,
+            "diffuse_radiation": [100.0] * quarters,
+            "temperature_2m": [20.0] * quarters,
         },
         "hourly": {
-            "time": [(start + timedelta(hours=i)).isoformat() for i in range(72)],
-            "cloud_cover_low": [10.0] * 72,
-            "cloud_cover_mid": [10.0] * 72,
-            "cloud_cover_high": [10.0] * 72,
-            "visibility": [20000.0] * 72,
-            "snowfall": [0.0] * 72,
-            "snow_depth": [0.0] * 72,
+            "time": [(start + timedelta(hours=i)).isoformat() for i in range(hours)],
+            "cloud_cover_low": [10.0] * hours,
+            "cloud_cover_mid": [10.0] * hours,
+            "cloud_cover_high": [10.0] * hours,
+            "visibility": [20000.0] * hours,
+            "snowfall": [0.0] * hours,
+            "snow_depth": [0.0] * hours,
         },
     }
 

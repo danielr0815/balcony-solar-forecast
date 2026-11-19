@@ -315,25 +315,20 @@ def test_energy_sensor_band_attrs_unrecorded():
 
 def test_band_blocks_shape():
     start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
-    iso0 = start.isoformat()
-    iso1 = (start + timedelta(minutes=15)).isoformat()
-    iso2 = (start + timedelta(minutes=60)).isoformat()  # next hour
+    hour = [(start + timedelta(minutes=i)).isoformat() for i in (0, 15, 30, 45)]
+    next_hour = (start + timedelta(hours=1)).isoformat()
     data = {
         DATA_KEY_QUANTILE_CURVES: {
-            FORECAST_RESP_KEY_P10: {iso0: 50.0, iso1: 50.0, iso2: 30.0},
-            FORECAST_RESP_KEY_P50: {iso0: 60.0, iso1: 60.0, iso2: 40.0},
-            FORECAST_RESP_KEY_P90: {iso0: 70.0, iso1: 70.0, iso2: 50.0},
+            FORECAST_RESP_KEY_P10: {**dict.fromkeys(hour, 50.0), next_hour: 30.0},
+            FORECAST_RESP_KEY_P50: {**dict.fromkeys(hour, 60.0), next_hour: 40.0},
+            FORECAST_RESP_KEY_P90: {**dict.fromkeys(hour, 70.0), next_hour: 50.0},
         }
     }
     blocks = _band_blocks(data)
     assert set(blocks) == {FORECAST_RESP_KEY_P10, FORECAST_RESP_KEY_P50, FORECAST_RESP_KEY_P90}
     p10 = blocks[FORECAST_RESP_KEY_P10]
-    assert p10["wh_period"] == {iso0: 50.0, iso1: 50.0, iso2: 30.0}
-    # Hourly roll-up buckets the two 10:00 slots into the 10:00 hour.
-    hour0 = start.replace(minute=0).isoformat()
-    hour1 = (start + timedelta(hours=1)).replace(minute=0).isoformat()
-    assert p10["hourly"][hour0] == pytest.approx(100.0)
-    assert p10["hourly"][hour1] == pytest.approx(30.0)
+    assert p10["wh_period"] == {**dict.fromkeys(hour, 50.0), next_hour: 30.0}
+    assert p10["hourly"] == {start.isoformat(): 200.0}
 
 
 def test_band_blocks_empty_when_absent():
@@ -344,10 +339,9 @@ def test_band_blocks_empty_when_absent():
 
 def test_hourly_from_slots_skips_garbage():
     start = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
-    out = _hourly_from_slots(
-        {start.isoformat(): 40.0, "not-a-date": 10.0, "x": "y", 5: 1.0}
-    )
-    assert out == {start.replace(minute=0).isoformat(): 40.0}
+    complete = {(start + timedelta(minutes=i)).isoformat(): 10.0 for i in (0, 15, 30, 45)}
+    out = _hourly_from_slots({**complete, "not-a-date": 10.0, "x": "y", 5: 1.0})
+    assert out == {start.isoformat(): 40.0}
 
 
 def test_forecast_response_includes_bands():
@@ -379,7 +373,7 @@ def test_forecast_response_includes_bands():
     assert entry["total_15min"] == [400.0]
     # v0.4 band blocks added.
     assert entry[FORECAST_RESP_KEY_P10]["wh_period"] == {iso: 80.0}
-    assert entry[FORECAST_RESP_KEY_P90]["hourly"][start.replace(minute=0).isoformat()] == pytest.approx(120.0)
+    assert entry[FORECAST_RESP_KEY_P90]["hourly"] == {}  # one quarter is not an hour
     # Band provenance rides along with the band block.
     assert entry["band_source"] == "ensemble"
     assert entry["band_source_by_day"] == {"2026-07-05": {"ensemble": 1}}

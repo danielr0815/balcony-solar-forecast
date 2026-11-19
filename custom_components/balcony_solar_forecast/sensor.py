@@ -58,6 +58,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from ._forecast_access import current_forecast
 from ._forecast_presenter import (
     _band_blocks,  # noqa: F401 -- historical import surface
     _build_forecast_response,  # noqa: F401 -- historical import surface
@@ -271,7 +272,6 @@ async def async_setup_entry(
             MeasuredDcTotalSensor(
                 coordinator,
                 [eid for eid, _name, _wp in measured],
-                [name for _eid, name, _wp in measured],
                 [wp for _eid, _name, wp in measured],
             )
         )
@@ -475,13 +475,14 @@ class PowerNowSensor(BalconyForecastEntity, SensorEntity):
         getter = getattr(self.coordinator, "inverter_efficiency_learned", None)
         if callable(getter):
             learned = getter()
-        calibrated = learned is not None and learned.get("effective") is not None
+        physics_only = (self.coordinator.data or {}).get("status") == STATUS_PHYSICS_FALLBACK
+        calibrated = not physics_only and learned is not None and learned.get("effective") is not None
         # Shown once the calibration folded a sample OR produced raw gated
         # ratios (v0.20): an all-out-of-band night (n stays 0) must still
         # surface its ``raw`` evidence — that case is exactly the mis-scaled
         # DC-sensor diagnosis the raw block exists for.
         if learned is not None and (learned.get("n", 0) or learned.get("raw")):
-            attrs["inverter_efficiency_learned"] = learned
+            attrs["inverter_efficiency_learned"] = {**learned, "effective": None} if physics_only else learned
         # Provenance label (v0.19.2 status honesty): without an AC meter the
         # per-group eta is a verbatim CONFIG echo that never changes — identical
         # values across all groups misread as a learned calibration result.
@@ -530,19 +531,10 @@ class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
         self,
         coordinator: Any,
         source_ids: list[str],
-        source_names: list[str] | None = None,
         source_wps: list[float] | None = None,
     ) -> None:
         super().__init__(coordinator, SENSOR_MEASURED_DC_TOTAL)
         self._source_ids = list(source_ids)
-        # Configured plane names aligned index-for-index with the (de-duplicated)
-        # source ids, so a consumer (the bundled power-history card) can label
-        # each channel M1…M8 instead of the per-port sensors' ambiguous own
-        # names. Falls back to the entity ids when names are not supplied
-        # (defensive; the platform always passes them).
-        self._source_names = (
-            list(source_names) if source_names is not None else list(source_ids)
-        )
         self._source_wps = (
             list(source_wps) if source_wps is not None else [math.inf] * len(source_ids)
         )
@@ -601,29 +593,13 @@ class MeasuredDcTotalSensor(BalconyForecastEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        attrs = {
+        # Entity states are shared with every reader of this total. Module
+        # bindings require individual source permissions at the read endpoint.
+        return {
             "channels_total": len(self._source_ids),
             "channels_reporting": self._reporting,
-            "sources": list(self._source_ids),
-            # Plane names aligned index-for-index with ``sources`` (a source used
-            # by multiple planes keeps the FIRST plane's name — the same dedupe
-            # order as ``sources``), so the power-history card can auto-discover
-            # the module labels without re-reading the site config.
-            "source_names": list(self._source_names),
+            "channels_rejected": len(getattr(self, "_rejected_sources", [])),
         }
-        source_wps = getattr(self, "_source_wps", None)
-        if source_wps is not None:
-            attrs.update({
-                "channels_rejected": len(getattr(self, "_rejected_sources", [])),
-                "rejected_sources": list(getattr(self, "_rejected_sources", [])),
-                # The card integrates hourly means, so expose the stricter
-                # sustained-power limit rather than the wider live peak gate.
-                "source_limits_w": [
-                    round(CHANNEL_PLAUSIBILITY_MAX_WP_FRAC * wp, 3)
-                    for wp in source_wps
-                ],
-            })
-        return attrs
 
 
 class MeasuredAcPowerSensor(BalconyForecastEntity, SensorEntity):
@@ -800,7 +776,7 @@ class PowerNowDcSensor(_DiagnosticSensor):
 
     @property
     def native_value(self) -> float | None:
-        data = self.coordinator.data or {}
+        data = current_forecast(self.coordinator)
         value = data.get(_KEY_POWER_NOW_W)
         return None if value is None else round(float(value), 1)
 
@@ -823,7 +799,7 @@ class EnergyProductionDcSensor(_DiagnosticSensor):
 
     @property
     def native_value(self) -> float | None:
-        data = self.coordinator.data or {}
+        data = current_forecast(self.coordinator)
         value = data.get(self._data_key)
         return None if value is None else round(float(value), 3)
 
@@ -850,7 +826,7 @@ class IntradayScalarSensor(_DiagnosticSensor):
 
     @property
     def native_value(self) -> float | None:
-        data = self.coordinator.data or {}
+        data = current_forecast(self.coordinator)
         value = data.get(DATA_KEY_INTRADAY_SCALAR)
         return None if value is None else round(float(value), 3)
 
@@ -945,7 +921,7 @@ class LearnerStatusSensor(_DiagnosticSensor):
 
     @property
     def native_value(self) -> str | None:
-        data = self.coordinator.data or {}
+        data = current_forecast(self.coordinator)
         status_map = data.get(DATA_KEY_LEARNER_STATUS)
         if not isinstance(status_map, dict):
             return None
@@ -977,6 +953,8 @@ class LearnerStatusSensor(_DiagnosticSensor):
         cells = data.get(DATA_KEY_BIAS_CELLS)
         if not isinstance(cells, dict):
             cells = {}
+        if not self.coordinator.last_update_success:
+            cells = {key: {**cell, "applied": None} for key, cell in cells.items() if isinstance(cell, dict)}
         return {"bias_cells": cells, "cells_n": len(cells)}
 
 
@@ -1119,11 +1097,18 @@ class EnergyBandSensor(BalconyForecastEntity, SensorEntity):
         # only fall back to the served-curve sum on older data without the key.
         if self._band == _Q_P10 and DATA_KEY_ENERGY_TODAY_AC_P10 in data:
             return data[DATA_KEY_ENERGY_TODAY_AC_P10]
-        curves = data.get(DATA_KEY_QUANTILE_CURVES_AC)
-        curve = curves.get(self._band) if isinstance(curves, dict) else None
+        target = dt_util.now().date()
+        complete_days = data.get("daily_kwh_ac")
+        if isinstance(complete_days, dict) and target.isoformat() not in complete_days:
+            return None
+        # The slot curve follows the local date even in a time zone whose
+        # midnight divides a UTC hour.
+        curve = data.get(_KEY_WH_PERIOD_AC_P90)
+        if curve is None:
+            curves = data.get(DATA_KEY_QUANTILE_CURVES_AC)
+            curve = curves.get(self._band) if isinstance(curves, dict) else None
         if not isinstance(curve, dict) or not curve:
             return None
-        target = dt_util.now().date()
         total_wh = 0.0
         seen = False
         for iso, wh in curve.items():
@@ -1283,6 +1268,18 @@ def _numeric_state(state: Any) -> float | None:
     if raw is None or raw in (STATE_UNKNOWN, STATE_UNAVAILABLE):
         return None
     return power_watts(raw, getattr(state, "attributes", {}).get("unit_of_measurement", "W"), signed=True)
+
+
+def _measurement_source_attributes(
+    source_ids: list[str], source_names: list[str], source_wps: list[float],
+) -> dict[str, Any]:
+    """Serialize authorized bindings for the dashboard read APIs."""
+    return {
+        "sources": source_ids,
+        "source_names": source_names,
+        # Hourly means use the sustained-power gate.
+        "source_limits_w": [round(CHANNEL_PLAUSIBILITY_MAX_WP_FRAC * wp, 3) for wp in source_wps],
+    }
 
 
 def _measured_sources(coordinator: Any) -> list[tuple[str, str, float]]:

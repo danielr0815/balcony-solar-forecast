@@ -132,6 +132,7 @@ def test_run_bootstrap_registered_response_only():
     class _Hass:
         def __init__(self):
             self.services = _Services()
+            self.data = {}
 
     svc.async_register_services(_Hass())
     assert registered[SERVICE_RUN_BOOTSTRAP] is SupportsResponse.ONLY

@@ -16,7 +16,7 @@ package), so HA must be installed; the whole module is skipped otherwise.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -98,13 +98,19 @@ def _instrument(monkeypatch, c, *, sweep, read_return=None,
     the catch-up day list so the orchestration order is deterministic.
     """
     calls: list[tuple[str, object]] = []
+    for day in sweep:
+        hour = f"{day.isoformat()}T11:00:00+00:00"
+        c._store.record_issued(day.isoformat(), {"complete_weather_hours": [hour]})
 
     async def _snap(today):
         calls.append(("snapshot", today))
 
     async def _read(day):
         calls.append(("read", day))
-        return read_return
+        if read_return is not None:
+            return read_return
+        hour = f"{day.isoformat()}T11:00:00+00:00"
+        return {"M1": 1.0, "M2": 1.0}, {"M1": {hour: 1.0}, "M2": {hour: 1.0}}
 
     async def _train(day):
         calls.append(("train", day))
@@ -154,11 +160,17 @@ async def test_nightly_catchup_latest_is_yesterday(monkeypatch):
     assert seen == [date(2026, 3, 11)]
 
 
-async def test_nightly_reads_actuals_only_when_absent(monkeypatch):
+def _store_day(store, day):
+    start = datetime.combine(day, datetime.min.time(), UTC)
+    hours = {(start + timedelta(hours=offset)).isoformat(): 1.0 for offset in range(24)}
+    store.record_verified_actuals(day.isoformat(), {"M1": 24, "M2": 24}, {"M1": hours, "M2": hours})
+
+
+async def test_nightly_reads_actuals_only_when_missing_or_incomplete(monkeypatch):
     store = _FakeStore()
     d1, d2 = date(2026, 3, 10), date(2026, 3, 11)
     # d1 already has actuals recorded -> must NOT be re-read.
-    store.record_actuals(d1.isoformat(), {"M1": 1.0})
+    _store_day(store, d1)
     c = _make_coordinator(store)
     calls = _instrument(monkeypatch, c, sweep=[d1, d2])
     await c._async_nightly_job(now=datetime(2026, 3, 12, 12, 0, tzinfo=UTC))
@@ -175,7 +187,7 @@ async def test_nightly_idempotent_day_trained_and_scored_not_reread(monkeypatch)
     IS still trained + scored (re-running is a no-op inside the guards)."""
     store = _FakeStore()
     d1 = date(2026, 3, 11)
-    store.record_actuals(d1.isoformat(), {"M1": 2.0})
+    _store_day(store, d1)
     c = _make_coordinator(store)
     calls = _instrument(monkeypatch, c, sweep=[d1])
     await c._async_nightly_job(now=datetime(2026, 3, 12, 12, 0, tzinfo=UTC))

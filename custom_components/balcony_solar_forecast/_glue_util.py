@@ -21,7 +21,8 @@ keep resolving.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from collections.abc import Iterable
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 
 from homeassistant.core import State
 from homeassistant.util import dt as dt_util
@@ -140,6 +141,25 @@ def _power_now_ac(result: ForecastResult, now: datetime) -> float:
     return _power_at(result.slot_starts, result.ac_watts, now)
 
 
+def _complete_local_days(
+    starts: Iterable[datetime], invalid: Iterable[datetime], tz: tzinfo,
+) -> set[str]:
+    """Return local dates covered by valid quarter starts, including DST days."""
+    valid = {start.astimezone(UTC) for start in starts}
+    valid.difference_update(start.astimezone(UTC) for start in invalid)
+    days = {start.astimezone(tz).date() for start in valid}
+    return {day.isoformat() for day in days if _covers_local_day(valid, day, tz)}
+
+
+def _covers_local_day(valid: set[datetime], day: date, tz: tzinfo) -> bool:
+    first = datetime.combine(day, time.min, tz).astimezone(UTC)
+    end = datetime.combine(day + timedelta(days=1), time.min, tz).astimezone(UTC)
+    step = timedelta(minutes=SLOT_MINUTES)
+    # Compare the UTC intervals to avoid duplicated or missing wall-clock times
+    # on DST changes and to support zones offset by a fraction of an hour.
+    return all(first + i * step in valid for i in range((end - first) // step))
+
+
 def _local_daily_kwh(result: ForecastResult) -> dict[str, float]:
     """Roll the 15-min curve up to LOCAL calendar-day kWh."""
     daily: dict[str, float] = {}
@@ -172,14 +192,12 @@ def _filter_hourly_to_local_day(
     see that day's hours (a 22:00 UTC hour belongs to the NEXT local day in
     CET/CEST — bucket by local date, exactly like _daily_kwh_from_hourly).
     """
-    out: dict[str, float] = {}
-    for hkey, wh in hourly_wh.items():
-        dt = dt_util.parse_datetime(hkey)
-        if dt is None:
-            continue
-        if dt_util.as_local(dt_util.as_utc(dt)).date().isoformat() == iso_day:
-            out[hkey] = float(wh)
-    return out
+    return {key: float(wh) for key, wh in hourly_wh.items() if _is_on_local_day(key, iso_day)}
+
+
+def _is_on_local_day(iso_stamp: str, iso_day: str) -> bool:
+    dt = dt_util.parse_datetime(iso_stamp)
+    return dt is not None and dt_util.as_local(dt_util.as_utc(dt)).date().isoformat() == iso_day
 
 
 def _daily_kwh_from_hourly(hourly_wh: dict[str, float]) -> dict[str, float]:

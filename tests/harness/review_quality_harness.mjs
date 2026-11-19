@@ -14,7 +14,8 @@ card._recomputeForecast(unavailable);
 assert.equal(card._dayForecast, null, 'unavailable old attributes cannot be live');
 card._hass.states['sensor.forecast'] = unavailable;
 assert.equal(card._liveForecastTotal(card._hass), null);
-card._recomputeForecast({state:'0', attributes:{wh_period:{[hour]:0}}});
+const zeroHour = Object.fromEntries(["00", "15", "30", "45"].map(min => [`${day}T10:${min}:00+00:00`, 0]));
+card._recomputeForecast({state:'0', attributes:{wh_period:zeroHour}});
 assert.equal(card._dayForecast[10], 0, 'measured forecast zero is valid');
 assert.equal(card._dayForecast[11], null, 'missing forecast hour is not zero');
 card._ingestDay({'sensor.p':[{start: hour, mean: 0}]}, ['sensor.p']);
@@ -34,18 +35,17 @@ assert.ok(!card._learningNote(labels).textContent.includes('Cached weather'));
 console.log('PASS unavailable, real zero, missing forecast and actual labels');
 
 for (const bad of [true, false, '', ' ', -1, null, {}, Infinity]) {
-  card._recomputeForecast({state:'1', attributes:{wh_period:{[hour]:bad}}});
+  card._recomputeForecast({state:'1', attributes:{wh_period:{...zeroHour, [hour]:bad}}});
   assert.equal(card._dayForecast, null, 'corrupt forecast labels stay missing');
   card._ingestDay({'sensor.p':[{start:hour,mean:bad}]}, ['sensor.p']);
   assert.equal(card._dayBars['sensor.p'][10], null, 'corrupt actual labels stay missing');
 }
 card._config.entry_id = 'synthetic';
-for (const curve of [{}, {[hour]:null}, {[hour]:true}, {[hour]:''}, {[hour]:-1},
-    {[hour]:1, [`${day}T11:00:00+00:00`]:null}]) {
-  card._hass.callWS = async () => ({response:{result:{available:true,hourly_wh:curve}}});
+for (const daily_wh of [undefined, null, true, '', -1]) {
+  card._hass.callWS = async () => ({response:{result:{available:true,hourly_wh:{[hour]:200}, daily_coverage:"complete",daily_wh}}});
   assert.deepEqual(await card._issuedTotal(card._hass, day), {status:'missing',value:null},
     'empty or damaged archives cannot become complete daily totals');
 }
-card._hass.callWS = async () => ({response:{result:{available:true,hourly_wh:{[hour]:0}}}});
+card._hass.callWS = async () => ({response:{result:{available:true,hourly_wh:{[hour]:0},daily_coverage:"complete",daily_wh:0}}});
 assert.deepEqual(await card._issuedTotal(card._hass, day), {status:'available',value:0});
 console.log('PASS invalid numeric labels and archive totals');

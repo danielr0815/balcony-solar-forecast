@@ -158,6 +158,14 @@ class _FakeStore:
     def get_issued(self, iso):
         return self.issued.get(iso)
 
+    def confirmed_late_issued(self, iso):
+        return getattr(self, "late_issued", {}).get(iso)
+
+    def record_late_issued(self, iso, issue_stamp):
+        if not hasattr(self, "late_issued"):
+            self.late_issued = {}
+        self.late_issued[iso] = issue_stamp
+
     def record_issued(self, iso, snap):
         self.issued[iso] = snap
 
@@ -166,6 +174,39 @@ class _FakeStore:
 
     def has_actuals(self, iso):
         return iso in self.actuals
+
+    def has_verified_actuals(self, iso):
+        # Existing coordinator fixtures inject trusted measurement labels.
+        return self.has_actuals(iso)
+
+    def has_verified_local_day_edges(self, iso):
+        return iso in getattr(self, "verified_local_day_edges", ())
+
+    def actuals_bindings(self, iso):
+        return getattr(self, "verified_bindings", {}).get(iso)
+
+    def first_actuals_edge_production(self, iso):
+        return getattr(self, "actuals_edge_production", {}).get(iso)
+
+    def record_verified_actuals(
+        self, iso, daily, hourly, *, local_day_edges_complete=False, bindings=None,
+        first_edge_production=None, replace_binding=False,
+    ):
+        self.record_actuals(iso, daily)
+        self.record_hourly_actuals(iso, hourly)
+        if local_day_edges_complete:
+            if not hasattr(self, "verified_local_day_edges"):
+                self.verified_local_day_edges = set()
+            self.verified_local_day_edges.add(iso)
+        if bindings is not None:
+            if not hasattr(self, "verified_bindings"):
+                self.verified_bindings = {}
+            self.verified_bindings[iso] = dict(bindings)
+        if first_edge_production is not None:
+            if not hasattr(self, "actuals_edge_production"):
+                self.actuals_edge_production = {}
+            self.actuals_edge_production[iso] = first_edge_production
+        return True
 
     def record_actuals(self, iso, per_module):
         self.actuals[iso] = dict(per_module)
@@ -202,6 +243,9 @@ class _FakeStore:
     # trained-day idempotence markers (real ForecastStore API)
     def is_day_trained(self, iso):
         return iso in getattr(self, "trained_days", set())
+
+    def latest_trained_day(self):
+        return max(getattr(self, "trained_days", ()), default=None)
 
     def mark_day_trained(self, iso):
         if not hasattr(self, "trained_days"):

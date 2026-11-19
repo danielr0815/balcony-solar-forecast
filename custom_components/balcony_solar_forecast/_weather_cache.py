@@ -85,8 +85,10 @@ class WeatherCache:
     last_error: str | None = None
     _parsed: WeatherSeries | None = field(default=None, init=False, repr=False)
 
-    def restore(self, stored: dict | None) -> None:
+    def restore(self, stored: dict | None, *, request_key: dict | None = None) -> None:
         """Adopt persisted weather without claiming a successful live fetch."""
+        if request_key is not None and stored and stored.get("request_key") != request_key:
+            stored = None
         payload = stored.get("payload") if stored else None
         if payload is not self.payload:
             self._parsed = None

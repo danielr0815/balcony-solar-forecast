@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -332,9 +332,10 @@ def test_auto_disable_invalidates_states_dependent_on_removed_layers() -> None:
         bins={"clear|midday": [["2026-06-20", 0.9]]}
     )
     c._drift_state = DriftState(
-        slow_loss_streak=DRIFT_LOSS_STREAK_DAYS - 1,
-        day_ahead_loss_streak=DRIFT_LOSS_STREAK_DAYS - 1,
-        fast_loss_streak=DRIFT_LOSS_STREAK_DAYS - 1,
+        loss_evidence={
+            (date.fromisoformat(iso) - timedelta(days=delta)).isoformat(): {"slow": True, "day_ahead": True}
+            for delta in range(1, DRIFT_LOSS_STREAK_DAYS)
+        },
     )
     snap = {
         "version": 2,

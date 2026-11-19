@@ -66,7 +66,7 @@ async def test_train_and_guard_second_run_is_noop(monkeypatch):
     iso = "2026-05-01"
     day = datetime.fromisoformat(iso + "T00:00:00+00:00").date()
     c._store.issued[iso] = _losing_issued(iso)
-    c._store.actuals[iso] = {"M1": 1000.0}
+    c._store.actuals[iso] = {"M1": 1000.0, "M2": 0.0}
 
     drift_calls: list[str] = []
     orig = c._update_drift
@@ -100,7 +100,7 @@ async def test_day_without_actuals_is_retried_later():
     assert c._drift_state.fast_loss_streak == 0
 
     # Actuals arrive; the retry now trains and marks the day.
-    c._store.actuals[iso] = {"M1": 1000.0}
+    c._store.actuals[iso] = {"M1": 1000.0, "M2": 0.0}
     await c._train_and_guard(day)
     assert c._store.is_day_trained(iso) is True
     assert c._drift_state.fast_loss_streak == 1

@@ -9,16 +9,42 @@ from __future__ import annotations
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 from .replay_benchmark import number, timestamp
+
+
+class IssueInputs(TypedDict):
+    issued_at: str
+    target_start: str
+    target_end: str
+    point_wh: NotRequired[float]
+    available_at: NotRequired[str]
+    features: NotRequired[list[dict]]
+    regime: NotRequired[dict]
+
+
+def _issue_inputs(row: dict) -> IssueInputs:
+    """Build the prediction contract before attaching retrospective audit fields."""
+    result = IssueInputs(issued_at=row['issued_at'], target_start=row['target_start'],
+                         target_end=row['target_end'])
+    if 'point_wh' in row:
+        result['point_wh'] = row['point_wh']
+    if 'available_at' in row:
+        result['available_at'] = row['available_at']
+    if 'features' in row:
+        result['features'] = row['features']
+    if 'regime' in row:
+        known = ('forecast_weather', 'sun_elevation_deg', 'learning_state', 'band_learning_state')
+        result['regime'] = {name: row['regime'][name] for name in known if name in row['regime']}
+    return result
 
 
 @dataclass(frozen=True)
 class LearnerVariant:
     initial_state: Any
     initial_available_at: str
-    predict: Callable[[Any, dict], float | None]
+    predict: Callable[[Any, IssueInputs], float | None]
     train: Callable[[Any, dict], Any]
 
 
@@ -56,6 +82,8 @@ def replay(issues: list[dict], labels: list[dict], variants: dict[str, LearnerVa
             raise ValueError('Initial learner state was not available at the issue')
         if 'actual_wh' in row or 'references' in row:
             raise ValueError('Issue inputs must not contain future labels')
+        if 'available_at' in row and timestamp(row['available_at']) > at:
+            raise ValueError('Issue inputs were unavailable at prediction time')
         if not at <= timestamp(row['target_start']) < timestamp(row['target_end']):
             raise ValueError('A prediction target must be fully future')
         for feature in row.get('features', []):
@@ -74,7 +102,8 @@ def replay(issues: list[dict], labels: list[dict], variants: dict[str, LearnerVa
                 own['reference'] = deepcopy(label['references'][name])
                 states[name] = deepcopy(variant.train(deepcopy(states[name]), own))
                 trained[name].append(label['id'])
-        values = {name: variant.predict(deepcopy(states[name]), deepcopy(row)) for name, variant in variants.items()}
+        inputs = _issue_inputs(row)
+        values = {name: variant.predict(deepcopy(states[name]), deepcopy(inputs)) for name, variant in variants.items()}
         if any(value is not None and number(value) is None for value in values.values()):
             raise ValueError('Learner emitted invalid power/energy')
         forecasts.append({**row, 'forecasts': values})

@@ -32,11 +32,12 @@ async def test_archive_uses_published_generation_when_cache_and_eta_advance(monk
     coord = _make_coordinator()
     at = datetime(2026, 7, 1, 11, tzinfo=UTC)
     now = at.replace(hour=1)
-    weather_a = WeatherSeries((WeatherSlot(at, 900, 700, 200, 20),))
-    weather_b = WeatherSeries((WeatherSlot(at, 50, 0, 50, 20),))
+    starts = tuple(at + timedelta(minutes=15 * i) for i in range(4))
+    weather_a = WeatherSeries(tuple(WeatherSlot(start, 900, 700, 200, 20) for start in starts))
+    weather_b = WeatherSeries(tuple(WeatherSlot(start, 50, 0, 50, 20) for start in starts))
 
-    def hooks(_weather, _now):
-        coord._day_factor = {at: 1.2}
+    def hooks(_weather, _now, *, physics_only=False):
+        coord._day_factor = dict.fromkeys(starts, 1.2)
         return LearnerHooks(
             beam_tau=lambda _ch, _az, _el, _doy, prior: prior * .7,
             slot_factor=lambda _slot: 1.2,
@@ -290,7 +291,9 @@ async def test_configured_eta_metadata_matches_frozen_ac_calculation(mixed):
     ))
     at = datetime(2026, 7, 1, 11, tzinfo=UTC)
     now = at.replace(hour=1)
-    weather = WeatherSeries((WeatherSlot(at, 900, 700, 200, 20),))
+    weather = WeatherSeries(tuple(
+        WeatherSlot(at + timedelta(minutes=15 * i), 900, 700, 200, 20) for i in range(4)
+    ))
     result = await coord._compute(weather, now)
     coord._last_result = result
     coord.data = coord._build_data(result, result.hourly_wh, now, "fresh", timedelta())

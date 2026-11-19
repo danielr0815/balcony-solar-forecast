@@ -27,6 +27,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from ._forecast_access import current_forecast
 from .const import (
     BINARY_SENSOR_DEGRADED,
     BINARY_SENSOR_FAST_LEARNER,
@@ -135,7 +136,7 @@ class LearnerActiveSensor(BalconyForecastEntity, BinarySensorEntity):
         self._layer = layer
 
     def _status(self) -> str | None:
-        data = self.coordinator.data or {}
+        data = current_forecast(self.coordinator)
         status_map = data.get(DATA_KEY_LEARNER_STATUS)
         if not isinstance(status_map, dict):
             return None

@@ -75,10 +75,13 @@ an empty dump, never an unhandled traceback.
 from __future__ import annotations
 
 import json
-from datetime import date
+import math
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.auth.permissions.const import POLICY_READ
+from homeassistant.components import websocket_api
 from homeassistant.core import (
     HomeAssistant,
     ServiceCall,
@@ -87,7 +90,10 @@ from homeassistant.core import (
     callback,
 )
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.service import async_register_admin_service
+from homeassistant.util import dt as dt_util
 
 from ._dashboard import (
     build_dashboard_config,
@@ -100,6 +106,7 @@ from .const import (
     DOMAIN,
     INTEGRATION_VERSION,
     LEARNER_SNAPSHOT_RING,
+    SENSOR_MEASURED_DC_TOTAL,
     SERVICE_DUMP_SHADEMAP,
     SERVICE_GET_FORECAST,
     SERVICE_GET_ISSUED_FORECAST,
@@ -235,6 +242,8 @@ def async_register_services(hass: HomeAssistant) -> None:
     coordinator. Kept idempotent as a belt-and-braces guard.
     """
     if not hass.services.has_service(DOMAIN, SERVICE_GET_FORECAST):
+        websocket_api.async_register_command(hass, _websocket_measurement_sources)
+        websocket_api.async_register_command(hass, _websocket_measurement_history)
 
         async def _get_forecast(call: ServiceCall) -> ServiceResponse:
             # Lazy import: the response builder lives in sensor.py (its tests
@@ -377,6 +386,119 @@ def async_register_services(hass: HomeAssistant) -> None:
             schema=GET_ISSUED_FORECAST_SCHEMA,
             supports_response=SupportsResponse.ONLY,
         )
+
+
+def _measurement_coordinator(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any],
+) -> Any:
+    """Resolve the enabled measured total from its stable entry binding."""
+    entity_id = msg["entity_id"]
+    if not connection.user.permissions.check_entity(entity_id, POLICY_READ):
+        connection.send_error(msg["id"], websocket_api.ERR_UNAUTHORIZED, "Cannot read entity")
+        return None
+    row = er.async_get(hass).async_get(entity_id)
+    coordinator = None
+    if (row is not None and row.platform == DOMAIN and not row.disabled_by
+            and row.config_entry_id and row.unique_id == f"{row.config_entry_id}_{SENSOR_MEASURED_DC_TOTAL}"
+            and msg.get(ATTR_ENTRY_ID, row.config_entry_id) == row.config_entry_id):
+        coordinator = hass.data.get(DOMAIN, {}).get(row.config_entry_id)
+    if coordinator is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Measured DC total not found")
+    return coordinator
+
+
+def _permitted_measurement_sources(
+    coordinator: Any, connection: websocket_api.ActiveConnection,
+) -> list[tuple[str, str, float]]:
+    from .sensor import _measured_sources
+
+    return [source for source in _measured_sources(coordinator)
+            if connection.user.permissions.check_entity(source[0], POLICY_READ)]
+
+
+def _measurement_bindings(sources: list[tuple[str, str, float]]) -> dict[str, Any]:
+    from .sensor import _measurement_source_attributes
+
+    return _measurement_source_attributes(
+        [entity_id for entity_id, _name, _wp in sources],
+        [name for _entity_id, name, _wp in sources],
+        [wp for _entity_id, _name, wp in sources],
+    )
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): f"{DOMAIN}/measurement_sources",
+    vol.Required("entity_id"): cv.entity_id,
+    vol.Optional(ATTR_ENTRY_ID): str,
+})
+@callback
+def _websocket_measurement_sources(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any],
+) -> None:
+    """Return only bindings the requesting user may read individually."""
+    coordinator = _measurement_coordinator(hass, connection, msg)
+    if coordinator is not None:
+        connection.send_result(msg["id"], _measurement_bindings(
+            _permitted_measurement_sources(coordinator, connection),
+        ))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): f"{DOMAIN}/measurement_history",
+    vol.Required("entity_id"): cv.entity_id,
+    vol.Optional(ATTR_ENTRY_ID): str,
+    vol.Required("start_time"): str,
+    vol.Required("end_time"): str,
+})
+@websocket_api.async_response
+async def _websocket_measurement_history(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any],
+) -> None:
+    """Read only explicitly authorized, configured module statistics."""
+    coordinator = _measurement_coordinator(hass, connection, msg)
+    if coordinator is None:
+        return
+    start = dt_util.parse_datetime(msg["start_time"])
+    end = dt_util.parse_datetime(msg["end_time"])
+    if start is None or end is None or start.tzinfo is None or end.tzinfo is None:
+        connection.send_error(msg["id"], "invalid_format", "Expected timezone-aware timestamps")
+        return
+    start, end = dt_util.as_utc(start), dt_util.as_utc(end)
+    if not timedelta(0) <= end - start <= timedelta(days=8):
+        connection.send_error(msg["id"], "invalid_format", "Invalid measurement history window")
+        return
+
+    sources = _permitted_measurement_sources(coordinator, connection)
+    allowed_ids = {source[0] for source in sources}
+    stats = {}
+    if allowed_ids and end > start:
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.statistics import (
+            statistics_during_period,
+        )
+
+        stats = await get_instance(hass).async_add_executor_job(
+            statistics_during_period, hass, start, end, allowed_ids, "hour", {"power": "W"}, {"mean"},
+        )
+        # Registry bindings or effective permissions can change while Recorder
+        # is awaiting I/O. Never return any rows or names from the old scope.
+        current = _measurement_coordinator(hass, connection, msg)
+        if current is None:
+            return
+        if current is not coordinator:
+            connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Measured DC total changed")
+            return
+        sources = [source for source in _permitted_measurement_sources(current, connection)
+                   if source[0] in allowed_ids]
+
+    connection.send_result(msg["id"], {
+        **_measurement_bindings(sources),
+        "statistics": {
+            entity_id: [{"start": int(row["start"] * 1000), "mean": row["mean"]}
+                        for row in stats.get(entity_id, ())]
+            for entity_id, _name, _wp in sources
+        },
+    })
 
 
 def _resolve_single_coordinator(hass: HomeAssistant, entry_id: str | None) -> Any:
@@ -801,6 +923,31 @@ def _handle_get_shade_profile(
 # ---------------------------------------------------------------------------
 
 
+def _legacy_covered_day_wh(day: date, corrected: dict[str, float]) -> float | None:
+    """Sum already coverage-filtered UTC hours that tile the exact local day."""
+    start = dt_util.as_utc(dt_util.start_of_local_day(datetime.combine(day, datetime.min.time())))
+    stop = dt_util.as_utc(dt_util.start_of_local_day(
+        datetime.combine(day + timedelta(days=1), datetime.min.time()),
+    ))
+    one_hour = timedelta(hours=1)
+    window = stop - start
+    # Even a positively covered UTC hour cannot prove the energy of the part
+    # on one side of a fractional local midnight.
+    if (window <= timedelta(0) or window % one_hour
+            or start.minute or start.second or start.microsecond):
+        return None
+    covered: dict[datetime, float] = {}
+    for stamp, value in corrected.items():
+        parsed = dt_util.parse_datetime(stamp)
+        if parsed is not None and value >= 0:
+            covered[dt_util.as_utc(parsed)] = value
+    expected = [start + i * one_hour for i in range(window // one_hour)]
+    if not all(hour in covered for hour in expected):
+        return None
+    total = sum(covered[hour] for hour in expected)
+    return total if math.isfinite(total) else None
+
+
 def _handle_get_issued_forecast(
     hass: HomeAssistant, call: ServiceCall
 ) -> ServiceResponse:
@@ -816,12 +963,10 @@ def _handle_get_issued_forecast(
     Resolve the single target coordinator, ISO-parse ``date`` (garbage → a clear
     ServiceValidationError, never a traceback), and look the snapshot up in the
     ring by its LOCAL-date key (exactly how ``snapshot_issued`` records it). A date
-    with no snapshot is NOT an error — the card treats ``available: False`` as "no
-    archived forecast, draw no line". A hit slices BOTH curves to the requested
-    local day with :func:`_filter_hourly_to_local_day` — the SAME helper the drift
-    monitor / nightly scorer use — so the returned ``hourly_wh`` (the served, i.e.
-    corrected, curve; the raw physics curve rides along under ``raw_hourly_wh``) is
-    exactly the day the nightly job scored against measured actuals.
+    with no snapshot returns ``available: False``. An existing snapshot preserves
+    its recorded DC/AC curves and cloud classifications for known UTC hours
+    assigned to that local date. A separate ``daily_wh`` reports the corrected DC
+    total only with positive quarter-slot coverage for the local day.
 
     BOTH branches additionally carry ``oldest_available``: the OLDEST archived
     date in the ring (``store.issued_dates()`` is sorted ascending, so its first
@@ -838,7 +983,7 @@ def _handle_get_issued_forecast(
     # ``_services`` is imported from the package ``__init__`` before the coordinator
     # concern-modules finish initialising. ``IssuedSnapshot`` is read straight from
     # the ``.core.types`` submodule (not the ``.core`` package facade).
-    from ._glue_util import _filter_hourly_to_local_day, _round3
+    from ._glue_util import _is_on_local_day, _round3
     from .core.types import IssuedSnapshot
 
     coordinator = _resolve_single_coordinator(hass, call.data.get(ATTR_ENTRY_ID))
@@ -877,11 +1022,34 @@ def _handle_get_issued_forecast(
 
     snap = IssuedSnapshot.from_dict(stored)
     legacy = snap.version == 1
-    corrected = _filter_hourly_to_local_day(
+    def usable(hour: str) -> bool:
+        return _is_on_local_day(hour, iso) and snap.weather_hour_usable(hour)
+
+    def covered_curve(curve: dict[str, float]) -> dict[str, float]:
+        return {hour: wh for hour, wh in curve.items() if usable(hour)}
+
+    corrected = covered_curve(
         snap.legacy_hourly_wh if legacy else snap.corrected_hourly_wh or snap.raw_hourly_wh,
-        iso,
     )
-    raw = _filter_hourly_to_local_day(snap.raw_hourly_wh, iso) if not legacy else {}
+    raw = covered_curve(snap.raw_hourly_wh) if not legacy else {}
+    daily_kwh = snap.corrected_daily_kwh.get(iso)
+    if snap.weather_day_complete is True and daily_kwh is not None and daily_kwh >= 0:
+        daily_wh = _round3(daily_kwh * 1000.0)
+        daily_coverage = "complete"
+    else:
+        daily_wh = None
+        daily_coverage = (
+            "incomplete" if snap.weather_day_complete is False or (
+                snap.weather_day_complete is None
+                and any(_is_on_local_day(hour, iso) for hour in snap.invalid_weather_hours)
+            ) else "unknown"
+        )
+        if (daily_coverage == "unknown" and snap.weather_day_complete is None
+                and snap.complete_weather_hours is not None):
+            legacy_total = _legacy_covered_day_wh(day, corrected)
+            if legacy_total is not None:
+                daily_wh = _round3(legacy_total)
+                daily_coverage = "complete"
     # DC->AC efficiency: the eta frozen INTO the snapshot at issue time (no
     # hindsight). A legacy snapshot lacks it — fall back to the CURRENT learned
     # eta and flag the substitution so a reader never mistakes it for the issued
@@ -898,7 +1066,7 @@ def _handle_get_issued_forecast(
         eta = coordinator._effective_inverter_eta()
         eta_source = "current"
     if stored_ac is not None:
-        ac = _filter_hourly_to_local_day(stored_ac, iso)
+        ac = covered_curve(stored_ac)
     else:
         ac = {key: value * eta for key, value in corrected.items()} if eta is not None else {}
     # Applied day-ahead factor per hour (corrected / raw), i.e. the shademap ∘
@@ -915,7 +1083,7 @@ def _handle_get_issued_forecast(
         for name, plane in snap.per_plane.items():
             curves = {}
             for key in ("raw_wh", "slow_wh", "corrected_wh"):
-                curve = _filter_hourly_to_local_day(getattr(plane, key), iso)
+                curve = covered_curve(getattr(plane, key))
                 if curve:
                     curves[key] = {hour: _round3(value) for hour, value in curve.items()}
             if curves:
@@ -931,6 +1099,8 @@ def _handle_get_issued_forecast(
             "hourly_wh": {k: _round3(v) for k, v in corrected.items()},
             "raw_hourly_wh": {k: _round3(v) for k, v in raw.items()},
             "hourly_wh_ac": {key: _round3(value) for key, value in ac.items()},
+            "daily_wh": daily_wh,
+            "daily_coverage": daily_coverage,
             "ac_source": "snapshot" if stored_ac is not None else "reconstructed",
             "computed_at": snap.computed_at,
             "archived_at": snap.archived_at,
@@ -939,7 +1109,9 @@ def _handle_get_issued_forecast(
             "band_aggregation": "marginal_slot_curves" if snap.bands is not None else None,
             "eta": round(eta, 4) if eta is not None else None,
             "eta_source": eta_source,
-            "cloud_class_by_hour": dict(snap.cloud_class_by_hour),
+            "cloud_class_by_hour": {
+                hour: cloud for hour, cloud in snap.cloud_class_by_hour.items() if usable(hour)
+            },
             "applied_factor_by_hour": applied_factor,
             **({"per_plane": planes} if include_planes else {}),
         }

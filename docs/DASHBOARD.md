@@ -344,7 +344,7 @@ auto-discovered from the entry-scoped entity registry when not configured:
 
 | Entity | Purpose |
 |---|---|
-| `sensor.balcony_solar_forecast_measured_dc_power_total` | the module list (its `sources` + `source_names` attributes) and the statistic ids to chart |
+| `sensor.balcony_solar_forecast_measured_dc_power_total` | the entry for permission-checked module discovery and measurement history. The card shows only channels the signed-in user can read |
 | `sensor.balcony_solar_forecast_energy_production_today` | the 15-min forecast `wh_period` attribute, aggregated to local hours for the dashed line |
 
 The bars come from the recorder's **hourly long-term statistics** (the mean DC

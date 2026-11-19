@@ -123,7 +123,7 @@ async def test_observer_reference_keeps_theta_from_its_result_generation(monkeyp
     at = datetime(2026, 6, 21, 10, tzinfo=UTC)
     weather = WeatherSeries((WeatherSlot(at, 800, 850, 100, 20),))
     result = compute_forecast(coord._site, weather, at)
-    def hooks(weather, now):
+    def hooks(weather, now, *, physics_only=False):
         coord._day_factor = {at: 1.2}
         return LearnerHooks()
     coord._build_learner_hooks = hooks
